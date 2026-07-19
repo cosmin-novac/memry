@@ -1,0 +1,18 @@
+#cloud-config
+# Boot a fresh VPS straight into a running Memry server.
+#
+# Paste this into the "Cloud-Init" / "User data" box when creating the instance
+# (Contabo: under Cloud-Init in the order form; Hetzner: Cloud config;
+# DigitalOcean: User data). Ubuntu or Debian images.
+#
+# Edit MEMRY_DOMAIN to your domain (DNS A record pointing at the new server)
+# for automatic HTTPS, or remove it to serve plain HTTP on port 80.
+# Optionally add ANTHROPIC_API_KEY=sk-ant-... (or OPENAI_API_KEY=...) before
+# `bash` to enable LLM extraction.
+#
+# After boot, the generated API key is in /opt/memry/.env on the server.
+
+package_update: true
+
+runcmd:
+  - curl -fsSL https://raw.githubusercontent.com/cosmin-novac/memry/main/deploy/install.sh | MEMRY_DOMAIN=memory.example.com bash

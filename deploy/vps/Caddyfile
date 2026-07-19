@@ -1,0 +1,4 @@
+{$MEMRY_DOMAIN} {
+	encode gzip
+	reverse_proxy memry:8787
+}

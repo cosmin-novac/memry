@@ -1,0 +1,44 @@
+name: memry
+
+services:
+  memry:
+    build:
+      context: ../..
+    restart: unless-stopped
+    environment:
+      MEMRY_DB_PATH: /data/memry.db
+      MEMRY_API_KEY: ${MEMRY_API_KEY:?set MEMRY_API_KEY in .env (see .env.example)}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      MEMRY_LLM_MODEL: ${MEMRY_LLM_MODEL:-}
+      MEMRY_TENANTS: ${MEMRY_TENANTS:-}
+    volumes:
+      - memry-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - memry
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      # A real domain enables automatic HTTPS; the default serves plain HTTP.
+      MEMRY_DOMAIN: ${MEMRY_DOMAIN:-:80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  memry-data:
+  caddy-data:
+  caddy-config:

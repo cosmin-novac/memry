@@ -1,0 +1,17 @@
+services:
+  memry:
+    build: .
+    ports:
+      - "8787:8787"
+    volumes:
+      - memry-data:/data
+    environment:
+      # MEMRY_API_KEY: change-me            # enable bearer auth
+      # ANTHROPIC_API_KEY: sk-ant-...           # LLM extraction (recommended)
+      # OPENAI_API_KEY: sk-...                  # or OpenAI (LLM + embeddings)
+      # MEMRY_LLM_MODEL: claude-haiku-4-5   # cheaper extraction model
+      MEMRY_DB_PATH: /data/memry.db
+    restart: unless-stopped
+
+volumes:
+  memry-data:

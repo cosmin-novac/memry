@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memry - the open memory layer for AI agents</title>
+<meta name="description" content="Memry gives any AI agent long-term memory over MCP. Local-first, self-hostable, Apache-2.0. Extraction, reconciliation, temporal memory and audit trails in one SQLite file.">
+<style>
+:root{
+  --bg:#0e1420; --panel:#16202f; --panel-2:#121a28; --line:#273349;
+  --text:#dce4f2; --dim:#8b99b5; --faint:#5c6a85;
+  --accent:#e5b15c; --accent-ink:#2b1f08;
+  --add:#85c79a; --sup:#db8f66; --upd:#84b6d6;
+  --serif:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
+  --sans:"Avenir Next","Segoe UI",system-ui,-apple-system,sans-serif;
+  --mono:ui-monospace,"Cascadia Code","JetBrains Mono","SF Mono",Consolas,monospace;
+  --radius:10px;
+  color-scheme: dark light;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#f3f5f9; --panel:#ffffff; --panel-2:#eaeef5; --line:#d7dfec;
+    --text:#1b2434; --dim:#5a6981; --faint:#8b98ad;
+    --accent:#9c6d14; --accent-ink:#fff;
+    --add:#2e7d4f; --sup:#b05c2a; --upd:#2a6a96;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e1420; --panel:#16202f; --panel-2:#121a28; --line:#273349;
+  --text:#dce4f2; --dim:#8b99b5; --faint:#5c6a85;
+  --accent:#e5b15c; --accent-ink:#2b1f08;
+  --add:#85c79a; --sup:#db8f66; --upd:#84b6d6;
+}
+:root[data-theme="light"]{
+  --bg:#f3f5f9; --panel:#ffffff; --panel-2:#eaeef5; --line:#d7dfec;
+  --text:#1b2434; --dim:#5a6981; --faint:#8b98ad;
+  --accent:#9c6d14; --accent-ink:#fff;
+  --add:#2e7d4f; --sup:#b05c2a; --upd:#2a6a96;
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);
+  font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:inherit}
+a:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+::selection{background:var(--accent);color:var(--accent-ink)}
+
+.wrap{max-width:1080px;margin:0 auto;padding:0 1.25rem}
+.eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+h1,h2,h3{font-family:var(--serif);font-weight:600;line-height:1.15;text-wrap:balance;margin:0}
+h2{font-size:clamp(1.6rem,3.4vw,2.2rem)}
+section{padding:4.5rem 0;border-top:1px solid var(--line)}
+section p.lede{color:var(--dim);max-width:38rem;margin:.9rem 0 0}
+code,pre{font-family:var(--mono)}
+pre{background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);
+  padding:1rem 1.1rem;overflow-x:auto;font-size:.83rem;line-height:1.65;margin:0}
+pre .c{color:var(--faint)} pre .k{color:var(--accent)} pre .s{color:var(--add)}
+.inlinecode{background:var(--panel-2);border:1px solid var(--line);border-radius:5px;padding:.05rem .35rem;font-size:.85em}
+
+/* ---------- nav ---------- */
+nav{display:flex;align-items:center;gap:1.4rem;padding:1.1rem 0;font-size:.9rem}
+.wordmark{font-family:var(--mono);font-size:1.05rem;font-weight:600;text-decoration:none;letter-spacing:-.02em}
+.wordmark b{color:var(--accent);font-weight:600}
+nav .links{margin-left:auto;display:flex;gap:1.3rem;flex-wrap:wrap}
+nav .links a{color:var(--dim);text-decoration:none}
+nav .links a:hover{color:var(--text)}
+
+/* ---------- hero ---------- */
+header.hero{padding:3.5rem 0 4.5rem}
+.hero-grid{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:3rem;align-items:center}
+@media (max-width:860px){.hero-grid{grid-template-columns:1fr}}
+.hero h1{font-size:clamp(2.3rem,5.4vw,3.4rem)}
+.hero h1 em{font-style:italic;color:var(--accent)}
+.hero .sub{color:var(--dim);max-width:34rem;margin:1.2rem 0 1.8rem;font-size:1.05rem}
+.cta-row{display:flex;gap:.8rem;flex-wrap:wrap;align-items:center}
+.btn{display:inline-block;padding:.62rem 1.15rem;border-radius:8px;text-decoration:none;
+  font-weight:600;font-size:.92rem;border:1px solid var(--line)}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+.btn.primary:hover{filter:brightness(1.07)}
+.btn.ghost:hover{border-color:var(--accent);color:var(--accent)}
+.pip{font-family:var(--mono);font-size:.85rem;color:var(--dim);background:var(--panel-2);
+  border:1px solid var(--line);border-radius:8px;padding:.62rem .9rem}
+.pip b{color:var(--text);font-weight:500}
+.badges{display:flex;gap:1.1rem;margin-top:1.6rem;color:var(--faint);font-family:var(--mono);font-size:.74rem;flex-wrap:wrap}
+
+/* ---------- ledger card ---------- */
+.ledger{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  box-shadow:0 18px 50px -28px rgba(0,0,0,.55);overflow:hidden;font-family:var(--mono);font-size:.78rem}
+.ledger-bar{display:flex;align-items:center;gap:.5rem;padding:.55rem .9rem;border-bottom:1px solid var(--line);color:var(--faint)}
+.ledger-bar .dot{width:9px;height:9px;border-radius:50%;background:var(--line)}
+.ledger-bar span:last-child{margin-left:auto;font-size:.7rem}
+.ledger-body{padding:.9rem 1rem 1.1rem;display:flex;flex-direction:column;gap:.42rem}
+.lrow{display:flex;gap:.6rem;align-items:baseline;opacity:0;transform:translateY(4px);
+  animation:rise .45s ease-out forwards}
+.lrow .ts{color:var(--faint);flex:none;font-size:.7rem}
+.lrow .tag{flex:none;font-size:.68rem;padding:.05rem .45rem;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+.lrow .tag.add{color:var(--add);border-color:var(--add)}
+.lrow .tag.sup{color:var(--sup);border-color:var(--sup)}
+.lrow .tag.epi{color:var(--upd);border-color:var(--upd)}
+.lrow .txt{color:var(--dim)} .lrow .txt b{color:var(--text);font-weight:500}
+.lrow .strike{text-decoration:line-through;text-decoration-color:var(--sup)}
+.lrow:nth-child(1){animation-delay:.15s}.lrow:nth-child(2){animation-delay:.55s}
+.lrow:nth-child(3){animation-delay:1.0s}.lrow:nth-child(4){animation-delay:1.45s}
+.lrow:nth-child(5){animation-delay:2.05s}.lrow:nth-child(6){animation-delay:2.5s}
+.lrow:nth-child(7){animation-delay:2.95s}.lrow:nth-child(8){animation-delay:3.4s}
+@keyframes rise{to{opacity:1;transform:none}}
+@media (prefers-reduced-motion: reduce){
+  .lrow{animation:none;opacity:1;transform:none}
+  html{scroll-behavior:auto}
+}
+
+/* ---------- pipeline ---------- */
+.pipeline{display:grid;grid-template-columns:repeat(4,1fr);gap:.9rem;margin-top:2.2rem}
+@media (max-width:860px){.pipeline{grid-template-columns:1fr 1fr}}
+@media (max-width:520px){.pipeline{grid-template-columns:1fr}}
+.stage{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:1.1rem 1.15rem}
+.stage .num{font-family:var(--mono);color:var(--accent);font-size:.72rem;letter-spacing:.1em}
+.stage h3{font-size:1.02rem;margin:.45rem 0 .35rem}
+.stage p{margin:0;color:var(--dim);font-size:.86rem}
+
+/* ---------- features ---------- */
+.features{display:grid;grid-template-columns:repeat(3,1fr);gap:.9rem;margin-top:2.2rem}
+@media (max-width:860px){.features{grid-template-columns:1fr 1fr}}
+@media (max-width:520px){.features{grid-template-columns:1fr}}
+.feat{border:1px solid var(--line);border-radius:var(--radius);padding:1.15rem 1.2rem;background:transparent}
+.feat h3{font-size:1rem;margin-bottom:.4rem}
+.feat h3 code{color:var(--accent);font-size:.85em}
+.feat p{margin:0;color:var(--dim);font-size:.86rem}
+
+/* ---------- code panes ---------- */
+.code-cols{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:2.2rem}
+@media (max-width:860px){.code-cols{grid-template-columns:1fr}}
+.code-cols .label{font-family:var(--mono);font-size:.72rem;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--faint);margin:0 0 .45rem}
+
+/* ---------- compare ---------- */
+.tbl-scroll{overflow-x:auto;margin-top:2.2rem;border:1px solid var(--line);border-radius:var(--radius)}
+table{border-collapse:collapse;width:100%;min-width:640px;font-size:.86rem;background:var(--panel)}
+th,td{padding:.6rem .9rem;text-align:left;border-bottom:1px solid var(--line)}
+tbody tr:last-child td{border-bottom:none}
+thead th{font-family:var(--mono);font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:500}
+td:first-child{color:var(--dim)}
+th.hl,td.hl{background:color-mix(in srgb,var(--accent) 7%,transparent)}
+th.hl{color:var(--accent)}
+.yes{color:var(--add)} .no{color:var(--faint)} .part{color:var(--sup)}
+.tbl-note{color:var(--faint);font-size:.76rem;margin-top:.6rem}
+
+/* ---------- self-host / research ---------- */
+.split{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:2.5rem;align-items:start;margin-top:2.2rem}
+@media (max-width:860px){.split{grid-template-columns:1fr}}
+.checks{list-style:none;padding:0;margin:1rem 0 0;display:flex;flex-direction:column;gap:.55rem;color:var(--dim);font-size:.92rem}
+.checks li::before{content:"- ";color:var(--accent)}
+
+/* ---------- footer ---------- */
+footer{border-top:1px solid var(--line);padding:2.5rem 0 3rem;color:var(--faint);font-size:.85rem}
+footer .wrap{display:flex;gap:1.5rem;flex-wrap:wrap;align-items:baseline}
+footer a{color:var(--dim)}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <nav aria-label="Main">
+    <a class="wordmark" href="#"><b>Mem</b>ry</a>
+    <div class="links">
+      <a href="#start">Get started</a>
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#compare">Compare</a>
+      <a href="#selfhost">Self-host</a>
+      <a href="https://github.com/cosmin-novac/memry">GitHub</a>
+    </div>
+  </nav>
+</div>
+
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow">Open source · Apache-2.0 · MCP-native</p>
+      <h1>Your agent forgets everything.<br><em>Memry</em> doesn't.</h1>
+      <p class="sub">The self-hostable memory layer for AI agents. One
+        <code class="inlinecode">pip install</code>, one SQLite file, plugged into
+        Claude&nbsp;Code, Cursor, or any MCP client - extraction, reconciliation,
+        and an audit trail your agents can trust.</p>
+      <div class="cta-row">
+        <a class="btn primary" href="#selfhost">Self-host in 60 seconds</a>
+        <a class="btn ghost" href="https://github.com/cosmin-novac/memry">Read the source</a>
+      </div>
+      <div class="cta-row" style="margin-top:.8rem">
+        <span class="pip">$ <b>pip install memry && memry mcp</b></span>
+      </div>
+      <div class="badges">
+        <span>zero services</span><span>zero API keys required</span><span>your infrastructure</span>
+      </div>
+    </div>
+
+    <div class="ledger" aria-label="Example memory ledger">
+      <div class="ledger-bar">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span>~/.memry/memry.db</span>
+      </div>
+      <div class="ledger-body">
+        <div class="lrow"><span class="ts">14:02:11</span><span class="tag epi">episode</span><span class="txt">"I'm Ada, data engineer at Northwind in Munich"</span></div>
+        <div class="lrow"><span class="ts">14:02:12</span><span class="tag add">ADD</span><span class="txt"><b>User works at Northwind as a data engineer</b></span></div>
+        <div class="lrow"><span class="ts">14:02:12</span><span class="tag add">ADD</span><span class="txt"><b>User lives in Munich</b></span></div>
+        <div class="lrow"><span class="ts">14:02:12</span><span class="tag">NONE</span><span class="txt">duplicate skipped · "prefers uv over pip"</span></div>
+        <div class="lrow"><span class="ts">09:17:40</span><span class="tag epi">episode</span><span class="txt">"big news - I moved to Amsterdam last month"</span></div>
+        <div class="lrow"><span class="ts">09:17:41</span><span class="tag sup">SUPERSEDE</span><span class="txt"><span class="strike">User lives in Munich</span> · kept in history</span></div>
+        <div class="lrow"><span class="ts">09:17:41</span><span class="tag add">ADD</span><span class="txt"><b>User lives in Amsterdam</b> ← superseded_by</span></div>
+        <div class="lrow"><span class="ts">09:20:03</span><span class="tag">recall</span><span class="txt">"where does ada live" → Amsterdam <span style="color:var(--faint)">(0.3 ms)</span></span></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="start">
+  <div class="wrap">
+    <p class="eyebrow">Get started</p>
+    <h2>Two minutes from install to remembering.</h2>
+    <div class="pipeline">
+      <div class="stage"><span class="num">01 · INSTALL</span>
+        <h3>One package</h3>
+        <p><code>pip install memry</code> (or straight from source:
+        <code>pip install git+https://github.com/cosmin-novac/memry.git</code>).
+        Python 3.11+, no other services.</p></div>
+      <div class="stage"><span class="num">02 · CONNECT</span>
+        <h3>Plug into your agent</h3>
+        <p>Claude Code: <code>claude mcp add memry -- memry mcp</code>. Claude Desktop,
+        Cursor, Windsurf: add the <code>memry mcp</code> command to your MCP config.</p></div>
+      <div class="stage"><span class="num">03 · UPGRADE</span>
+        <h3>Optional brain</h3>
+        <p>Works with zero keys (verbatim + keyword search). Set
+        <code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code> and extraction,
+        reconciliation, and entity resolution switch on by themselves.</p></div>
+      <div class="stage"><span class="num">04 · USE</span>
+        <h3>Just talk</h3>
+        <p>Tell your agent something worth keeping, then ask about it in a fresh
+        session. Inspect anytime: <code>memry list</code>, <code>memry entities
+        proposals</code>, or the dashboard via <code>memry serve</code>.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <p class="eyebrow">How it works</p>
+    <h2>Real memory, not a vector dump.</h2>
+    <p class="lede">Most "memory" is retrieval over raw chat logs. Memry keeps the raw
+      episodes <em>and</em> distills them into reconciled, contradiction-aware facts -
+      so your agent recalls what's true now, with the receipts for how it got there.</p>
+    <div class="pipeline">
+      <div class="stage"><span class="num">01 · RECORD</span>
+        <h3>Episodes first</h3>
+        <p>Every message is stored immutably before anything is derived. Memories are an index; episodes are the source of truth.</p></div>
+      <div class="stage"><span class="num">02 · EXTRACT</span>
+        <h3>Facts, not transcripts</h3>
+        <p>An LLM distills self-contained facts with type, importance, and entities. No LLM key? Verbatim mode still works.</p></div>
+      <div class="stage"><span class="num">03 · RECONCILE</span>
+        <h3>Supersede, don't delete</h3>
+        <p>Duplicates are skipped, refinements merge, contradictions invalidate the old memory and link its successor. Bi-temporal, fully audited.</p></div>
+      <div class="stage"><span class="num">04 · RECALL</span>
+        <h3>Explainable retrieval</h3>
+        <p>BM25 + vectors fused by reciprocal rank, boosted by recency and importance. Every result shows its score signals.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <p class="eyebrow">Features</p>
+    <h2>Everything a memory layer should have. Nothing you have to operate.</h2>
+    <div class="features">
+      <div class="feat"><h3>MCP-native</h3>
+        <p>Eight tools over stdio or streamable HTTP. Claude Code, Claude Desktop, Cursor, Windsurf, Codex - one server, every agent, shared memory.</p></div>
+      <div class="feat"><h3>One SQLite file</h3>
+        <p>Episodes, memories, FTS5 index, embeddings, and events in a single file. Back it up with <code>cp</code>. No vector DB, no Postgres, no cloud.</p></div>
+      <div class="feat"><h3>Works with zero keys</h3>
+        <p>BM25 keyword search plus deterministic hash embeddings out of the box. Add <code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code> and extraction upgrades itself.</p></div>
+      <div class="feat"><h3>Temporal memory</h3>
+        <p><code>valid_from</code> · <code>invalid_at</code> · <code>superseded_by</code> on every fact. "Forgotten" means invalidated and auditable - never silently destroyed.</p></div>
+      <div class="feat"><h3>Provenance &amp; history</h3>
+        <p>Every memory links to the exact episodes it came from, and every mutation is an event you can replay with <code>history()</code>.</p></div>
+      <div class="feat"><h3>Forgetting built in</h3>
+        <p>Importance decays on a half-life; a sweep soft-forgets stale trivia so ten-month-old noise stops crowding out what matters.</p></div>
+      <div class="feat"><h3>Scoped &amp; multi-agent</h3>
+        <p>user / agent / run scoping, mem0-compatible. Point several agents at one server and they share what they learn.</p></div>
+      <div class="feat"><h3>Pluggable everything</h3>
+        <p>Anthropic, OpenAI, or Ollama for extraction; OpenAI, Voyage, Ollama, or local hashing for embeddings; swappable storage backends - including a Mem0 adapter.</p></div>
+      <div class="feat"><h3>Entities, disambiguated</h3>
+        <p>Three ambiguous "Jonas" mentions stay three entities. Merges happen only when identity is clear, or when you confirm a recorded merge proposal.</p></div>
+      <div class="feat"><h3>Scales when you need it</h3>
+        <p>Optional HNSW vector index (<code>memry[ann]</code>) and a PostgreSQL + pgvector backend (<code>memry[postgres]</code>) for multi-writer fleets.</p></div>
+      <div class="feat"><h3>Multi-tenant ready</h3>
+        <p>Per-tenant API keys with transparent namespacing and strict isolation, plus category filters on every search surface.</p></div>
+      <div class="feat"><h3>Benchmark it yourself</h3>
+        <p>A built-in eval harness (recall@k, MRR, latency) runs offline in CI. Format LoCoMo or LongMemEval into JSONL and compare configs honestly.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="code">
+  <div class="wrap">
+    <p class="eyebrow">Two ways in</p>
+    <h2>An MCP server for agents. A Python API for you.</h2>
+    <div class="code-cols">
+      <div>
+        <p class="label">any MCP client</p>
+<pre>{
+  <span class="k">"mcpServers"</span>: {
+    <span class="k">"memry"</span>: {
+      <span class="k">"command"</span>: <span class="s">"memry"</span>,
+      <span class="k">"args"</span>: [<span class="s">"mcp"</span>]
+    }
+  }
+}
+<span class="c"># or for Claude Code:</span>
+<span class="c">$ claude mcp add memry -- memry mcp</span></pre>
+      </div>
+      <div>
+        <p class="label">python</p>
+<pre><span class="k">from</span> memry <span class="k">import</span> MemoryStore
+
+store = MemoryStore()
+store.add(<span class="s">"I'm Ada. I moved to Amsterdam."</span>,
+          user_id=<span class="s">"ada"</span>)
+
+hits = store.search(<span class="s">"where does ada live?"</span>,
+                    user_id=<span class="s">"ada"</span>)
+ctx = store.reconstruct_context(
+    <span class="s">"plan my commute"</span>, user_id=<span class="s">"ada"</span>,
+    token_budget=<span class="k">1200</span>)   <span class="c"># drop into any prompt</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <p class="eyebrow">Compare</p>
+    <h2>Honest comparison, self-hosted editions.</h2>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr>
+          <th></th><th class="hl">Memry</th><th>Mem0 OSS</th><th>Zep</th><th>Recall MCP</th>
+        </tr></thead>
+        <tbody>
+          <tr><td>LLM extraction + reconciliation</td><td class="hl yes">yes</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">-</td></tr>
+          <tr><td>Temporal invalidation (supersede, not delete)</td><td class="hl yes">yes</td><td class="no">platform only</td><td class="yes">yes</td><td class="no">-</td></tr>
+          <tr><td>Provenance: fact → source episode</td><td class="hl yes">yes</td><td class="part">partial</td><td class="yes">yes</td><td class="no">-</td></tr>
+          <tr><td>Hybrid retrieval (BM25 + vector + recency)</td><td class="hl yes">yes</td><td class="yes">yes</td><td class="yes">graph</td><td class="yes">yes</td></tr>
+          <tr><td>Memory decay / forgetting</td><td class="hl yes">yes</td><td class="no">platform only</td><td class="part">retention</td><td class="yes">yes</td></tr>
+          <tr><td>Works with zero API keys</td><td class="hl yes">yes</td><td class="no">no</td><td class="no">no</td><td class="yes">yes</td></tr>
+          <tr><td>Runs without extra services</td><td class="hl yes">SQLite only</td><td class="part">needs vector DB</td><td class="no">BYOC</td><td class="yes">SQLite</td></tr>
+          <tr><td>Built-in eval harness</td><td class="hl yes">yes</td><td class="no">-</td><td class="no">-</td><td class="no">-</td></tr>
+          <tr><td>License</td><td class="hl">Apache-2.0</td><td>Apache-2.0</td><td>proprietary</td><td>open source</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="tbl-note">Feature availability as of July 2026, self-hosted/OSS editions; see
+      docs/research/competitive-analysis.md in the repo for sources.</p>
+  </div>
+</section>
+
+<section id="selfhost">
+  <div class="wrap">
+    <p class="eyebrow">Self-host</p>
+    <h2>Your agents. Your memories. Your infrastructure.</h2>
+    <div class="split">
+      <div>
+        <p class="lede" style="margin-top:.9rem">Memory is the most personal data an agent
+          touches. Memry keeps it in a file you own, on a machine you control, under a
+          license that can't be revoked.</p>
+        <ul class="checks">
+          <li>REST API + dashboard + MCP endpoint in one process</li>
+          <li>Bearer-token auth with <code class="inlinecode">MEMRY_API_KEY</code></li>
+          <li>Backup = copy one file (or <code class="inlinecode">memry export</code>)</li>
+          <li>Fully offline with Ollama, or fully keyless</li>
+        </ul>
+      </div>
+      <div>
+<pre><span class="c"># bare metal</span>
+$ pip install memry
+$ memry serve --host 0.0.0.0 --port 8787
+<span class="c">→ dashboard  http://localhost:8787/</span>
+<span class="c">→ REST API   http://localhost:8787/api/v1</span>
+<span class="c">→ MCP        http://localhost:8787/mcp</span>
+
+<span class="c"># or docker</span>
+$ docker compose up -d</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="research">
+  <div class="wrap">
+    <p class="eyebrow">Research-grade</p>
+    <h2>Built to be studied, not just used.</h2>
+    <p class="lede">Memry doubles as a memory-systems research codebase: raw episodes are
+      never thrown away, so better extraction pipelines can be replayed over history; every
+      ranking signal is exposed; and the eval harness compares providers, weights, and even
+      competing backends (a Mem0 adapter ships in the box) under identical conditions.
+      Hierarchical compression, belief revision, and memory-type routing are on the open
+      roadmap - contributions welcome.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span><b style="color:var(--accent)">Mem</b><b style="color:var(--dim)">ry</b> · memry.tech</span>
+    <a href="https://github.com/cosmin-novac/memry">GitHub</a>
+    <a href="https://github.com/cosmin-novac/memry/tree/main/docs">Docs</a>
+    <a href="https://github.com/cosmin-novac/memry/blob/main/LICENSE">Apache-2.0</a>
+    <span style="margin-left:auto">no telemetry · no account · no lock-in</span>
+  </div>
+</footer>
+
+</body>
+</html>
