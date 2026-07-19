@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .config import Config
 from .store import MemoryStore
@@ -50,7 +51,19 @@ def create_server(
     host: str = "127.0.0.1",
     port: int = 8787,
 ) -> FastMCP:
-    mcp = FastMCP("memry", instructions=INSTRUCTIONS, host=host, port=port)
+    # The SDK's DNS-rebinding protection only accepts localhost-style Host
+    # headers, which 421s every request arriving through a reverse proxy on a
+    # public domain. That protection exists for unauthenticated localhost
+    # servers; Memry's HTTP transport carries its own bearer auth.
+    mcp = FastMCP(
+        "memry",
+        instructions=INSTRUCTIONS,
+        host=host,
+        port=port,
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        ),
+    )
     store = store or MemoryStore()
     default_user = store.config.default_user_id
 
