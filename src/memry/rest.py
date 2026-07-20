@@ -55,50 +55,209 @@ button{cursor:pointer}button.primary{background:var(--accent);color:#04211c;bord
 .tag{border:1px solid var(--line);border-radius:999px;padding:0 .5rem}
 textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .empty{color:var(--dim);padding:2rem;text-align:center}
+#mapwrap{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.4rem .4rem 0;margin-bottom:.7rem}
+#map{display:block;width:100%}
+.maphint{color:var(--dim);font-size:.75rem;text-align:center;margin:.15rem 0 .35rem}
 </style></head><body><main>
 <h1><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small></h1>
 <div id="stats">loading…</div>
 <div class="bar">
-  <input id="user" placeholder="user_id (default)" style="width:11rem">
+  <input id="user" placeholder="user_id (all)" style="width:11rem">
   <input id="q" placeholder="search memories…" style="flex:1;min-width:12rem">
   <button class="primary" onclick="search()">Search</button>
-  <button onclick="loadAll()">All</button>
+  <button onclick="activeCat=null;loadAll()">All</button>
 </div>
 <textarea id="newmem" placeholder="Add to memory… (extraction runs if an LLM is configured)"></textarea>
-<div class="bar"><button class="primary" onclick="add(true)">Add (infer)</button>
-<button onclick="add(false)">Add verbatim</button></div>
+<div class="bar">
+  <input id="newcats" placeholder="categories, comma separated (optional)" style="flex:1;min-width:10rem">
+  <button class="primary" onclick="add(true)">Add (infer)</button>
+  <button onclick="add(false)">Add verbatim</button>
+</div>
+<div id="mapwrap" hidden><canvas id="map"></canvas><p class="maphint" id="maphint"></p></div>
 <div id="list"></div>
 </main><script>
 const key = localStorage.getItem('memry_key') || '';
 const H = key ? {'Authorization':'Bearer '+key,'Content-Type':'application/json'} : {'Content-Type':'application/json'};
-const uid = () => document.getElementById('user').value.trim() || 'default';
+// Empty box = no user filter: list EVERY namespace, so the list always
+// agrees with the stats line. (Tenant keys are namespaced server-side.)
+const uid = () => document.getElementById('user').value.trim();
 async function api(path, opts={}){
   const r = await fetch(path,{headers:H,...opts});
   if(r.status===401){const k=prompt('API key required');if(k){localStorage.setItem('memry_key',k);location.reload();}throw new Error('unauthorized');}
   return r.json();
 }
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+let current=[],activeCat=null,mapGraph=null,haveMore=false;
+const cats=m=>((m.categories&&m.categories.length)?m.categories:['(untagged)']).map(c=>String(c).toLowerCase());
 function render(items){
+  current=items; drawMap(items);
+  const shown=activeCat?items.filter(m=>cats(m).includes(activeCat)):items;
   const el=document.getElementById('list');
-  if(!items.length){el.innerHTML='<div class="empty">No memories yet.</div>';return}
-  el.innerHTML=items.map(m=>`<div class="mem"><button class="del" title="forget" onclick="del('${m.id}')">✕</button>
+  if(!shown.length&&!haveMore){el.innerHTML='<div class="empty">'+(activeCat?'No memories under #'+esc(activeCat)+'.':'No memories yet.')+'</div>';return}
+  el.innerHTML=shown.map(m=>`<div class="mem"><button class="del" title="forget" onclick="del('${m.id}')">✕</button>
    <div>${esc(m.content)}</div>
    <div class="meta"><span class="tag">${m.memory_type||m.type||'semantic'}</span>
+   ${(m.categories||[]).map(c=>`<span class="tag">#${esc(String(c))}</span>`).join('')}
+   <span>@${esc(m.user_id||'(no user)')}</span>
    <span>imp ${(m.importance??0.5).toFixed(2)}</span>
    ${m.score!==undefined?`<span>score ${m.score.toFixed(3)}</span>`:''}
    <span>${(m.updated_at||m.created_at||'').slice(0,10)}</span>
-   ${m.invalid_at?'<span style="color:var(--warn)">invalidated</span>':''}</div></div>`).join('');
+   ${m.invalid_at?'<span style="color:var(--warn)">invalidated</span>':''}</div></div>`).join('')
+   +(haveMore?'<div class="bar"><button onclick="loadAll(true)">Load more</button></div>':'');
 }
-async function loadAll(){render(await api('/api/v1/memories?user_id='+encodeURIComponent(uid())+'&limit=100'))}
+
+// ---- category map: each bubble is a category, dots are its memories ------
+// (Ported from the cory-orb memory panel; deterministic layout - golden-angle
+// spiral seeded by category hash, then a short force relaxation - so the map
+// stays familiar between visits.)
+const PALETTE=['#c96442','#246f59','#8a6d3b','#4a7d9f','#7d6b8f','#b3402e','#5c8a5c','#a05c7b'];
+const hashCode=s=>{let h=0;for(let i=0;i<s.length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;return Math.abs(h)};
+function buildGraph(items){
+  const counts=new Map();
+  items.forEach(m=>cats(m).forEach(c=>counts.set(c,(counts.get(c)||0)+1)));
+  const nodes=[...counts.keys()].sort().map(t=>({tag:t,count:counts.get(t),
+    radius:Math.min(30,11+5*Math.sqrt(counts.get(t))),color:PALETTE[hashCode(t)%PALETTE.length]}));
+  // Two categories are linked when a memory carries both (strong signal), or
+  // when a memory under one merely mentions the other in its text (weak).
+  const index=new Map(nodes.map((n,i)=>[n.tag,i]));
+  const edgeMap=new Map();
+  const bump=(a,b,w)=>{const k=a<b?a+':'+b:b+':'+a;edgeMap.set(k,(edgeMap.get(k)||0)+w)};
+  for(const m of items){
+    const t=cats(m);
+    for(let i=0;i<t.length;i++)for(let j=i+1;j<t.length;j++)bump(index.get(t[i]),index.get(t[j]),2);
+    const text=String(m.content||'').toLowerCase();
+    for(const n of nodes){
+      if(t.includes(n.tag)||n.tag.length<3||n.tag==='(untagged)')continue;
+      if(text.includes(n.tag))bump(index.get(t[0]),index.get(n.tag),1);
+    }
+  }
+  const edges=[...edgeMap.entries()].map(([k,w])=>{const[a,b]=k.split(':').map(Number);return{a,b,weight:w}});
+  return{nodes,edges};
+}
+function layoutMap(nodes,edges,width,height){
+  nodes.forEach((n,i)=>{
+    const angle=(hashCode(n.tag)%360)*(Math.PI/180)+i*2.39996;
+    const spread=0.32*Math.min(width,height)*Math.sqrt((i+1)/nodes.length);
+    n.x=width/2+spread*Math.cos(angle); n.y=height/2+spread*Math.sin(angle);
+  });
+  const iterations=nodes.length>1?130:0;
+  for(let it=0;it<iterations;it++){
+    for(let i=0;i<nodes.length;i++){
+      const a=nodes[i];
+      let fx=(width/2-a.x)*0.005, fy=(height/2-a.y)*0.005;
+      for(let j=0;j<nodes.length;j++){
+        if(i===j)continue;
+        const b=nodes[j], dx=a.x-b.x, dy=a.y-b.y;
+        const dist=Math.max(Math.hypot(dx,dy),1);
+        const minGap=a.radius+b.radius+34;
+        const push=(dist<minGap?2.2:1)*900/(dist*dist);
+        fx+=dx/dist*push; fy+=dy/dist*push;
+      }
+      a.fx=fx; a.fy=fy;
+    }
+    for(const e of edges){
+      const a=nodes[e.a], b=nodes[e.b], dx=b.x-a.x, dy=b.y-a.y;
+      const dist=Math.max(Math.hypot(dx,dy),1);
+      const pull=0.02*(dist-(a.radius+b.radius+60));
+      a.fx+=dx/dist*pull; a.fy+=dy/dist*pull;
+      b.fx-=dx/dist*pull; b.fy-=dy/dist*pull;
+    }
+    for(const n of nodes){
+      n.x=Math.min(width-n.radius-8,Math.max(n.radius+8,n.x+n.fx));
+      n.y=Math.min(height-n.radius-22,Math.max(n.radius+8,n.y+n.fy));
+    }
+  }
+}
+function drawMap(items){
+  const wrap=document.getElementById('mapwrap'), canvas=document.getElementById('map');
+  const tagCount=new Set(items.flatMap(cats)).size;
+  if(!items.length||!tagCount){wrap.hidden=true;mapGraph=null;return}
+  wrap.hidden=false;
+  document.getElementById('maphint').textContent=activeCat
+    ?`Filtering #${activeCat} - click its bubble again (or All) to clear.`
+    :'Each bubble is a category; dots are its memories. Click a bubble to filter.';
+  const width=Math.max(300,wrap.clientWidth-14);
+  const height=Math.min(420,Math.max(200,150+tagCount*16));
+  const dpr=window.devicePixelRatio||1;
+  canvas.width=Math.round(width*dpr); canvas.height=Math.round(height*dpr);
+  canvas.style.width=width+'px'; canvas.style.height=height+'px';
+  const g=buildGraph(items);
+  layoutMap(g.nodes,g.edges,width,height);
+  mapGraph=g;
+  const rootStyle=getComputedStyle(document.documentElement);
+  const textColor=rootStyle.getPropertyValue('--text').trim()||'#dbe4f0';
+  const dimColor=rootStyle.getPropertyValue('--dim').trim()||'#8494ab';
+  const ctx=canvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,width,height);
+  const alphaOf=n=>activeCat&&n.tag!==activeCat?0.25:1;
+  for(const e of g.edges){
+    const a=g.nodes[e.a], b=g.nodes[e.b];
+    ctx.globalAlpha=0.35*Math.min(alphaOf(a),alphaOf(b));
+    ctx.strokeStyle=dimColor;
+    ctx.lineWidth=Math.min(3,1+e.weight*0.6);
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+  }
+  for(const n of g.nodes){
+    const alpha=alphaOf(n);
+    const satellites=Math.min(n.count,10);
+    for(let i=0;i<satellites;i++){
+      const angle=i/satellites*Math.PI*2-Math.PI/2;
+      ctx.fillStyle=n.color; ctx.globalAlpha=alpha*0.55;
+      ctx.beginPath();
+      ctx.arc(n.x+(n.radius+7)*Math.cos(angle),n.y+(n.radius+7)*Math.sin(angle),2.4,0,Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha=alpha; ctx.fillStyle=n.color;
+    ctx.beginPath(); ctx.arc(n.x,n.y,n.radius,0,Math.PI*2); ctx.fill();
+    if(activeCat===n.tag){ctx.strokeStyle=textColor;ctx.lineWidth=2;ctx.stroke()}
+    ctx.fillStyle='#ffffff';
+    ctx.font=`700 ${Math.max(10,Math.min(13,n.radius*0.6))}px system-ui,sans-serif`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(String(n.count),n.x,n.y);
+    ctx.fillStyle=textColor;
+    ctx.font='600 12px system-ui,sans-serif'; ctx.textBaseline='top';
+    const label=n.tag.length>18?n.tag.slice(0,17)+'…':n.tag;
+    ctx.fillText('#'+label,n.x,n.y+n.radius+12);
+  }
+  ctx.globalAlpha=1;
+}
+function hitNode(event){
+  if(!mapGraph)return null;
+  const rect=document.getElementById('map').getBoundingClientRect();
+  const x=event.clientX-rect.left, y=event.clientY-rect.top;
+  return mapGraph.nodes.find(n=>Math.hypot(n.x-x,n.y-y)<=n.radius+6)||null;
+}
+document.getElementById('map').addEventListener('click',e=>{
+  const n=hitNode(e);
+  if(n){activeCat=activeCat===n.tag?null:n.tag;render(current)}
+});
+document.getElementById('map').addEventListener('mousemove',e=>{
+  e.target.style.cursor=hitNode(e)?'pointer':'default';
+});
+window.addEventListener('resize',()=>drawMap(current));
+const PAGE=100; let offset=0;
+async function loadAll(more){
+  if(!more){offset=0;current=[]}
+  const u=uid()?'&user_id='+encodeURIComponent(uid()):'';
+  const items=await api('/api/v1/memories?limit='+PAGE+'&offset='+offset+u);
+  offset+=items.length; haveMore=items.length===PAGE;
+  render(current.concat(items));
+}
 async function search(){
   const q=document.getElementById('q').value.trim(); if(!q)return loadAll();
-  const rs=await api('/api/v1/search',{method:'POST',body:JSON.stringify({query:q,user_id:uid(),limit:20})});
+  const body={query:q,limit:20}; if(uid())body.user_id=uid();
+  const rs=await api('/api/v1/search',{method:'POST',body:JSON.stringify(body)});
+  haveMore=false;
   render(rs.map(r=>({...r.memory,score:r.score})));
 }
 async function add(infer){
   const t=document.getElementById('newmem').value.trim(); if(!t)return;
-  await api('/api/v1/memories',{method:'POST',body:JSON.stringify({content:t,user_id:uid(),infer})});
-  document.getElementById('newmem').value=''; loadAll(); loadStats();
+  const cs=document.getElementById('newcats').value.split(',').map(s=>s.trim()).filter(Boolean);
+  await api('/api/v1/memories',{method:'POST',
+    body:JSON.stringify({content:t,user_id:uid()||undefined,infer,categories:cs.length?cs:undefined})});
+  document.getElementById('newmem').value=''; document.getElementById('newcats').value='';
+  loadAll(); loadStats();
 }
 async function del(id){await api('/api/v1/memories/'+id,{method:'DELETE'}); loadAll(); loadStats();}
 async function loadStats(){
@@ -196,9 +355,13 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         content = body.get("messages") or body.get("content")
         if not content:
             return JSONResponse({"error": "content or messages required"}, status_code=400)
+        # Writes always land in a concrete namespace: an omitted user_id
+        # defaults to config.default_user_id instead of storing NULL, which
+        # no scoped read (dashboard, clients) would ever find again. Reads
+        # keep None = "all users" as the admin view.
         result = store.add(
             content,
-            user_id=_ns(request.state.tenant, body.get("user_id")),
+            user_id=_ns(request.state.tenant, body.get("user_id")) or default_user,
             agent_id=body.get("agent_id"),
             run_id=body.get("run_id"),
             metadata=body.get("metadata"),
