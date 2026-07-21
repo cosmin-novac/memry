@@ -55,8 +55,10 @@ button.toggle[aria-pressed="true"]{border-color:var(--accent);color:var(--accent
 #stats{color:var(--dim);font-size:.85rem;margin-bottom:1rem}
 .mem{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.7rem .9rem;margin-bottom:.5rem}
 .mem .meta{color:var(--dim);font-size:.78rem;margin-top:.35rem;display:flex;gap:.8rem;flex-wrap:wrap}
-.mem .del{float:right;border:none;background:none;color:var(--dim)}.mem .del:hover{color:var(--warn)}
+.mem .del,.mem .edit{float:right;border:none;background:none;color:var(--dim)}.mem .del:hover{color:var(--warn)}.mem .edit:hover{color:var(--accent)}
 .tag{border:1px solid var(--line);border-radius:999px;padding:0 .5rem}
+.meta button.distill{border:1px solid var(--warn);border-radius:999px;padding:0 .5rem;background:none;color:var(--warn);font-size:inherit}
+.meta button.distill:hover{background:var(--warn);color:var(--bg)}
 textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .empty{color:var(--dim);padding:2rem;text-align:center}
 #mapwrap{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.4rem .4rem 0;margin-bottom:.7rem}
@@ -72,7 +74,10 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <button onclick="activeCat=null;loadAll()">All</button>
   <button class="toggle" id="addbtn" onclick="togglePanel('add')">+ Add</button>
   <button class="toggle" id="mapbtn" onclick="togglePanel('map')">Map</button>
+  <button onclick="exportMemories()" title="Download memories as JSONL (respects the user_id filter; same format as `memry export`)">Export</button>
+  <button id="importbtn" onclick="document.getElementById('importfile').click()" title="Additive import from a JSON/JSONL export; nothing is deleted">Import</button>
 </div>
+<input type="file" id="importfile" accept=".json,.jsonl,.txt,application/json" hidden onchange="importMemories(this.files[0]);this.value=''">
 <div id="addpanel" hidden>
 <textarea id="newmem" placeholder="Add to memory… (extraction runs if an LLM is configured)"></textarea>
 <div class="bar">
@@ -113,14 +118,19 @@ function togglePanel(name){
   localStorage.setItem('memry_show_'+name,panels[name]?'1':'0');
   syncPanels();
 }
-let current=[],activeCat=null,mapGraph=null,haveMore=false;
+let current=[],activeCat=null,mapGraph=null,haveMore=false,editingId=null;
 const cats=m=>((m.categories&&m.categories.length)?m.categories:['(untagged)']).map(c=>String(c).toLowerCase());
 function render(items){
   current=items; drawMap(items);
   const shown=activeCat?items.filter(m=>cats(m).includes(activeCat)):items;
   const el=document.getElementById('list');
   if(!shown.length&&!haveMore){el.innerHTML='<div class="empty">'+(activeCat?'No memories under #'+esc(activeCat)+'.':'No memories yet.')+'</div>';return}
-  el.innerHTML=shown.map(m=>`<div class="mem"><button class="del" title="forget" onclick="del('${m.id}')">✕</button>
+  el.innerHTML=shown.map(m=>m.id===editingId?editCard(m):viewCard(m)).join('')
+   +(haveMore?'<div class="bar"><button onclick="loadAll(true)">Load more</button></div>':'');
+}
+function viewCard(m){
+  return `<div class="mem"><button class="del" title="forget" onclick="del('${m.id}')">✕</button>
+   <button class="edit" title="edit" onclick="startEdit('${m.id}')">✎</button>
    <div>${esc(m.content)}</div>
    <div class="meta"><span class="tag">${m.memory_type||m.type||'semantic'}</span>
    ${(m.categories||[]).map(c=>`<span class="tag">#${esc(String(c))}</span>`).join('')}
@@ -128,8 +138,17 @@ function render(items){
    <span>imp ${(m.importance??0.5).toFixed(2)}</span>
    ${m.score!==undefined?`<span>score ${m.score.toFixed(3)}</span>`:''}
    <span>${(m.updated_at||m.created_at||'').slice(0,10)}</span>
-   ${m.invalid_at?'<span style="color:var(--warn)">invalidated</span>':''}</div></div>`).join('')
-   +(haveMore?'<div class="bar"><button onclick="loadAll(true)">Load more</button></div>':'');
+   ${m.invalid_at?'<span style="color:var(--warn)">invalidated</span>':''}
+   ${m.metadata&&m.metadata.pending_distillation&&!m.invalid_at?`<button class="distill" onclick="distill('${m.id}')" title="Saved verbatim because extraction was skipped (no LLM or LLM error). Distill into discrete facts now.">not distilled ↻</button>`:''}</div></div>`;
+}
+function editCard(m){
+  return `<div class="mem">
+   <textarea id="edit-note">${esc(m.content)}</textarea>
+   <div class="bar" style="margin-bottom:0">
+     <input id="edit-cats" value="${esc((m.categories||[]).join(', '))}" placeholder="tags, comma separated (optional)" style="flex:1;min-width:8rem">
+     <button class="primary" onclick="saveEdit('${m.id}')">Save</button>
+     <button onclick="cancelEdit()">Cancel</button>
+   </div></div>`;
 }
 
 // ---- category map: each bubble is a category, dots are its memories ------
@@ -280,12 +299,71 @@ async function search(){
 async function add(infer){
   const t=document.getElementById('newmem').value.trim(); if(!t)return;
   const cs=document.getElementById('newcats').value.split(',').map(s=>s.trim()).filter(Boolean);
-  await api('/api/v1/memories',{method:'POST',
+  const res=await api('/api/v1/memories',{method:'POST',
     body:JSON.stringify({content:t,user_id:uid()||undefined,infer,categories:cs.length?cs:undefined})});
+  if(res.warnings&&res.warnings.length)alert(res.warnings.join('\\n'));
   document.getElementById('newmem').value=''; document.getElementById('newcats').value='';
   loadAll(); loadStats();
 }
+async function distill(id){
+  const r=await fetch('/api/v1/memories/'+id+'/distill',{method:'POST',headers:H});
+  const data=await r.json().catch(()=>null);
+  if(!r.ok){alert((data&&data.error)||('Distillation failed ('+r.status+').'));return}
+  if(data.warnings&&data.warnings.length)alert(data.warnings.join('\\n'));
+  loadAll(); loadStats();
+}
 async function del(id){await api('/api/v1/memories/'+id,{method:'DELETE'}); loadAll(); loadStats();}
+function startEdit(id){editingId=id;render(current)}
+function cancelEdit(){editingId=null;render(current)}
+async function saveEdit(id){
+  const content=document.getElementById('edit-note').value.trim(); if(!content)return;
+  const cats=document.getElementById('edit-cats').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const updated=await api('/api/v1/memories/'+id,{method:'PATCH',body:JSON.stringify({content,categories:cats})});
+  editingId=null;
+  current=current.map(m=>m.id===id?{...m,...updated}:m);
+  render(current);
+}
+// Same JSONL shape as `memry export`, so files work with the CLI and back.
+async function exportMemories(){
+  const u=uid()?'&user_id='+encodeURIComponent(uid()):'';
+  let all=[],off=0,page;
+  do{
+    page=await api('/api/v1/memories?limit=500&offset='+off+u);
+    all=all.concat(page); off+=page.length;
+  }while(page.length===500);
+  if(!all.length){alert('Nothing to export.');return}
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([all.map(m=>JSON.stringify(m)).join('\\n')+'\\n'],{type:'application/json'}));
+  a.download='memry-export-'+new Date().toISOString().slice(0,10)+'.jsonl';
+  a.click(); URL.revokeObjectURL(a.href);
+}
+// Additive: every row becomes a new verbatim memory (same field mapping as
+// `memry import`); nothing is deleted or deduplicated.
+async function importMemories(file){
+  if(!file)return;
+  const text=((await file.text())||'').trim(); if(!text)return;
+  let rows;
+  try{rows=text.startsWith('[')?JSON.parse(text):text.split('\\n').map(l=>l.trim()).filter(Boolean).map(l=>JSON.parse(l));}
+  catch{alert('Not a valid JSON or JSONL export file.');return}
+  if(!Array.isArray(rows))rows=[rows];
+  const btn=document.getElementById('importbtn');
+  let ok=0,failed=0;
+  for(const r of rows){
+    const content=String(r.content||'').trim();
+    if(!content){failed++;continue}
+    const body={content,infer:false,
+      user_id:r.user_id||uid()||undefined,
+      memory_type:r.memory_type||'semantic',
+      importance:r.importance??0.5,
+      categories:(r.categories&&r.categories.length)?r.categories:undefined};
+    try{await api('/api/v1/memories',{method:'POST',body:JSON.stringify(body)});ok++}
+    catch{failed++}
+    btn.textContent='Import '+(ok+failed)+'/'+rows.length;
+  }
+  btn.textContent='Import';
+  alert('Imported '+ok+' of '+rows.length+(failed?' ('+failed+' failed or empty)':'')+'.');
+  loadAll(); loadStats();
+}
 async function loadStats(){
   const s=await api('/api/v1/stats');
   document.getElementById('stats').textContent=
@@ -430,6 +508,22 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
             return error
         events = store.history(request.path_params["memory_id"])
         return JSONResponse([e.model_dump() for e in events])
+
+    async def distill_memory(request: Request) -> Response:
+        _, error = _memory_or_error(request)
+        if error:
+            return error
+        try:
+            result = store.distill(request.path_params["memory_id"])
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except Exception as exc:  # LLM/provider failure: report, don't 500
+            return JSONResponse(
+                {"error": f"distillation failed: {exc}"}, status_code=502
+            )
+        if result is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(result.model_dump())
 
     async def search(request: Request) -> Response:
         body = await request.json()
@@ -585,6 +679,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         Route("/api/v1/memories/{memory_id}", guarded(patch_memory), methods=["PATCH"]),
         Route("/api/v1/memories/{memory_id}", guarded(delete_memory), methods=["DELETE"]),
         Route("/api/v1/memories/{memory_id}/history", guarded(memory_history), methods=["GET"]),
+        Route("/api/v1/memories/{memory_id}/distill", guarded(distill_memory), methods=["POST"]),
         Route("/api/v1/search", guarded(search), methods=["POST"]),
         Route("/api/v1/context", guarded(context), methods=["POST"]),
         Route("/api/v1/stats", guarded(stats), methods=["GET"]),

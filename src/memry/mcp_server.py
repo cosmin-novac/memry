@@ -91,16 +91,16 @@ def create_server(
             run_id=run_id or None,
             infer=infer,
         )
-        return json.dumps(
-            {
-                "saved": result.summary(),
-                "actions": [
-                    {"event": a.event, "memory_id": a.memory_id, "content": a.content}
-                    for a in result.actions
-                ],
-            },
-            ensure_ascii=False,
-        )
+        payload: dict[str, Any] = {
+            "saved": result.summary(),
+            "actions": [
+                {"event": a.event, "memory_id": a.memory_id, "content": a.content}
+                for a in result.actions
+            ],
+        }
+        if result.warnings:
+            payload["warnings"] = result.warnings
+        return json.dumps(payload, ensure_ascii=False)
 
     @mcp.tool()
     def search_memories(

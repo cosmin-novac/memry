@@ -161,6 +161,7 @@ def reconcile_candidate(
         importance=candidate.importance,
         categories=candidate.categories,
         entities=candidate.entities,
+        metadata=candidate.metadata,
         source_episode_ids=episode_ids,
         created_at=utcnow(),
         updated_at=utcnow(),

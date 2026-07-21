@@ -127,6 +127,49 @@ def test_rest_auth_enforced():
         assert client.get("/health").status_code == 200
 
 
+def test_rest_distill_endpoint():
+    from conftest import FakeLLM, fact, facts_response
+
+    llm = FakeLLM()
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64))
+    with TestClient(create_app(store)) as client:
+        # empty FakeLLM queue raises on complete() -> save degrades to
+        # verbatim with a warning and the pending_distillation flag
+        created = client.post(
+            "/api/v1/memories", json={"content": "Ada lives in Berlin", "user_id": "ada"}
+        )
+        body = created.json()
+        assert body["warnings"] and "stored verbatim" in body["warnings"][0]
+        memory_id = body["actions"][0]["memory_id"]
+        listed = client.get("/api/v1/memories", params={"user_id": "ada"}).json()
+        assert listed[0]["metadata"]["pending_distillation"] is True
+
+        # LLM still failing -> distillation reports the provider error
+        failed = client.post(f"/api/v1/memories/{memory_id}/distill")
+        assert failed.status_code == 502
+        assert "distillation failed" in failed.json()["error"]
+
+        # LLM recovered -> distill replaces the verbatim memory
+        llm.queue(facts_response(fact("Ada lives in Berlin", categories=["location"])))
+        ok = client.post(f"/api/v1/memories/{memory_id}/distill")
+        assert ok.status_code == 200
+        assert ok.json()["actions"][0]["event"] == "ADD"
+        listed = client.get("/api/v1/memories", params={"user_id": "ada"}).json()
+        assert len(listed) == 1
+        assert listed[0]["content"] == "Ada lives in Berlin"
+        assert not listed[0]["metadata"].get("pending_distillation")
+
+    # without any LLM configured the endpoint says so instead of 500ing
+    with TestClient(create_app(make_store())) as client:
+        created = client.post(
+            "/api/v1/memories", json={"content": "note", "user_id": "u", "infer": False}
+        )
+        memory_id = created.json()["actions"][0]["memory_id"]
+        resp = client.post(f"/api/v1/memories/{memory_id}/distill")
+        assert resp.status_code == 400
+        assert "no LLM" in resp.json()["error"]
+
+
 def test_mcp_http_url_key_auth():
     """claude.ai custom connectors cannot send headers, so /mcp accepts the
     admin key embedded in the URL: /mcp/<key> or /mcp?key=<key>."""

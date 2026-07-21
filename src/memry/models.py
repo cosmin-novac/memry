@@ -116,6 +116,10 @@ class CandidateFact(BaseModel):
     importance: float = 0.5
     categories: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
+    # Carried onto the stored memory. Set to {"pending_distillation": True}
+    # when extraction was requested but skipped (no LLM / LLM failure), so the
+    # memory can be distilled later.
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AddAction(BaseModel):
@@ -130,6 +134,9 @@ class AddAction(BaseModel):
 class AddResult(BaseModel):
     episode_ids: list[str] = Field(default_factory=list)
     actions: list[AddAction] = Field(default_factory=list)
+    # Non-fatal degradations the caller should surface to the user
+    # (e.g. "extraction failed; stored verbatim").
+    warnings: list[str] = Field(default_factory=list)
 
     def summary(self) -> dict[str, int]:
         counts: dict[str, int] = {}

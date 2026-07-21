@@ -102,6 +102,7 @@ class MemoryStore:
         episode_ids = [e.id for e in episodes]
 
         candidates: list[CandidateFact]
+        warnings: list[str] = []
         if not infer:
             text = content if isinstance(content, str) else "\n".join(
                 m.get("content", "") for m in messages
@@ -115,10 +116,43 @@ class MemoryStore:
                 )
             ]
         elif self.llm.available:
-            candidates = extract_facts(self.llm, messages)
+            try:
+                candidates = extract_facts(self.llm, messages)
+            except Exception as exc:
+                # Provider outage / exhausted credits must not lose the save:
+                # degrade to verbatim, tell the caller, and flag the memories
+                # so distillation can be re-run later (store.distill).
+                candidates = self._pending_verbatim(messages)
+                warnings.append(
+                    f"extraction failed; stored verbatim instead (distill later): {exc}"
+                )
         else:
-            candidates = verbatim_candidates(messages)
+            candidates = self._pending_verbatim(messages)
 
+        actions = self._apply_candidates(candidates, scope, episode_ids)
+        return AddResult(episode_ids=episode_ids, actions=actions, warnings=warnings)
+
+    @staticmethod
+    def _pending_verbatim(messages: list[dict[str, str]]) -> list[CandidateFact]:
+        """Verbatim candidates flagged for later distillation."""
+        candidates = verbatim_candidates(messages)
+        for candidate in candidates:
+            candidate.metadata = {"pending_distillation": True}
+        return candidates
+
+    def _apply_candidates(
+        self,
+        candidates: list[CandidateFact],
+        scope: Scope,
+        episode_ids: list[str],
+        *,
+        exclude_id: str | None = None,
+    ) -> list[AddAction]:
+        """Reconcile candidates into the store (shared by add and distill).
+
+        ``exclude_id`` keeps a memory out of the similarity set - distillation
+        must not reconcile facts against the verbatim memory they came from.
+        """
         actions: list[AddAction] = []
         for candidate in candidates:
             similar = hybrid_search(
@@ -129,6 +163,8 @@ class MemoryStore:
                 limit=self.config.retrieval.reconcile_similarity_limit,
                 cfg=self.config.retrieval,
             )
+            if exclude_id is not None:
+                similar = [r for r in similar if r.memory.id != exclude_id]
             action = reconcile_candidate(
                 candidate=candidate,
                 scope=scope,
@@ -151,6 +187,55 @@ class MemoryStore:
                     memory_content=action.content or candidate.content,
                     surfaces=candidate.entities,
                 )
+        return actions
+
+    def distill(self, memory_id: str) -> AddResult | None:
+        """Run extraction on a memory that was stored verbatim (LLM missing or
+        failing at save time) and replace it with the distilled facts.
+
+        The original memory is invalidated (kept in the audit history) and
+        superseded by the first fact that landed. If extraction finds nothing
+        worth keeping, the memory stays as-is with its pending flag cleared.
+        Returns None for unknown or already-invalidated memories; raises if
+        no LLM is configured or the LLM call fails.
+        """
+        memory = self.backend.get_memory(memory_id)
+        if memory is None or memory.invalid_at is not None:
+            return None
+        if not self.llm.available:
+            raise ValueError("no LLM configured; distillation needs one")
+        scope = Scope(
+            user_id=memory.user_id, agent_id=memory.agent_id, run_id=memory.run_id
+        )
+        candidates = extract_facts(
+            self.llm, [{"role": "user", "content": memory.content}]
+        )
+        episode_ids = memory.source_episode_ids
+        if not candidates:
+            meta = {
+                k: v for k, v in memory.metadata.items() if k != "pending_distillation"
+            }
+            self.backend.update_memory(memory_id, metadata=meta)
+            return AddResult(
+                episode_ids=episode_ids,
+                warnings=["no facts extracted; memory kept verbatim"],
+            )
+        actions = self._apply_candidates(
+            candidates, scope, episode_ids, exclude_id=memory_id
+        )
+        landed = sum(1 for a in actions if a.event != "NONE")
+        new_id = next(
+            (a.memory_id for a in actions if a.event != "NONE" and a.memory_id), None
+        )
+        self.backend.invalidate_memory(memory_id, superseded_by=new_id)
+        self.backend.add_event(
+            MemoryEvent(
+                memory_id=memory_id,
+                event="SUPERSEDE",
+                old_content=memory.content,
+                reason=f"distilled into {landed} fact(s)",
+            )
+        )
         return AddResult(episode_ids=episode_ids, actions=actions)
 
     # ------------------------------------------------------------------

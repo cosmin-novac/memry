@@ -26,6 +26,76 @@ def test_add_without_llm_falls_back_to_verbatim(verbatim_store):
         user_id="ada",
     )
     assert result.summary()["ADD"] == 2
+    # verbatim-because-no-LLM memories are flagged for later distillation
+    assert all(
+        m.metadata.get("pending_distillation") for m in verbatim_store.get_all(user_id="ada")
+    )
+
+
+def test_llm_failure_degrades_to_verbatim_with_warning(store, fake_llm):
+    # FakeLLM with an empty queue raises on complete(), simulating a provider
+    # outage (e.g. exhausted API credits) mid-save.
+    result = store.add("I live in Berlin", user_id="ada")
+    assert result.summary() == {"ADD": 1}
+    assert result.warnings and "stored verbatim" in result.warnings[0]
+    memory = store.get_all(user_id="ada")[0]
+    assert memory.content == "I live in Berlin"
+    assert memory.metadata.get("pending_distillation") is True
+
+
+def test_distill_replaces_verbatim_memory(store, fake_llm):
+    result = store.add("I live in Berlin and use uv", user_id="ada")  # LLM fails
+    assert result.warnings
+    original = store.get_all(user_id="ada")[0]
+
+    fake_llm.queue(
+        facts_response(
+            fact("User lives in Berlin", categories=["location"]),
+            fact("User prefers uv over pip", type="procedural"),
+        ),
+        # 2nd fact sees the 1st as similar -> reconcile call (original excluded)
+        decision("ADD", reason="unrelated preference"),
+    )
+    distilled = store.distill(original.id)
+    assert distilled.summary() == {"ADD": 2}
+
+    active = store.get_all(user_id="ada")
+    assert {m.content for m in active} == {
+        "User lives in Berlin",
+        "User prefers uv over pip",
+    }
+    assert not any(m.metadata.get("pending_distillation") for m in active)
+    # original invalidated with audit trail, superseded by a distilled fact
+    gone = store.get(original.id)
+    assert gone.invalid_at is not None
+    assert gone.superseded_by in {m.id for m in active}
+    assert any(
+        e.event == "SUPERSEDE" and "distilled" in (e.reason or "")
+        for e in store.history(original.id)
+    )
+    # provenance carried over
+    assert all(m.source_episode_ids == original.source_episode_ids for m in active)
+
+
+def test_distill_nothing_extracted_keeps_memory(store, fake_llm):
+    store.add("hmm ok", user_id="ada")  # LLM fails -> pending verbatim
+    original = store.get_all(user_id="ada")[0]
+    fake_llm.queue(facts_response())  # extraction finds nothing
+    result = store.distill(original.id)
+    assert result.warnings and "kept verbatim" in result.warnings[0]
+    kept = store.get(original.id)
+    assert kept.invalid_at is None
+    assert "pending_distillation" not in kept.metadata
+
+
+def test_distill_requires_llm_and_valid_target(verbatim_store, store, fake_llm):
+    import pytest
+
+    verbatim_store.add("note", user_id="ada", infer=False)
+    memory = verbatim_store.get_all(user_id="ada")[0]
+    with pytest.raises(ValueError):
+        verbatim_store.distill(memory.id)
+    assert store.distill("no-such-id") is None
 
 
 def test_add_with_extraction_and_reconcile_add(store, fake_llm):
