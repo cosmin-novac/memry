@@ -75,6 +75,30 @@ def test_explicit_provider_beats_autodetect(monkeypatch):
     assert cfg.llm.provider == "ollama"
 
 
+def test_pinned_hash_embeddings_survive_openai_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("MEMRY_EMBEDDING_PROVIDER", "hash")
+    cfg = Config.load()
+    assert cfg.embedding.provider == "hash"
+    assert cfg.llm.provider == "openai"  # LLM not pinned -> still autodetects
+
+
+def test_pinned_none_llm_survives_api_keys(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("MEMRY_LLM_PROVIDER", "none")
+    cfg = Config.load()
+    assert cfg.llm.provider == "none"
+
+
+def test_file_pinned_embedding_survives_openai_key(monkeypatch, tmp_path):
+    file = tmp_path / "config.json"
+    file.write_text(json.dumps({"embedding": {"provider": "hash"}}), encoding="utf-8")
+    monkeypatch.setenv("MEMRY_CONFIG", str(file))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    cfg = Config.load()
+    assert cfg.embedding.provider == "hash"
+
+
 def test_redacted_hides_secrets():
     cfg = Config(api_key="topsecret")
     cfg.llm.api_key = "sk-hidden"

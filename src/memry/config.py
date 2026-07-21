@@ -132,7 +132,11 @@ class Config(BaseModel):
         data = _deep_merge(data, _from_env())
         data = _deep_merge(data, overrides)
         cfg = cls.model_validate(data)
-        return _autodetect_providers(cfg)
+        return _autodetect_providers(
+            cfg,
+            llm_pinned="provider" in data.get("llm", {}),
+            embedding_pinned="provider" in data.get("embedding", {}),
+        )
 
     def redacted(self) -> dict[str, Any]:
         d = self.model_dump()
@@ -195,15 +199,21 @@ def _from_env() -> dict[str, Any]:
     return data
 
 
-def _autodetect_providers(cfg: Config) -> Config:
-    """Upgrade the zero-config defaults when well-known API keys are present."""
+def _autodetect_providers(
+    cfg: Config, *, llm_pinned: bool = False, embedding_pinned: bool = False
+) -> Config:
+    """Upgrade the zero-config defaults when well-known API keys are present.
+
+    A provider set explicitly (config file, env var, or override) is pinned:
+    autodetection never replaces it, so e.g. MEMRY_EMBEDDING_PROVIDER=hash
+    keeps the local embedder even when OPENAI_API_KEY exists."""
     env = os.environ
-    if cfg.llm.provider == "none":
+    if not llm_pinned and cfg.llm.provider == "none":
         if env.get("ANTHROPIC_API_KEY"):
             cfg.llm.provider = "anthropic"
         elif env.get("OPENAI_API_KEY"):
             cfg.llm.provider = "openai"
-    if cfg.embedding.provider == "hash":
+    if not embedding_pinned and cfg.embedding.provider == "hash":
         if env.get("OPENAI_API_KEY"):
             cfg.embedding.provider = "openai"
         elif env.get("VOYAGE_API_KEY"):
