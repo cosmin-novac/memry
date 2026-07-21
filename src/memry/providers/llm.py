@@ -117,6 +117,7 @@ class OpenAILLM(LLM):
         self.base_url = (cfg.base_url or "https://api.openai.com").rstrip("/")
         self.api_key = cfg.api_key or os.environ.get("OPENAI_API_KEY", "")
         self.timeout = cfg.timeout
+        self.effort = cfg.effort
 
     def complete(self, system: str, user: str, *, json_schema: dict[str, Any] | None = None) -> str:
         body: dict[str, Any] = {
@@ -126,6 +127,11 @@ class OpenAILLM(LLM):
                 {"role": "user", "content": user},
             ],
         }
+        # gpt-5* are reasoning models that default to medium effort; extraction
+        # is a structured task where low keeps latency and cost down. Other
+        # models reject the parameter.
+        if self.model.startswith("gpt-5"):
+            body["reasoning_effort"] = self.effort
         if json_schema is not None:
             body["response_format"] = {
                 "type": "json_schema",
