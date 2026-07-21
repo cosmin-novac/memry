@@ -67,9 +67,17 @@ button.toggle[aria-pressed="true"]{border-color:var(--accent);color:var(--accent
 .meta button.distill:hover{background:var(--warn);color:var(--bg)}
 textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .empty{color:var(--dim);padding:2rem;text-align:center}
-#mapwrap{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.4rem .4rem 0;margin-bottom:.7rem}
-#map{display:block;width:100%}
-.maphint{color:var(--dim);font-size:.75rem;text-align:center;margin:.15rem 0 .35rem}
+#mapwrap{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.4rem;margin-bottom:.7rem;overflow:hidden}
+#map{display:block;width:100%;border-radius:8px}
+#mapwrap:fullscreen,#mapwrap.maxed{padding:0;border:0;border-radius:0;background:var(--bg)}
+#mapwrap:fullscreen #map,#mapwrap.maxed #map{border-radius:0}
+#mapwrap.maxed{position:fixed;inset:0;z-index:99999}
+.gx-ctrl{position:absolute;top:.6rem;right:.6rem;display:flex;gap:.4rem;z-index:3}
+.gx-ctrl button{background:color-mix(in srgb,var(--panel) 68%,transparent);border:1px solid var(--line);color:var(--dim);border-radius:7px;padding:.3rem .5rem;font-size:.72rem;cursor:pointer;backdrop-filter:blur(5px);line-height:1}
+.gx-ctrl button:hover{color:var(--accent);border-color:var(--accent)}
+.gx-read{position:absolute;top:.6rem;left:.6rem;z-index:3;font-size:.75rem;color:var(--dim);background:color-mix(in srgb,var(--panel) 60%,transparent);border:1px solid var(--line);border-radius:7px;padding:.32rem .6rem;backdrop-filter:blur(5px);max-width:62%;pointer-events:none;opacity:0;transition:opacity .15s}
+.gx-read.on{opacity:1}.gx-read b{color:var(--text)}
+.gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
 <span class="datalinks"><a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
@@ -91,7 +99,9 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <button onclick="add(false)">Add verbatim</button>
 </div>
 </div>
-<div id="mapwrap" hidden><canvas id="map"></canvas><p class="maphint" id="maphint"></p></div>
+<div id="mapwrap" hidden><canvas id="map"></canvas>
+<div class="gx-ctrl"><button id="fsBtn" title="Fullscreen" aria-label="Fullscreen">⤢</button></div>
+<div class="gx-read" id="mapread"></div><div class="gx-stat" id="mapstat"></div></div>
 <div id="list"></div>
 </main><script>
 const key = localStorage.getItem('memry_key') || '';
@@ -164,7 +174,7 @@ function editCard(m){
 const hashCode=s=>{let h=0;for(let i=0;i<s.length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;return Math.abs(h)};
 const mulberry=a=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
 const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
-let G=null,gRAF=0,gPulses=[];
+let G=null,gRAF=0,gPulses=[],gMaxed=false;
 const gStars=Array.from({length:230},(_,i)=>{const r=mulberry(i*2654435761+11);const k=r();
   return{x:r(),y:r(),s:.3+r()*1.4,a:.2+r()*.7,ph:r()*6.28,sp:.3+r()*.7,hue:k>.94?36:(k>.84?176:(k>.78?252:null)),big:r()>.965};});
 const gDust=Array.from({length:150},(_,i)=>{const r=mulberry(i*97+5);
@@ -184,9 +194,11 @@ function buildGalaxy(items){
   const sd=Math.sqrt(vals.reduce((a,c)=>a+(c-mean)**2,0)/vals.length);
   const coreMin=mean+2*sd,rimMax=Math.max(1,mean-2*sd),maxC=Math.max(...vals);
   const fb=!vals.some(c=>c>=coreMin);
+  // belt and rim planets get a size boost so the outer zones read clearly
+  const ZF={core:1.0,belt:1.28,rim:1.55};
   const nodes=[...counts.keys()].sort().map(tag=>{const count=counts.get(tag);
-    return{tag,count,zone:(fb?count===maxC:count>=coreMin)?'core':(count<=rimMax?'rim':'belt'),
-      radius:Math.min(28,9+5*Math.sqrt(count)),seed:hashCode(tag),h:0};});
+    const zone=(fb?count===maxC:count>=coreMin)?'core':(count<=rimMax?'rim':'belt');
+    return{tag,count,zone,radius:Math.min(34,(9+5*Math.sqrt(count))*ZF[zone]),seed:hashCode(tag),h:0};});
   const index=new Map(nodes.map((n,i)=>[n.tag,i]));
   const edgeMap=new Map();
   const bump=(a,b,w)=>{const k=a<b?a+':'+b:b+':'+a;edgeMap.set(k,(edgeMap.get(k)||0)+w)};
@@ -203,22 +215,24 @@ function buildGalaxy(items){
   const neigh={};
   edges.forEach(e=>{const ta=nodes[e.a].tag,tb=nodes[e.b].tag;
     (neigh[ta]??=new Set()).add(tb);(neigh[tb]??=new Set()).add(ta);});
-  const BANDS={core:[0.02,0.17],belt:[0.42,0.60],rim:[0.78,0.90]};
+  const BANDS={core:[0.02,0.16],belt:[0.30,0.62],rim:[0.66,0.99]};
+  const PHASE={core:0,belt:0.7,rim:1.4},PACK={core:4,belt:16,rim:22},GOLDEN=2.399963229728653;
   for(const zone of['core','belt','rim']){
     const ring=nodes.filter(n=>n.zone===zone);
     ring.sort((a,b)=>b.count-a.count||a.tag.localeCompare(b.tag));
-    // crowded rings split into staggered rows and shrink their planets
-    const rows=Math.min(3,Math.ceil(ring.length/16)),shrink=rows>1?0.7:1;
+    const N=ring.length,lo=BANDS[zone][0],hi=BANDS[zone][1];
+    // planets shrink as a ring fills so a long tail of tags still fits
+    const shrink=Math.max(0.4,Math.min(1,1/Math.sqrt(Math.max(1,N)/PACK[zone])));
+    const dense=N>PACK[zone]*0.8;
     ring.forEach((n,k)=>{const rnd=mulberry(n.seed);
       n.radius*=shrink;
-      n.ang=(n.seed%628)/100*0.35+k*(Math.PI*2/ring.length)+rnd()*0.2;
-      const bl=BANDS[zone][0],bh=BANDS[zone][1];
-      // multiple core planets sit on a small fixed ring so they never overlap
-      if(zone==='core')n.rFrac=ring.length===1?0:0.12;
-      else if(rows>1)n.rFrac=bl+(bh-bl)*((k%rows)/(rows-1));
-      else n.rFrac=bl+(bh-bl)*rnd();});
+      if(zone==='core'){n.rFrac=N===1?0:0.13;n.ang=PHASE.core+k*(Math.PI*2/N);}
+      // dense rings fill the annulus with a phyllotaxis (sunflower) pattern -
+      // even area density at any count, no clumps; sparse ones use an even ring
+      else if(dense){n.rFrac=lo+(hi-lo)*Math.sqrt((k+0.5)/N);n.ang=PHASE[zone]+k*GOLDEN;}
+      else{n.ang=PHASE[zone]+k*(Math.PI*2/N)+(rnd()-0.5)*0.22;n.rFrac=lo+(hi-lo)*(0.35+0.5*rnd());}});
   }
-  return{nodes,edges,neigh,byTag:Object.fromEntries(nodes.map(n=>[n.tag,n])),fb};
+  return{nodes,edges,neigh,byTag:Object.fromEntries(nodes.map(n=>[n.tag,n])),fb,total:items.length};
 }
 function drawMap(items){
   const wrap=document.getElementById('mapwrap');
@@ -226,30 +240,39 @@ function drawMap(items){
   if(!G){wrap.hidden=true;if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return}
   wrap.hidden=false;
   sizeGalaxy();
-  galaxyHint();
+  galaxyRead();
   if(reducedMotion)galaxyFrame(performance.now());
   else if(!gRAF)gRAF=requestAnimationFrame(galaxyFrame);
 }
 function sizeGalaxy(){
   const wrap=document.getElementById('mapwrap'),canvas=document.getElementById('map');
-  const width=Math.max(300,wrap.clientWidth-14),height=Math.min(560,Math.max(380,width*0.55));
+  const big=document.fullscreenElement===wrap||gMaxed;
+  let width,height;
+  if(big){width=wrap.clientWidth;height=wrap.clientHeight;}
+  else{width=Math.max(300,wrap.clientWidth-10);height=Math.max(380,Math.min(620,width*0.56));}
   const dpr=window.devicePixelRatio||1;
   canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);
   canvas.style.width=width+'px';canvas.style.height=height+'px';
   canvas.getContext('2d').setTransform(dpr,0,0,dpr,0,0);
-  G.W=width;G.H=height;G.CX=width/2;G.CY=height/2;G.R=Math.min(width,height)/2-30;
+  G.W=width;G.H=height;G.CX=width/2;G.CY=height/2;G.RX=width/2-46;G.RY=height/2-42;
 }
-function galaxyHint(){
-  const el=document.getElementById('maphint');
-  const focus=hoverTag&&G?G.byTag[hoverTag]:null;
-  if(activeCat)el.textContent=`Filtering #${activeCat} - click its planet again (or All) to clear.`;
-  else if(focus)el.textContent=`#${focus.tag}: ${focus.count} memor${focus.count===1?'y':'ies'} (${focus.zone})`+(G.neigh[focus.tag]?` - linked: ${[...G.neigh[focus.tag]].map(x=>'#'+x).join(', ')}`:'');
-  else el.textContent=`Tag galaxy: gold core, teal belt, violet rim${G&&G.fb?' (core = largest tags)':''}. Hover to light a constellation, click to filter.`;
+// hover/filter info as a corner overlay; a faint tag/memory count sits bottom-left
+function galaxyRead(){
+  const readEl=document.getElementById('mapread'),statEl=document.getElementById('mapstat');
+  if(!G){readEl.classList.remove('on');return}
+  const f=activeCat?G.byTag[activeCat]:(hoverTag?G.byTag[hoverTag]:null);
+  if(f){
+    const linked=G.neigh[f.tag]?[...G.neigh[f.tag]].map(x=>'#'+x).join(', '):'none';
+    readEl.innerHTML=`<b>#${f.tag}</b> · ${f.count} memor${f.count===1?'y':'ies'} · ${f.zone}`
+      +(activeCat===f.tag?' · filtering':'')+`<br><span style="opacity:.8">linked: ${linked}</span>`;
+    readEl.classList.add('on');
+  }else readEl.classList.remove('on');
+  statEl.textContent=`${G.nodes.length} tags · ${G.total} memories`+(G.fb?' · core = largest':'');
 }
 function galaxyFrame(now){
   if(!G){gRAF=0;return}
   const canvas=document.getElementById('map'),ctx=canvas.getContext('2d');
-  const W=G.W,H=G.H,R=G.R,CX=G.CX,CY=G.CY,t=now;
+  const W=G.W,H=G.H,RX=G.RX,RY=G.RY,Rm=Math.max(RX,RY),CX=G.CX,CY=G.CY,t=now;
   const rootStyle=getComputedStyle(document.documentElement);
   const bg=(rootStyle.getPropertyValue('--bg').trim()||'#0b0e14');
   const dark=parseInt(bg.slice(5,7)||'14',16)<120;
@@ -260,28 +283,28 @@ function galaxyFrame(now){
   const still=reducedMotion||!!hoverTag||!!activeCat;
   ctx.clearRect(0,0,W,H);
   // deep space ground
-  const g0=ctx.createRadialGradient(CX,CY-H*0.05,R*0.12,CX,CY,R*1.45);
+  const g0=ctx.createRadialGradient(CX,CY-H*0.05,Rm*0.12,CX,CY,Rm*1.45);
   g0.addColorStop(0,dark?'#0b1020':'#f0f4f9');g0.addColorStop(1,dark?'#04060c':'#e3e9f2');
   ctx.fillStyle=g0;ctx.fillRect(0,0,W,H);
   // nebula washes + distant sunlight
-  for(const wsh of[[W*0.24,H*0.2,R*1.0,252],[W*0.78,H*0.84,R*0.95,176],[W*0.62,H*0.22,R*0.75,318]]){
+  for(const wsh of[[W*0.22,H*0.2,Rm*1.0,252],[W*0.8,H*0.84,Rm*0.95,176],[W*0.62,H*0.2,Rm*0.7,318]]){
     const neb=ctx.createRadialGradient(wsh[0],wsh[1],0,wsh[0],wsh[1],wsh[2]);
     neb.addColorStop(0,`hsla(${wsh[3]},70%,${dark?55:70}%,${dark?0.09:0.11})`);
     neb.addColorStop(1,'transparent');
     ctx.fillStyle=neb;ctx.fillRect(0,0,W,H);
   }
-  const sun=ctx.createRadialGradient(W*0.12,H*0.08,0,W*0.12,H*0.08,R*0.9);
+  const sun=ctx.createRadialGradient(W*0.1,H*0.06,0,W*0.1,H*0.06,Rm*0.9);
   sun.addColorStop(0,hexA(WARM,0.10));sun.addColorStop(1,'transparent');
   ctx.fillStyle=sun;ctx.fillRect(0,0,W,H);
   // galactic dust band with stellar specks
-  ctx.save();ctx.translate(CX,CY);ctx.rotate(-0.32);ctx.scale(1,0.3);
-  const band=ctx.createRadialGradient(0,0,0,0,0,R*1.4);
+  ctx.save();ctx.translate(CX,CY);ctx.rotate(-0.28);ctx.scale(1,0.34);
+  const band=ctx.createRadialGradient(0,0,0,0,0,Rm*1.4);
   band.addColorStop(0,hexA(STAR,0.07));band.addColorStop(1,'transparent');
-  ctx.fillStyle=band;ctx.beginPath();ctx.arc(0,0,R*1.4,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle=band;ctx.beginPath();ctx.arc(0,0,Rm*1.4,0,Math.PI*2);ctx.fill();
   for(const d of gDust){
     ctx.globalAlpha=d.al*(dark?1:0.55);
     ctx.fillStyle=d.teal?`hsla(176,60%,${dark?70:40}%,1)`:STAR;
-    ctx.beginPath();ctx.arc(Math.cos(d.a)*R*1.25*d.rad,Math.sin(d.a)*R*1.25*d.rad+d.off*R,d.s*2,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(Math.cos(d.a)*Rm*1.3*d.rad,Math.sin(d.a)*Rm*1.3*d.rad+d.off*Rm,d.s*2,0,Math.PI*2);ctx.fill();
   }
   ctx.globalAlpha=1;ctx.restore();
   // starfield
@@ -298,27 +321,25 @@ function galaxyFrame(now){
   }
   ctx.globalAlpha=1;
   // gravity well + lens streak
-  const well=ctx.createRadialGradient(CX,CY,0,CX,CY,R*0.30);
+  const well=ctx.createRadialGradient(CX,CY,0,CX,CY,Rm*0.30);
   well.addColorStop(0,hexA(WARM,0.11));well.addColorStop(1,'transparent');
-  ctx.fillStyle=well;ctx.fillRect(CX-R*0.32,CY-R*0.32,R*0.64,R*0.64);
-  const streak=ctx.createLinearGradient(CX-R*0.9,CY,CX+R*0.9,CY);
+  ctx.fillStyle=well;ctx.fillRect(CX-Rm*0.32,CY-Rm*0.32,Rm*0.64,Rm*0.64);
+  const streak=ctx.createLinearGradient(CX-RX*0.9,CY,CX+RX*0.9,CY);
   streak.addColorStop(0,'transparent');streak.addColorStop(0.5,hexA(WARM,0.15));streak.addColorStop(1,'transparent');
-  ctx.fillStyle=streak;ctx.fillRect(CX-R*0.9,CY-1,R*1.8,2);
+  ctx.fillStyle=streak;ctx.fillRect(CX-RX*0.9,CY-1,RX*1.8,2);
   ctx.strokeStyle=hexA(WARM,0.45);ctx.lineWidth=0.9;
-  ctx.beginPath();ctx.arc(CX,CY,R*0.05,0,Math.PI*2);ctx.stroke();
-  ctx.strokeStyle=hexA(WARM,0.15);
-  ctx.beginPath();ctx.arc(CX,CY,R*0.08,0,Math.PI*2);ctx.stroke();
-  // zone hairlines
+  ctx.beginPath();ctx.ellipse(CX,CY,RX*0.05,RY*0.05,0,0,Math.PI*2);ctx.stroke();
+  // zone hairlines (elliptical)
   ctx.lineWidth=1.2;
-  for(const fr of[0.31,0.70,0.96]){
-    ctx.strokeStyle=hexA(DIM,0.45);
-    ctx.beginPath();ctx.arc(CX,CY,R*fr,0,Math.PI*2);ctx.stroke();
+  for(const fr of[0.28,0.72,0.99]){
+    ctx.strokeStyle=hexA(DIM,0.4);
+    ctx.beginPath();ctx.ellipse(CX,CY,RX*fr,RY*fr,0,0,Math.PI*2);ctx.stroke();
   }
   // positions + focus
   const pts={};
   for(const n of G.nodes){
     n.ang+=still?0:0.00010*(n.zone==='core'?1:(n.zone==='belt'?-0.5:0.3));
-    pts[n.tag]={x:CX+n.rFrac*R*Math.cos(n.ang),y:CY+n.rFrac*R*Math.sin(n.ang)};
+    pts[n.tag]={x:CX+n.rFrac*RX*Math.cos(n.ang),y:CY+n.rFrac*RY*Math.sin(n.ang)};
   }
   const sel=activeCat?G.byTag[activeCat]:null;
   const hov=hoverTag?G.byTag[hoverTag]:null;
@@ -414,7 +435,7 @@ function galaxyFrame(now){
       ctx.shadowBlur=0;
     }
     const lit=n.h>0.4||(foc&&G.neigh[foc.tag]&&G.neigh[foc.tag].has(n.tag));
-    if(n.radius>=13||n.h>0.05||lit){
+    if(n.radius>=19||n.h>0.05||lit){
       ctx.globalAlpha=Math.min(1,A+0.05);
       ctx.font='500 9.5px ui-sans-serif,system-ui';
       if('letterSpacing'in ctx)ctx.letterSpacing='1.5px';
@@ -434,7 +455,7 @@ function hitNode(event){
   const x=event.clientX-rect.left,y=event.clientY-rect.top;
   let best=null,bd=1e9;
   for(const n of G.nodes){
-    const px=G.CX+n.rFrac*G.R*Math.cos(n.ang),py=G.CY+n.rFrac*G.R*Math.sin(n.ang);
+    const px=G.CX+n.rFrac*G.RX*Math.cos(n.ang),py=G.CY+n.rFrac*G.RY*Math.sin(n.ang);
     const d=Math.hypot(px-x,py-y);
     if(d<Math.max(n.radius+8,14)&&d<bd){bd=d;best=n}
   }
@@ -446,7 +467,7 @@ document.getElementById('map').addEventListener('click',e=>{
     activeCat=activeCat===n.tag?null:n.tag;
     const rootStyle=getComputedStyle(document.documentElement);
     const dark=parseInt((rootStyle.getPropertyValue('--bg').trim()||'#0b0e14').slice(5,7)||'14',16)<120;
-    gPulses.push({x:G.CX+n.rFrac*G.R*Math.cos(n.ang),y:G.CY+n.rFrac*G.R*Math.sin(n.ang),
+    gPulses.push({x:G.CX+n.rFrac*G.RX*Math.cos(n.ang),y:G.CY+n.rFrac*G.RY*Math.sin(n.ang),
       r:n.radius,start:performance.now(),tone:gTone(n,dark)});
     render(current);
   }
@@ -455,11 +476,25 @@ document.getElementById('map').addEventListener('mousemove',e=>{
   const n=hitNode(e);
   e.target.style.cursor=n?'pointer':'default';
   const tg=n?n.tag:null;
-  if(tg!==hoverTag){hoverTag=tg;if(G)galaxyHint();if(reducedMotion&&G)galaxyFrame(performance.now())}
+  if(tg!==hoverTag){hoverTag=tg;if(G)galaxyRead();if(reducedMotion&&G)galaxyFrame(performance.now())}
 });
 document.getElementById('map').addEventListener('mouseleave',()=>{
-  if(hoverTag){hoverTag=null;if(G){galaxyHint();if(reducedMotion)galaxyFrame(performance.now())}}
+  if(hoverTag){hoverTag=null;if(G){galaxyRead();if(reducedMotion)galaxyFrame(performance.now())}}
 });
+// Fullscreen: real API where allowed, CSS-maximize fallback otherwise.
+function setMaxed(v){gMaxed=v;document.getElementById('mapwrap').classList.toggle('maxed',v);
+  document.documentElement.style.overflow=v?'hidden':'';
+  if(G){sizeGalaxy();if(reducedMotion)galaxyFrame(performance.now())}}
+document.getElementById('fsBtn').addEventListener('click',()=>{
+  const wrap=document.getElementById('mapwrap');
+  if(document.fullscreenElement){document.exitFullscreen();return}
+  if(gMaxed){setMaxed(false);return}
+  let p;try{p=wrap.requestFullscreen&&wrap.requestFullscreen();}catch(e){}
+  if(p&&p.then)p.then(()=>{},()=>setMaxed(true));
+  else if(!document.fullscreenElement)setMaxed(true);
+});
+window.addEventListener('keydown',e=>{if(e.key==='Escape'&&gMaxed)setMaxed(false);});
+document.addEventListener('fullscreenchange',()=>{if(G){sizeGalaxy();if(reducedMotion)galaxyFrame(performance.now())}});
 window.addEventListener('resize',()=>drawMap(current));
 const PAGE=100; let offset=0;
 async function loadAll(more){
