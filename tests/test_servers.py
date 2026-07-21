@@ -61,8 +61,22 @@ def test_mcp_tools_registered():
     names = {t.name for t in tools}
     assert {
         "save_memories", "search_memories", "get_memory_context", "list_memories",
-        "update_memory", "delete_memory", "memory_history", "memory_stats",
+        "list_categories", "update_memory", "delete_memory", "memory_history",
+        "memory_stats",
     } <= names
+
+
+def test_mcp_list_categories_sorted_desc():
+    store = make_store()
+    server = create_server(store)
+    store.add("a", user_id="u", infer=False, categories=["work", "diet"])
+    store.add("b", user_id="u", infer=False, categories=["work"])
+    store.add("c", user_id="u", infer=False, categories=["Work", "travel"])
+    cats = call_tool(server, "list_categories", {"user_id": "u"})
+    assert cats[0] == {"category": "work", "count": 3}
+    assert {c["category"] for c in cats} == {"work", "diet", "travel"}
+    counts = [c["count"] for c in cats]
+    assert counts == sorted(counts, reverse=True)
 
 
 # ---------------------------------------------------------------- REST API
@@ -115,6 +129,13 @@ def test_rest_crud_and_search(client):
 
 def test_rest_missing_content_400(client):
     assert client.post("/api/v1/memories", json={}).status_code == 400
+
+
+def test_rest_categories(client):
+    client.post("/api/v1/memories", json={"content": "a", "user_id": "u", "infer": False, "categories": ["work", "diet"]})
+    client.post("/api/v1/memories", json={"content": "b", "user_id": "u", "infer": False, "categories": ["work"]})
+    cats = client.get("/api/v1/categories", params={"user_id": "u"}).json()
+    assert cats == [{"category": "work", "count": 2}, {"category": "diet", "count": 1}]
 
 
 def test_rest_bulk_import(client):

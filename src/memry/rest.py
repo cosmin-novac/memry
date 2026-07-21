@@ -43,6 +43,7 @@ _DASHBOARD = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Memry dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50' fill='none' stroke='%2314b8a6' stroke-width='7' stroke-linecap='round'/%3E%3Ccircle cx='47' cy='10.5' r='4.5' fill='%2314b8a6'/%3E%3Ccircle cx='56' cy='20' r='3.2' fill='%2314b8a6' opacity='.85'/%3E%3Ccircle cx='57.5' cy='30' r='2.2' fill='%2314b8a6' opacity='.7'/%3E%3C/svg%3E">
 <style>
 :root{--bg:#0b0e14;--panel:#141a24;--line:#232c3b;--text:#dbe4f0;--dim:#8494ab;--accent:#5eead4;--warn:#f0a35e;font-size:15px}
 @media (prefers-color-scheme: light){:root{--bg:#f5f7fa;--panel:#ffffff;--line:#dde4ee;--text:#1a2333;--dim:#5c6b82;--accent:#0d9488;--warn:#b45309}}
@@ -70,7 +71,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 #map{display:block;width:100%}
 .maphint{color:var(--dim);font-size:.75rem;text-align:center;margin:.15rem 0 .35rem}
 </style></head><body><main>
-<h1><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
+<h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
 <span class="datalinks"><a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
@@ -122,7 +123,7 @@ function togglePanel(name){
   localStorage.setItem('memry_show_'+name,panels[name]?'1':'0');
   syncPanels();
 }
-let current=[],activeCat=null,mapGraph=null,haveMore=false,editingId=null;
+let current=[],activeCat=null,haveMore=false,editingId=null,hoverTag=null;
 const cats=m=>((m.categories&&m.categories.length)?m.categories:['(untagged)']).map(c=>String(c).toLowerCase());
 function render(items){
   current=items; drawMap(items);
@@ -155,19 +156,37 @@ function editCard(m){
    </div></div>`;
 }
 
-// ---- category map: each bubble is a category, dots are its memories ------
-// (Ported from the cory-orb memory panel; deterministic layout - golden-angle
-// spiral seeded by category hash, then a short force relaxation - so the map
-// stays familiar between visits.)
-const PALETTE=['#c96442','#246f59','#8a6d3b','#4a7d9f','#7d6b8f','#b3402e','#5c8a5c','#a05c7b'];
+// ---- galaxy map: tags as planets in three sd-based orbital zones ----------
+// core: count >= mean+2sd (largest tags when none qualify), rim: count <=
+// max(1, mean-2sd), belt: between. Deterministic per tag (seeded angles),
+// slow counter-rotating drift, temperature palette: gold core, teal belt,
+// ice-violet rim. Links = co-occurrence (strong) or text mention (weak).
 const hashCode=s=>{let h=0;for(let i=0;i<s.length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;return Math.abs(h)};
-function buildGraph(items){
+const mulberry=a=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
+const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
+let G=null,gRAF=0,gPulses=[];
+const gStars=Array.from({length:230},(_,i)=>{const r=mulberry(i*2654435761+11);const k=r();
+  return{x:r(),y:r(),s:.3+r()*1.4,a:.2+r()*.7,ph:r()*6.28,sp:.3+r()*.7,hue:k>.94?36:(k>.84?176:(k>.78?252:null)),big:r()>.965};});
+const gDust=Array.from({length:150},(_,i)=>{const r=mulberry(i*97+5);
+  return{a:r()*Math.PI*2,rad:0.12+r()*0.95,off:(r()-0.5)*0.3,s:0.35+r()*0.75,al:0.05+r()*0.10,teal:r()>0.8};});
+const gTone=(n,dark)=>{const j=((n.seed%1000)/1000-0.5);
+  if(n.zone==='core')return{h:36+j*16,s:dark?95:80,l:dark?66:42};
+  if(n.zone==='belt')return{h:172+j*34,s:dark?75:65,l:dark?60:36};
+  return{h:248+j*40,s:dark?60:50,l:dark?74:44};};
+const hsla=(c,a,dl)=>`hsla(${c.h},${c.s}%,${Math.max(4,Math.min(96,c.l+(dl||0)))}%,${a})`;
+const hexA=(hex,a)=>{const v=parseInt(hex.slice(1),16);return`rgba(${(v>>16)&255},${(v>>8)&255},${v&255},${a})`};
+function buildGalaxy(items){
   const counts=new Map();
   items.forEach(m=>cats(m).forEach(c=>counts.set(c,(counts.get(c)||0)+1)));
-  const nodes=[...counts.keys()].sort().map(t=>({tag:t,count:counts.get(t),
-    radius:Math.min(30,11+5*Math.sqrt(counts.get(t))),color:PALETTE[hashCode(t)%PALETTE.length]}));
-  // Two categories are linked when a memory carries both (strong signal), or
-  // when a memory under one merely mentions the other in its text (weak).
+  if(!counts.size)return null;
+  const vals=[...counts.values()];
+  const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
+  const sd=Math.sqrt(vals.reduce((a,c)=>a+(c-mean)**2,0)/vals.length);
+  const coreMin=mean+2*sd,rimMax=Math.max(1,mean-2*sd),maxC=Math.max(...vals);
+  const fb=!vals.some(c=>c>=coreMin);
+  const nodes=[...counts.keys()].sort().map(tag=>{const count=counts.get(tag);
+    return{tag,count,zone:(fb?count===maxC:count>=coreMin)?'core':(count<=rimMax?'rim':'belt'),
+      radius:Math.min(28,9+5*Math.sqrt(count)),seed:hashCode(tag),h:0};});
   const index=new Map(nodes.map((n,i)=>[n.tag,i]));
   const edgeMap=new Map();
   const bump=(a,b,w)=>{const k=a<b?a+':'+b:b+':'+a;edgeMap.set(k,(edgeMap.get(k)||0)+w)};
@@ -180,109 +199,266 @@ function buildGraph(items){
       if(text.includes(n.tag))bump(index.get(t[0]),index.get(n.tag),1);
     }
   }
-  const edges=[...edgeMap.entries()].map(([k,w])=>{const[a,b]=k.split(':').map(Number);return{a,b,weight:w}});
-  return{nodes,edges};
-}
-function layoutMap(nodes,edges,width,height){
-  nodes.forEach((n,i)=>{
-    const angle=(hashCode(n.tag)%360)*(Math.PI/180)+i*2.39996;
-    const spread=0.32*Math.min(width,height)*Math.sqrt((i+1)/nodes.length);
-    n.x=width/2+spread*Math.cos(angle); n.y=height/2+spread*Math.sin(angle);
-  });
-  const iterations=nodes.length>1?130:0;
-  for(let it=0;it<iterations;it++){
-    for(let i=0;i<nodes.length;i++){
-      const a=nodes[i];
-      let fx=(width/2-a.x)*0.005, fy=(height/2-a.y)*0.005;
-      for(let j=0;j<nodes.length;j++){
-        if(i===j)continue;
-        const b=nodes[j], dx=a.x-b.x, dy=a.y-b.y;
-        const dist=Math.max(Math.hypot(dx,dy),1);
-        const minGap=a.radius+b.radius+34;
-        const push=(dist<minGap?2.2:1)*900/(dist*dist);
-        fx+=dx/dist*push; fy+=dy/dist*push;
-      }
-      a.fx=fx; a.fy=fy;
-    }
-    for(const e of edges){
-      const a=nodes[e.a], b=nodes[e.b], dx=b.x-a.x, dy=b.y-a.y;
-      const dist=Math.max(Math.hypot(dx,dy),1);
-      const pull=0.02*(dist-(a.radius+b.radius+60));
-      a.fx+=dx/dist*pull; a.fy+=dy/dist*pull;
-      b.fx-=dx/dist*pull; b.fy-=dy/dist*pull;
-    }
-    for(const n of nodes){
-      n.x=Math.min(width-n.radius-8,Math.max(n.radius+8,n.x+n.fx));
-      n.y=Math.min(height-n.radius-22,Math.max(n.radius+8,n.y+n.fy));
-    }
+  const edges=[...edgeMap.entries()].map(([k,w])=>{const[a,b]=k.split(':').map(Number);return{a,b,weight:Math.min(3,w)}});
+  const neigh={};
+  edges.forEach(e=>{const ta=nodes[e.a].tag,tb=nodes[e.b].tag;
+    (neigh[ta]??=new Set()).add(tb);(neigh[tb]??=new Set()).add(ta);});
+  const BANDS={core:[0.02,0.17],belt:[0.42,0.60],rim:[0.78,0.90]};
+  for(const zone of['core','belt','rim']){
+    const ring=nodes.filter(n=>n.zone===zone);
+    ring.sort((a,b)=>b.count-a.count||a.tag.localeCompare(b.tag));
+    // crowded rings split into staggered rows and shrink their planets
+    const rows=Math.min(3,Math.ceil(ring.length/16)),shrink=rows>1?0.7:1;
+    ring.forEach((n,k)=>{const rnd=mulberry(n.seed);
+      n.radius*=shrink;
+      n.ang=(n.seed%628)/100*0.35+k*(Math.PI*2/ring.length)+rnd()*0.2;
+      const bl=BANDS[zone][0],bh=BANDS[zone][1];
+      // multiple core planets sit on a small fixed ring so they never overlap
+      if(zone==='core')n.rFrac=ring.length===1?0:0.12;
+      else if(rows>1)n.rFrac=bl+(bh-bl)*((k%rows)/(rows-1));
+      else n.rFrac=bl+(bh-bl)*rnd();});
   }
+  return{nodes,edges,neigh,byTag:Object.fromEntries(nodes.map(n=>[n.tag,n])),fb};
 }
 function drawMap(items){
-  const wrap=document.getElementById('mapwrap'), canvas=document.getElementById('map');
-  const tagCount=new Set(items.flatMap(cats)).size;
-  if(!panels.map||!items.length||!tagCount){wrap.hidden=true;mapGraph=null;return}
+  const wrap=document.getElementById('mapwrap');
+  G=panels.map&&items.length?buildGalaxy(items):null;
+  if(!G){wrap.hidden=true;if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return}
   wrap.hidden=false;
-  document.getElementById('maphint').textContent=activeCat
-    ?`Filtering #${activeCat} - click its bubble again (or All) to clear.`
-    :'Each bubble is a category; dots are its memories. Click a bubble to filter.';
-  const width=Math.max(300,wrap.clientWidth-14);
-  const height=Math.min(420,Math.max(200,150+tagCount*16));
+  sizeGalaxy();
+  galaxyHint();
+  if(reducedMotion)galaxyFrame(performance.now());
+  else if(!gRAF)gRAF=requestAnimationFrame(galaxyFrame);
+}
+function sizeGalaxy(){
+  const wrap=document.getElementById('mapwrap'),canvas=document.getElementById('map');
+  const width=Math.max(300,wrap.clientWidth-14),height=Math.min(560,Math.max(380,width*0.55));
   const dpr=window.devicePixelRatio||1;
-  canvas.width=Math.round(width*dpr); canvas.height=Math.round(height*dpr);
-  canvas.style.width=width+'px'; canvas.style.height=height+'px';
-  const g=buildGraph(items);
-  layoutMap(g.nodes,g.edges,width,height);
-  mapGraph=g;
+  canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);
+  canvas.style.width=width+'px';canvas.style.height=height+'px';
+  canvas.getContext('2d').setTransform(dpr,0,0,dpr,0,0);
+  G.W=width;G.H=height;G.CX=width/2;G.CY=height/2;G.R=Math.min(width,height)/2-30;
+}
+function galaxyHint(){
+  const el=document.getElementById('maphint');
+  const focus=hoverTag&&G?G.byTag[hoverTag]:null;
+  if(activeCat)el.textContent=`Filtering #${activeCat} - click its planet again (or All) to clear.`;
+  else if(focus)el.textContent=`#${focus.tag}: ${focus.count} memor${focus.count===1?'y':'ies'} (${focus.zone})`+(G.neigh[focus.tag]?` - linked: ${[...G.neigh[focus.tag]].map(x=>'#'+x).join(', ')}`:'');
+  else el.textContent=`Tag galaxy: gold core, teal belt, violet rim${G&&G.fb?' (core = largest tags)':''}. Hover to light a constellation, click to filter.`;
+}
+function galaxyFrame(now){
+  if(!G){gRAF=0;return}
+  const canvas=document.getElementById('map'),ctx=canvas.getContext('2d');
+  const W=G.W,H=G.H,R=G.R,CX=G.CX,CY=G.CY,t=now;
   const rootStyle=getComputedStyle(document.documentElement);
-  const textColor=rootStyle.getPropertyValue('--text').trim()||'#dbe4f0';
-  const dimColor=rootStyle.getPropertyValue('--dim').trim()||'#8494ab';
-  const ctx=canvas.getContext('2d');
-  ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.clearRect(0,0,width,height);
-  const alphaOf=n=>activeCat&&n.tag!==activeCat?0.25:1;
-  for(const e of g.edges){
-    const a=g.nodes[e.a], b=g.nodes[e.b];
-    ctx.globalAlpha=0.35*Math.min(alphaOf(a),alphaOf(b));
-    ctx.strokeStyle=dimColor;
-    ctx.lineWidth=Math.min(3,1+e.weight*0.6);
-    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+  const bg=(rootStyle.getPropertyValue('--bg').trim()||'#0b0e14');
+  const dark=parseInt(bg.slice(5,7)||'14',16)<120;
+  const TEXT=rootStyle.getPropertyValue('--text').trim()||'#dbe4f0';
+  const DIM=rootStyle.getPropertyValue('--dim').trim()||'#8494ab';
+  const WARM=rootStyle.getPropertyValue('--warn').trim()||'#f0a35e';
+  const STAR=dark?'#c9d6ea':'#33415c';
+  const still=reducedMotion||!!hoverTag||!!activeCat;
+  ctx.clearRect(0,0,W,H);
+  // deep space ground
+  const g0=ctx.createRadialGradient(CX,CY-H*0.05,R*0.12,CX,CY,R*1.45);
+  g0.addColorStop(0,dark?'#0b1020':'#f0f4f9');g0.addColorStop(1,dark?'#04060c':'#e3e9f2');
+  ctx.fillStyle=g0;ctx.fillRect(0,0,W,H);
+  // nebula washes + distant sunlight
+  for(const wsh of[[W*0.24,H*0.2,R*1.0,252],[W*0.78,H*0.84,R*0.95,176],[W*0.62,H*0.22,R*0.75,318]]){
+    const neb=ctx.createRadialGradient(wsh[0],wsh[1],0,wsh[0],wsh[1],wsh[2]);
+    neb.addColorStop(0,`hsla(${wsh[3]},70%,${dark?55:70}%,${dark?0.09:0.11})`);
+    neb.addColorStop(1,'transparent');
+    ctx.fillStyle=neb;ctx.fillRect(0,0,W,H);
   }
-  for(const n of g.nodes){
-    const alpha=alphaOf(n);
-    const satellites=Math.min(n.count,10);
-    for(let i=0;i<satellites;i++){
-      const angle=i/satellites*Math.PI*2-Math.PI/2;
-      ctx.fillStyle=n.color; ctx.globalAlpha=alpha*0.55;
-      ctx.beginPath();
-      ctx.arc(n.x+(n.radius+7)*Math.cos(angle),n.y+(n.radius+7)*Math.sin(angle),2.4,0,Math.PI*2);
-      ctx.fill();
-    }
-    ctx.globalAlpha=alpha; ctx.fillStyle=n.color;
-    ctx.beginPath(); ctx.arc(n.x,n.y,n.radius,0,Math.PI*2); ctx.fill();
-    if(activeCat===n.tag){ctx.strokeStyle=textColor;ctx.lineWidth=2;ctx.stroke()}
-    ctx.fillStyle='#ffffff';
-    ctx.font=`700 ${Math.max(10,Math.min(13,n.radius*0.6))}px system-ui,sans-serif`;
-    ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillText(String(n.count),n.x,n.y);
-    ctx.fillStyle=textColor;
-    ctx.font='600 12px system-ui,sans-serif'; ctx.textBaseline='top';
-    const label=n.tag.length>18?n.tag.slice(0,17)+'…':n.tag;
-    ctx.fillText('#'+label,n.x,n.y+n.radius+12);
+  const sun=ctx.createRadialGradient(W*0.12,H*0.08,0,W*0.12,H*0.08,R*0.9);
+  sun.addColorStop(0,hexA(WARM,0.10));sun.addColorStop(1,'transparent');
+  ctx.fillStyle=sun;ctx.fillRect(0,0,W,H);
+  // galactic dust band with stellar specks
+  ctx.save();ctx.translate(CX,CY);ctx.rotate(-0.32);ctx.scale(1,0.3);
+  const band=ctx.createRadialGradient(0,0,0,0,0,R*1.4);
+  band.addColorStop(0,hexA(STAR,0.07));band.addColorStop(1,'transparent');
+  ctx.fillStyle=band;ctx.beginPath();ctx.arc(0,0,R*1.4,0,Math.PI*2);ctx.fill();
+  for(const d of gDust){
+    ctx.globalAlpha=d.al*(dark?1:0.55);
+    ctx.fillStyle=d.teal?`hsla(176,60%,${dark?70:40}%,1)`:STAR;
+    ctx.beginPath();ctx.arc(Math.cos(d.a)*R*1.25*d.rad,Math.sin(d.a)*R*1.25*d.rad+d.off*R,d.s*2,0,Math.PI*2);ctx.fill();
+  }
+  ctx.globalAlpha=1;ctx.restore();
+  // starfield
+  for(const s of gStars){
+    const tw=reducedMotion?0.7:0.5+0.5*Math.sin(s.ph+t*0.00025*s.sp);
+    ctx.globalAlpha=s.a*tw*(dark?0.9:0.5);
+    ctx.fillStyle=s.hue?`hsla(${s.hue},80%,${dark?75:40}%,1)`:STAR;
+    const x=s.x*W,y=s.y*H;
+    ctx.fillRect(x,y,s.s,s.s);
+    if(s.big){ctx.globalAlpha*=0.4;
+      const halo=ctx.createRadialGradient(x,y,0,x,y,7);
+      halo.addColorStop(0,hexA(STAR,0.5));halo.addColorStop(1,'transparent');
+      ctx.fillStyle=halo;ctx.fillRect(x-7,y-7,14,14);}
   }
   ctx.globalAlpha=1;
+  // gravity well + lens streak
+  const well=ctx.createRadialGradient(CX,CY,0,CX,CY,R*0.30);
+  well.addColorStop(0,hexA(WARM,0.11));well.addColorStop(1,'transparent');
+  ctx.fillStyle=well;ctx.fillRect(CX-R*0.32,CY-R*0.32,R*0.64,R*0.64);
+  const streak=ctx.createLinearGradient(CX-R*0.9,CY,CX+R*0.9,CY);
+  streak.addColorStop(0,'transparent');streak.addColorStop(0.5,hexA(WARM,0.15));streak.addColorStop(1,'transparent');
+  ctx.fillStyle=streak;ctx.fillRect(CX-R*0.9,CY-1,R*1.8,2);
+  ctx.strokeStyle=hexA(WARM,0.45);ctx.lineWidth=0.9;
+  ctx.beginPath();ctx.arc(CX,CY,R*0.05,0,Math.PI*2);ctx.stroke();
+  ctx.strokeStyle=hexA(WARM,0.15);
+  ctx.beginPath();ctx.arc(CX,CY,R*0.08,0,Math.PI*2);ctx.stroke();
+  // zone hairlines
+  ctx.lineWidth=1.2;
+  for(const fr of[0.31,0.70,0.96]){
+    ctx.strokeStyle=hexA(DIM,0.45);
+    ctx.beginPath();ctx.arc(CX,CY,R*fr,0,Math.PI*2);ctx.stroke();
+  }
+  // positions + focus
+  const pts={};
+  for(const n of G.nodes){
+    n.ang+=still?0:0.00010*(n.zone==='core'?1:(n.zone==='belt'?-0.5:0.3));
+    pts[n.tag]={x:CX+n.rFrac*R*Math.cos(n.ang),y:CY+n.rFrac*R*Math.sin(n.ang)};
+  }
+  const sel=activeCat?G.byTag[activeCat]:null;
+  const hov=hoverTag?G.byTag[hoverTag]:null;
+  const foc=hov||sel;
+  const emph=n=>{
+    if(!foc)return 1;
+    if(n===foc)return 1;
+    return(G.neigh[foc.tag]&&G.neigh[foc.tag].has(n.tag))?0.92:0.16;
+  };
+  // filaments: soft underglow + bright core line; particles on locked links
+  for(const e of G.edges){
+    const na=G.nodes[e.a],nb=G.nodes[e.b];
+    const p=pts[na.tag],q=pts[nb.tag];
+    const ca=gTone(na,dark),cb=gTone(nb,dark);
+    const touches=foc&&(na===foc||nb===foc);
+    const A=touches?1:(foc?0.06:1);
+    const mxp=(p.x+q.x)/2,myp=(p.y+q.y)/2;
+    const cpx=mxp+(CX-mxp)*0.13,cpy=myp+(CY-myp)*0.13;
+    const grad=ctx.createLinearGradient(p.x,p.y,q.x,q.y);
+    grad.addColorStop(0,hsla(ca,1));grad.addColorStop(1,hsla(cb,1));
+    if(dark)ctx.globalCompositeOperation='lighter';
+    ctx.globalAlpha=(touches?0.34:0.15)*A*(dark?1:0.9);
+    ctx.strokeStyle=grad;ctx.lineWidth=(touches?7:4.5)+e.weight*0.6;ctx.lineCap='round';
+    ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.quadraticCurveTo(cpx,cpy,q.x,q.y);ctx.stroke();
+    ctx.globalAlpha=(touches?0.95:0.5)*A;
+    ctx.lineWidth=touches?1.8:1.1;
+    ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.quadraticCurveTo(cpx,cpy,q.x,q.y);ctx.stroke();
+    if(touches&&foc===sel&&!reducedMotion){
+      for(let i=0;i<2+e.weight;i++){
+        const tt=((t*0.00022*(0.7+0.15*i))+i/(2+e.weight))%1;
+        const u=1-tt;
+        const sx=u*u*p.x+2*u*tt*cpx+tt*tt*q.x,sy=u*u*p.y+2*u*tt*cpy+tt*tt*q.y;
+        const cc=tt<0.5?ca:cb;
+        ctx.globalAlpha=0.9;
+        const spark=ctx.createRadialGradient(sx,sy,0,sx,sy,4.5);
+        spark.addColorStop(0,hsla(cc,0.95,18));spark.addColorStop(1,'transparent');
+        ctx.fillStyle=spark;ctx.beginPath();ctx.arc(sx,sy,4.5,0,Math.PI*2);ctx.fill();
+      }
+    }
+    ctx.globalCompositeOperation='source-over';
+  }
+  ctx.globalAlpha=1;
+  // click pulses
+  for(let i=gPulses.length-1;i>=0;i--){
+    const pl=gPulses[i],age=(now-pl.start)/700;
+    if(age>1){gPulses.splice(i,1);continue}
+    ctx.globalAlpha=(1-age)*0.5;
+    ctx.strokeStyle=hsla(pl.tone,1,10);ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.arc(pl.x,pl.y,pl.r+age*46,0,Math.PI*2);ctx.stroke();
+  }
+  ctx.globalAlpha=1;
+  // planets: flat crisp discs, varied memory dots, gated counts and labels
+  for(const n of G.nodes){
+    const p=pts[n.tag],x=p.x,y=p.y,A=emph(n),c=gTone(n,dark);
+    n.h+=(((n===hov||activeCat===n.tag)?1:0)-n.h)*(reducedMotion?1:0.14);
+    ctx.globalAlpha=A;
+    if(n.h>0.03){
+      const len=n.radius*(2.4+1.0*n.h);
+      for(const rot of[0,Math.PI/2]){
+        const sx=Math.cos(rot),sy=Math.sin(rot);
+        const sp=ctx.createLinearGradient(x-sx*len,y-sy*len,x+sx*len,y+sy*len);
+        sp.addColorStop(0,'transparent');sp.addColorStop(0.5,hsla(c,0.55*n.h*A,15));sp.addColorStop(1,'transparent');
+        ctx.strokeStyle=sp;ctx.lineWidth=0.8;
+        ctx.beginPath();ctx.moveTo(x-sx*len,y-sy*len);ctx.lineTo(x+sx*len,y+sy*len);ctx.stroke();
+      }
+    }
+    ctx.shadowColor=hsla(c,0.5,6);ctx.shadowBlur=(5+5*n.h)*(dark?1:0.5);
+    const body=ctx.createRadialGradient(x,y,0,x,y,n.radius);
+    body.addColorStop(0,hsla(c,1,3));body.addColorStop(0.8,hsla(c,1));body.addColorStop(1,hsla(c,1,-3));
+    ctx.fillStyle=body;
+    ctx.beginPath();ctx.arc(x,y,n.radius,0,Math.PI*2);ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.strokeStyle=hsla(c,0.85+0.15*n.h,dark?16:-14);ctx.lineWidth=1.2;
+    ctx.beginPath();ctx.arc(x,y,n.radius,0,Math.PI*2);ctx.stroke();
+    const sats=Math.min(n.count,10);
+    for(let i=0;i<sats;i++){
+      const angle=i/sats*Math.PI*2-Math.PI/2+(reducedMotion?0:t*0.00008);
+      const ds=0.9+(((n.seed>>3)+i*37)%10)/12;
+      ctx.fillStyle=hsla(c,0.8*A,10);
+      ctx.beginPath();ctx.arc(x+(n.radius+6)*Math.cos(angle),y+(n.radius+6)*Math.sin(angle),ds,0,Math.PI*2);ctx.fill();
+    }
+    if(activeCat===n.tag){
+      ctx.strokeStyle=hsla(c,0.95,18);ctx.lineWidth=1.3;
+      ctx.beginPath();ctx.arc(x,y,n.radius+5,0,Math.PI*2);ctx.stroke();
+    }
+    if(n.radius>=9){
+      ctx.globalAlpha=Math.min(1,A+0.05);
+      ctx.font=`700 ${Math.max(8,Math.min(15,n.radius*0.55))}px ui-sans-serif,system-ui`;
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.shadowColor=dark?'rgba(0,0,0,0.7)':'rgba(255,255,255,0.8)';ctx.shadowBlur=4;
+      ctx.fillStyle=dark?'#ffffff':'#0c1524';
+      ctx.fillText(n.count,x,y+0.5);
+      ctx.shadowBlur=0;
+    }
+    const lit=n.h>0.4||(foc&&G.neigh[foc.tag]&&G.neigh[foc.tag].has(n.tag));
+    if(n.radius>=13||n.h>0.05||lit){
+      ctx.globalAlpha=Math.min(1,A+0.05);
+      ctx.font='500 9.5px ui-sans-serif,system-ui';
+      if('letterSpacing'in ctx)ctx.letterSpacing='1.5px';
+      ctx.textAlign='center';ctx.textBaseline='top';
+      const label=n.tag.length>18?n.tag.slice(0,17)+'…':n.tag;
+      ctx.fillStyle=lit?TEXT:hexA(DIM.length===7?DIM:'#8494ab',0.95);
+      ctx.fillText(label.toUpperCase()+' · '+n.count,x,y+n.radius+8+3*n.h);
+      if('letterSpacing'in ctx)ctx.letterSpacing='0px';
+    }
+  }
+  ctx.globalAlpha=1;
+  if(!reducedMotion&&panels.map)gRAF=requestAnimationFrame(galaxyFrame);else gRAF=0;
 }
 function hitNode(event){
-  if(!mapGraph)return null;
+  if(!G)return null;
   const rect=document.getElementById('map').getBoundingClientRect();
-  const x=event.clientX-rect.left, y=event.clientY-rect.top;
-  return mapGraph.nodes.find(n=>Math.hypot(n.x-x,n.y-y)<=n.radius+6)||null;
+  const x=event.clientX-rect.left,y=event.clientY-rect.top;
+  let best=null,bd=1e9;
+  for(const n of G.nodes){
+    const px=G.CX+n.rFrac*G.R*Math.cos(n.ang),py=G.CY+n.rFrac*G.R*Math.sin(n.ang);
+    const d=Math.hypot(px-x,py-y);
+    if(d<Math.max(n.radius+8,14)&&d<bd){bd=d;best=n}
+  }
+  return best;
 }
 document.getElementById('map').addEventListener('click',e=>{
   const n=hitNode(e);
-  if(n){activeCat=activeCat===n.tag?null:n.tag;render(current)}
+  if(n){
+    activeCat=activeCat===n.tag?null:n.tag;
+    const rootStyle=getComputedStyle(document.documentElement);
+    const dark=parseInt((rootStyle.getPropertyValue('--bg').trim()||'#0b0e14').slice(5,7)||'14',16)<120;
+    gPulses.push({x:G.CX+n.rFrac*G.R*Math.cos(n.ang),y:G.CY+n.rFrac*G.R*Math.sin(n.ang),
+      r:n.radius,start:performance.now(),tone:gTone(n,dark)});
+    render(current);
+  }
 });
 document.getElementById('map').addEventListener('mousemove',e=>{
-  e.target.style.cursor=hitNode(e)?'pointer':'default';
+  const n=hitNode(e);
+  e.target.style.cursor=n?'pointer':'default';
+  const tg=n?n.tag:null;
+  if(tg!==hoverTag){hoverTag=tg;if(G)galaxyHint();if(reducedMotion&&G)galaxyFrame(performance.now())}
+});
+document.getElementById('map').addEventListener('mouseleave',()=>{
+  if(hoverTag){hoverTag=null;if(G){galaxyHint();if(reducedMotion)galaxyFrame(performance.now())}}
 });
 window.addEventListener('resize',()=>drawMap(current));
 const PAGE=100; let offset=0;
@@ -511,6 +687,16 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         events = store.history(request.path_params["memory_id"])
         return JSONResponse([e.model_dump() for e in events])
 
+    async def list_categories_route(request: Request) -> Response:
+        q = request.query_params
+        cats = await run_in_threadpool(partial(
+            store.categories,
+            user_id=_ns(request.state.tenant, q.get("user_id")),
+            agent_id=q.get("agent_id"),
+            run_id=q.get("run_id"),
+        ))
+        return JSONResponse(cats)
+
     async def import_memories_route(request: Request) -> Response:
         """Bulk verbatim import: a JSON array of rows, or {memories: [...],
         user_id?}. One request instead of one POST per memory."""
@@ -714,6 +900,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         Route("/api/v1/memories/{memory_id}", guarded(delete_memory), methods=["DELETE"]),
         Route("/api/v1/memories/{memory_id}/history", guarded(memory_history), methods=["GET"]),
         Route("/api/v1/memories/{memory_id}/distill", guarded(distill_memory), methods=["POST"]),
+        Route("/api/v1/categories", guarded(list_categories_route), methods=["GET"]),
         Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),
         Route("/api/v1/search", guarded(search), methods=["POST"]),
         Route("/api/v1/context", guarded(context), methods=["POST"]),

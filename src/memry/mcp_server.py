@@ -165,6 +165,14 @@ def create_server(
         return json.dumps([_memory_row(m) for m in memories], ensure_ascii=False)
 
     @mcp.tool()
+    async def list_categories(user_id: str = "") -> str:
+        """List all memory categories (tags) with their memory counts, sorted
+        by count descending. Use this to see how knowledge is organized before
+        drilling into a category with search_memories."""
+        cats = await _threaded(store.categories, user_id=_uid(user_id))
+        return json.dumps(cats, ensure_ascii=False)
+
+    @mcp.tool()
     async def update_memory(memory_id: str, content: str) -> str:
         """Rewrite the content of an existing memory (e.g. after the user
         corrects a stored fact)."""

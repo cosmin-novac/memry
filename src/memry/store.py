@@ -400,6 +400,27 @@ class MemoryStore:
     def get(self, memory_id: str) -> Memory | None:
         return self.backend.get_memory(memory_id)
 
+    def categories(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Category histogram over active memories, largest count first."""
+        counter: dict[str, int] = {}
+        for memory in self.get_all(
+            user_id=user_id, agent_id=agent_id, run_id=run_id, limit=1_000_000
+        ):
+            for raw in memory.categories or []:
+                category = str(raw).strip().lower()
+                if category:
+                    counter[category] = counter.get(category, 0) + 1
+        return [
+            {"category": c, "count": n}
+            for c, n in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+
     def get_all(
         self,
         *,

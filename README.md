@@ -1,4 +1,4 @@
-# Memry
+# <img src="docs/assets/memry-mark.svg" width="30" alt="" align="top"> Memry
 
 **The open, self-hostable memory layer for AI agents** - [memry.tech](https://memry.tech)
 
@@ -53,6 +53,17 @@ identical conditions.
 
 ### As an MCP server (any agent)
 
+Memry speaks MCP two ways: **stdio** for agents on the same machine (zero
+config, no port, no auth) and **streamable HTTP** for a shared server that
+several agents and devices talk to.
+
+**Local, stdio** - the fastest start:
+
+```bash
+# Claude Code
+claude mcp add memry -- memry mcp
+```
+
 ```jsonc
 // Claude Desktop / Cursor / Windsurf config
 {
@@ -66,13 +77,44 @@ identical conditions.
 }
 ```
 
+**Remote, streamable HTTP** - point any MCP client at a self-hosted server
+(see below) and share one memory across every machine:
+
 ```bash
 # Claude Code
-claude mcp add memry -- memry mcp
+claude mcp add --transport http memry https://memory.example.com/mcp \
+  --header "Authorization: Bearer <MEMRY_API_KEY>"
 ```
 
+```jsonc
+// Cursor / Windsurf / anything that takes a config file
+{
+  "mcpServers": {
+    "memry": {
+      "type": "http",
+      "url": "https://memory.example.com/mcp",
+      "headers": { "Authorization": "Bearer <MEMRY_API_KEY>" }
+    }
+  }
+}
+```
+
+**claude.ai (web, desktop, mobile)** - add Memry as a custom connector under
+Settings → Connectors → Add custom connector. The dialog has no header field,
+so embed the key in the URL instead:
+
+```
+https://memory.example.com/mcp/<MEMRY_API_KEY>
+```
+
+Full walkthrough with screenshots of the flow, security notes, and
+troubleshooting: [docs/connect-claude-ai.md](docs/connect-claude-ai.md).
+
 The server exposes `save_memories`, `search_memories`, `get_memory_context`,
-`list_memories`, `update_memory`, `delete_memory`, `memory_history`, and `memory_stats`.
+`list_memories`, `list_categories`, `update_memory`, `delete_memory`,
+`memory_history`, and `memory_stats`. Agents are instructed to recall context
+at the start of a task, save durable facts as they appear, and check the
+`warnings` field on saves (it reports anything distillation dropped).
 
 ### As a Python library
 
@@ -104,6 +146,13 @@ memry serve --host 0.0.0.0 --port 8787
 # REST API:   http://localhost:8787/api/v1/...
 # MCP (HTTP): http://localhost:8787/mcp
 ```
+
+The dashboard shows your memories with inline editing, search, JSONL
+export/import, and a galaxy map of your tags: heavily-used tags gravitate to
+the gold core, the working set orbits in the teal belt, and one-off tags
+drift at the violet rim. Links are co-occurrence; click a planet to filter.
+
+![Memry dashboard: galaxy tag map and memory list](docs/assets/dashboard.png)
 
 With Docker: `docker compose up -d` (see [docker-compose.yml](docker-compose.yml)).
 
