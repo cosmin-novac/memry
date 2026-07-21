@@ -117,6 +117,27 @@ def test_rest_missing_content_400(client):
     assert client.post("/api/v1/memories", json={}).status_code == 400
 
 
+def test_rest_bulk_import(client):
+    rows = [
+        {"content": "row one", "categories": ["a"]},
+        {"content": "row two", "user_id": "other"},
+        {"content": ""},
+    ]
+    res = client.post("/api/v1/import", json={"memories": rows, "user_id": "bulk"})
+    assert res.status_code == 201
+    body = res.json()
+    assert body["imported"] == 2 and body["skipped"] == 1
+
+    listed = client.get("/api/v1/memories", params={"user_id": "bulk"}).json()
+    assert [m["content"] for m in listed] == ["row one"]
+    assert client.get("/api/v1/memories", params={"user_id": "other"}).json()[0]["content"] == "row two"
+
+    # bare-array form and validation
+    assert client.post("/api/v1/import", json=[{"content": "three"}]).status_code == 201
+    assert client.post("/api/v1/import", json={}).status_code == 400
+    assert client.post("/api/v1/import", json={"memories": []}).status_code == 400
+
+
 def test_rest_auth_enforced():
     app = create_app(make_store(api_key="sekret"))
     with TestClient(app) as client:

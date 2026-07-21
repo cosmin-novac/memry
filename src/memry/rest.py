@@ -26,10 +26,12 @@ from __future__ import annotations
 
 import contextlib
 import json
+from functools import partial
 from typing import Any
 from urllib.parse import parse_qs
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
@@ -47,6 +49,9 @@ _DASHBOARD = """<!doctype html>
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,Segoe UI,sans-serif}
 main{max-width:900px;margin:0 auto;padding:2rem 1rem}
 h1{font-size:1.3rem;margin:.2rem 0 1rem}h1 span{color:var(--accent)}
+h1 .datalinks{float:right;font-size:.75rem;font-weight:400;color:var(--dim)}
+h1 .datalinks a{color:var(--dim);text-decoration:none;border-bottom:1px dotted var(--dim);cursor:help}
+h1 .datalinks a:hover{color:var(--accent);border-bottom-color:var(--accent)}
 .bar{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem}
 input,button,textarea{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem}
 input:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
@@ -65,7 +70,8 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 #map{display:block;width:100%}
 .maphint{color:var(--dim);font-size:.75rem;text-align:center;margin:.15rem 0 .35rem}
 </style></head><body><main>
-<h1><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small></h1>
+<h1><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
+<span class="datalinks"><a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <input id="user" placeholder="user_id (all)" style="width:11rem">
@@ -74,8 +80,6 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <button onclick="activeCat=null;loadAll()">All</button>
   <button class="toggle" id="addbtn" onclick="togglePanel('add')">+ Add</button>
   <button class="toggle" id="mapbtn" onclick="togglePanel('map')">Map</button>
-  <button onclick="exportMemories()" title="Download memories as JSONL (respects the user_id filter; same format as `memry export`)">Export</button>
-  <button id="importbtn" onclick="document.getElementById('importfile').click()" title="Additive import from a JSON/JSONL export; nothing is deleted">Import</button>
 </div>
 <input type="file" id="importfile" accept=".json,.jsonl,.txt,application/json" hidden onchange="importMemories(this.files[0]);this.value=''">
 <div id="addpanel" hidden>
@@ -105,8 +109,8 @@ async function api(path, opts={}){
   return r.json();
 }
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-// Add form and category map are opt-in panels; the choice sticks per browser.
-const panels={add:localStorage.getItem('memry_show_add')==='1',map:localStorage.getItem('memry_show_map')==='1'};
+// Add form is opt-in, map is opt-out; the choice sticks per browser.
+const panels={add:localStorage.getItem('memry_show_add')==='1',map:localStorage.getItem('memry_show_map')!=='0'};
 function syncPanels(){
   document.getElementById('addpanel').hidden=!panels.add;
   document.getElementById('addbtn').setAttribute('aria-pressed',panels.add);
@@ -337,8 +341,8 @@ async function exportMemories(){
   a.download='memry-export-'+new Date().toISOString().slice(0,10)+'.jsonl';
   a.click(); URL.revokeObjectURL(a.href);
 }
-// Additive: every row becomes a new verbatim memory (same field mapping as
-// `memry import`); nothing is deleted or deduplicated.
+// Additive: every row becomes a new verbatim memory in ONE bulk request
+// (server batches the embedding calls); nothing is deleted or deduplicated.
 async function importMemories(file){
   if(!file)return;
   const text=((await file.text())||'').trim(); if(!text)return;
@@ -347,21 +351,15 @@ async function importMemories(file){
   catch{alert('Not a valid JSON or JSONL export file.');return}
   if(!Array.isArray(rows))rows=[rows];
   const btn=document.getElementById('importbtn');
-  let ok=0,failed=0;
-  for(const r of rows){
-    const content=String(r.content||'').trim();
-    if(!content){failed++;continue}
-    const body={content,infer:false,
-      user_id:r.user_id||uid()||undefined,
-      memory_type:r.memory_type||'semantic',
-      importance:r.importance??0.5,
-      categories:(r.categories&&r.categories.length)?r.categories:undefined};
-    try{await api('/api/v1/memories',{method:'POST',body:JSON.stringify(body)});ok++}
-    catch{failed++}
-    btn.textContent='Import '+(ok+failed)+'/'+rows.length;
-  }
-  btn.textContent='Import';
-  alert('Imported '+ok+' of '+rows.length+(failed?' ('+failed+' failed or empty)':'')+'.');
+  btn.textContent='importing…';
+  try{
+    const res=await api('/api/v1/import',{method:'POST',
+      body:JSON.stringify({memories:rows,user_id:uid()||undefined})});
+    if(res&&res.imported!==undefined)
+      alert('Imported '+res.imported+' of '+rows.length+(res.skipped?' ('+res.skipped+' empty rows skipped)':'')+'.');
+    else alert((res&&res.error)||'Import failed.');
+  }catch{alert('Import failed.')}
+  btn.textContent='import';
   loadAll(); loadStats();
 }
 async function loadStats(){
@@ -463,7 +461,11 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         # defaults to config.default_user_id instead of storing NULL, which
         # no scoped read (dashboard, clients) would ever find again. Reads
         # keep None = "all users" as the admin view.
-        result = store.add(
+        # Store calls that hit LLM/embedding providers run in the threadpool:
+        # blocking the event loop would stall every other request for the
+        # duration of a provider round-trip.
+        result = await run_in_threadpool(partial(
+            store.add,
             content,
             user_id=_ns(request.state.tenant, body.get("user_id")) or default_user,
             agent_id=body.get("agent_id"),
@@ -473,7 +475,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
             memory_type=body.get("memory_type", "semantic"),
             importance=float(body.get("importance", 0.5)),
             categories=body.get("categories"),
-        )
+        ))
         return JSONResponse(result.model_dump(), status_code=201)
 
     async def get_memory(request: Request) -> Response:
@@ -509,12 +511,38 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         events = store.history(request.path_params["memory_id"])
         return JSONResponse([e.model_dump() for e in events])
 
+    async def import_memories_route(request: Request) -> Response:
+        """Bulk verbatim import: a JSON array of rows, or {memories: [...],
+        user_id?}. One request instead of one POST per memory."""
+        body = await request.json()
+        rows = body if isinstance(body, list) else body.get("memories")
+        if not isinstance(rows, list) or not rows:
+            return JSONResponse(
+                {"error": "provide a JSON array of rows or {\"memories\": [...]}"},
+                status_code=400,
+            )
+        default_uid = None if isinstance(body, list) else body.get("user_id")
+        tenant = request.state.tenant
+        sanitized = [
+            {**row, "user_id": _ns(tenant, row.get("user_id") or default_uid)}
+            for row in rows
+            if isinstance(row, dict)
+        ]
+        result = await run_in_threadpool(partial(
+            store.import_verbatim,
+            sanitized,
+            user_id=_ns(tenant, default_uid) or default_user,
+        ))
+        return JSONResponse(result, status_code=201)
+
     async def distill_memory(request: Request) -> Response:
         _, error = _memory_or_error(request)
         if error:
             return error
         try:
-            result = store.distill(request.path_params["memory_id"])
+            result = await run_in_threadpool(
+                partial(store.distill, request.path_params["memory_id"])
+            )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except Exception as exc:  # LLM/provider failure: report, don't 500
@@ -527,7 +555,8 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
 
     async def search(request: Request) -> Response:
         body = await request.json()
-        results = store.search(
+        results = await run_in_threadpool(partial(
+            store.search,
             body.get("query", ""),
             user_id=_ns(request.state.tenant, body.get("user_id")),
             agent_id=body.get("agent_id"),
@@ -535,7 +564,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
             limit=int(body.get("limit", 10)),
             include_invalid=bool(body.get("include_invalid", False)),
             categories=_parse_categories(body.get("categories")),
-        )
+        ))
         return JSONResponse(
             [
                 {"memory": r.memory.model_dump(), "score": r.score, "signals": r.signals}
@@ -545,21 +574,25 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
 
     async def context(request: Request) -> Response:
         body = await request.json()
-        ctx = store.reconstruct_context(
+        ctx = await run_in_threadpool(partial(
+            store.reconstruct_context,
             body.get("query", ""),
             user_id=_ns(request.state.tenant, body.get("user_id")),
             agent_id=body.get("agent_id"),
             run_id=body.get("run_id"),
             token_budget=int(body.get("token_budget", 1200)),
-        )
+        ))
         return JSONResponse(ctx.model_dump())
 
     async def stats(request: Request) -> Response:
-        data = store.stats()
+        data = await run_in_threadpool(store.stats)
         if request.state.tenant is not None:
             prefix = f"{request.state.tenant}::"
+            everything = await run_in_threadpool(
+                partial(store.get_all, include_invalid=True, limit=100_000)
+            )
             mine = [
-                m for m in store.get_all(include_invalid=True, limit=100_000)
+                m for m in everything
                 if (m.user_id or "").startswith(prefix)
             ]
             data = {
@@ -623,9 +656,10 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
 
     async def resolve_entities_route(request: Request) -> Response:
         body = await request.json() if await request.body() else {}
-        outcome = store.resolve_entities(
-            user_id=_ns(request.state.tenant, body.get("user_id"))
-        )
+        outcome = await run_in_threadpool(partial(
+            store.resolve_entities,
+            user_id=_ns(request.state.tenant, body.get("user_id")),
+        ))
         return JSONResponse(outcome)
 
     async def guarded_mcp_app(scope, receive, send):
@@ -680,6 +714,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         Route("/api/v1/memories/{memory_id}", guarded(delete_memory), methods=["DELETE"]),
         Route("/api/v1/memories/{memory_id}/history", guarded(memory_history), methods=["GET"]),
         Route("/api/v1/memories/{memory_id}/distill", guarded(distill_memory), methods=["POST"]),
+        Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),
         Route("/api/v1/search", guarded(search), methods=["POST"]),
         Route("/api/v1/context", guarded(context), methods=["POST"]),
         Route("/api/v1/stats", guarded(stats), methods=["GET"]),

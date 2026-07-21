@@ -259,25 +259,10 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 print(memory.model_dump_json())
         elif args.command == "import":
-            count = 0
             with open(args.path, encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    record = json.loads(line)
-                    store.add(
-                        record["content"],
-                        user_id=record.get("user_id"),
-                        agent_id=record.get("agent_id"),
-                        run_id=record.get("run_id"),
-                        infer=False,
-                        memory_type=record.get("memory_type", "semantic"),
-                        importance=float(record.get("importance", 0.5)),
-                        categories=record.get("categories"),
-                    )
-                    count += 1
-            _print({"imported": count})
+                rows = [json.loads(line) for line in fh if line.strip()]
+            result = store.import_verbatim(rows)
+            _print({k: v for k, v in result.items() if k != "memory_ids"})
     finally:
         store.close()
     return 0

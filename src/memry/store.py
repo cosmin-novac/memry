@@ -24,6 +24,7 @@ from .intelligence.entities import resolve_mentions, resolve_open_proposals
 from .intelligence.extraction import extract_facts, verbatim_candidates
 from .intelligence.reconcile import reconcile_candidate
 from .models import (
+    MEMORY_TYPES,
     AddAction,
     AddResult,
     CandidateFact,
@@ -188,6 +189,99 @@ class MemoryStore:
                     surfaces=candidate.entities,
                 )
         return actions
+
+    def import_verbatim(
+        self, rows: list[dict[str, Any]], *, user_id: str | None = None
+    ) -> dict[str, Any]:
+        """Bulk verbatim import (dashboard/CLI import, restoring exports).
+
+        Rows are trusted as already-curated facts: no extraction, no
+        reconciliation, and embeddings are fetched in batched provider calls,
+        so importing N memories costs O(N/batch) HTTP round-trips instead of
+        two or three per row. Each row needs "content"; user_id, categories,
+        memory_type, and importance are optional (a row's own user_id wins
+        over the call-level default)."""
+        default_uid = user_id or self.config.default_user_id
+        prepared: list[dict[str, Any]] = []
+        skipped = 0
+        for row in rows:
+            content = str(row.get("content") or "").strip()
+            if not content:
+                skipped += 1
+                continue
+            categories = row.get("categories") or []
+            if isinstance(categories, str):
+                categories = [c.strip() for c in categories.split(",") if c.strip()]
+            memory_type = row.get("memory_type", "semantic")
+            if memory_type not in MEMORY_TYPES:
+                memory_type = "semantic"
+            try:
+                importance = float(row.get("importance", 0.5))
+            except (TypeError, ValueError):
+                importance = 0.5
+            prepared.append(
+                {
+                    "content": content,
+                    "user_id": str(row.get("user_id") or default_uid),
+                    "agent_id": row.get("agent_id") or None,
+                    "run_id": row.get("run_id") or None,
+                    "categories": [str(c) for c in categories],
+                    "memory_type": memory_type,
+                    "importance": importance,
+                }
+            )
+        if not prepared:
+            return {"imported": 0, "skipped": skipped, "memory_ids": []}
+
+        episodes = [
+            Episode(
+                content=p["content"],
+                user_id=p["user_id"],
+                agent_id=p["agent_id"],
+                run_id=p["run_id"],
+                metadata={"imported": True},
+            )
+            for p in prepared
+        ]
+        self.backend.add_episodes(episodes)
+
+        vectors: list[list[float] | None] = [None] * len(prepared)
+        if self.embedder.dimensions:
+            chunk = 256  # stay well under provider batch limits
+            for start in range(0, len(prepared), chunk):
+                batch = prepared[start : start + chunk]
+                try:
+                    embedded = self.embedder.embed([p["content"] for p in batch])
+                except Exception:
+                    embedded = []  # import anyway; `memry reindex` can backfill
+                for offset, vec in enumerate(embedded):
+                    vectors[start + offset] = vec or None
+
+        memory_ids: list[str] = []
+        for p, episode, vector in zip(prepared, episodes, vectors):
+            memory = Memory(
+                content=p["content"],
+                memory_type=p["memory_type"],
+                user_id=p["user_id"],
+                agent_id=p["agent_id"],
+                run_id=p["run_id"],
+                importance=p["importance"],
+                categories=p["categories"],
+                source_episode_ids=[episode.id],
+            )
+            if vector:
+                memory.embedding_model = self.embedder.model_id
+            stored = self.backend.insert_memory(memory, vector)
+            self.backend.add_event(
+                MemoryEvent(
+                    memory_id=stored.id,
+                    event="ADD",
+                    new_content=stored.content,
+                    reason="imported",
+                )
+            )
+            memory_ids.append(stored.id)
+        return {"imported": len(memory_ids), "skipped": skipped, "memory_ids": memory_ids}
 
     def distill(self, memory_id: str) -> AddResult | None:
         """Run extraction on a memory that was stored verbatim (LLM missing or

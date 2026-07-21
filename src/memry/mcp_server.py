@@ -10,8 +10,10 @@ Cursor, Windsurf, Codex, ...) over stdio or streamable HTTP.
 from __future__ import annotations
 
 import json
+from functools import partial
 from typing import Any
 
+import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -70,8 +72,14 @@ def create_server(
     def _uid(user_id: str) -> str | None:
         return user_id or default_user
 
+    # Store calls are synchronous (SQLite + provider HTTP). FastMCP runs sync
+    # tools directly on the event loop, so every tool below is async and hops
+    # to a worker thread - one slow LLM call must not stall the whole server.
+    async def _threaded(fn, /, **kwargs):
+        return await anyio.to_thread.run_sync(partial(fn, **kwargs))
+
     @mcp.tool()
-    def save_memories(
+    async def save_memories(
         content: str,
         user_id: str = "",
         agent_id: str = "",
@@ -84,8 +92,9 @@ def create_server(
         reconciled against existing memories (duplicates skipped, contradictions
         superseded). With infer=false the text is saved verbatim as one memory.
         """
-        result = store.add(
-            content,
+        result = await _threaded(
+            store.add,
+            content=content,
             user_id=_uid(user_id),
             agent_id=agent_id or None,
             run_id=run_id or None,
@@ -103,7 +112,7 @@ def create_server(
         return json.dumps(payload, ensure_ascii=False)
 
     @mcp.tool()
-    def search_memories(
+    async def search_memories(
         query: str,
         user_id: str = "",
         agent_id: str = "",
@@ -117,8 +126,9 @@ def create_server(
         Optionally restrict to categories (comma-separated, e.g. "diet,health").
         """
         category_list = [c.strip() for c in categories.split(",") if c.strip()] or None
-        results = store.search(
-            query,
+        results = await _threaded(
+            store.search,
+            query=query,
             user_id=_uid(user_id),
             agent_id=agent_id or None,
             run_id=run_id or None,
@@ -130,7 +140,7 @@ def create_server(
         )
 
     @mcp.tool()
-    def get_memory_context(
+    async def get_memory_context(
         query: str,
         user_id: str = "",
         token_budget: int = 1200,
@@ -138,39 +148,40 @@ def create_server(
         """Get a ready-to-use context block of the most relevant memories for a
         task, packed to fit the given token budget. Prefer this over
         search_memories when you just want background context injected."""
-        ctx = store.reconstruct_context(
-            query, user_id=_uid(user_id), token_budget=token_budget
+        ctx = await _threaded(
+            store.reconstruct_context,
+            query=query, user_id=_uid(user_id), token_budget=token_budget,
         )
         return ctx.text or "(no relevant memories yet)"
 
     @mcp.tool()
-    def list_memories(user_id: str = "", limit: int = 50) -> str:
+    async def list_memories(user_id: str = "", limit: int = 50) -> str:
         """List the most recently updated memories for a user."""
-        memories = store.get_all(user_id=_uid(user_id), limit=limit)
+        memories = await _threaded(store.get_all, user_id=_uid(user_id), limit=limit)
         return json.dumps([_memory_row(m) for m in memories], ensure_ascii=False)
 
     @mcp.tool()
-    def update_memory(memory_id: str, content: str) -> str:
+    async def update_memory(memory_id: str, content: str) -> str:
         """Rewrite the content of an existing memory (e.g. after the user
         corrects a stored fact)."""
-        memory = store.update(memory_id, content=content)
+        memory = await _threaded(store.update, memory_id=memory_id, content=content)
         if memory is None:
             return json.dumps({"error": f"memory {memory_id} not found"})
         return json.dumps(_memory_row(memory), ensure_ascii=False)
 
     @mcp.tool()
-    def delete_memory(memory_id: str) -> str:
+    async def delete_memory(memory_id: str) -> str:
         """Forget a memory (soft delete: it is invalidated and kept in the
         audit history, not destroyed). Use when the user asks you to forget
         something."""
-        ok = store.delete(memory_id)
+        ok = await _threaded(store.delete, memory_id=memory_id)
         return json.dumps({"deleted": ok, "memory_id": memory_id})
 
     @mcp.tool()
-    def memory_history(memory_id: str) -> str:
+    async def memory_history(memory_id: str) -> str:
         """Show the full audit trail of a memory (ADD/UPDATE/SUPERSEDE/DELETE
         events with old and new content)."""
-        events = store.history(memory_id)
+        events = await _threaded(store.history, memory_id=memory_id)
         return json.dumps(
             [
                 {
@@ -186,9 +197,10 @@ def create_server(
         )
 
     @mcp.tool()
-    def memory_stats() -> str:
+    async def memory_stats() -> str:
         """Show memory store statistics (counts, backend, models in use)."""
-        return json.dumps(store.stats(), ensure_ascii=False, default=str)
+        stats = await _threaded(store.stats)
+        return json.dumps(stats, ensure_ascii=False, default=str)
 
     return mcp
 

@@ -88,6 +88,42 @@ def test_distill_nothing_extracted_keeps_memory(store, fake_llm):
     assert "pending_distillation" not in kept.metadata
 
 
+def test_import_verbatim_bulk(verbatim_store):
+    result = verbatim_store.import_verbatim(
+        [
+            {"content": "Ada lives in Berlin", "categories": ["location"], "importance": 0.9},
+            {"content": "Ada prefers espresso", "user_id": "ada", "categories": "diet, coffee"},
+            {"content": "   "},  # empty -> skipped
+            {"content": "typed", "memory_type": "bogus-type"},  # falls back to semantic
+        ],
+        user_id="fallback",
+    )
+    assert result["imported"] == 3
+    assert result["skipped"] == 1
+    assert len(result["memory_ids"]) == 3
+
+    everyone = verbatim_store.get_all()
+    by_content = {m.content: m for m in everyone}
+    assert by_content["Ada lives in Berlin"].user_id == "fallback"
+    assert by_content["Ada lives in Berlin"].importance == 0.9
+    assert by_content["Ada prefers espresso"].user_id == "ada"
+    assert by_content["Ada prefers espresso"].categories == ["diet", "coffee"]
+    assert by_content["typed"].memory_type == "semantic"
+    # no LLM, no reconciliation, but full provenance + audit trail
+    for m in everyone:
+        assert m.source_episode_ids
+        assert [e.event for e in verbatim_store.history(m.id)] == ["ADD"]
+    # embeddings arrive in one batch (hash embedder: all rows embedded)
+    assert all(m.embedding_model for m in everyone)
+
+
+def test_import_verbatim_never_calls_llm(store, fake_llm):
+    # FakeLLM raises on any call; a verbatim import must not touch it.
+    result = store.import_verbatim([{"content": "a"}, {"content": "b"}])
+    assert result["imported"] == 2
+    assert fake_llm.calls == []
+
+
 def test_distill_requires_llm_and_valid_target(verbatim_store, store, fake_llm):
     import pytest
 
