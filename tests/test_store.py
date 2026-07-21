@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import json
+
 from conftest import decision, fact, facts_response
+
+
+def coverage(*missing: str) -> str:
+    return json.dumps({"missing": list(missing)})
 
 
 def test_add_infer_false_stores_verbatim(verbatim_store):
@@ -88,6 +94,44 @@ def test_distill_nothing_extracted_keeps_memory(store, fake_llm):
     assert "pending_distillation" not in kept.metadata
 
 
+def test_batch_facts_stay_discrete(store, fake_llm):
+    """Facts extracted from ONE payload must not chain-merge into a single
+    memory (the ADD followed by N UPDATEs failure): same-call memories are
+    excluded from each other's similarity sets, so no reconcile LLM call."""
+    fake_llm.queue(
+        facts_response(
+            fact("The zeitnachweis skill fills timesheets"),
+            fact("The zeitnachweis skill must edit XML directly rather than openpyxl"),
+            fact("openpyxl corrupts the timesheet template, hence direct XML"),
+        ),
+        coverage(),  # audit pass: nothing missing
+    )
+    result = store.add(
+        "zeitnachweis fills timesheets; must edit XML directly, not openpyxl, "
+        "because openpyxl corrupts the template",
+        user_id="u",
+    )
+    assert result.summary() == {"ADD": 3}
+    assert not result.warnings
+    assert len(store.get_all(user_id="u")) == 3
+    # extraction + coverage only; no reconcile calls between batch siblings
+    assert len(fake_llm.calls) == 2
+
+
+def test_coverage_audit_reports_dropped_details(store, fake_llm):
+    fake_llm.queue(
+        facts_response(fact("The skill fills timesheets")),
+        coverage("must edit XML directly rather than openpyxl"),
+    )
+    result = store.add(
+        "The skill fills timesheets and must edit XML directly rather than "
+        "openpyxl because openpyxl corrupts the template.",
+        user_id="u",
+    )
+    assert result.summary() == {"ADD": 1}
+    assert result.warnings and "XML" in result.warnings[0]
+
+
 def test_import_verbatim_bulk(verbatim_store):
     result = verbatim_store.import_verbatim(
         [
@@ -150,15 +194,16 @@ def test_add_with_extraction_and_reconcile_add(store, fake_llm):
 
 
 def test_exact_duplicate_skipped_without_llm_call(store, fake_llm):
-    fake_llm.queue(facts_response(fact("User lives in Berlin")))
+    fake_llm.queue(facts_response(fact("User lives in Berlin")), coverage())
     store.add("I live in Berlin", user_id="ada")
 
-    fake_llm.queue(facts_response(fact("User lives in Berlin")))
+    fake_llm.queue(facts_response(fact("User lives in Berlin")), coverage())
     result = store.add("I live in Berlin", user_id="ada")
     assert result.summary() == {"NONE": 1}
     assert len(store.get_all(user_id="ada")) == 1
-    # extraction called twice, reconcile decision never needed
-    assert len(fake_llm.calls) == 2
+    # extraction + coverage audit only; the exact-duplicate fast path never
+    # needs a reconcile decision
+    assert not any("decide one action" in system for system, _ in fake_llm.calls)
 
 
 def test_contradiction_supersedes_old_memory(store, fake_llm):

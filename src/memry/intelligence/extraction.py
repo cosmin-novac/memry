@@ -60,7 +60,15 @@ Do NOT extract:
 
 Rules:
 - each fact must be fully self-contained: resolve pronouns and references
-- one fact per item; keep each under ~200 characters
+- one fact per item; keep each under ~200 characters, but NEVER shorten a fact
+  by dropping specifics
+- NEVER drop: numeric values, dates, prices, model/version identifiers, file
+  formats, library/tool names, negative constraints ("not X", "rather than X",
+  "must not"), or the stated reason for a constraint. These carry the
+  operational weight; carry them into the fact verbatim.
+- a constraint buried mid-sentence is still its own fact when it changes
+  future behavior; extract it as a separate item rather than summarizing over it
+- prefer several precise facts over one compressed summary
 - importance in [0,1]: 0.9+ identity/hard constraints, ~0.7 preferences and
   decisions, ~0.4 minor details
 - type: "semantic" (stable fact/preference), "episodic" (dated event/plan),
@@ -92,6 +100,49 @@ def extract_facts(
         json_schema=EXTRACTION_SCHEMA,
     )
     return _parse_facts(raw)
+
+
+COVERAGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"missing": {"type": "array", "items": {"type": "string"}}},
+    "required": ["missing"],
+    "additionalProperties": False,
+}
+
+COVERAGE_SYSTEM = """You audit what a memory system stored against what it was told.
+Compare the INPUT with the STORED facts. Report substantive details that appear
+in the input but in none of the stored facts: numbers, dates, prices, names,
+model/version identifiers, file formats, library/tool names, constraints
+(especially negations like "not" or "rather than"), and the reasons given for
+constraints. Ignore phrasing differences, small talk, and anything a stored
+fact already captures in different words.
+Respond with JSON only: {"missing": ["<short description>", ...]}.
+Return {"missing": []} when nothing substantive was lost."""
+
+
+def verify_coverage(
+    llm: LLM, messages: list[dict[str, str]], stored: list[str]
+) -> list[str]:
+    """One extra LLM pass after a write: which operational details from the
+    input made it into none of the stored facts? Extraction is lossy and
+    non-deterministic; this turns silent loss into a reportable warning."""
+    transcript = "\n".join(
+        f"{m.get('role', 'user')}: {m['content'].strip()}"
+        for m in messages
+        if (m.get("content") or "").strip()
+    )
+    if not transcript or not stored:
+        return []
+    listing = "\n".join(f"- {s}" for s in stored)
+    raw = llm.complete(
+        COVERAGE_SYSTEM,
+        f"INPUT:\n{transcript}\n\nSTORED FACTS:\n{listing}",
+        json_schema=COVERAGE_SCHEMA,
+    )
+    parsed = parse_lenient_json(raw)
+    if isinstance(parsed, dict) and isinstance(parsed.get("missing"), list):
+        return [str(m).strip() for m in parsed["missing"] if str(m).strip()][:8]
+    return []
 
 
 def verbatim_candidates(messages: list[dict[str, str]]) -> list[CandidateFact]:

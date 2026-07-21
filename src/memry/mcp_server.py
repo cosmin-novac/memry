@@ -26,6 +26,10 @@ INSTRUCTIONS = """Memry gives you persistent long-term memory across sessions.
   short description of the task to recall relevant knowledge about the user.
 - WHENEVER the user shares stable facts, preferences, decisions, corrections,
   or plans, call save_memories with that information so it persists.
+- Prefer several focused save_memories calls (one topic each) over one giant
+  multi-topic dump, and ALWAYS check the response's "warnings" field: it lists
+  input details that did not survive distillation so you can save them
+  explicitly (or retry with infer=false for must-keep-verbatim content).
 - Never store secrets (passwords, API keys, tokens).
 """
 

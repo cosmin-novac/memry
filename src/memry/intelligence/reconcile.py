@@ -61,6 +61,10 @@ Given a NEW fact and the most similar EXISTING memories, decide one action:
 
 Prefer UPDATE over ADD when the information overlaps. Prefer DELETE over
 UPDATE when the old statement would now be false.
+When writing UPDATE content, the replacement must preserve EVERY concrete
+detail from both texts - numbers, dates, prices, names, versions, file
+formats, tool names, constraints and their reasons. Never drop a detail to
+make the merged text shorter.
 Respond with JSON only:
 {"action": "ADD"|"UPDATE"|"DELETE"|"NONE", "target": int|null,
  "content": str|null, "reason": short str}"""

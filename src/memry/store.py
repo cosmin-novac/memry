@@ -21,7 +21,7 @@ from .config import Config
 from .intelligence.context import build_context
 from .intelligence.decay import decay_sweep, effective_importance
 from .intelligence.entities import resolve_mentions, resolve_open_proposals
-from .intelligence.extraction import extract_facts, verbatim_candidates
+from .intelligence.extraction import extract_facts, verbatim_candidates, verify_coverage
 from .intelligence.reconcile import reconcile_candidate
 from .models import (
     MEMORY_TYPES,
@@ -131,6 +131,21 @@ class MemoryStore:
             candidates = self._pending_verbatim(messages)
 
         actions = self._apply_candidates(candidates, scope, episode_ids)
+
+        # Post-write audit: extraction is lossy and non-deterministic, and a
+        # dropped constraint is invisible in a "success" response. One cheap
+        # LLM pass compares input against what landed and reports the gap.
+        if infer and self.llm.available and actions:
+            stored = [a.content for a in actions if a.content]
+            try:
+                missing = verify_coverage(self.llm, messages, stored)
+            except Exception:
+                missing = []  # audit is best-effort; never fail the save
+            if missing:
+                warnings.append(
+                    "some details were not captured as facts; consider saving "
+                    "them explicitly: " + "; ".join(missing)
+                )
         return AddResult(episode_ids=episode_ids, actions=actions, warnings=warnings)
 
     @staticmethod
@@ -147,13 +162,20 @@ class MemoryStore:
         scope: Scope,
         episode_ids: list[str],
         *,
-        exclude_id: str | None = None,
+        exclude_ids: set[str] | None = None,
     ) -> list[AddAction]:
         """Reconcile candidates into the store (shared by add and distill).
 
-        ``exclude_id`` keeps a memory out of the similarity set - distillation
-        must not reconcile facts against the verbatim memory they came from.
+        ``exclude_ids`` keeps memories out of the similarity set: distillation
+        must not reconcile facts against the verbatim memory they came from,
+        and candidates from ONE call must not reconcile against each other.
+        The extractor already split the payload into discrete facts; without
+        this, fact N finds facts 1..N-1 as "similar" and the reconciler chains
+        them into a single memory via lossy UPDATE rewrites (the observed
+        ADD followed by N UPDATEs on one id). Memories touched by this call
+        are therefore accumulated into the exclusion set as we go.
         """
+        excluded: set[str] = set(exclude_ids or ())
         actions: list[AddAction] = []
         for candidate in candidates:
             similar = hybrid_search(
@@ -164,8 +186,8 @@ class MemoryStore:
                 limit=self.config.retrieval.reconcile_similarity_limit,
                 cfg=self.config.retrieval,
             )
-            if exclude_id is not None:
-                similar = [r for r in similar if r.memory.id != exclude_id]
+            if excluded:
+                similar = [r for r in similar if r.memory.id not in excluded]
             action = reconcile_candidate(
                 candidate=candidate,
                 scope=scope,
@@ -177,6 +199,8 @@ class MemoryStore:
                 retrieval_cfg=self.config.retrieval,
             )
             actions.append(action)
+            if action.event != "NONE" and action.memory_id:
+                excluded.add(action.memory_id)
             # Entity mentions attach to the memory the action landed on
             # (conservative disambiguation; see intelligence/entities.py).
             if action.event != "NONE" and action.memory_id and candidate.entities:
@@ -315,7 +339,7 @@ class MemoryStore:
                 warnings=["no facts extracted; memory kept verbatim"],
             )
         actions = self._apply_candidates(
-            candidates, scope, episode_ids, exclude_id=memory_id
+            candidates, scope, episode_ids, exclude_ids={memory_id}
         )
         landed = sum(1 for a in actions if a.event != "NONE")
         new_id = next(
