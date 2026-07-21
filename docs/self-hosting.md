@@ -98,6 +98,10 @@ Multiple agents on multiple machines can share one memory server over MCP HTTP:
 }
 ```
 
+Clients that cannot send headers (claude.ai custom connectors) may embed the
+admin key in the URL instead: `https://memory.example.com/mcp/<MEMRY_API_KEY>`
+(or `/mcp?key=...`). See [connect-claude-ai.md](connect-claude-ai.md).
+
 For local single-machine use, prefer stdio (`memry mcp`) - no port, no auth surface.
 
 ## Provider configuration

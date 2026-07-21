@@ -65,6 +65,11 @@ The same steps work on any provider; only the panel names differ.
 }
 ```
 
+For claude.ai (web/desktop/mobile custom connectors, which cannot send
+headers) embed the key in the URL instead:
+`https://memory.example.com/mcp/<MEMRY_API_KEY>` - full walkthrough in
+[connect-claude-ai.md](connect-claude-ai.md).
+
 The dashboard at `https://memory.example.com/` prompts for the API key once.
 
 ## Changing configuration

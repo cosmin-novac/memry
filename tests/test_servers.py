@@ -125,3 +125,31 @@ def test_rest_auth_enforced():
         assert ok.status_code == 200
         # health and dashboard stay open
         assert client.get("/health").status_code == 200
+
+
+def test_mcp_http_url_key_auth():
+    """claude.ai custom connectors cannot send headers, so /mcp accepts the
+    admin key embedded in the URL: /mcp/<key> or /mcp?key=<key>."""
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "0"},
+        },
+    }
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    app = create_app(make_store(api_key="sekret"))
+    with TestClient(app) as client:
+        post = lambda path, **kw: client.post(path, json=initialize, headers={**headers, **kw.pop("extra", {})})
+        assert post("/mcp").status_code == 401
+        assert post("/mcp/wrong-key").status_code == 401
+        assert post("/mcp?key=wrong-key").status_code == 401
+        assert post("/mcp/sekret").status_code == 200
+        assert post("/mcp?key=sekret").status_code == 200
+        assert post("/mcp", extra={"Authorization": "Bearer sekret"}).status_code == 200

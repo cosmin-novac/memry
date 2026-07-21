@@ -116,7 +116,9 @@ curl -fsSL https://raw.githubusercontent.com/cosmin-novac/memry/main/deploy/inst
 ```
 
 Set `MEMRY_API_KEY` to require `Authorization: Bearer <key>` on the API. More in
-[docs/self-hosting.md](docs/self-hosting.md).
+[docs/self-hosting.md](docs/self-hosting.md). To plug a hosted Memry into
+claude.ai as a custom connector, see
+[docs/connect-claude-ai.md](docs/connect-claude-ai.md).
 
 ### From the CLI
 

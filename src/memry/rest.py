@@ -18,6 +18,8 @@ Endpoints:
 
 Auth: set MEMRY_API_KEY to require ``Authorization: Bearer <key>`` on /api
 and /mcp. Without it the server is open - bind to localhost or a private net.
+Clients that cannot send headers (claude.ai custom connectors) may embed the
+admin key in the MCP URL instead: ``/mcp/<key>`` or ``/mcp?key=<key>``.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import json
 from typing import Any
+from urllib.parse import parse_qs
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -48,6 +51,7 @@ h1{font-size:1.3rem;margin:.2rem 0 1rem}h1 span{color:var(--accent)}
 input,button,textarea{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem}
 input:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
 button{cursor:pointer}button.primary{background:var(--accent);color:#04211c;border-color:transparent;font-weight:600}
+button.toggle[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
 #stats{color:var(--dim);font-size:.85rem;margin-bottom:1rem}
 .mem{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.7rem .9rem;margin-bottom:.5rem}
 .mem .meta{color:var(--dim);font-size:.78rem;margin-top:.35rem;display:flex;gap:.8rem;flex-wrap:wrap}
@@ -66,12 +70,16 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <input id="q" placeholder="search memories…" style="flex:1;min-width:12rem">
   <button class="primary" onclick="search()">Search</button>
   <button onclick="activeCat=null;loadAll()">All</button>
+  <button class="toggle" id="addbtn" onclick="togglePanel('add')">+ Add</button>
+  <button class="toggle" id="mapbtn" onclick="togglePanel('map')">Map</button>
 </div>
+<div id="addpanel" hidden>
 <textarea id="newmem" placeholder="Add to memory… (extraction runs if an LLM is configured)"></textarea>
 <div class="bar">
   <input id="newcats" placeholder="categories, comma separated (optional)" style="flex:1;min-width:10rem">
   <button class="primary" onclick="add(true)">Add (infer)</button>
   <button onclick="add(false)">Add verbatim</button>
+</div>
 </div>
 <div id="mapwrap" hidden><canvas id="map"></canvas><p class="maphint" id="maphint"></p></div>
 <div id="list"></div>
@@ -81,12 +89,30 @@ const H = key ? {'Authorization':'Bearer '+key,'Content-Type':'application/json'
 // Empty box = no user filter: list EVERY namespace, so the list always
 // agrees with the stats line. (Tenant keys are namespaced server-side.)
 const uid = () => document.getElementById('user').value.trim();
+let askedKey=false;
 async function api(path, opts={}){
   const r = await fetch(path,{headers:H,...opts});
-  if(r.status===401){const k=prompt('API key required');if(k){localStorage.setItem('memry_key',k);location.reload();}throw new Error('unauthorized');}
+  if(r.status===401){
+    // Concurrent boot requests (stats + list) may both 401; prompt only once.
+    if(!askedKey){askedKey=true;const k=prompt('API key required');if(k){localStorage.setItem('memry_key',k);location.reload();}}
+    throw new Error('unauthorized');
+  }
   return r.json();
 }
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+// Add form and category map are opt-in panels; the choice sticks per browser.
+const panels={add:localStorage.getItem('memry_show_add')==='1',map:localStorage.getItem('memry_show_map')==='1'};
+function syncPanels(){
+  document.getElementById('addpanel').hidden=!panels.add;
+  document.getElementById('addbtn').setAttribute('aria-pressed',panels.add);
+  document.getElementById('mapbtn').setAttribute('aria-pressed',panels.map);
+  drawMap(current);
+}
+function togglePanel(name){
+  panels[name]=!panels[name];
+  localStorage.setItem('memry_show_'+name,panels[name]?'1':'0');
+  syncPanels();
+}
 let current=[],activeCat=null,mapGraph=null,haveMore=false;
 const cats=m=>((m.categories&&m.categories.length)?m.categories:['(untagged)']).map(c=>String(c).toLowerCase());
 function render(items){
@@ -171,7 +197,7 @@ function layoutMap(nodes,edges,width,height){
 function drawMap(items){
   const wrap=document.getElementById('mapwrap'), canvas=document.getElementById('map');
   const tagCount=new Set(items.flatMap(cats)).size;
-  if(!items.length||!tagCount){wrap.hidden=true;mapGraph=null;return}
+  if(!panels.map||!items.length||!tagCount){wrap.hidden=true;mapGraph=null;return}
   wrap.hidden=false;
   document.getElementById('maphint').textContent=activeCat
     ?`Filtering #${activeCat} - click its bubble again (or All) to clear.`
@@ -267,7 +293,7 @@ async function loadStats(){
     `${s.episodes??0} episodes · backend ${s.backend} · llm ${s.llm} · embeddings ${s.embedder}`;
 }
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
-loadStats(); loadAll();
+syncPanels(); loadStats(); loadAll();
 </script></body></html>"""
 
 
@@ -511,7 +537,11 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
     async def guarded_mcp_app(scope, receive, send):
         """MCP over HTTP: open in open mode; admin-key-only once any auth is
         configured (per-tenant scoping inside MCP tool calls isn't enforced
-        yet, so tenant keys are REST-only by design)."""
+        yet, so tenant keys are REST-only by design).
+
+        The admin key may arrive as ``Authorization: Bearer <key>`` or, for
+        clients that cannot send headers (claude.ai custom connectors),
+        embedded in the URL as ``/mcp/<key>`` or ``/mcp?key=<key>``."""
         if api_key or tenants:
             headers = {
                 k.decode("latin-1").lower(): v.decode("latin-1")
@@ -519,6 +549,21 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
             }
             token = headers.get("authorization", "")
             token = token[7:].strip() if token.lower().startswith("bearer ") else ""
+            if not token:
+                # scope["path"] is the full path; the mount prefix lives in
+                # root_path (ASGI spec), so look at the part after /mcp.
+                root = scope.get("root_path", "")
+                path = scope.get("path", "")
+                sub = path[len(root):] if path.startswith(root) else path
+                segments = [s for s in sub.split("/") if s]
+                if api_key and segments and segments[0] == api_key:
+                    token = segments[0]
+                    # Strip the key segment so the MCP app sees its root path.
+                    scope = dict(scope)
+                    scope["path"] = root + "/" + "/".join(segments[1:])
+                else:
+                    query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+                    token = (query.get("key") or [""])[0]
             if not (api_key and token == api_key):
                 await JSONResponse({"error": "unauthorized"}, status_code=401)(
                     scope, receive, send
