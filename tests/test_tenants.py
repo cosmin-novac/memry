@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -92,15 +94,23 @@ def test_tenant_stats_scoped(multi):
     assert admin_stats["active_memories"] == 3
 
 
-def test_mcp_http_admin_only_when_auth_configured(multi):
+def test_mcp_http_accepts_tenant_keys(multi):
+    """Tenant keys authenticate on /mcp now that tool calls are scoped."""
     client, _ = multi
     body = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
                        "clientInfo": {"name": "t", "version": "0"}}}
     headers = {"accept": "application/json, text/event-stream"}
     assert client.post("/mcp/", json=body, headers=headers).status_code == 401
-    assert client.post("/mcp/", json=body, headers={**headers, **ACME}).status_code == 401
+    assert client.post(
+        "/mcp/", json=body, headers={**headers, "Authorization": "Bearer wrong"}
+    ).status_code == 401
+    assert client.post("/mcp/", json=body, headers={**headers, **ACME}).status_code == 200
     assert client.post("/mcp/", json=body, headers={**headers, **ADMIN}).status_code == 200
+    # the URL-key form works for tenants too
+    assert client.post(
+        "/mcp/acme-key", json=body, headers=headers
+    ).status_code == 200
 
 
 def test_open_mode_unchanged():
@@ -130,3 +140,104 @@ def test_rest_entities_endpoints(multi):
 
     # other tenant cannot see it
     assert client.get(f"/api/v1/entities/{entity_id}", headers=GLOBEX).status_code == 404
+
+
+# ---------------------------------------------------------------- MCP scoping
+def _sse_json(text: str) -> dict:
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            return json.loads(line[6:])
+    raise AssertionError(f"no SSE data frame in {text!r}")
+
+
+def mcp_call(client, key: str, tool: str, arguments: dict) -> str:
+    """Drive a real MCP session over streamable HTTP and return the tool text.
+
+    Goes through the whole transport (initialize, initialized, tools/call) on
+    purpose: the identity these tests are about is attached to the HTTP request
+    and has to survive the session task boundary to reach the tool body.
+    """
+    headers = {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "Authorization": f"Bearer {key}",
+    }
+    init = client.post("/mcp/", headers=headers, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "test", "version": "0"}}})
+    assert init.status_code == 200, init.text
+    headers["mcp-session-id"] = init.headers["mcp-session-id"]
+    client.post("/mcp/", headers=headers, json={
+        "jsonrpc": "2.0", "method": "notifications/initialized"})
+    called = client.post("/mcp/", headers=headers, json={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments}})
+    assert called.status_code == 200, called.text
+    return _sse_json(called.text)["result"]["content"][0]["text"]
+
+
+def test_mcp_tool_writes_land_in_the_tenant_namespace(multi):
+    client, store = multi
+    mcp_call(client, "acme-key", "save_memories", {"content": "acme fact", "infer": False})
+    mcp_call(client, "globex-key", "save_memories", {"content": "globex fact", "infer": False})
+
+    owners = {m.content: m.user_id for m in store.get_all(limit=50)}
+    assert owners == {"acme fact": "acme::default", "globex fact": "globex::default"}
+
+    mine = json.loads(mcp_call(client, "acme-key", "list_memories", {}))
+    assert [m["content"] for m in mine] == ["acme fact"]
+
+
+def test_mcp_user_id_argument_cannot_escape_the_namespace(multi):
+    """The tool argument selects a sub-namespace, never someone else's."""
+    client, store = multi
+    mcp_call(client, "globex-key", "save_memories", {"content": "globex fact", "infer": False})
+
+    escaped = json.loads(mcp_call(
+        client, "acme-key", "list_memories", {"user_id": "globex::default"}
+    ))
+    assert escaped == []
+
+    mcp_call(client, "acme-key", "save_memories",
+             {"content": "planted", "infer": False, "user_id": "globex::default"})
+    planted = next(m for m in store.get_all(limit=50) if m.content == "planted")
+    assert planted.user_id == "acme::globex::default"
+
+
+def test_mcp_id_addressed_tools_are_confined(multi):
+    """The isolation matrix: every by-id tool must refuse another tenant's id."""
+    client, store = multi
+    mcp_call(client, "acme-key", "save_memories", {"content": "acme secret", "infer": False})
+    victim = next(m for m in store.get_all(limit=50) if m.content == "acme secret")
+
+    updated = json.loads(mcp_call(
+        client, "globex-key", "update_memory",
+        {"memory_id": victim.id, "content": "hijacked"}))
+    assert "error" in updated
+    assert store.get(victim.id).content == "acme secret"
+
+    deleted = json.loads(mcp_call(
+        client, "globex-key", "delete_memory", {"memory_id": victim.id}))
+    assert deleted["deleted"] is False
+    assert store.get(victim.id).invalid_at is None
+
+    assert json.loads(mcp_call(
+        client, "globex-key", "memory_history", {"memory_id": victim.id})) == []
+
+    # the owner can still do all three
+    assert json.loads(mcp_call(
+        client, "acme-key", "memory_history", {"memory_id": victim.id}))
+    assert json.loads(mcp_call(
+        client, "acme-key", "delete_memory", {"memory_id": victim.id}))["deleted"] is True
+
+
+def test_mcp_stats_do_not_leak_other_namespaces(multi):
+    client, store = multi
+    store.add("a", user_id="acme::default", infer=False)
+    store.add("b", user_id="globex::default", infer=False)
+    store.add("c", user_id="globex::default", infer=False)
+
+    stats = json.loads(mcp_call(client, "acme-key", "memory_stats", {}))
+    assert stats["tenant"] == "acme"
+    assert stats["active_memories"] == 1

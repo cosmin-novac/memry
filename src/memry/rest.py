@@ -37,7 +37,8 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 
-from .mcp_server import create_server
+from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
+from .principal import ADMIN, Principal
 from .store import MemoryStore
 
 _DASHBOARD = """<!doctype html>
@@ -615,36 +616,42 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
     def _unauthorized() -> JSONResponse:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    def _resolve_auth(request: Request) -> tuple[bool, str | None]:
-        """Returns (authorized, tenant_name). tenant_name None = admin/open."""
-        header = request.headers.get("authorization", "")
-        token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    def resolve_principal(token: str) -> Principal | None:
+        """Map a bearer token to who it acts as, or None to reject it.
+
+        Shared by REST and MCP so both transports agree on identity; there is
+        no second implementation to drift.
+        """
         if not api_key and not tenants:
-            return True, None  # open mode: bind privately or set keys
+            return ADMIN  # open mode: bind privately or set keys
         if api_key and token == api_key:
-            return True, None
+            return ADMIN
         if token in tenants:
-            return True, tenants[token]
-        return False, None
+            return Principal(name=tenants[token], default_user=default_user)
+        return None
 
-    def _ns(tenant: str | None, user_id: str | None) -> str | None:
-        """Tenant requests are transparently namespaced: they can only ever
-        read or write user ids of the form ``<tenant>::<user>``."""
-        if tenant is None:
-            return user_id
-        return f"{tenant}::{user_id or default_user}"
+    def _is_configured_key(value: str) -> bool:
+        """Is this URL segment actually one of our keys?
 
-    def _owns(tenant: str | None, owner_user_id: str | None) -> bool:
-        if tenant is None:
-            return True
-        return bool(owner_user_id) and owner_user_id.startswith(f"{tenant}::")
+        Deliberately stricter than resolve_principal, which returns admin for
+        anything in open mode: without that distinction an open server would
+        strip the first path segment of every /mcp request as if it were a key.
+        """
+        return bool(value) and (value == api_key or value in tenants)
+
+    def _bearer(request: Request) -> str:
+        header = request.headers.get("authorization", "")
+        return header[7:].strip() if header.lower().startswith("bearer ") else ""
+
+    def _p(request: Request) -> Principal:
+        return request.state.principal
 
     def guarded(handler):
         async def wrapper(request: Request) -> Response:
-            ok, tenant = _resolve_auth(request)
-            if not ok:
+            principal = resolve_principal(_bearer(request))
+            if principal is None:
                 return _unauthorized()
-            request.state.tenant = tenant
+            request.state.principal = principal
             return await handler(request)
 
         return wrapper
@@ -657,8 +664,10 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         return JSONResponse({"status": "ok", "service": "memry"})
 
     def _memory_or_error(request: Request) -> tuple[Any, Response | None]:
-        memory = store.get(request.path_params["memory_id"])
-        if memory is None or not _owns(request.state.tenant, memory.user_id):
+        memory = store.get(
+            request.path_params["memory_id"], owner_prefix=_p(request).prefix
+        )
+        if memory is None:
             return None, JSONResponse({"error": "not found"}, status_code=404)
         return memory, None
 
@@ -672,7 +681,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
     async def list_memories(request: Request) -> Response:
         q = request.query_params
         memories = store.get_all(
-            user_id=_ns(request.state.tenant, q.get("user_id")),
+            user_id=_p(request).namespace(q.get("user_id")),
             agent_id=q.get("agent_id"),
             run_id=q.get("run_id"),
             include_invalid=q.get("include_invalid") == "true",
@@ -697,7 +706,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         result = await run_in_threadpool(partial(
             store.add,
             content,
-            user_id=_ns(request.state.tenant, body.get("user_id")) or default_user,
+            user_id=_p(request).namespace(body.get("user_id")) or default_user,
             agent_id=body.get("agent_id"),
             run_id=body.get("run_id"),
             metadata=body.get("metadata"),
@@ -723,6 +732,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
             importance=body.get("importance"),
             categories=body.get("categories"),
             metadata=body.get("metadata"),
+            owner_prefix=_p(request).prefix,
         )
         return JSONResponse(memory.model_dump())
 
@@ -731,21 +741,25 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         if error:
             return error
         hard = request.query_params.get("hard") == "true"
-        store.delete(request.path_params["memory_id"], hard=hard)
+        store.delete(
+            request.path_params["memory_id"], hard=hard, owner_prefix=_p(request).prefix
+        )
         return JSONResponse({"deleted": True, "hard": hard})
 
     async def memory_history(request: Request) -> Response:
         _, error = _memory_or_error(request)
         if error:
             return error
-        events = store.history(request.path_params["memory_id"])
+        events = store.history(
+            request.path_params["memory_id"], owner_prefix=_p(request).prefix
+        )
         return JSONResponse([e.model_dump() for e in events])
 
     async def list_categories_route(request: Request) -> Response:
         q = request.query_params
         cats = await run_in_threadpool(partial(
             store.categories,
-            user_id=_ns(request.state.tenant, q.get("user_id")),
+            user_id=_p(request).namespace(q.get("user_id")),
             agent_id=q.get("agent_id"),
             run_id=q.get("run_id"),
         ))
@@ -762,16 +776,16 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
                 status_code=400,
             )
         default_uid = None if isinstance(body, list) else body.get("user_id")
-        tenant = request.state.tenant
+        principal = _p(request)
         sanitized = [
-            {**row, "user_id": _ns(tenant, row.get("user_id") or default_uid)}
+            {**row, "user_id": principal.namespace(row.get("user_id") or default_uid)}
             for row in rows
             if isinstance(row, dict)
         ]
         result = await run_in_threadpool(partial(
             store.import_verbatim,
             sanitized,
-            user_id=_ns(tenant, default_uid) or default_user,
+            user_id=principal.namespace(default_uid) or default_user,
         ))
         return JSONResponse(result, status_code=201)
 
@@ -781,7 +795,11 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
             return error
         try:
             result = await run_in_threadpool(
-                partial(store.distill, request.path_params["memory_id"])
+                partial(
+                    store.distill,
+                    request.path_params["memory_id"],
+                    owner_prefix=_p(request).prefix,
+                )
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
@@ -798,7 +816,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         results = await run_in_threadpool(partial(
             store.search,
             body.get("query", ""),
-            user_id=_ns(request.state.tenant, body.get("user_id")),
+            user_id=_p(request).namespace(body.get("user_id")),
             agent_id=body.get("agent_id"),
             run_id=body.get("run_id"),
             limit=int(body.get("limit", 10)),
@@ -817,7 +835,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         ctx = await run_in_threadpool(partial(
             store.reconstruct_context,
             body.get("query", ""),
-            user_id=_ns(request.state.tenant, body.get("user_id")),
+            user_id=_p(request).namespace(body.get("user_id")),
             agent_id=body.get("agent_id"),
             run_id=body.get("run_id"),
             token_budget=int(body.get("token_budget", 1200)),
@@ -826,18 +844,18 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
 
     async def stats(request: Request) -> Response:
         data = await run_in_threadpool(store.stats)
-        if request.state.tenant is not None:
-            prefix = f"{request.state.tenant}::"
+        principal = _p(request)
+        if principal.prefix is not None:
             everything = await run_in_threadpool(
                 partial(store.get_all, include_invalid=True, limit=100_000)
             )
             mine = [
                 m for m in everything
-                if (m.user_id or "").startswith(prefix)
+                if (m.user_id or "").startswith(principal.prefix)
             ]
             data = {
                 "backend": data.get("backend"),
-                "tenant": request.state.tenant,
+                "tenant": principal.name,
                 "active_memories": sum(1 for m in mine if m.invalid_at is None),
                 "invalidated_memories": sum(1 for m in mine if m.invalid_at is not None),
             }
@@ -847,15 +865,17 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
     async def list_entities(request: Request) -> Response:
         q = request.query_params
         entities = store.entities(
-            user_id=_ns(request.state.tenant, q.get("user_id")),
+            user_id=_p(request).namespace(q.get("user_id")),
             include_merged=q.get("include_merged") == "true",
             limit=int(q.get("limit", "100")),
         )
         return JSONResponse([e.model_dump() for e in entities])
 
     async def get_entity(request: Request) -> Response:
-        detail = store.entity(request.path_params["entity_id"])
-        if detail is None or not _owns(request.state.tenant, detail["entity"].user_id):
+        detail = store.entity(
+            request.path_params["entity_id"], owner_prefix=_p(request).prefix
+        )
+        if detail is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         return JSONResponse(
             {
@@ -868,7 +888,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
     async def list_proposals(request: Request) -> Response:
         q = request.query_params
         proposals = store.merge_proposals(
-            user_id=_ns(request.state.tenant, q.get("user_id")),
+            user_id=_p(request).namespace(q.get("user_id")),
             status=q.get("status", "proposed"),
             limit=int(q.get("limit", "100")),
         )
@@ -876,7 +896,7 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
 
     def _proposal_guard(request: Request):
         proposal = store.backend.get_proposal(request.path_params["proposal_id"])
-        if proposal is None or not _owns(request.state.tenant, proposal.user_id):
+        if proposal is None or not _p(request).owns(proposal.user_id):
             return None, JSONResponse({"error": "not found"}, status_code=404)
         return proposal, None
 
@@ -884,59 +904,64 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         proposal, error = _proposal_guard(request)
         if error:
             return error
-        ok = store.confirm_merge(proposal.id)
+        ok = store.confirm_merge(proposal.id, owner_prefix=_p(request).prefix)
         return JSONResponse({"confirmed": ok, "proposal_id": proposal.id})
 
     async def reject_proposal(request: Request) -> Response:
         proposal, error = _proposal_guard(request)
         if error:
             return error
-        ok = store.reject_merge(proposal.id)
+        ok = store.reject_merge(proposal.id, owner_prefix=_p(request).prefix)
         return JSONResponse({"rejected": ok, "proposal_id": proposal.id})
 
     async def resolve_entities_route(request: Request) -> Response:
         body = await request.json() if await request.body() else {}
         outcome = await run_in_threadpool(partial(
             store.resolve_entities,
-            user_id=_ns(request.state.tenant, body.get("user_id")),
+            user_id=_p(request).namespace(body.get("user_id")),
         ))
         return JSONResponse(outcome)
 
     async def guarded_mcp_app(scope, receive, send):
-        """MCP over HTTP: open in open mode; admin-key-only once any auth is
-        configured (per-tenant scoping inside MCP tool calls isn't enforced
-        yet, so tenant keys are REST-only by design).
+        """MCP over HTTP, authenticated exactly like the REST API.
 
-        The admin key may arrive as ``Authorization: Bearer <key>`` or, for
-        clients that cannot send headers (claude.ai custom connectors),
-        embedded in the URL as ``/mcp/<key>`` or ``/mcp?key=<key>``."""
-        if api_key or tenants:
-            headers = {
-                k.decode("latin-1").lower(): v.decode("latin-1")
-                for k, v in scope.get("headers", [])
-            }
-            token = headers.get("authorization", "")
-            token = token[7:].strip() if token.lower().startswith("bearer ") else ""
-            if not token:
-                # scope["path"] is the full path; the mount prefix lives in
-                # root_path (ASGI spec), so look at the part after /mcp.
-                root = scope.get("root_path", "")
-                path = scope.get("path", "")
-                sub = path[len(root):] if path.startswith(root) else path
-                segments = [s for s in sub.split("/") if s]
-                if api_key and segments and segments[0] == api_key:
-                    token = segments[0]
-                    # Strip the key segment so the MCP app sees its root path.
-                    scope = dict(scope)
-                    scope["path"] = root + "/" + "/".join(segments[1:])
-                else:
-                    query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
-                    token = (query.get("key") or [""])[0]
-            if not (api_key and token == api_key):
-                await JSONResponse({"error": "unauthorized"}, status_code=401)(
-                    scope, receive, send
-                )
-                return
+        Tenant keys work here too: the tools derive their namespace from the
+        principal published below rather than from their own ``user_id``
+        argument, so a tenant is confined on this transport the same way it is
+        on /api.
+
+        The key may arrive as ``Authorization: Bearer <key>`` or, for clients
+        that cannot send headers (claude.ai custom connectors), embedded in the
+        URL as ``/mcp/<key>`` or ``/mcp?key=<key>``."""
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope.get("headers", [])
+        }
+        token = headers.get("authorization", "")
+        token = token[7:].strip() if token.lower().startswith("bearer ") else ""
+        if not token:
+            # scope["path"] is the full path; the mount prefix lives in
+            # root_path (ASGI spec), so look at the part after /mcp.
+            root = scope.get("root_path", "")
+            path = scope.get("path", "")
+            sub = path[len(root):] if path.startswith(root) else path
+            segments = [s for s in sub.split("/") if s]
+            if segments and _is_configured_key(segments[0]):
+                token = segments[0]
+                # Strip the key segment so the MCP app sees its root path.
+                scope = dict(scope)
+                scope["path"] = root + "/" + "/".join(segments[1:])
+            else:
+                query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+                token = (query.get("key") or [""])[0]
+        principal = resolve_principal(token)
+        if principal is None:
+            await JSONResponse({"error": "unauthorized"}, status_code=401)(
+                scope, receive, send
+            )
+            return
+        scope = dict(scope)
+        scope[PRINCIPAL_SCOPE_KEY] = principal
         await mcp_app(scope, receive, send)
 
     @contextlib.asynccontextmanager

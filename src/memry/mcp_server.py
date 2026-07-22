@@ -18,7 +18,12 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .config import Config
+from .principal import ADMIN, Principal
 from .store import MemoryStore
+
+# ASGI scope key the HTTP server uses to hand the authenticated identity to
+# the tools below. See memry.rest.create_app.
+PRINCIPAL_SCOPE_KEY = "memry.principal"
 
 INSTRUCTIONS = """Memry gives you persistent long-term memory across sessions.
 
@@ -73,8 +78,31 @@ def create_server(
     store = store or MemoryStore()
     default_user = store.config.default_user_id
 
+    def _principal() -> Principal:
+        """Who the call in flight acts as.
+
+        The HTTP transport attaches the Starlette request to every JSON-RPC
+        message (ServerMessageMetadata.request_context), so this reaches the
+        tool body across the session task boundary that a plain contextvar
+        would not survive. stdio has no request and no auth: that is the local
+        single-user case, which stays admin.
+        """
+        try:
+            request = mcp.get_context().request_context.request
+        except (ValueError, AttributeError, LookupError):
+            return ADMIN
+        scope = getattr(request, "scope", None) or {}
+        return scope.get(PRINCIPAL_SCOPE_KEY) or ADMIN
+
     def _uid(user_id: str) -> str | None:
-        return user_id or default_user
+        """Namespace for a tool argument.
+
+        The argument is never trusted as an identity: for a confined principal
+        it can only ever select a sub-namespace of that principal's own space,
+        so passing someone else's user_id lands in your own namespace rather
+        than reaching theirs.
+        """
+        return _principal().namespace(user_id or default_user)
 
     # Store calls are synchronous (SQLite + provider HTTP). FastMCP runs sync
     # tools directly on the event loop, so every tool below is async and hops
@@ -176,7 +204,12 @@ def create_server(
     async def update_memory(memory_id: str, content: str) -> str:
         """Rewrite the content of an existing memory (e.g. after the user
         corrects a stored fact)."""
-        memory = await _threaded(store.update, memory_id=memory_id, content=content)
+        memory = await _threaded(
+            store.update,
+            memory_id=memory_id,
+            content=content,
+            owner_prefix=_principal().prefix,
+        )
         if memory is None:
             return json.dumps({"error": f"memory {memory_id} not found"})
         return json.dumps(_memory_row(memory), ensure_ascii=False)
@@ -186,14 +219,18 @@ def create_server(
         """Forget a memory (soft delete: it is invalidated and kept in the
         audit history, not destroyed). Use when the user asks you to forget
         something."""
-        ok = await _threaded(store.delete, memory_id=memory_id)
+        ok = await _threaded(
+            store.delete, memory_id=memory_id, owner_prefix=_principal().prefix
+        )
         return json.dumps({"deleted": ok, "memory_id": memory_id})
 
     @mcp.tool()
     async def memory_history(memory_id: str) -> str:
         """Show the full audit trail of a memory (ADD/UPDATE/SUPERSEDE/DELETE
         events with old and new content)."""
-        events = await _threaded(store.history, memory_id=memory_id)
+        events = await _threaded(
+            store.history, memory_id=memory_id, owner_prefix=_principal().prefix
+        )
         return json.dumps(
             [
                 {
@@ -211,6 +248,27 @@ def create_server(
     @mcp.tool()
     async def memory_stats() -> str:
         """Show memory store statistics (counts, backend, models in use)."""
+        principal = _principal()
+        if principal.prefix is not None:
+            # Global counts would leak the size of other namespaces, so a
+            # confined principal gets counts over its own space only.
+            mine = await _threaded(
+                store.get_all,
+                user_id=None,
+                include_invalid=True,
+                limit=100_000,
+            )
+            mine = [m for m in mine if (m.user_id or "").startswith(principal.prefix)]
+            return json.dumps(
+                {
+                    "tenant": principal.name,
+                    "active_memories": sum(1 for m in mine if m.invalid_at is None),
+                    "invalidated_memories": sum(
+                        1 for m in mine if m.invalid_at is not None
+                    ),
+                },
+                ensure_ascii=False,
+            )
         stats = await _threaded(store.stats)
         return json.dumps(stats, ensure_ascii=False, default=str)
 

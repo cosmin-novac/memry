@@ -45,6 +45,25 @@ from .providers.llm import LLM, build_llm
 from .retrieval import hybrid_search
 
 
+def _owned(record: Any, owner_prefix: str | None) -> bool:
+    """Ownership gate for every id-addressed operation.
+
+    ``owner_prefix`` None means admin: no confinement. Otherwise the record's
+    ``user_id`` must sit under that namespace prefix.
+
+    This lives in the store rather than at each call site on purpose. Ids are
+    guessable-ish and callers are many (REST handlers, MCP tools, the CLI, the
+    dashboard); one forgotten check is a cross-account read. Putting the gate
+    behind the same door as the data means a new caller cannot skip it.
+    """
+    if record is None:
+        return False
+    if owner_prefix is None:
+        return True
+    user_id = getattr(record, "user_id", None)
+    return bool(user_id) and str(user_id).startswith(owner_prefix)
+
+
 class MemoryStore:
     def __init__(
         self,
@@ -307,7 +326,9 @@ class MemoryStore:
             memory_ids.append(stored.id)
         return {"imported": len(memory_ids), "skipped": skipped, "memory_ids": memory_ids}
 
-    def distill(self, memory_id: str) -> AddResult | None:
+    def distill(
+        self, memory_id: str, *, owner_prefix: str | None = None
+    ) -> AddResult | None:
         """Run extraction on a memory that was stored verbatim (LLM missing or
         failing at save time) and replace it with the distilled facts.
 
@@ -318,7 +339,7 @@ class MemoryStore:
         no LLM is configured or the LLM call fails.
         """
         memory = self.backend.get_memory(memory_id)
-        if memory is None or memory.invalid_at is not None:
+        if not _owned(memory, owner_prefix) or memory.invalid_at is not None:
             return None
         if not self.llm.available:
             raise ValueError("no LLM configured; distillation needs one")
@@ -397,8 +418,9 @@ class MemoryStore:
         )
         return build_context(results, token_budget=token_budget)
 
-    def get(self, memory_id: str) -> Memory | None:
-        return self.backend.get_memory(memory_id)
+    def get(self, memory_id: str, *, owner_prefix: str | None = None) -> Memory | None:
+        memory = self.backend.get_memory(memory_id)
+        return memory if _owned(memory, owner_prefix) else None
 
     def categories(
         self,
@@ -438,7 +460,15 @@ class MemoryStore:
             categories=categories,
         )
 
-    def history(self, memory_id: str) -> list[MemoryEvent]:
+    def history(
+        self, memory_id: str, *, owner_prefix: str | None = None
+    ) -> list[MemoryEvent]:
+        # Admin path is untouched: events outlive their memory row (hard delete
+        # keeps the audit trail), so only look the row up when confining.
+        if owner_prefix is not None and not _owned(
+            self.backend.get_memory(memory_id), owner_prefix
+        ):
+            return []
         return self.backend.history(memory_id)
 
     def episodes(
@@ -463,9 +493,10 @@ class MemoryStore:
         importance: float | None = None,
         categories: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        owner_prefix: str | None = None,
     ) -> Memory | None:
         old = self.backend.get_memory(memory_id)
-        if old is None:
+        if not _owned(old, owner_prefix):
             return None
         embedding = None
         embedding_model = None
@@ -497,9 +528,11 @@ class MemoryStore:
             )
         return updated
 
-    def delete(self, memory_id: str, *, hard: bool = False) -> bool:
+    def delete(
+        self, memory_id: str, *, hard: bool = False, owner_prefix: str | None = None
+    ) -> bool:
         memory = self.backend.get_memory(memory_id)
-        if memory is None:
+        if not _owned(memory, owner_prefix):
             return False
         if hard:
             ok = self.backend.delete_memory(memory_id)
@@ -546,10 +579,12 @@ class MemoryStore:
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         return self.backend.list_entities(scope, include_merged=include_merged, limit=limit)
 
-    def entity(self, entity_id: str) -> dict[str, Any] | None:
+    def entity(
+        self, entity_id: str, *, owner_prefix: str | None = None
+    ) -> dict[str, Any] | None:
         """One entity with its mentions and the memories that mention it."""
         entity = self.backend.get_entity(entity_id)
-        if entity is None:
+        if not _owned(entity, owner_prefix):
             return None
         return {
             "entity": entity,
@@ -566,26 +601,37 @@ class MemoryStore:
     ) -> list[MergeProposal]:
         return self.backend.list_proposals(Scope(user_id=user_id), status=status, limit=limit)
 
-    def confirm_merge(self, proposal_id: str) -> bool:
+    def confirm_merge(
+        self, proposal_id: str, *, owner_prefix: str | None = None
+    ) -> bool:
         """User (or system) confirms: entity_b is folded into entity_a."""
         proposal = self.backend.get_proposal(proposal_id)
-        if proposal is None or proposal.status != "proposed":
+        if not _owned(proposal, owner_prefix) or proposal.status != "proposed":
             return False
         if not self.backend.merge_entities(proposal.entity_a, proposal.entity_b):
             return False
         self.backend.set_proposal_status(proposal_id, "confirmed")
         return True
 
-    def reject_merge(self, proposal_id: str) -> bool:
+    def reject_merge(
+        self, proposal_id: str, *, owner_prefix: str | None = None
+    ) -> bool:
         """User says: these are different entities. They stay separate for good."""
         proposal = self.backend.get_proposal(proposal_id)
-        if proposal is None or proposal.status != "proposed":
+        if not _owned(proposal, owner_prefix) or proposal.status != "proposed":
             return False
         self.backend.set_proposal_status(proposal_id, "rejected")
         return True
 
-    def merge_entities(self, keep_id: str, merge_id: str) -> bool:
+    def merge_entities(
+        self, keep_id: str, merge_id: str, *, owner_prefix: str | None = None
+    ) -> bool:
         """Direct user-driven merge outside of any proposal."""
+        if owner_prefix is not None and not all(
+            _owned(self.backend.get_entity(eid), owner_prefix)
+            for eid in (keep_id, merge_id)
+        ):
+            return False
         return self.backend.merge_entities(keep_id, merge_id)
 
     def resolve_entities(self, *, user_id: str | None = None) -> dict[str, int]:
