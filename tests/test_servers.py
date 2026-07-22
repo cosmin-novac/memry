@@ -238,3 +238,12 @@ def test_mcp_http_url_key_auth():
         assert post("/mcp/sekret").status_code == 200
         assert post("/mcp?key=sekret").status_code == 200
         assert post("/mcp", extra={"Authorization": "Bearer sekret"}).status_code == 200
+        # /mcp must answer directly, never 307 to /mcp/: clients drop the
+        # Authorization header across a redirect and then see a 401.
+        bare = client.post(
+            "/mcp",
+            json=initialize,
+            headers={**headers, "Authorization": "Bearer sekret"},
+            follow_redirects=False,
+        )
+        assert bare.status_code == 200

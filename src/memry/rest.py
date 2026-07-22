@@ -32,6 +32,7 @@ from urllib.parse import parse_qs
 
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
@@ -584,6 +585,24 @@ syncPanels(); loadStats(); loadAll();
 </script></body></html>"""
 
 
+class _NormalizeMcpPath:
+    """``/mcp`` and ``/mcp/`` are one endpoint.
+
+    Left alone, Starlette's router answers ``/mcp`` with a 307 to ``/mcp/``.
+    Clients that drop the Authorization header across a redirect (VS Code and
+    other SDK MCP clients do, especially when a proxy makes it cross-scheme)
+    then arrive unauthenticated and see a 401. Rewrite instead of redirect.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path") == "/mcp":
+            scope = dict(scope, path="/mcp/", raw_path=b"/mcp/")
+        await self.app(scope, receive, send)
+
+
 def create_app(store: MemoryStore | None = None) -> Starlette:
     store = store or MemoryStore()
     api_key = store.config.api_key
@@ -954,10 +973,22 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         Route("/api/v1/entities/{entity_id}", guarded(get_entity), methods=["GET"]),
         Mount("/mcp", app=guarded_mcp_app),
     ]
-    return Starlette(routes=routes, lifespan=lifespan)
+    return Starlette(
+        routes=routes, lifespan=lifespan, middleware=[Middleware(_NormalizeMcpPath)]
+    )
 
 
 def main(host: str = "127.0.0.1", port: int = 8787) -> None:
     import uvicorn
 
-    uvicorn.run(create_app(), host=host, port=port)
+    # Behind a TLS-terminating proxy (the bundled Caddy), uvicorn must trust
+    # X-Forwarded-Proto or it builds redirects as http:// - e.g. /mcp -> /mcp/.
+    # Clients drop the Authorization header on such cross-scheme redirects and
+    # then see a 401. Only the proxy can reach this port, so trust any peer.
+    uvicorn.run(
+        create_app(),
+        host=host,
+        port=port,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )
