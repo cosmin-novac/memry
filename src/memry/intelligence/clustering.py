@@ -1,0 +1,125 @@
+"""Tag abstraction: propose higher-level tags that cluster existing ones.
+
+Given the flat list of tags a namespace has accumulated (each an ad-hoc label
+from extraction or the user), an LLM is asked to step back and name a few
+broader themes - a "synthetic" tag like ``health`` that groups ``running``,
+``diet``, ``sleep``, ``doctor``. Each synthetic tag is then written onto every
+memory carrying one of its member tags, giving a coarse index over a store that
+would otherwise only have long-tail specifics.
+
+This is deliberately conservative: the model may only cluster tags that already
+exist (it cannot invent membership out of nothing), and a cluster must group at
+least ``min_cluster_size`` of them, so a synthetic tag always earns its place.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ..providers.llm import LLM
+from .extraction import parse_lenient_json
+
+SYNTHETIC_TAG_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "clusters": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string"},
+                    "members": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["tag", "members"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["clusters"],
+    "additionalProperties": False,
+}
+
+SYNTHETIC_TAG_SYSTEM = """You organize a personal memory system's tags.
+
+You are given the full list of tags currently in use, each with how many
+memories carry it. Think outside the box and propose up to {max_new} NEW
+higher-level tags that each cluster several of the existing tags under a broader
+theme - the kind of abstraction a librarian adds so specific labels roll up into
+navigable topics (e.g. "health" over running/diet/sleep; "career" over
+promotion/interview/salary).
+
+Hard rules:
+- Each new tag's "members" must be drawn ONLY from the existing tags listed
+  below, spelled exactly as given. Never invent member tags.
+- A cluster must group at least {min_cluster} existing tags. Skip weak groupings.
+- The new tag name must be a short, lowercase, general theme, and must NOT
+  duplicate an existing tag or one of the already-abstract tags listed.
+- Prefer a few strong, genuinely useful clusters over many thin ones. It is fine
+  to return fewer than {max_new}, or none if nothing clusters well.
+- Do not force unrelated tags together. Coherence matters more than coverage.
+
+Return JSON: {{"clusters": [{{"tag": "...", "members": ["...", "..."]}}]}}.
+"""
+
+
+def propose_synthetic_tags(
+    llm: LLM,
+    tags: list[dict[str, Any]],
+    *,
+    existing_synthetic: list[str],
+    max_new: int = 5,
+    min_cluster: int = 2,
+) -> list[dict[str, Any]]:
+    """Ask the LLM for higher-level tags. Raises if the LLM is unavailable.
+
+    ``tags`` is the category histogram ([{"category", "count"}]). Returns a list
+    of validated ``{"tag", "members"}`` dicts: the tag is lowercased and unique,
+    members are filtered to real existing tags, and clusters below
+    ``min_cluster`` distinct members are dropped.
+    """
+    known = {str(t["category"]).strip().lower(): int(t.get("count", 0)) for t in tags}
+    known.pop("", None)
+    if len(known) < min_cluster:
+        return []
+    already = {t.strip().lower() for t in existing_synthetic}
+
+    listing = "\n".join(f"- {tag} ({count})" for tag, count in known.items())
+    raw = llm.complete(
+        SYNTHETIC_TAG_SYSTEM.format(max_new=max_new, min_cluster=min_cluster),
+        "Existing tags (tag (memory count)):\n"
+        f"{listing}\n\n"
+        f"Already-abstract tags to not repeat: {sorted(already) or 'none'}\n\n"
+        "Propose the higher-level clusters as JSON.",
+        json_schema=SYNTHETIC_TAG_SCHEMA,
+    )
+    return _validate(raw, known=set(known), already=already, min_cluster=min_cluster,
+                     max_new=max_new)
+
+
+def _validate(
+    raw: str, *, known: set[str], already: set[str], min_cluster: int, max_new: int
+) -> list[dict[str, Any]]:
+    data = parse_lenient_json(raw)
+    if not isinstance(data, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    seen_tags: set[str] = set()
+    for cluster in data.get("clusters", []):
+        if not isinstance(cluster, dict):
+            continue
+        tag = str(cluster.get("tag", "")).strip().lower()
+        if not tag or tag in known or tag in already or tag in seen_tags:
+            continue  # must be a genuinely new label
+        # members must be real existing tags, and not the synthetic tag itself
+        members = []
+        for m in cluster.get("members", []):
+            m = str(m).strip().lower()
+            if m in known and m != tag and m not in members:
+                members.append(m)
+        if len(members) < min_cluster:
+            continue
+        out.append({"tag": tag, "members": members})
+        seen_tags.add(tag)
+        if len(out) >= max_new:
+            break
+    return out

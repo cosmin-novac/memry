@@ -18,6 +18,9 @@ services:
       # Set to your public https URL to turn on OAuth for accounts (see
       # docs/self-hosting.md#accounts-and-oauth). Unset = OAuth off.
       MEMRY_PUBLIC_URL: ${MEMRY_PUBLIC_URL:-}
+      # Weekly LLM tag abstraction (needs an LLM). "off" to disable.
+      MEMRY_TAG_ABSTRACTION: ${MEMRY_TAG_ABSTRACTION:-}
+      MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS: ${MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS:-}
     volumes:
       - memry-data:/data
     healthcheck:

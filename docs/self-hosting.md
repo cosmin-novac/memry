@@ -171,7 +171,34 @@ After switching embedding providers, run `memry reindex` once to re-embed the st
 memry sweep --threshold 0.1   # soft-forget stale, low-importance memories
 memry stats                   # counts, providers, db path
 memry export > backup.jsonl   # JSONL backup (memories incl. invalidated)
+memry abstract-tags           # LLM clusters tags into higher-level ones now
 ```
 
 A weekly `sweep` in cron/Task Scheduler keeps long-running stores lean; forgotten memories
 are invalidated (auditable, recoverable), never destroyed.
+
+## Tag abstraction
+
+With an LLM configured, Memry periodically (weekly by default) looks at all the tags a
+namespace has accumulated and proposes a few **higher-level tags** that cluster related
+ones - a synthetic `health` over `running`/`diet`/`sleep`, say - then applies each to every
+matching memory, giving a coarse index over an otherwise long-tail set of labels. It
+remembers which tags it invented (`GET /api/v1/tags/synthetic`; they're flagged in
+`/api/v1/categories`), so they're distinguishable and never re-proposed.
+
+The server runs this on a schedule; the cadence and off-switch live in config:
+
+```bash
+MEMRY_TAG_ABSTRACTION=off              # disable entirely (default: on with an LLM)
+MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7  # how often the scheduler runs per namespace
+```
+
+Run it on demand any time with `memry abstract-tags` (or `POST /api/v1/tags/abstract`).
+Without an LLM it is a no-op, so zero-key installs are unaffected.
+
+## Searching by tag and date
+
+Beyond relevance search, both `search_memories`/`POST /api/v1/search` and
+`list_memories`/`GET /api/v1/memories` accept a `categories` (tag) filter and a `since`/
+`until` date window (`YYYY-MM-DD`, the `until` day inclusive). Pass an empty query with just
+a tag or date to browse rather than rank, e.g. "everything tagged `travel` since 2026-01-01".

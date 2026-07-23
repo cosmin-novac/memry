@@ -38,6 +38,11 @@ re-run a better extraction pipeline over the original episodes.
 and a shared name is never enough to merge two of them: unclear cases stay separate
 ("three Jonases") with a merge proposal you confirm or reject once the evidence is in.
 
+**Tags organize themselves.** With an LLM, Memry periodically clusters your accumulated
+tags into a few higher-level ones (a synthetic `health` over `running`/`diet`/`sleep`) and
+applies them to matching memories, so a long tail of specific labels rolls up into
+navigable topics. Search and list by tag or by date window, not just by relevance.
+
 **It scales when needed and stays simple when not.** Optional extras add a usearch HNSW
 index for larger stores (`memry[ann]`) and a PostgreSQL + pgvector backend for
 multi-writer deployments (`memry[postgres]`). Per-tenant API keys with strict isolation

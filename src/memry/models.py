@@ -204,6 +204,21 @@ class MergeProposal(BaseModel):
     decided_at: str | None = None
 
 
+class SyntheticTag(BaseModel):
+    """A higher-level tag an LLM proposed to cluster several existing tags.
+
+    Recorded so the system remembers which tags it invented (vs. tags that came
+    from the user/extraction), can avoid re-proposing them, and can show or undo
+    them later. The tag itself is also written onto each clustered memory's
+    ``categories`` like any other tag."""
+
+    id: str = Field(default_factory=new_id)
+    tag: str
+    source_tags: list[str] = Field(default_factory=list)
+    user_id: str | None = None
+    created_at: str = Field(default_factory=utcnow)
+
+
 class ContextResult(BaseModel):
     text: str
     memory_ids: list[str] = Field(default_factory=list)

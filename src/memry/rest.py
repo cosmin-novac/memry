@@ -28,9 +28,11 @@ memry.principal for how that identity is derived and enforced.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import html
 import json
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any
 from urllib.parse import parse_qs
@@ -727,6 +729,23 @@ font-weight:400}}
 </form></body></html>"""
 
 
+def _tag_run_due(last_run: str | None, interval_days: float, now: datetime) -> bool:
+    """Has ``interval_days`` elapsed since the last tag-abstraction run?
+
+    A namespace never run before (``None``) is due. An unparseable stamp is
+    treated as due rather than wedging the scheduler forever.
+    """
+    if last_run is None:
+        return True
+    try:
+        last = datetime.fromisoformat(last_run)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return True
+    return (now - last) >= timedelta(days=max(interval_days, 0.0))
+
+
 class _NormalizeMcpPath:
     """``/mcp`` and ``/mcp/`` are one endpoint.
 
@@ -927,6 +946,8 @@ def create_app(
             limit=int(q.get("limit", "100")),
             offset=int(q.get("offset", "0")),
             categories=_parse_categories(q.get("categories")),
+            since=q.get("since") or None,
+            until=q.get("until") or None,
         )
         return JSONResponse([m.model_dump() for m in memories])
 
@@ -996,13 +1017,39 @@ def create_app(
 
     async def list_categories_route(request: Request) -> Response:
         q = request.query_params
+        user_id = _p(request).namespace(q.get("user_id"))
         cats = await run_in_threadpool(partial(
             store.categories,
-            user_id=_p(request).namespace(q.get("user_id")),
+            user_id=user_id,
             agent_id=q.get("agent_id"),
             run_id=q.get("run_id"),
         ))
+        synthetic = {
+            t.tag for t in await run_in_threadpool(
+                partial(store.synthetic_tags, user_id=user_id)
+            )
+        }
+        for c in cats:
+            if c["category"] in synthetic:
+                c["synthetic"] = True
         return JSONResponse(cats)
+
+    async def synthetic_tags_route(request: Request) -> Response:
+        tags = await run_in_threadpool(partial(
+            store.synthetic_tags,
+            user_id=_p(request).namespace(request.query_params.get("user_id")),
+        ))
+        return JSONResponse([t.model_dump() for t in tags])
+
+    async def abstract_tags_route(request: Request) -> Response:
+        """Run tag abstraction now for the caller's namespace (also runs on a
+        weekly schedule; this is the manual trigger)."""
+        body = await request.json() if await request.body() else {}
+        result = await run_in_threadpool(partial(
+            store.abstract_tags,
+            user_id=_p(request).namespace(body.get("user_id")),
+        ))
+        return JSONResponse(result)
 
     async def import_memories_route(request: Request) -> Response:
         """Bulk verbatim import: a JSON array of rows, or {memories: [...],
@@ -1061,6 +1108,8 @@ def create_app(
             limit=int(body.get("limit", 10)),
             include_invalid=bool(body.get("include_invalid", False)),
             categories=_parse_categories(body.get("categories")),
+            since=body.get("since") or None,
+            until=body.get("until") or None,
         ))
         return JSONResponse(
             [
@@ -1274,10 +1323,47 @@ def create_app(
         scope[PRINCIPAL_SCOPE_KEY] = principal
         await mcp_app(scope, receive, send)
 
+    async def _tag_abstraction_scheduler() -> None:
+        """Weekly (configurable) tag abstraction per namespace.
+
+        Wakes periodically, runs abstraction for namespaces whose interval has
+        elapsed, and caps how many it does per wake so a server with many
+        accounts spreads the LLM work across cycles instead of bursting. The
+        last-run time is persisted (backend meta), so restarts don't re-run and
+        the cadence survives them.
+        """
+        cfg = store.config.tags
+        interval = max(cfg.interval_days, 0.001)
+        check_every = max(min(interval * 86400, 6 * 3600), 60)
+        max_per_cycle = 25
+        while True:
+            try:
+                now = datetime.now(timezone.utc)
+                processed = 0
+                for uid in store.backend.distinct_user_ids() or [None]:
+                    if processed >= max_per_cycle:
+                        break
+                    if _tag_run_due(store.last_tag_run(uid), interval, now):
+                        await run_in_threadpool(store.abstract_tags, user_id=uid)
+                        processed += 1
+            except Exception:  # a scheduler hiccup must never take the server down
+                pass
+            await asyncio.sleep(check_every)
+
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette):
-        async with mcp.session_manager.run():
-            yield
+        task: asyncio.Task | None = None
+        # Only schedule when it can do something: enabled and an LLM present.
+        if store.config.tags.enabled and store.llm.available:
+            task = asyncio.create_task(_tag_abstraction_scheduler())
+        try:
+            async with mcp.session_manager.run():
+                yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
 
     routes = [
         Route("/", dashboard),
@@ -1293,6 +1379,8 @@ def create_app(
         Route("/api/v1/memories/{memory_id}/history", guarded(memory_history), methods=["GET"]),
         Route("/api/v1/memories/{memory_id}/distill", guarded(distill_memory), methods=["POST"]),
         Route("/api/v1/categories", guarded(list_categories_route), methods=["GET"]),
+        Route("/api/v1/tags/synthetic", guarded(synthetic_tags_route), methods=["GET"]),
+        Route("/api/v1/tags/abstract", guarded(abstract_tags_route), methods=["POST"]),
         Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),
         Route("/api/v1/search", guarded(search), methods=["POST"]),
         Route("/api/v1/context", guarded(context), methods=["POST"]),

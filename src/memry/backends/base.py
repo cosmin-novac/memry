@@ -11,7 +11,16 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from ..models import Entity, EntityMention, Episode, Memory, MemoryEvent, MergeProposal, Scope
+from ..models import (
+    Entity,
+    EntityMention,
+    Episode,
+    Memory,
+    MemoryEvent,
+    MergeProposal,
+    Scope,
+    SyntheticTag,
+)
 
 
 class MemoryBackend(ABC):
@@ -149,6 +158,27 @@ class MemoryBackend(ABC):
         return []
 
     def set_proposal_status(self, proposal_id: str, status: str) -> MergeProposal | None:
+        return None
+
+    # -- synthetic tags + key/value meta ----------------------------------
+    # Default no-ops so adapters without their own storage (e.g. Mem0) stay
+    # valid; LocalBackend and PostgresBackend override. A backend that does not
+    # persist these simply won't remember synthetic tags or scheduler state -
+    # tag abstraction degrades to "runs but doesn't record", never crashes.
+    def record_synthetic_tag(self, tag: SyntheticTag) -> None:
+        return None
+
+    def list_synthetic_tags(self, scope: Scope) -> list[SyntheticTag]:
+        return []
+
+    def distinct_user_ids(self) -> list[str | None]:
+        """Namespaces present in the store, for the maintenance scheduler."""
+        return []
+
+    def get_meta(self, key: str) -> str | None:
+        return None
+
+    def set_meta(self, key: str, value: str) -> None:
         return None
 
     # -- events / audit ---------------------------------------------------

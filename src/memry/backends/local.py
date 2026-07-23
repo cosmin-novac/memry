@@ -26,6 +26,7 @@ from ..models import (
     MemoryEvent,
     MergeProposal,
     Scope,
+    SyntheticTag,
     utcnow,
 )
 from .ann import HAS_USEARCH, HnswSidecar
@@ -136,6 +137,18 @@ CREATE INDEX IF NOT EXISTS idx_proposals_status ON entity_proposals(status, user
 CREATE TABLE IF NOT EXISTS ann_keys (
     key INTEGER PRIMARY KEY AUTOINCREMENT,
     memory_id TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS synthetic_tags (
+    id          TEXT PRIMARY KEY,
+    tag         TEXT NOT NULL,
+    user_id     TEXT,
+    source_tags TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_synthetic_tags_user ON synthetic_tags(user_id);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -597,6 +610,53 @@ class LocalBackend(MemoryBackend):
             )
             for r in rows
         ]
+
+    # -- synthetic tags + meta ---------------------------------------------
+    def record_synthetic_tag(self, tag: SyntheticTag) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO synthetic_tags "
+                "(id, tag, user_id, source_tags, created_at) VALUES (?,?,?,?,?)",
+                (tag.id, tag.tag, tag.user_id, json.dumps(tag.source_tags),
+                 tag.created_at),
+            )
+            self._db.commit()
+
+    def list_synthetic_tags(self, scope: Scope) -> list[SyntheticTag]:
+        clause, params = _scope_clause(Scope(user_id=scope.user_id))
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM synthetic_tags WHERE {clause} ORDER BY created_at DESC",
+                params,
+            ).fetchall()
+        return [
+            SyntheticTag(
+                id=r["id"], tag=r["tag"], user_id=r["user_id"],
+                source_tags=json.loads(r["source_tags"]), created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+    def distinct_user_ids(self) -> list[str | None]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT DISTINCT user_id FROM memories"
+            ).fetchall()
+        return [r["user_id"] for r in rows]
+
+    def get_meta(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)
+            )
+            self._db.commit()
 
     # -- entities -----------------------------------------------------------
     @staticmethod

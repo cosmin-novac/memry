@@ -13,11 +13,13 @@ backends, LLMs, and embedders are all replaceable underneath it.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .backends import build_backend
 from .backends.base import MemoryBackend
 from .config import Config
+from .intelligence.clustering import propose_synthetic_tags
 from .intelligence.context import build_context
 from .intelligence.decay import decay_sweep, effective_importance
 from .intelligence.entities import resolve_mentions, resolve_open_proposals
@@ -38,6 +40,7 @@ from .models import (
     MergeProposal,
     Scope,
     SearchResult,
+    SyntheticTag,
     utcnow,
 )
 from .providers.embeddings import Embedder, build_embedder
@@ -62,6 +65,46 @@ def _owned(record: Any, owner_prefix: str | None) -> bool:
         return True
     user_id = getattr(record, "user_id", None)
     return bool(user_id) and str(user_id).startswith(owner_prefix)
+
+
+def _tag_run_key(user_id: str | None) -> str:
+    """Meta key under which the last tag-abstraction run time is stamped."""
+    return f"tag_abstraction:last_run:{user_id or ''}"
+
+
+def _within(created_at: str, since: str | None, until: str | None) -> bool:
+    """Is an ISO ``created_at`` inside the [since, until] window?
+
+    Bounds accept a plain date (YYYY-MM-DD) or a full ISO timestamp; a date-only
+    ``until`` is inclusive of that whole day, which is what a human means by
+    "up to the 22nd".
+    """
+    def _dt(value: str, *, end_of_day: bool) -> datetime | None:
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            if len(value) == 10:  # date only
+                base = datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+                return base + timedelta(days=1) if end_of_day else base
+            dt = datetime.fromisoformat(value)
+            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+        except ValueError:
+            return None
+
+    try:
+        created = datetime.fromisoformat(created_at)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return True  # unparseable timestamps are never filtered out
+    lo = _dt(since, end_of_day=False) if since else None
+    hi = _dt(until, end_of_day=True) if until else None
+    if lo is not None and created < lo:
+        return False
+    if hi is not None and created >= hi:
+        return False
+    return True
 
 
 class MemoryStore:
@@ -390,18 +433,36 @@ class MemoryStore:
         limit: int = 10,
         include_invalid: bool = False,
         categories: list[str] | None = None,
+        since: str | None = None,
+        until: str | None = None,
     ) -> list[SearchResult]:
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        return hybrid_search(
+        # No query text = browse by tag/date rather than rank by relevance.
+        if not (query or "").strip():
+            memories = self.get_all(
+                user_id=user_id, agent_id=agent_id, run_id=run_id,
+                include_invalid=include_invalid, limit=limit,
+                categories=categories, since=since, until=until,
+            )
+            return [SearchResult(memory=m, score=0.0) for m in memories]
+        # Date filtering is applied after ranking; over-fetch so a date window
+        # still yields a full page of the best matches within it.
+        fetch = limit if not (since or until) else min(max(limit * 8, 40), 500)
+        results = hybrid_search(
             backend=self.backend,
             embedder=self.embedder,
             query=query,
             scope=scope,
-            limit=limit,
+            limit=fetch,
             cfg=self.config.retrieval,
             include_invalid=include_invalid,
             categories=categories,
         )
+        if since or until:
+            results = [
+                r for r in results if _within(r.memory.created_at, since, until)
+            ][:limit]
+        return results
 
     def reconstruct_context(
         self,
@@ -453,12 +514,23 @@ class MemoryStore:
         limit: int = 100,
         offset: int = 0,
         categories: list[str] | None = None,
+        since: str | None = None,
+        until: str | None = None,
     ) -> list[Memory]:
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        return self.backend.list_memories(
-            scope, include_invalid=include_invalid, limit=limit, offset=offset,
+        if not (since or until):
+            return self.backend.list_memories(
+                scope, include_invalid=include_invalid, limit=limit, offset=offset,
+                categories=categories,
+            )
+        # Date-windowed browse: the filter is backend-agnostic (applied here), so
+        # pull a broad page ordered by the backend, filter, then paginate.
+        rows = self.backend.list_memories(
+            scope, include_invalid=include_invalid, limit=1_000_000, offset=0,
             categories=categories,
         )
+        rows = [m for m in rows if _within(m.created_at, since, until)]
+        return rows[offset : offset + limit]
 
     def history(
         self, memory_id: str, *, owner_prefix: str | None = None
@@ -640,6 +712,75 @@ class MemoryStore:
         return resolve_open_proposals(
             backend=self.backend, llm=self.llm, scope=Scope(user_id=user_id)
         )
+
+    # ------------------------------------------------------------------
+    # tag abstraction
+    # ------------------------------------------------------------------
+    def synthetic_tags(self, *, user_id: str | None = None) -> list[SyntheticTag]:
+        """The higher-level tags the system invented for this namespace."""
+        return self.backend.list_synthetic_tags(Scope(user_id=user_id))
+
+    def abstract_tags(self, *, user_id: str | None = None) -> dict[str, Any]:
+        """Ask the LLM for higher-level tags over this namespace's tags, then
+        write each onto every memory carrying one of its member tags.
+
+        Returns a summary dict. A no-op (``{"applied": []}``) when no LLM is
+        configured or there are too few tags to cluster - callers can run this
+        unconditionally. Records each synthetic tag and stamps the run time.
+        """
+        cfg = self.config.tags
+        summary: dict[str, Any] = {"user_id": user_id, "applied": []}
+        if not self.llm.available:
+            summary["skipped"] = "no LLM configured"
+            return summary
+        histogram = self.categories(user_id=user_id)
+        if len(histogram) < cfg.min_tags:
+            summary["skipped"] = f"only {len(histogram)} tags (< {cfg.min_tags})"
+            self._stamp_tag_run(user_id)
+            return summary
+
+        existing = [t.tag for t in self.synthetic_tags(user_id=user_id)]
+        proposals = propose_synthetic_tags(
+            self.llm, histogram,
+            existing_synthetic=existing,
+            max_new=cfg.max_new_tags,
+            min_cluster=cfg.min_cluster_size,
+        )
+        for proposal in proposals:
+            tag = proposal["tag"]
+            members = proposal["members"]
+            tagged = self._apply_tag_to_members(user_id, tag, members)
+            self.backend.record_synthetic_tag(
+                SyntheticTag(tag=tag, source_tags=members, user_id=user_id)
+            )
+            summary["applied"].append(
+                {"tag": tag, "source_tags": members, "memories_tagged": tagged}
+            )
+        self._stamp_tag_run(user_id)
+        return summary
+
+    def _apply_tag_to_members(
+        self, user_id: str | None, tag: str, members: list[str]
+    ) -> int:
+        """Add ``tag`` to every active memory carrying one of ``members``."""
+        tagged = 0
+        for memory in self.get_all(
+            user_id=user_id, categories=members, limit=1_000_000
+        ):
+            current = [str(c).strip().lower() for c in memory.categories or []]
+            if tag in current:
+                continue
+            self.backend.update_memory(
+                memory.id, categories=[*(memory.categories or []), tag]
+            )
+            tagged += 1
+        return tagged
+
+    def _stamp_tag_run(self, user_id: str | None) -> None:
+        self.backend.set_meta(_tag_run_key(user_id), utcnow())
+
+    def last_tag_run(self, user_id: str | None) -> str | None:
+        return self.backend.get_meta(_tag_run_key(user_id))
 
     # ------------------------------------------------------------------
     # maintenance

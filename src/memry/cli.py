@@ -221,6 +221,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("sweep", help="decay sweep: soft-forget stale memories")
     p.add_argument("--threshold", type=float, default=0.1)
 
+    p = sub.add_parser(
+        "abstract-tags",
+        help="LLM proposes higher-level tags that cluster existing ones",
+    )
+    p.add_argument("-u", "--user", default=None,
+                   help="namespace to abstract (default: every namespace)")
+
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
     p = sub.add_parser("export", help="export memories as JSONL to stdout")
@@ -355,6 +362,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "sweep":
             forgotten = store.decay_sweep(threshold=args.threshold)
             _print({"forgotten": forgotten, "count": len(forgotten)})
+        elif args.command == "abstract-tags":
+            if not store.llm.available:
+                print("no LLM configured; tag abstraction needs one", file=sys.stderr)
+                return 1
+            namespaces = (
+                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
+            )
+            _print([store.abstract_tags(user_id=uid) for uid in namespaces])
         elif args.command == "reindex":
             count = store.reindex()
             _print({"reindexed": count, "embedder": store.embedder.model_id})
