@@ -25,17 +25,36 @@ from .store import MemoryStore
 # the tools below. See memry.rest.create_app.
 PRINCIPAL_SCOPE_KEY = "memry.principal"
 
-INSTRUCTIONS = """Memry gives you persistent long-term memory across sessions.
+INSTRUCTIONS = """Memry is your long-term memory across sessions. Treat it as a
+working habit, not a filing cabinet you visit at the end: recall before you
+reason, and save as you learn. Following this loop is what makes you feel like
+you remember the user instead of meeting them fresh each time.
 
-- At the START of a task, call get_memory_context (or search_memories) with a
-  short description of the task to recall relevant knowledge about the user.
-- WHENEVER the user shares stable facts, preferences, decisions, corrections,
-  or plans, call save_memories with that information so it persists.
-- Prefer several focused save_memories calls (one topic each) over one giant
-  multi-topic dump, and ALWAYS check the response's "warnings" field: it lists
-  input details that did not survive distillation so you can save them
-  explicitly (or retry with infer=false for must-keep-verbatim content).
-- Never store secrets (passwords, API keys, tokens).
+RECALL - call get_memory_context (or search_memories) with a short description
+of the subject:
+- at the START of a session, before your first substantive answer;
+- WHENEVER the conversation turns to a new topic, project, person, tool, or
+  decision. The moment a new subject comes up, check what you already know
+  about it before responding. This is the most important habit: a new topic is
+  the trigger to recall.
+- when the user implies prior context ("as I mentioned", "my usual setup",
+  "the project"). Recall is cheap and stops you contradicting or re-asking what
+  you were already told.
+
+SAVE - call save_memories:
+- whenever the user states a stable fact, preference, decision, correction, or
+  plan - capture it in their own words;
+- as a running checkpoint, not just at the end: once you have learned a handful
+  of new facts, or when the topic is about to change, save what is worth keeping
+  before moving on. A good rhythm is "recall on a new topic, save when leaving
+  one."
+- Prefer several focused calls (one topic each) over one giant multi-topic dump,
+  and ALWAYS check the response's "warnings" field: it lists input details that
+  did not survive distillation, so you can save them explicitly (or retry with
+  infer=false for must-keep-verbatim content).
+
+Never store secrets (passwords, API keys, tokens). When unsure whether a durable
+fact is worth keeping, saving it is better than losing it.
 """
 
 
@@ -119,10 +138,13 @@ def create_server(
         infer: bool = True,
     ) -> str:
         """Store information in long-term memory. Call this whenever the user
-        shares stable facts, preferences, decisions, corrections, or plans.
-        With infer=true (default) the text is distilled into discrete facts and
+        shares a stable fact, preference, decision, correction, or plan - and
+        also as a periodic checkpoint, once you have learned several new facts
+        or the topic is changing, rather than only at the end of the chat. With
+        infer=true (default) the text is distilled into discrete facts and
         reconciled against existing memories (duplicates skipped, contradictions
         superseded). With infer=false the text is saved verbatim as one memory.
+        Prefer focused, one-topic calls over a single multi-topic dump.
         """
         result = await _threaded(
             store.add,
@@ -152,10 +174,12 @@ def create_server(
         limit: int = 8,
         categories: str = "",
     ) -> str:
-        """Search long-term memory. Call this at the start of a task (and any
-        time you need background about the user, their preferences, or past
-        decisions). Returns the most relevant memories, best first.
-        Optionally restrict to categories (comma-separated, e.g. "diet,health").
+        """Search long-term memory for what you already know. Call this at the
+        start of a session AND whenever the conversation turns to a new topic,
+        project, person, or decision - recall before you answer, so you don't
+        contradict or re-ask what the user already told you. Returns the most
+        relevant memories, best first. Optionally restrict to categories
+        (comma-separated, e.g. "diet,health").
         """
         category_list = [c.strip() for c in categories.split(",") if c.strip()] or None
         results = await _threaded(
@@ -177,9 +201,11 @@ def create_server(
         user_id: str = "",
         token_budget: int = 1200,
     ) -> str:
-        """Get a ready-to-use context block of the most relevant memories for a
-        task, packed to fit the given token budget. Prefer this over
-        search_memories when you just want background context injected."""
+        """Get a ready-to-use context block of the most relevant memories for
+        the current subject, packed to fit the given token budget. Prefer this
+        over search_memories when you just want background injected before you
+        answer. Worth calling at the start of a session and whenever a new topic
+        comes up."""
         ctx = await _threaded(
             store.reconstruct_context,
             query=query, user_id=_uid(user_id), token_budget=token_budget,

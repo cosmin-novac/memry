@@ -41,8 +41,10 @@ walkthrough (cloud-init, DNS, backups, uninstall): [deploy-vps.md](deploy-vps.md
 ## Securing the server
 
 1. **Set an API key** - `MEMRY_API_KEY=<random>` requires
-   `Authorization: Bearer <key>` on `/api/*`. The dashboard prompts for it once and stores
-   it in localStorage.
+   `Authorization: Bearer <key>` on `/api/*`. The dashboard has a sign-in page at `/login`:
+   accounts sign in with their name and password, and the admin signs in with the API key
+   (under "Sign in as admin"). Login opens an HttpOnly session cookie, so there is no key to
+   paste on every visit; programmatic clients keep using the bearer header.
 2. **Bind privately** - without a key, keep `--host 127.0.0.1` or terminate TLS + auth in a
    reverse proxy (Caddy/Traefik/nginx).
 3. **Backups** - the entire state is one SQLite file; snapshot it (plus `-wal`/`-shm`) or

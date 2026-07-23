@@ -51,11 +51,13 @@ from starlette.responses import (
 )
 from starlette.routing import Mount, Route
 
-from .accounts import AccountStore, default_auth_db_path
+from .accounts import SESSION_TTL, AccountStore, default_auth_db_path
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
 from .oauth import MEMRY_SCOPE, MemryOAuthProvider
 from .principal import ADMIN, Principal
 from .store import MemoryStore
+
+SESSION_COOKIE = "memry_session"
 
 _DASHBOARD = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -98,7 +100,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
+<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <input id="user" placeholder="user_id (all)" style="width:11rem">
@@ -122,19 +124,14 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <div class="gx-read" id="mapread"></div><div class="gx-stat" id="mapstat"></div></div>
 <div id="list"></div>
 </main><script>
-const key = localStorage.getItem('memry_key') || '';
-const H = key ? {'Authorization':'Bearer '+key,'Content-Type':'application/json'} : {'Content-Type':'application/json'};
+// Auth rides the session cookie set at /login; no key to paste anymore.
+const H = {'Content-Type':'application/json'};
 // Empty box = no user filter: list EVERY namespace, so the list always
-// agrees with the stats line. (Tenant keys are namespaced server-side.)
+// agrees with the stats line. (Accounts are namespaced server-side.)
 const uid = () => document.getElementById('user').value.trim();
-let askedKey=false;
 async function api(path, opts={}){
   const r = await fetch(path,{headers:H,...opts});
-  if(r.status===401){
-    // Concurrent boot requests (stats + list) may both 401; prompt only once.
-    if(!askedKey){askedKey=true;const k=prompt('API key required');if(k){localStorage.setItem('memry_key',k);location.reload();}}
-    throw new Error('unauthorized');
-  }
+  if(r.status===401){ location.href='/login'; throw new Error('unauthorized'); }
   return r.json();
 }
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
@@ -680,6 +677,56 @@ namespace only. You can revoke it at any time with
 </form></body></html>"""
 
 
+# Same visual language as the OAuth login, but this one opens a dashboard
+# session cookie instead of issuing an authorization code.
+_DASH_LOGIN_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in to Memry</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50' fill='none' stroke='%2314b8a6' stroke-width='7' stroke-linecap='round'/%3E%3Ccircle cx='47' cy='10.5' r='4.5' fill='%2314b8a6'/%3E%3Ccircle cx='56' cy='20' r='3.2' fill='%2314b8a6' opacity='.85'/%3E%3Ccircle cx='57.5' cy='30' r='2.2' fill='%2314b8a6' opacity='.7'/%3E%3C/svg%3E">
+<style>
+:root{{--bg:#0b0e14;--panel:#141a24;--line:#232c3b;--text:#dbe4f0;--dim:#8494ab;
+--accent:#5eead4;--warn:#f0a35e;font-size:15px}}
+@media (prefers-color-scheme: light){{:root{{--bg:#f5f7fa;--panel:#fff;--line:#dde4ee;
+--text:#1a2333;--dim:#5c6b82;--accent:#0d9488;--warn:#b45309}}}}
+*{{box-sizing:border-box}}
+body{{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);
+color:var(--text);font-family:ui-sans-serif,system-ui,Segoe UI,sans-serif}}
+.card{{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+padding:1.8rem;width:min(94vw,26rem)}}
+h1{{font-size:1.15rem;margin:.2rem 0 1rem}}h1 span{{color:var(--accent)}}
+h1 svg{{vertical-align:-4px;margin-right:.3rem}}
+label{{display:block;font-size:.8rem;color:var(--dim);margin:.7rem 0 .25rem}}
+input{{width:100%;font:inherit;color:inherit;background:var(--bg);
+border:1px solid var(--line);border-radius:8px;padding:.55rem .7rem}}
+input:focus{{outline:2px solid var(--accent);outline-offset:-1px}}
+button{{width:100%;margin-top:1.2rem;font:inherit;cursor:pointer;border-radius:8px;
+padding:.6rem;border:1px solid transparent;background:var(--accent);color:#04211c;
+font-weight:600}}
+.err{{background:color-mix(in srgb,var(--warn) 16%,transparent);border:1px solid var(--warn);
+color:var(--warn);border-radius:8px;padding:.5rem .7rem;font-size:.85rem;margin-bottom:1rem}}
+details{{margin-top:1.1rem;border-top:1px solid var(--line);padding-top:.7rem}}
+summary{{font-size:.8rem;color:var(--dim);cursor:pointer}}
+details button{{background:var(--panel);color:var(--text);border-color:var(--line);
+font-weight:400}}
+</style></head><body>
+<form class="card" method="post" action="/login">
+<h1><svg viewBox="0 0 64 64" width="20" height="20"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="#5eead4" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="#5eead4"/><circle cx="56" cy="20" r="3.2" fill="#5eead4" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="#5eead4" opacity=".7"/></svg><span>Mem</span>ry dashboard</h1>
+{error}
+<label for="account">Account</label>
+<input id="account" name="account" autocomplete="username" autofocus>
+<label for="password">Password</label>
+<input id="password" name="password" type="password" autocomplete="current-password">
+<button type="submit">Sign in</button>
+<details>
+<summary>Sign in as admin instead</summary>
+<label for="adminkey">Admin API key</label>
+<input id="adminkey" name="admin_key" type="password" autocomplete="off">
+<button type="submit">Sign in as admin</button>
+</details>
+</form></body></html>"""
+
+
 class _NormalizeMcpPath:
     """``/mcp`` and ``/mcp/`` are one endpoint.
 
@@ -759,12 +806,38 @@ def create_app(
         header = request.headers.get("authorization", "")
         return header[7:].strip() if header.lower().startswith("bearer ") else ""
 
+    def _session_principal(request: Request) -> Principal | None:
+        """Principal from a dashboard session cookie, if any.
+
+        This is the browser's path: humans log in once at /login and ride a
+        cookie, instead of pasting an API key into every session. Programmatic
+        clients keep using the bearer header and never touch this.
+        """
+        row = accounts.resolve_session(request.cookies.get(SESSION_COOKIE, ""))
+        if row is None:
+            return None
+        kind, name = row
+        if kind == "admin":
+            return ADMIN
+        return Principal(name=name, default_user=default_user)
+
+    def _authenticate(request: Request) -> Principal | None:
+        """Who this request acts as: bearer token first, then session cookie."""
+        if not api_key and not tenants and accounts.is_empty():
+            return ADMIN  # open mode
+        token = _bearer(request)
+        if token:
+            principal = resolve_principal(token)
+            if principal is not None:
+                return principal
+        return _session_principal(request)
+
     def _p(request: Request) -> Principal:
         return request.state.principal
 
     def guarded(handler):
         async def wrapper(request: Request) -> Response:
-            principal = resolve_principal(_bearer(request))
+            principal = _authenticate(request)
             if principal is None:
                 return _unauthorized()
             request.state.principal = principal
@@ -772,9 +845,59 @@ def create_app(
 
         return wrapper
 
+    # -- dashboard login / session ---------------------------------------
+    def _set_session(response: Response, request: Request, account: str | None) -> None:
+        token = accounts.create_session(account)
+        response.set_cookie(
+            SESSION_COOKIE, token,
+            max_age=SESSION_TTL, httponly=True, samesite="lax",
+            secure=request.url.scheme == "https",
+        )
+
+    def _login_error(message: str) -> HTMLResponse:
+        return HTMLResponse(
+            _DASH_LOGIN_PAGE.format(error=f'<div class="err">{html.escape(message)}</div>'),
+            status_code=401,
+        )
+
+    async def login_form(request: Request) -> Response:
+        if _authenticate(request) is not None:
+            return RedirectResponse("/", status_code=302)
+        return HTMLResponse(_DASH_LOGIN_PAGE.format(error=""))
+
+    async def login_submit(request: Request) -> Response:
+        form = await request.form()
+        admin_key = str(form.get("admin_key", "")).strip()
+        if admin_key:
+            if not api_key or admin_key != api_key:
+                return _login_error("Wrong admin key.")
+            resp = RedirectResponse("/", status_code=302)
+            _set_session(resp, request, None)
+            return resp
+
+        name = str(form.get("account", "")).strip()
+        password = str(form.get("password", ""))
+        account = accounts.get_by_name(name) if name else None
+        if account is None or account.disabled or not account.check_password(password):
+            # one message for any failure: no probing which accounts exist
+            return _login_error("Wrong account or password.")
+        resp = RedirectResponse("/", status_code=302)
+        _set_session(resp, request, account.name)
+        return resp
+
+    async def logout(request: Request) -> Response:
+        accounts.delete_session(request.cookies.get(SESSION_COOKIE, ""))
+        resp = RedirectResponse("/login", status_code=302)
+        resp.delete_cookie(SESSION_COOKIE)
+        return resp
+
     # -- handlers ---------------------------------------------------------
     async def dashboard(request: Request) -> Response:
-        return HTMLResponse(_DASHBOARD)
+        principal = _authenticate(request)
+        if principal is None:
+            return RedirectResponse("/login", status_code=302)
+        who = "admin" if principal.is_admin else principal.name
+        return HTMLResponse(_DASHBOARD.replace("__WHOAMI__", html.escape(who)))
 
     async def health(request: Request) -> Response:
         return JSONResponse({"status": "ok", "service": "memry"})
@@ -1159,6 +1282,9 @@ def create_app(
     routes = [
         Route("/", dashboard),
         Route("/health", health),
+        Route("/login", login_form, methods=["GET"]),
+        Route("/login", login_submit, methods=["POST"]),
+        Route("/logout", logout, methods=["GET", "POST"]),
         Route("/api/v1/memories", guarded(list_memories), methods=["GET"]),
         Route("/api/v1/memories", guarded(create_memory), methods=["POST"]),
         Route("/api/v1/memories/{memory_id}", guarded(get_memory), methods=["GET"]),

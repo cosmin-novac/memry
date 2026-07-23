@@ -70,7 +70,8 @@ headers) embed the key in the URL instead:
 `https://memory.example.com/mcp/<MEMRY_API_KEY>` - full walkthrough in
 [connect-claude-ai.md](connect-claude-ai.md).
 
-The dashboard at `https://memory.example.com/` prompts for the API key once.
+The dashboard at `https://memory.example.com/` has a sign-in page: accounts use their
+name and password, the admin uses the API key ("Sign in as admin").
 
 ## Changing configuration
 

@@ -28,6 +28,7 @@ import os
 import secrets
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +50,15 @@ CREATE TABLE IF NOT EXISTS account_keys (
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_account_keys_account ON account_keys(account_id);
+CREATE TABLE IF NOT EXISTS dashboard_sessions (
+    token_hash   TEXT PRIMARY KEY,
+    account      TEXT,                 -- NULL = admin session
+    created_at   TEXT NOT NULL,
+    expires_at   REAL NOT NULL
+);
 """
+
+SESSION_TTL = 60 * 60 * 24 * 14  # dashboard cookies last two weeks
 
 KEY_PREFIX = "mk_"  # so a leaked string is recognisable as a Memry key
 _SCRYPT_N = 2**14
@@ -284,3 +293,57 @@ class AccountStore:
         with self._lock:
             row = self._db.execute("SELECT 1 FROM accounts LIMIT 1").fetchone()
         return row is None
+
+    # -- dashboard sessions --------------------------------------------
+    def create_session(self, account: str | None) -> str:
+        """Open a dashboard session and return its cookie token.
+
+        ``account`` None is an admin session. Like API keys, only a hash of the
+        token is stored, so a leaked database does not hand over live sessions.
+        """
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO dashboard_sessions (token_hash, account, created_at, "
+                "expires_at) VALUES (?, ?, ?, ?)",
+                (hash_key(token), account, utcnow(), time.time() + SESSION_TTL),
+            )
+            self._db.commit()
+        return token
+
+    def resolve_session(self, token: str) -> tuple[str, str | None] | None:
+        """Map a cookie token to ("admin", None) or ("account", name), or None.
+
+        Expired sessions and sessions whose account was deleted or disabled
+        return None, so revoking an account takes effect on the dashboard too.
+        """
+        if not token:
+            return None
+        with self._lock:
+            row = self._db.execute(
+                "SELECT account, expires_at FROM dashboard_sessions WHERE token_hash = ?",
+                (hash_key(token),),
+            ).fetchone()
+        if row is None or row["expires_at"] < time.time():
+            return None
+        if row["account"] is None:
+            return ("admin", None)
+        account = self.get_by_name(row["account"])
+        if account is None or account.disabled:
+            return None
+        return ("account", account.name)
+
+    def delete_session(self, token: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "DELETE FROM dashboard_sessions WHERE token_hash = ?", (hash_key(token),)
+            )
+            self._db.commit()
+
+    def purge_expired_sessions(self) -> int:
+        with self._lock:
+            cur = self._db.execute(
+                "DELETE FROM dashboard_sessions WHERE expires_at < ?", (time.time(),)
+            )
+            self._db.commit()
+        return cur.rowcount
