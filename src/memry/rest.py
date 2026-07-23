@@ -152,6 +152,8 @@ function togglePanel(name){
   syncPanels();
 }
 let current=[],activeCat=null,haveMore=false,editingId=null,hoverTag=null;
+let hoverFocusTag=null,hoverFocusMix=0,hoverFadeStarted=0;
+const HOVER_FADE_MS=500;
 const cats=m=>((m.categories&&m.categories.length)?m.categories:['(untagged)']).map(c=>String(c).toLowerCase());
 function render(items){
   current=items; drawMap(items);
@@ -298,7 +300,12 @@ function galaxyFrame(now){
   const DIM=rootStyle.getPropertyValue('--dim').trim()||'#8494ab';
   const WARM=rootStyle.getPropertyValue('--warn').trim()||'#f0a35e';
   const STAR=dark?'#c9d6ea':'#33415c';
-  const still=reducedMotion||!!hoverTag||!!activeCat;
+  if(hoverTag){hoverFocusTag=hoverTag;hoverFocusMix=1;hoverFadeStarted=0}
+  else if(hoverFocusTag){
+    hoverFocusMix=reducedMotion||!hoverFadeStarted?0:Math.max(0,1-(now-hoverFadeStarted)/HOVER_FADE_MS);
+    if(!hoverFocusMix)hoverFocusTag=null;
+  }
+  const still=reducedMotion||!!hoverFocusTag||!!activeCat;
   ctx.clearRect(0,0,W,H);
   // deep space ground
   const g0=ctx.createRadialGradient(CX,CY-H*0.05,Rm*0.12,CX,CY,Rm*1.45);
@@ -360,38 +367,49 @@ function galaxyFrame(now){
     pts[n.tag]={x:CX+n.rFrac*RX*Math.cos(n.ang),y:CY+n.rFrac*RY*Math.sin(n.ang)};
   }
   const sel=activeCat?G.byTag[activeCat]:null;
-  const hov=hoverTag?G.byTag[hoverTag]:null;
-  const foc=hov||sel;
+  const hov=hoverFocusTag?G.byTag[hoverFocusTag]:null;
+  const hoverMix=hov?hoverFocusMix:0;
+  const focusEmph=(n,f)=>{
+    if(!f||n===f)return 1;
+    return(G.neigh[f.tag]&&G.neigh[f.tag].has(n.tag))?0.92:0.16;
+  };
   const emph=n=>{
-    if(!foc)return 1;
-    if(n===foc)return 1;
-    return(G.neigh[foc.tag]&&G.neigh[foc.tag].has(n.tag))?0.92:0.16;
+    let A=focusEmph(n,sel);
+    if(hov)A+=(focusEmph(n,hov)-A)*hoverMix;
+    return A;
   };
   // filaments: soft underglow + bright core line; particles on locked links
   for(const e of G.edges){
     const na=G.nodes[e.a],nb=G.nodes[e.b];
     const p=pts[na.tag],q=pts[nb.tag];
     const ca=gTone(na,dark),cb=gTone(nb,dark);
-    const touches=foc&&(na===foc||nb===foc);
-    const A=touches?1:(foc?0.06:1);
+    const selTouches=!!sel&&(na===sel||nb===sel);
+    let touchMix=selTouches?1:0;
+    let A=selTouches?1:(sel?0.06:1);
+    if(hov){
+      const hovTouches=na===hov||nb===hov;
+      A+=((hovTouches?1:0.06)-A)*hoverMix;
+      touchMix+=((hovTouches?1:0)-touchMix)*hoverMix;
+    }
     const mxp=(p.x+q.x)/2,myp=(p.y+q.y)/2;
     const cpx=mxp+(CX-mxp)*0.13,cpy=myp+(CY-myp)*0.13;
     const grad=ctx.createLinearGradient(p.x,p.y,q.x,q.y);
     grad.addColorStop(0,hsla(ca,1));grad.addColorStop(1,hsla(cb,1));
     if(dark)ctx.globalCompositeOperation='lighter';
-    ctx.globalAlpha=(touches?0.34:0.15)*A*(dark?1:0.9);
-    ctx.strokeStyle=grad;ctx.lineWidth=(touches?7:4.5)+e.weight*0.6;ctx.lineCap='round';
+    ctx.globalAlpha=(0.15+0.19*touchMix)*A*(dark?1:0.9);
+    ctx.strokeStyle=grad;ctx.lineWidth=4.5+2.5*touchMix+e.weight*0.6;ctx.lineCap='round';
     ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.quadraticCurveTo(cpx,cpy,q.x,q.y);ctx.stroke();
-    ctx.globalAlpha=(touches?0.95:0.5)*A;
-    ctx.lineWidth=touches?1.8:1.1;
+    ctx.globalAlpha=(0.5+0.45*touchMix)*A;
+    ctx.lineWidth=1.1+0.7*touchMix;
     ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.quadraticCurveTo(cpx,cpy,q.x,q.y);ctx.stroke();
-    if(touches&&foc===sel&&!reducedMotion){
+    const sparkMix=selTouches&&(hov&&hov!==sel?1-hoverMix:1);
+    if(sparkMix>0.01&&!reducedMotion){
       for(let i=0;i<2+e.weight;i++){
         const tt=((t*0.00022*(0.7+0.15*i))+i/(2+e.weight))%1;
         const u=1-tt;
         const sx=u*u*p.x+2*u*tt*cpx+tt*tt*q.x,sy=u*u*p.y+2*u*tt*cpy+tt*tt*q.y;
         const cc=tt<0.5?ca:cb;
-        ctx.globalAlpha=0.9;
+        ctx.globalAlpha=0.9*sparkMix;
         const spark=ctx.createRadialGradient(sx,sy,0,sx,sy,4.5);
         spark.addColorStop(0,hsla(cc,0.95,18));spark.addColorStop(1,'transparent');
         ctx.fillStyle=spark;ctx.beginPath();ctx.arc(sx,sy,4.5,0,Math.PI*2);ctx.fill();
@@ -412,7 +430,8 @@ function galaxyFrame(now){
   // planets: flat crisp discs, varied memory dots, gated counts and labels
   for(const n of G.nodes){
     const p=pts[n.tag],x=p.x,y=p.y,A=emph(n),c=gTone(n,dark);
-    n.h+=(((n===hov||activeCat===n.tag)?1:0)-n.h)*(reducedMotion?1:0.14);
+    const glowTarget=Math.max(activeCat===n.tag?1:0,n===hov?hoverMix:0);
+    n.h+=(glowTarget-n.h)*(reducedMotion?1:0.14);
     ctx.globalAlpha=A;
     if(n.h>0.03){
       const len=n.radius*(2.4+1.0*n.h);
@@ -452,7 +471,9 @@ function galaxyFrame(now){
       ctx.fillText(n.count,x,y+0.5);
       ctx.shadowBlur=0;
     }
-    const lit=n.h>0.4||(foc&&G.neigh[foc.tag]&&G.neigh[foc.tag].has(n.tag));
+    const selLinked=sel&&(n===sel||(G.neigh[sel.tag]&&G.neigh[sel.tag].has(n.tag)));
+    const hovLinked=hov&&(n===hov||(G.neigh[hov.tag]&&G.neigh[hov.tag].has(n.tag)));
+    const lit=n.h>0.4||selLinked||(hovLinked&&hoverMix>0.04);
     if(n.radius>=19||n.h>0.05||lit){
       ctx.globalAlpha=Math.min(1,A+0.05);
       ctx.font='500 9.5px ui-sans-serif,system-ui';
@@ -490,15 +511,22 @@ document.getElementById('map').addEventListener('click',e=>{
     render(current);
   }
 });
+function updateHover(tag){
+  if(tag===hoverTag)return;
+  hoverTag=tag;
+  if(tag){hoverFocusTag=tag;hoverFocusMix=1;hoverFadeStarted=0}
+  else if(hoverFocusTag){
+    hoverFadeStarted=performance.now();
+    if(reducedMotion){hoverFocusTag=null;hoverFocusMix=0}
+  }
+  if(G){galaxyRead();if(reducedMotion)galaxyFrame(performance.now())}
+}
 document.getElementById('map').addEventListener('mousemove',e=>{
   const n=hitNode(e);
   e.target.style.cursor=n?'pointer':'default';
-  const tg=n?n.tag:null;
-  if(tg!==hoverTag){hoverTag=tg;if(G)galaxyRead();if(reducedMotion&&G)galaxyFrame(performance.now())}
+  updateHover(n?n.tag:null);
 });
-document.getElementById('map').addEventListener('mouseleave',()=>{
-  if(hoverTag){hoverTag=null;if(G){galaxyRead();if(reducedMotion)galaxyFrame(performance.now())}}
-});
+document.getElementById('map').addEventListener('mouseleave',()=>updateHover(null));
 // Fullscreen: real API where allowed, CSS-maximize fallback otherwise.
 function setMaxed(v){gMaxed=v;document.getElementById('mapwrap').classList.toggle('maxed',v);
   document.documentElement.style.overflow=v?'hidden':'';
