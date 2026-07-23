@@ -44,6 +44,15 @@ multi-writer deployments (`memry[postgres]`). Per-tenant API keys with strict is
 (`MEMRY_TENANTS`) let one server serve several teams. The default remains a zero-ops
 single file.
 
+**Multi-user, with real OAuth.** Beyond static config tenants, one server can host
+runtime-managed **accounts**, each confined to its own namespace, created with
+`memry account add`. Set `MEMRY_PUBLIC_URL` and Memry becomes an OAuth 2.1 authorization
+server for those accounts (dynamic client registration, PKCE, refresh, revocation, discovery
+at the domain root), so any OAuth-capable MCP client - Claude, Cursor, VS Code - can sign in
+and get a token scoped to that account. No IdP required; Memry verifies against its own
+accounts. Off by default: the single-user path stays keyless. See
+[docs/self-hosting.md](docs/self-hosting.md#accounts-and-oauth).
+
 **You can measure it.** A built-in eval harness scores retrieval (recall@k, MRR, latency
 percentiles) deterministically and offline, and the pluggable backend interface includes
 a [Mem0](https://github.com/mem0ai/mem0) adapter so you can benchmark against it under

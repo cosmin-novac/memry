@@ -82,6 +82,37 @@ docker compose --env-file /opt/memry/.env \
   -f /opt/memry/app/deploy/vps/docker-compose.yml up -d
 ```
 
+## Multi-user & OAuth
+
+To let other people connect as isolated accounts (each confined to its own
+namespace) instead of sharing the admin key:
+
+1. Set your public URL so OAuth turns on, then re-apply:
+
+   ```bash
+   echo 'MEMRY_PUBLIC_URL=https://memory.example.com' >> /opt/memry/.env
+   docker compose --env-file /opt/memry/.env \
+     -f /opt/memry/app/deploy/vps/docker-compose.yml up -d
+   ```
+
+2. Create an account (accounts live in `auth.db` on the same data volume, so
+   they survive redeploys):
+
+   ```bash
+   docker compose --env-file /opt/memry/.env \
+     -f /opt/memry/app/deploy/vps/docker-compose.yml \
+     exec memry memry account add alice --password 's3cret'
+   ```
+
+   That prints an API key (shown once). The account holder can now either use
+   that key directly (`Authorization: Bearer <key>`, or `/mcp/<key>`) or sign in
+   through OAuth from a client that supports it, using the account name and
+   password. There is no public signup: only keys and accounts you create here
+   grant access. See [self-hosting.md](self-hosting.md#accounts-and-oauth).
+
+Your existing admin-key connections keep working unchanged; enabling OAuth only
+adds a second way in.
+
 ## Backups
 
 All state is one SQLite file in the `memry_memry-data` volume:

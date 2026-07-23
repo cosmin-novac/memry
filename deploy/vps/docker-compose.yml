@@ -15,6 +15,9 @@ services:
       MEMRY_LLM_EFFORT: ${MEMRY_LLM_EFFORT:-}
       MEMRY_EMBEDDING_PROVIDER: ${MEMRY_EMBEDDING_PROVIDER:-}
       MEMRY_TENANTS: ${MEMRY_TENANTS:-}
+      # Set to your public https URL to turn on OAuth for accounts (see
+      # docs/self-hosting.md#accounts-and-oauth). Unset = OAuth off.
+      MEMRY_PUBLIC_URL: ${MEMRY_PUBLIC_URL:-}
     volumes:
       - memry-data:/data
     healthcheck:
