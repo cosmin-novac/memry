@@ -178,6 +178,25 @@ Set `MEMRY_API_KEY` to require `Authorization: Bearer <key>` on the API. More in
 claude.ai as a custom connector, see
 [docs/connect-claude-ai.md](docs/connect-claude-ai.md).
 
+### Multi-user accounts
+
+One server can host isolated accounts, each confined to its own `name::*`
+namespace. Manage them with the CLI:
+
+```bash
+memry account add alice --password s3cret    # creates it, prints an API key (shown once)
+memry account list
+memry account issue-key alice --label laptop # another key for the same account
+memry account disable alice                   # its keys + sessions stop working immediately
+```
+
+An account connects with its API key (`Authorization: Bearer <key>`, or
+`https://<host>/mcp/<key>`), or - once you set
+`MEMRY_PUBLIC_URL=https://memory.example.com` - by signing in through **OAuth**
+from any client that supports it (Claude, ChatGPT, Cursor, VS Code). On the
+dashboard, accounts sign in at `/login` with their name and password. Full
+walkthrough: [docs/self-hosting.md](docs/self-hosting.md#accounts-and-oauth).
+
 ### From the CLI
 
 ```bash
