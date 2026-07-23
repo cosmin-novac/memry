@@ -37,6 +37,85 @@ def _store():
     return MemoryStore(Config.load())
 
 
+def _accounts():
+    from .accounts import AccountStore, default_auth_db_path
+
+    cfg = Config.load()
+    return AccountStore(cfg.auth_db_path or default_auth_db_path(cfg.db_path)), cfg
+
+
+def _account_command(args: argparse.Namespace) -> int:
+    accounts, cfg = _accounts()
+    command = getattr(args, "account_command", None) or "list"
+    name = getattr(args, "name", None)
+    try:
+        if command == "add":
+            if any(t.name == name for t in cfg.tenants):
+                print(
+                    f"error: {name!r} is already a configured tenant; it would share "
+                    "that namespace. Pick another name.",
+                    file=sys.stderr,
+                )
+                return 1
+            accounts.create(name, password=args.password)
+            out = {"account": name, "created": True}
+            if not args.no_key:
+                # printed once and never recoverable: only the hash is stored
+                out["api_key"] = accounts.issue_key(name, label="initial")
+            _print(out)
+            return 0
+
+        if command == "list":
+            _print([
+                {
+                    "name": a.name,
+                    "disabled": a.disabled,
+                    "has_password": a.has_password,
+                    "keys": len(accounts.keys_for(a.name)),
+                    "created_at": a.created_at,
+                }
+                for a in accounts.list()
+            ])
+            return 0
+
+        if command == "issue-key":
+            _print({"account": name, "api_key": accounts.issue_key(name, label=args.label)})
+            return 0
+
+        if command == "revoke-keys":
+            _print({"account": name, "revoked": accounts.revoke_keys(name)})
+            return 0
+
+        if command == "passwd":
+            if not accounts.set_password(name, args.password):
+                print(f"no such account: {name}", file=sys.stderr)
+                return 1
+            _print({"account": name, "password_set": True})
+            return 0
+
+        if command in ("disable", "enable"):
+            if not accounts.set_disabled(name, command == "disable"):
+                print(f"no such account: {name}", file=sys.stderr)
+                return 1
+            _print({"account": name, "disabled": command == "disable"})
+            return 0
+
+        if command == "delete":
+            if not accounts.delete(name):
+                print(f"no such account: {name}", file=sys.stderr)
+                return 1
+            _print({"account": name, "deleted": True})
+            return 0
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        accounts.close()
+
+    print(f"unknown account command: {command}", file=sys.stderr)
+    return 1
+
+
 def _scope_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-u", "--user", default=None, help="user_id scope")
     parser.add_argument("-a", "--agent", default=None, help="agent_id scope")
@@ -98,6 +177,30 @@ def main(argv: list[str] | None = None) -> int:
     ep = entity_sub.add_parser("resolve", help="re-judge open proposals with the LLM")
     _scope_args(ep)
 
+    p = sub.add_parser("account", help="manage multiuser accounts")
+    account_sub = p.add_subparsers(dest="account_command")
+    ap = account_sub.add_parser("add", help="create an account and mint its API key")
+    ap.add_argument("name")
+    ap.add_argument("--password", default=None,
+                    help="password for dashboard/OAuth login (optional)")
+    ap.add_argument("--no-key", action="store_true",
+                    help="create the account without minting an API key")
+    ap = account_sub.add_parser("list", help="list accounts")
+    ap = account_sub.add_parser("issue-key", help="mint another API key for an account")
+    ap.add_argument("name")
+    ap.add_argument("--label", default=None, help="what this key is for")
+    ap = account_sub.add_parser("revoke-keys", help="revoke every API key of an account")
+    ap.add_argument("name")
+    ap = account_sub.add_parser("passwd", help="set an account password")
+    ap.add_argument("name")
+    ap.add_argument("password")
+    ap = account_sub.add_parser("disable", help="disable an account (keys stop working)")
+    ap.add_argument("name")
+    ap = account_sub.add_parser("enable", help="re-enable a disabled account")
+    ap.add_argument("name")
+    ap = account_sub.add_parser("delete", help="delete an account (memories are kept)")
+    ap.add_argument("name")
+
     p = sub.add_parser("context", help="build a context block for a task")
     p.add_argument("query")
     _scope_args(p)
@@ -153,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "config":
         _print(Config.load().redacted())
         return 0
+
+    if args.command == "account":
+        return _account_command(args)
 
     if args.command == "eval":
         from .evals.harness import run_eval

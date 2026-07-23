@@ -111,6 +111,13 @@ class Config(BaseModel):
     default_user_id: str = "default"
     api_key: str | None = None  # admin bearer token for the REST/MCP server
     tenants: list[TenantConfig] = Field(default_factory=list)
+    # Accounts live in their own SQLite file (see memry.accounts); None derives
+    # it from db_path. Unlike tenants these are created at runtime, not config.
+    auth_db_path: str | None = None
+    # Public base URL (https://memory.example.com). OAuth needs it: it is the
+    # token issuer and the resource identifier clients discover. Unset means no
+    # OAuth endpoints, which is the right default for a private single-user box.
+    public_url: str | None = None
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
@@ -179,6 +186,8 @@ def _from_env() -> dict[str, Any]:
     put(None, "postgres_dsn", e("MEMRY_POSTGRES_DSN"))
     put(None, "default_user_id", e("MEMRY_DEFAULT_USER"))
     put(None, "api_key", e("MEMRY_API_KEY"))
+    put(None, "auth_db_path", e("MEMRY_AUTH_DB_PATH"))
+    put(None, "public_url", e("MEMRY_PUBLIC_URL"))
     tenants_json = e("MEMRY_TENANTS")
     if tenants_json:
         try:

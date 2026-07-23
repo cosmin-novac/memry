@@ -205,19 +205,25 @@ class LocalBackend(MemoryBackend):
         self._db.commit()
         self.db_path = db_path
         self._ann_cfg = ann or AnnConfig()
-        self._ann: HnswSidecar | None = None
+        # One sidecar per embedding model: a multiuser server with per-account
+        # BYO-key can run several models against this one DB, and a single slot
+        # would rebuild the whole HNSW index every time the model alternated.
+        self._anns: dict[tuple[str, int], HnswSidecar] = {}
         self._ann_pending_saves = 0
 
     # -- ANN sidecar ----------------------------------------------------
     def _ann_index(self, model_id: str, dimensions: int) -> HnswSidecar | None:
-        """Lazily create/load the sidecar; rebuild if stale or model changed."""
+        """Lazily create/load the sidecar for a given model; rebuild if stale."""
         if not (self._ann_cfg.enabled and HAS_USEARCH) or dimensions <= 0:
             return None
-        if self._ann is None or self._ann.model_id != model_id or self._ann.dimensions != dimensions:
-            self._ann = HnswSidecar(self.db_path, dimensions, model_id)
-        if self._ann.needs_rebuild:
+        key = (model_id, dimensions)
+        sidecar = self._anns.get(key)
+        if sidecar is None:
+            sidecar = HnswSidecar(self.db_path, dimensions, model_id)
+            self._anns[key] = sidecar
+        if sidecar.needs_rebuild:
             self.rebuild_ann(model_id, dimensions)
-        return self._ann
+        return self._anns.get(key)
 
     def _ann_key(self, memory_id: str) -> int:
         self._db.execute(
@@ -238,13 +244,18 @@ class LocalBackend(MemoryBackend):
             self._ann_pending_saves = 0
 
     def _ann_remove(self, memory_id: str) -> None:
-        if self._ann is None:
+        if not self._anns:
             return
         row = self._db.execute(
             "SELECT key FROM ann_keys WHERE memory_id = ?", (memory_id,)
         ).fetchone()
-        if row:
-            self._ann.remove(row[0])
+        if not row:
+            return
+        # A memory lives in exactly one model's index, but which one is not
+        # known here; usearch remove() is a no-op for absent keys, so clearing
+        # it from every loaded index is correct and cheap.
+        for sidecar in self._anns.values():
+            sidecar.remove(row[0])
 
     def rebuild_ann(self, model_id: str, dimensions: int) -> int:
         """Rebuild the sidecar from SQLite (the source of truth)."""
@@ -263,9 +274,12 @@ class LocalBackend(MemoryBackend):
                 (model_id,),
             ).fetchall()
             self._db.commit()
-        if self._ann is None or self._ann.model_id != model_id:
-            self._ann = HnswSidecar(self.db_path, dimensions, model_id)
-        self._ann.rebuild([(r[0], r[1]) for r in rows])
+        key = (model_id, dimensions)
+        sidecar = self._anns.get(key)
+        if sidecar is None:
+            sidecar = HnswSidecar(self.db_path, dimensions, model_id)
+            self._anns[key] = sidecar
+        sidecar.rebuild([(r[0], r[1]) for r in rows])
         return len(rows)
 
     # -- episodes -------------------------------------------------------
@@ -826,8 +840,10 @@ class LocalBackend(MemoryBackend):
             "open_merge_proposals": proposals,
             "ann": {
                 "available": HAS_USEARCH,
-                "active": self._ann is not None and self._ann.size >= self._ann_cfg.min_rows,
-                "indexed": self._ann.size if self._ann else 0,
+                "active": any(
+                    s.size >= self._ann_cfg.min_rows for s in self._anns.values()
+                ),
+                "indexed": sum(s.size for s in self._anns.values()),
             },
         }
 
@@ -837,11 +853,11 @@ class LocalBackend(MemoryBackend):
                           "entity_mentions", "entity_proposals", "ann_keys"):
                 self._db.execute(f"DELETE FROM {table}")
             self._db.commit()
-        if self._ann is not None:
-            self._ann.rebuild([])
+        for sidecar in self._anns.values():
+            sidecar.rebuild([])
 
     def close(self) -> None:
-        if self._ann is not None:
-            self._ann.save()
+        for sidecar in self._anns.values():
+            sidecar.save()
         with self._lock:
             self._db.close()

@@ -77,3 +77,37 @@ def verbatim_store(config) -> MemoryStore:
     s = MemoryStore(config, llm=NoneLLM(), embedder=HashEmbedder(128))
     yield s
     s.close()
+
+
+def _sse_json(text: str) -> dict:
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            return json.loads(line[6:])
+    raise AssertionError(f"no SSE data frame in {text!r}")
+
+
+def mcp_call(client, key: str, tool: str, arguments: dict) -> str:
+    """Drive a real MCP session over streamable HTTP and return the tool text.
+
+    Goes through the whole transport (initialize, initialized, tools/call) on
+    purpose: the identity these tests are about is attached to the HTTP request
+    and has to survive the session task boundary to reach the tool body.
+    """
+    headers = {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "Authorization": f"Bearer {key}",
+    }
+    init = client.post("/mcp/", headers=headers, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "test", "version": "0"}}})
+    assert init.status_code == 200, init.text
+    headers["mcp-session-id"] = init.headers["mcp-session-id"]
+    client.post("/mcp/", headers=headers, json={
+        "jsonrpc": "2.0", "method": "notifications/initialized"})
+    called = client.post("/mcp/", headers=headers, json={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments}})
+    assert called.status_code == 200, called.text
+    return _sse_json(called.text)["result"]["content"][0]["text"]

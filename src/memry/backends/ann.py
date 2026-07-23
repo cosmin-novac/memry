@@ -13,6 +13,7 @@ renumbered by VACUUM, so they are not used directly).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -34,8 +35,15 @@ class HnswSidecar:
         self.dimensions = dimensions
         self.model_id = model_id
         self._persist = db_path != ":memory:"
-        self.index_path = Path(f"{db_path}.usearch") if self._persist else None
-        self.meta_path = Path(f"{db_path}.usearch.json") if self._persist else None
+        # The index file is per-model: a multiuser server can hold accounts on
+        # different embedding models against one DB, and their indexes must not
+        # share a file or they clobber each other on save. A short hash keeps
+        # the name filesystem-safe whatever the model id contains.
+        tag = hashlib.sha1(model_id.encode("utf-8")).hexdigest()[:12]
+        self.index_path = Path(f"{db_path}.{tag}.usearch") if self._persist else None
+        self.meta_path = (
+            Path(f"{db_path}.{tag}.usearch.json") if self._persist else None
+        )
         self.index = _UsearchIndex(ndim=dimensions, metric="cos")
         self._loaded_ok = self._try_load()
 

@@ -66,10 +66,11 @@ other agents use, so what Claude Code learned yesterday, claude.ai knows today.
   (`docker compose --env-file /opt/memry/.env -f
   /opt/memry/app/deploy/vps/docker-compose.yml up -d`), then update the
   connector URL in claude.ai.
-- Memories are namespaced per user id; MCP writes default to
+- Memories are namespaced per user id; MCP writes under the admin key default to
   `MEMRY_DEFAULT_USER_ID`. If several people share one server, give each their
-  own tenant key for REST and consider separate deployments for MCP (tenant
-  keys are intentionally not accepted on `/mcp`).
+  own tenant key and hand out `https://memory.example.com/mcp/<TENANT_KEY>`:
+  tenant keys are accepted on `/mcp` and confined to their own namespace, so
+  one deployment can serve several people without them seeing each other.
 
 ## Troubleshooting
 

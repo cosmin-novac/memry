@@ -69,10 +69,57 @@ How isolation works:
   cross-tenant access by memory/entity id returns 404.
 - `GET /api/v1/stats` returns per-tenant counts for tenant keys, global stats for the
   admin key.
-- MCP over HTTP (`/mcp`) accepts only the admin key while auth is configured; tenant keys
-  are REST-scoped. Local stdio MCP (`memry mcp`) is single-user and unaffected.
+- MCP over HTTP (`/mcp`) accepts tenant keys too, with the same confinement: a tool's
+  `user_id` argument selects a namespace *under* the calling tenant, so asking for
+  another tenant's namespace lands in your own rather than reaching theirs. `/mcp/<key>`
+  works for tenant keys as well as the admin key. Local stdio MCP (`memry mcp`) has no
+  auth and stays single-user.
 
 Keys live in config on your infrastructure; treat the config file like a secret.
+
+Tenants are fixed in config. For a server where people sign themselves up and connect from
+any MCP client, use **accounts** instead.
+
+## Accounts and OAuth
+
+Accounts are runtime-managed identities (not config), each confined to its own
+`<account>::<user>` namespace exactly like a tenant. They exist so a shared Memry server
+can hand every person their own isolated space, reachable either with an API key or through
+a real OAuth login from clients like Claude Code, Cursor, or VS Code that expect it.
+
+Create accounts with the CLI:
+
+```bash
+memry account add alice --password s3cret   # prints an API key (shown once)
+memry account list
+memry account issue-key alice --label laptop
+memry account disable alice                 # keys and tokens stop working immediately
+```
+
+Accounts live in `auth.db` next to your memory database (override with `MEMRY_AUTH_DB_PATH`).
+An account's API key works on both `/api` and `/mcp`, including the `/mcp/<key>` URL form.
+
+**OAuth.** Set a public URL and Memry becomes an OAuth 2.1 authorization server for its own
+accounts:
+
+```bash
+export MEMRY_PUBLIC_URL="https://memory.example.com"
+memry serve --host 0.0.0.0
+```
+
+That turns on, at the domain root:
+
+- `/.well-known/oauth-authorization-server` and
+  `/.well-known/oauth-protected-resource/mcp` - discovery documents clients read first.
+- `/register` (Dynamic Client Registration), `/authorize`, `/token`, `/revoke` - the flow,
+  with PKCE required and refresh-token rotation.
+- `/oauth/login` - Memry's own sign-in and consent page, where the account name and password
+  are entered.
+
+A client pointed at `https://memory.example.com/mcp` with no key now discovers the
+authorization server (via the `WWW-Authenticate` header on the 401), registers itself, sends
+the user through login, and receives a token scoped to that account. No key to copy by hand.
+Memry verifies the human against its own accounts, so no third-party IdP is required.
 
 ## Scaling up
 

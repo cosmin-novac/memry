@@ -19,25 +19,41 @@ Endpoints:
 Auth: set MEMRY_API_KEY to require ``Authorization: Bearer <key>`` on /api
 and /mcp. Without it the server is open - bind to localhost or a private net.
 Clients that cannot send headers (claude.ai custom connectors) may embed the
-admin key in the MCP URL instead: ``/mcp/<key>`` or ``/mcp?key=<key>``.
+key in the MCP URL instead: ``/mcp/<key>`` or ``/mcp?key=<key>``.
+
+Tenant keys (MEMRY_TENANTS) work on both transports and are confined to their
+own ``<tenant>::<user>`` namespace; the admin key is unconfined. See
+memry.principal for how that identity is derived and enforced.
 """
 
 from __future__ import annotations
 
 import contextlib
+import html
 import json
 from functools import partial
 from typing import Any
 from urllib.parse import parse_qs
 
+from mcp.server.auth.provider import construct_redirect_uri
+from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
+from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
+from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from starlette.routing import Mount, Route
 
+from .accounts import AccountStore, default_auth_db_path
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
+from .oauth import MEMRY_SCOPE, MemryOAuthProvider
 from .principal import ADMIN, Principal
 from .store import MemoryStore
 
@@ -586,6 +602,56 @@ syncPanels(); loadStats(); loadAll();
 </script></body></html>"""
 
 
+_LOGIN_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in to Memry</title>
+<style>
+:root{{--bg:#0b0e14;--panel:#141a24;--line:#232c3b;--text:#dbe4f0;--dim:#8494ab;
+--accent:#5eead4;--warn:#f0a35e;font-size:15px}}
+@media (prefers-color-scheme: light){{:root{{--bg:#f5f7fa;--panel:#fff;--line:#dde4ee;
+--text:#1a2333;--dim:#5c6b82;--accent:#0d9488;--warn:#b45309}}}}
+*{{box-sizing:border-box}}
+body{{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);
+color:var(--text);font-family:ui-sans-serif,system-ui,Segoe UI,sans-serif}}
+.card{{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+padding:1.8rem;width:min(94vw,26rem)}}
+h1{{font-size:1.15rem;margin:.2rem 0 .3rem}}h1 span{{color:var(--accent)}}
+p.sub{{color:var(--dim);font-size:.85rem;margin:0 0 1.2rem;line-height:1.45}}
+label{{display:block;font-size:.8rem;color:var(--dim);margin:.7rem 0 .25rem}}
+input{{width:100%;font:inherit;color:inherit;background:var(--bg);
+border:1px solid var(--line);border-radius:8px;padding:.55rem .7rem}}
+input:focus{{outline:2px solid var(--accent);outline-offset:-1px}}
+.row{{display:flex;gap:.6rem;margin-top:1.3rem}}
+button{{flex:1;font:inherit;cursor:pointer;border-radius:8px;padding:.6rem;
+border:1px solid var(--line);background:var(--panel);color:inherit}}
+button.primary{{background:var(--accent);color:#04211c;border-color:transparent;
+font-weight:600}}
+.err{{background:color-mix(in srgb,var(--warn) 16%,transparent);border:1px solid var(--warn);
+color:var(--warn);border-radius:8px;padding:.5rem .7rem;font-size:.85rem;margin-bottom:1rem}}
+.scope{{font-size:.78rem;color:var(--dim);margin-top:1.1rem;border-top:1px solid var(--line);
+padding-top:.8rem;line-height:1.5}}
+</style></head><body>
+<form class="card" method="post" action="/oauth/login">
+<h1><span>Mem</span>ry</h1>
+<p class="sub"><b>{client}</b> is asking to read and write your memories.</p>
+{error}
+<input type="hidden" name="request" value="{request_id}">
+<label for="account">Account</label>
+<input id="account" name="account" autocomplete="username" autofocus required>
+<label for="password">Password</label>
+<input id="password" name="password" type="password"
+       autocomplete="current-password" required>
+<div class="row">
+  <button type="submit" name="decision" value="deny">Deny</button>
+  <button class="primary" type="submit" name="decision" value="approve">Approve</button>
+</div>
+<p class="scope">Approving lets this client save, search and delete memories in your
+namespace only. You can revoke it at any time with
+<code>memry account revoke-keys</code> or by disabling the account.</p>
+</form></body></html>"""
+
+
 class _NormalizeMcpPath:
     """``/mcp`` and ``/mcp/`` are one endpoint.
 
@@ -604,11 +670,20 @@ class _NormalizeMcpPath:
         await self.app(scope, receive, send)
 
 
-def create_app(store: MemoryStore | None = None) -> Starlette:
+def create_app(
+    store: MemoryStore | None = None, *, accounts: AccountStore | None = None
+) -> Starlette:
     store = store or MemoryStore()
     api_key = store.config.api_key
     tenants = {t.api_key: t.name for t in store.config.tenants}
     default_user = store.config.default_user_id
+    accounts = accounts or AccountStore(
+        store.config.auth_db_path or default_auth_db_path(store.config.db_path)
+    )
+    # OAuth needs a public issuer URL to put in its metadata; without one there
+    # is nothing coherent to advertise, so the endpoints simply do not exist.
+    public_url = (store.config.public_url or "").rstrip("/")
+    oauth = MemryOAuthProvider(accounts, public_url=public_url) if public_url else None
     mcp = create_server(store)
     mcp.settings.streamable_http_path = "/"
     mcp_app = mcp.streamable_http_app()
@@ -622,12 +697,19 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         Shared by REST and MCP so both transports agree on identity; there is
         no second implementation to drift.
         """
-        if not api_key and not tenants:
+        if not api_key and not tenants and accounts.is_empty():
             return ADMIN  # open mode: bind privately or set keys
         if api_key and token == api_key:
             return ADMIN
         if token in tenants:
             return Principal(name=tenants[token], default_user=default_user)
+        account = accounts.account_for_key(token)
+        if account is not None:
+            return Principal(name=account.name, default_user=default_user)
+        if oauth is not None:
+            granted = oauth.verify_access_token(token)
+            if granted is not None and granted.subject:
+                return Principal(name=granted.subject, default_user=default_user)
         return None
 
     def _is_configured_key(value: str) -> bool:
@@ -637,7 +719,13 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         anything in open mode: without that distinction an open server would
         strip the first path segment of every /mcp request as if it were a key.
         """
-        return bool(value) and (value == api_key or value in tenants)
+        if not value:
+            return False
+        return (
+            value == api_key
+            or value in tenants
+            or accounts.account_for_key(value) is not None
+        )
 
     def _bearer(request: Request) -> str:
         header = request.headers.get("authorization", "")
@@ -922,6 +1010,65 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         ))
         return JSONResponse(outcome)
 
+    # -- OAuth login / consent -------------------------------------------
+    def _login_page(request_id: str, client_name: str, error: str = "") -> HTMLResponse:
+        return HTMLResponse(_LOGIN_PAGE.format(
+            request_id=html.escape(request_id),
+            client=html.escape(client_name),
+            error=f'<div class="err">{html.escape(error)}</div>' if error else "",
+        ))
+
+    async def _client_label(client_id: str) -> str:
+        client = await oauth.get_client(client_id)
+        name = getattr(client, "client_name", None) if client else None
+        return name or client_id
+
+    async def oauth_login_form(request: Request) -> Response:
+        request_id = request.query_params.get("request", "")
+        pending = oauth.load_pending(request_id)
+        if pending is None:
+            return HTMLResponse(
+                "<p>This sign-in link has expired. Start again from your client.</p>",
+                status_code=400,
+            )
+        return _login_page(request_id, await _client_label(pending[0]))
+
+    async def oauth_login_submit(request: Request) -> Response:
+        form = await request.form()
+        request_id = str(form.get("request", ""))
+        pending = oauth.load_pending(request_id)
+        if pending is None:
+            return HTMLResponse(
+                "<p>This sign-in link has expired. Start again from your client.</p>",
+                status_code=400,
+            )
+        client_id, params = pending
+        if form.get("decision") != "approve":
+            return RedirectResponse(
+                construct_redirect_uri(
+                    str(params.redirect_uri),
+                    error="access_denied",
+                    error_description="the user denied the request",
+                    state=params.state,
+                ),
+                status_code=302,
+            )
+
+        account = accounts.get_by_name(str(form.get("account", "")).strip())
+        password = str(form.get("password", ""))
+        if account is None or account.disabled or not account.check_password(password):
+            # one message for every failure: no probing for which accounts exist
+            return _login_page(
+                request_id,
+                await _client_label(client_id),
+                "Wrong account or password.",
+            )
+
+        redirect = oauth.complete_authorization(request_id, account.name)
+        if redirect is None:  # pragma: no cover - consumed concurrently
+            return HTMLResponse("<p>Sign-in expired, please retry.</p>", status_code=400)
+        return RedirectResponse(redirect, status_code=302)
+
     async def guarded_mcp_app(scope, receive, send):
         """MCP over HTTP, authenticated exactly like the REST API.
 
@@ -956,9 +1103,21 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
                 token = (query.get("key") or [""])[0]
         principal = resolve_principal(token)
         if principal is None:
-            await JSONResponse({"error": "unauthorized"}, status_code=401)(
-                scope, receive, send
-            )
+            # RFC 9728: point the client at the protected-resource document so
+            # it can discover the authorization server. Without this header a
+            # client falls back to guessing /.well-known/oauth-authorization-server
+            # and reports the 404 instead of starting the OAuth flow.
+            unauthorized_headers = {}
+            if public_url:
+                unauthorized_headers["WWW-Authenticate"] = (
+                    'Bearer resource_metadata='
+                    f'"{public_url}/.well-known/oauth-protected-resource/mcp"'
+                )
+            await JSONResponse(
+                {"error": "unauthorized"},
+                status_code=401,
+                headers=unauthorized_headers,
+            )(scope, receive, send)
             return
         scope = dict(scope)
         scope[PRINCIPAL_SCOPE_KEY] = principal
@@ -996,8 +1155,32 @@ def create_app(store: MemoryStore | None = None) -> Starlette:
         ),
         Route("/api/v1/entities/resolve", guarded(resolve_entities_route), methods=["POST"]),
         Route("/api/v1/entities/{entity_id}", guarded(get_entity), methods=["GET"]),
-        Mount("/mcp", app=guarded_mcp_app),
     ]
+    if oauth is not None:
+        # These MUST live at the domain root. FastMCP would add them inside its
+        # own app, which is mounted at /mcp, putting the metadata documents at
+        # /mcp/.well-known/... where no client looks for them.
+        routes += create_auth_routes(
+            provider=oauth,
+            issuer_url=AnyHttpUrl(public_url),
+            client_registration_options=ClientRegistrationOptions(
+                enabled=True,
+                valid_scopes=[MEMRY_SCOPE],
+                default_scopes=[MEMRY_SCOPE],
+            ),
+            revocation_options=RevocationOptions(enabled=True),
+        )
+        routes += create_protected_resource_routes(
+            resource_url=AnyHttpUrl(f"{public_url}/mcp"),
+            authorization_servers=[AnyHttpUrl(public_url)],
+            scopes_supported=[MEMRY_SCOPE],
+            resource_name="Memry",
+        )
+        routes += [
+            Route("/oauth/login", oauth_login_form, methods=["GET"]),
+            Route("/oauth/login", oauth_login_submit, methods=["POST"]),
+        ]
+    routes.append(Mount("/mcp", app=guarded_mcp_app))
     return Starlette(
         routes=routes, lifespan=lifespan, middleware=[Middleware(_NormalizeMcpPath)]
     )

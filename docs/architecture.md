@@ -200,7 +200,10 @@ self-hosted memory layer.
 - *Multi-tenant auth.* Named tenants each get their own API key; the server transparently
   namespaces every tenant request (`acme::u1`), refuses cross-tenant access to memories,
   entities, and proposals (404, no existence leak), and scopes stats per tenant. The admin
-  key keeps a global view. MCP-over-HTTP is admin-key-only once auth is configured.
+  key keeps a global view. The same confinement covers MCP-over-HTTP: tools take their
+  namespace from the authenticated principal, never from their own `user_id` argument,
+  and every id-addressed store method re-checks ownership behind the same door as the
+  data, so a new endpoint or tool cannot forget the check.
 
 **Where it is honestly not (yet):**
 
@@ -209,8 +212,11 @@ self-hosted memory layer.
   design statement, not a measured one. Running those benchmarks is the very next step.
 - *No relations graph, no hierarchical summaries, no connectors.* Known roadmap items,
   not accidents. Entities exist and disambiguate; edges between them are next.
-- *Auth is API keys in config.* Fine for self-hosting; SaaS-grade auth (hashed keys,
-  rotation, per-key rate limits, SSO) is deliberately out of scope for now.
+- *Auth: config keys, runtime accounts, or OAuth.* Config tenants and admin keys for the
+  simple case; runtime accounts (hashed API keys, scrypt passwords) plus a built-in OAuth
+  2.1 authorization server (DCR, PKCE, refresh rotation, revocation) for self-service
+  multiuser. Still out of scope: per-key rate limits, and delegating login to an external
+  IdP (SSO) - Memry is its own authorization server today.
 
 **Fast?** Retrieval: yes, sub-millisecond locally, and with the ANN sidecar the vector
 path stays fast into the millions of rows; the latency budget is entirely the LLM calls on
