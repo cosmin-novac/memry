@@ -16,21 +16,30 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import numpy as np
+
 from .backends import build_backend
 from .backends.base import MemoryBackend
 from .config import Config
-from .intelligence.clustering import propose_synthetic_tags
+from .intelligence.clustering import propose_synthetic_tags, suggest_canonical_merges
+from .intelligence.summaries import cluster_vectors, summarize_cluster
 from .intelligence.context import build_context
 from .intelligence.decay import decay_sweep, effective_importance
 from .intelligence.entities import resolve_mentions, resolve_open_proposals
 from .intelligence.graph_retrieval import relational_memory_ids
-from .intelligence.extraction import extract_facts, verbatim_candidates, verify_coverage
+from .intelligence.extraction import (
+    extract_facts,
+    extract_relations,
+    verbatim_candidates,
+    verify_coverage,
+)
 from .intelligence.reconcile import reconcile_candidate
 from .models import (
     MEMORY_TYPES,
     AddAction,
     AddResult,
     CandidateFact,
+    Collection,
     ContextResult,
     Entity,
     EntityMention,
@@ -723,6 +732,53 @@ class MemoryStore:
     def relations(self, *, user_id: str | None = None, limit: int = 1000) -> list[Relation]:
         return self.backend.list_relations(Scope(user_id=user_id), limit=limit)
 
+    def backfill_relations(
+        self, *, user_id: str | None = None, limit: int = 100_000
+    ) -> dict[str, Any]:
+        """One-time: extract typed relations from existing memories.
+
+        Only memories with 2+ linked entities are considered (a relation needs
+        two), each does one small focused LLM call, and each is marked done so a
+        re-run spends no tokens. Cheap and resumable by design.
+        """
+        summary = {"scanned": 0, "processed": 0, "relations_added": 0, "skipped": 0}
+        if not self.llm.available:
+            summary["error"] = "no LLM configured"
+            return summary
+        for memory in self.get_all(user_id=user_id, limit=limit):
+            summary["scanned"] += 1
+            if memory.metadata.get("relations_backfilled"):
+                continue
+            entities = self.backend.entities_of_memory(memory.id)
+            if len(entities) < 2:
+                summary["skipped"] += 1
+                self.backend.update_memory(
+                    memory.id, metadata={**memory.metadata, "relations_backfilled": True}
+                )
+                continue
+            by_norm = {e.normalized or e.name.lower(): e for e in entities}
+            try:
+                triples = extract_relations(
+                    self.llm, memory.content, [e.name for e in entities]
+                )
+            except Exception:
+                continue  # provider hiccup: leave unmarked, retry on next run
+            for t in triples:
+                subj = by_norm.get(t["subject"].strip().lower())
+                obj = by_norm.get(t["object"].strip().lower())
+                if subj is None or obj is None or subj.id == obj.id:
+                    continue
+                self.backend.add_relation(
+                    Relation(subject=subj.id, predicate=t["predicate"], object=obj.id,
+                             user_id=memory.user_id, memory_id=memory.id)
+                )
+                summary["relations_added"] += 1
+            summary["processed"] += 1
+            self.backend.update_memory(
+                memory.id, metadata={**memory.metadata, "relations_backfilled": True}
+            )
+        return summary
+
     def entity(
         self, entity_id: str, *, owner_prefix: str | None = None
     ) -> dict[str, Any] | None:
@@ -830,6 +886,53 @@ class MemoryStore:
             )
         self._stamp_tag_run(user_id)
         return summary
+
+    def collections(self, *, user_id: str | None = None) -> list[Collection]:
+        return self.backend.list_collections(Scope(user_id=user_id))
+
+    def build_collections(
+        self, *, user_id: str | None = None, sample: int = 2000
+    ) -> dict[str, Any]:
+        """Cluster memory embeddings and summarize the largest clusters into
+        titled collections. Clustering is free; only a few clusters are sent to
+        the LLM (capped), so a run costs a small, bounded number of tokens.
+        Rebuilds from scratch each run (idempotent)."""
+        summary: dict[str, Any] = {"collections": 0}
+        if not self.llm.available:
+            summary["skipped"] = "no LLM configured"
+            return summary
+        pairs = self.backend.memory_vectors(Scope(user_id=user_id), limit=sample)
+        if len(pairs) < 4:
+            summary["skipped"] = "too few embedded memories"
+            return summary
+        ids = [p[0] for p in pairs]
+        vectors = np.stack([p[1] for p in pairs])
+        clusters = cluster_vectors(ids, vectors)
+        if not clusters:
+            summary["skipped"] = "no coherent clusters"
+            return summary
+        self.backend.clear_collections(Scope(user_id=user_id))
+        by_id = {m.id: m for m in self.get_all(user_id=user_id, limit=1_000_000)}
+        for member_ids in clusters:
+            contents = [by_id[i].content for i in member_ids if i in by_id]
+            if not contents:
+                continue
+            named = summarize_cluster(self.llm, contents)
+            if not named:
+                continue
+            self.backend.record_collection(
+                Collection(title=named["title"], summary=named.get("summary", ""),
+                           memory_ids=member_ids, user_id=user_id)
+            )
+            summary["collections"] += 1
+        return summary
+
+    def suggest_tag_merges(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
+        """One-shot canonicalization suggestions (variant/synonym merges) for the
+        Tag manager. No LLM -> empty list, so callers can call unconditionally."""
+        if not self.llm.available:
+            return []
+        return suggest_canonical_merges(self.llm, self.categories(user_id=user_id))
 
     def _apply_tag_to_members(
         self, user_id: str | None, tag: str, members: list[str]

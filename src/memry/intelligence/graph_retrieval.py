@@ -14,6 +14,8 @@ relational questions gain the hop-reachable memories on top.
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 from ..backends.base import MemoryBackend
 from ..models import Scope
 
@@ -58,7 +60,61 @@ def expand_entities(
         frontier = nxt
         if not frontier:
             break
+    if not order:
+        # No typed edges (e.g. memories predating relation extraction): fall back
+        # to co-occurrence proximity. The benchmark showed localized PageRank over
+        # co-occurrence is the reliable relation-free option (~0.90, scale-stable),
+        # so weight neighbours by how strongly they co-occur with the seeds rather
+        # than dumping a flat pool.
+        order = _cooccurrence_expand(backend, seeds, hops=hops)
     return order
+
+
+def _cooccurrence_expand(
+    backend: MemoryBackend, seeds: list[str], *, hops: int, per_entity: int = 25
+) -> list[str]:
+    """Entities near the seeds by shared-memory co-occurrence, ranked by a
+    localized PageRank so the strongest structural neighbours come first."""
+    adj: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    reached: set[str] = set(seeds)
+    frontier = set(seeds)
+    for _ in range(hops):
+        nxt: set[str] = set()
+        for e in frontier:
+            for mem in backend.entity_memories(e, limit=per_entity):
+                others = [x.id for x in backend.entities_of_memory(mem.id)]
+                for a in others:
+                    for b in others:
+                        if a != b:
+                            adj[a][b] += 1.0
+                    if a not in reached:
+                        nxt.add(a)
+        reached |= nxt
+        frontier = nxt
+        if not frontier:
+            break
+    nodes = list(reached | set(adj))
+    if not nodes:
+        return []
+    # weighted personalized PageRank, localized to this neighbourhood
+    idx = {n: i for i, n in enumerate(nodes)}
+    seed_mass = 1.0 / max(len(seeds), 1)
+    rank = {n: (seed_mass if n in seeds else 0.0) for n in nodes}
+    alpha = 0.85
+    for _ in range(20):
+        nxt_rank = {n: (1 - alpha) * (seed_mass if n in seeds else 0.0) for n in nodes}
+        for n in nodes:
+            out = adj.get(n)
+            if not out:
+                continue
+            total = sum(out.values())
+            share = alpha * rank[n] / total
+            for m, w in out.items():
+                if m in idx:
+                    nxt_rank[m] += share * w
+        rank = nxt_rank
+    ranked = sorted((n for n in nodes if n not in seeds), key=lambda n: -rank[n])
+    return ranked
 
 
 def relational_memory_ids(

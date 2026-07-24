@@ -11,7 +11,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+from typing import TYPE_CHECKING
+
 from ..models import (
+    Collection,
     Entity,
     EntityMention,
     Episode,
@@ -22,6 +25,9 @@ from ..models import (
     Scope,
     SyntheticTag,
 )
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 class MemoryBackend(ABC):
@@ -139,6 +145,10 @@ class MemoryBackend(ABC):
         """Memories that mention this entity (following merges)."""
         return []
 
+    def entities_of_memory(self, memory_id: str) -> list[Entity]:
+        """The entities a single memory mentions (for relation backfill)."""
+        return []
+
     def merge_entities(self, keep_id: str, merge_id: str) -> bool:
         """Fold ``merge_id`` into ``keep_id`` (repoint mentions, mark merged)."""
         return False
@@ -155,6 +165,22 @@ class MemoryBackend(ABC):
     def relations_of(self, entity_ids: list[str]) -> list[Relation]:
         """Active relations touching any of these entities (either endpoint)."""
         return []
+
+    # -- collections + vectors (for RAPTOR-lite summaries) ----------------
+    def memory_vectors(
+        self, scope: Scope, *, limit: int = 5000
+    ) -> list[tuple[str, "np.ndarray"]]:
+        """(memory_id, embedding) for active memories, for clustering."""
+        return []
+
+    def record_collection(self, collection: Collection) -> None:
+        return None
+
+    def list_collections(self, scope: Scope) -> list[Collection]:
+        return []
+
+    def clear_collections(self, scope: Scope) -> int:
+        return 0
 
     def add_proposal(self, proposal: MergeProposal) -> MergeProposal:
         return proposal

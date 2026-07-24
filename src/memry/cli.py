@@ -228,6 +228,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-u", "--user", default=None,
                    help="namespace to abstract (default: every namespace)")
 
+    p = sub.add_parser(
+        "backfill-relations",
+        help="extract typed relations from existing memories (one-time, cheap)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+
+    p = sub.add_parser(
+        "build-collections",
+        help="cluster memories into titled collections (LLM; a few calls/run)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
     p = sub.add_parser("export", help="export memories as JSONL to stdout")
@@ -370,6 +382,22 @@ def main(argv: list[str] | None = None) -> int:
                 [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
             )
             _print([store.abstract_tags(user_id=uid) for uid in namespaces])
+        elif args.command == "backfill-relations":
+            if not store.llm.available:
+                print("no LLM configured; relation backfill needs one", file=sys.stderr)
+                return 1
+            namespaces = (
+                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
+            )
+            _print([store.backfill_relations(user_id=uid) for uid in namespaces])
+        elif args.command == "build-collections":
+            if not store.llm.available:
+                print("no LLM configured; collections need one", file=sys.stderr)
+                return 1
+            namespaces = (
+                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
+            )
+            _print([store.build_collections(user_id=uid) for uid in namespaces])
         elif args.command == "reindex":
             count = store.reindex()
             _print({"reindexed": count, "embedder": store.embedder.model_id})

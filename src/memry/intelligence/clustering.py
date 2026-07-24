@@ -62,6 +62,78 @@ Return JSON: {{"clusters": [{{"tag": "...", "members": ["...", "..."]}}]}}.
 """
 
 
+CANONICALIZE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "groups": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "canonical": {"type": "string"},
+                    "variants": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["canonical", "variants"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["groups"],
+    "additionalProperties": False,
+}
+
+CANONICALIZE_SYSTEM = """You clean up a tag vocabulary. Given the list of tags in
+use, group ones that are duplicates or variants of the SAME concept: singular
+/plural (project/projects), hyphen/space/case (writing-preference/writing
+preferences), abbreviations, and clear synonyms (finance/financial). For each
+group of two or more, pick the clearest canonical name (prefer one already in
+the list). Do NOT group tags that are merely related but genuinely distinct
+(running and diet are both health, but they are NOT the same tag - leave them).
+Preserve specificity; only merge what a person would call the same label.
+JSON only: {"groups": [{"canonical": str, "variants": [str, str, ...]}]}."""
+
+
+def suggest_canonical_merges(
+    llm: LLM, tags: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """One cheap call proposing variant/synonym merges over the tag list.
+
+    Returns validated ``{"canonical", "variants"}`` groups where every variant
+    is a real existing tag and the group merges 2+ of them. Nothing is applied;
+    the caller (Tag manager) shows these for one-click approval."""
+    known = {str(t["category"]).strip().lower() for t in tags}
+    known.discard("")
+    if len(known) < 2:
+        return []
+    listing = ", ".join(sorted(known))
+    raw = llm.complete(
+        CANONICALIZE_SYSTEM,
+        f"Tags: {listing}\n\nPropose the merge groups as JSON.",
+        json_schema=CANONICALIZE_SCHEMA,
+    )
+    data = parse_lenient_json(raw)
+    if not isinstance(data, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    used: set[str] = set()
+    for group in data.get("groups", []):
+        if not isinstance(group, dict):
+            continue
+        variants = []
+        for v in group.get("variants", []):
+            v = str(v).strip().lower()
+            if v in known and v not in used and v not in variants:
+                variants.append(v)
+        if len(variants) < 2:
+            continue
+        canonical = str(group.get("canonical", "")).strip().lower()
+        if canonical not in variants:
+            canonical = variants[0]  # canonical must be one of the real variants
+        out.append({"canonical": canonical, "variants": variants})
+        used.update(variants)
+    return out
+
+
 def propose_synthetic_tags(
     llm: LLM,
     tags: list[dict[str, Any]],

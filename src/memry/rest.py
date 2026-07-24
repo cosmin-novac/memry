@@ -151,8 +151,10 @@ clearer label, or delete a tag from all memories. Changes apply across the curre
 user filter. Synthetic tags are flagged.</p>
 <div class="tagbar">
   <span class="sel" id="tagsel">none selected</span>
+  <button onclick="suggestMerges()" title="let the LLM propose duplicate/variant tags to merge">Suggest merges</button>
   <button onclick="mergeTags()" title="combine the checked tags into one">Combine selected…</button>
 </div>
+<div id="tagsuggest"></div>
 <div id="taglist"></div>
 </div></div>
 </main><script>
@@ -313,7 +315,7 @@ function galaxyRead(){
   if(f){
     const linked=G.neigh[f.tag]?[...G.neigh[f.tag]].map(x=>'#'+x).join(', '):'none';
     readEl.innerHTML=`<b>#${f.tag}</b> · ${f.count} memor${f.count===1?'y':'ies'} · ${f.zone}`
-      +(activeCat===f.tag?' · filtering':'')+`<br><span style="opacity:.8">linked: ${linked}</span>`;
+      +(activeCat===f.tag?' · filtering':'');
     readEl.classList.add('on');
   }else readEl.classList.remove('on');
   statEl.textContent=`${G.nodes.length} tags · ${G.total} memories`+(G.fb?' · core = largest':'');
@@ -639,6 +641,22 @@ async function mergeTags(){
   const sel=tagSel(); if(sel.length<2)return alert('Check at least two tags to combine.');
   const to=prompt('Combine '+sel.length+' tags into one named:', sel[0]); if(!to||!to.trim())return;
   await tagOp({op:'merge', tags:sel, to:to.trim()});
+}
+async function suggestMerges(){
+  const box=document.getElementById('tagsuggest');
+  box.innerHTML='<div class="hint">thinking…</div>';
+  const u=uid()?'?user_id='+encodeURIComponent(uid()):'';
+  const groups=await api('/api/v1/tags/suggest-merges'+u);
+  if(!groups.length){box.innerHTML='<div class="hint">No duplicate or variant tags found.</div>';return}
+  box.innerHTML=groups.map((g,i)=>`<div class="tagrow" id="sg${i}">
+    <span class="name">merge <b>${g.variants.map(esc).join('</b>, <b>')}</b> → <b>${esc(g.canonical)}</b></span>
+    <button class="act" onclick='applyMerge(${JSON.stringify(g)},${i})'>apply</button>
+    <button class="act del" onclick="document.getElementById('sg${i}').remove()">dismiss</button>
+  </div>`).join('');
+}
+async function applyMerge(g,i){
+  await tagOp({op:'merge', tags:g.variants, to:g.canonical});
+  const row=document.getElementById('sg'+i); if(row)row.remove();
 }
 async function add(infer){
   const t=document.getElementById('newmem').value.trim(); if(!t)return;
@@ -1135,6 +1153,46 @@ def create_app(
         ))
         return JSONResponse(result)
 
+    async def collections_route(request: Request) -> Response:
+        cols = await run_in_threadpool(partial(
+            store.collections,
+            user_id=_p(request).namespace(request.query_params.get("user_id")),
+        ))
+        return JSONResponse([c.model_dump() for c in cols])
+
+    async def build_collections_route(request: Request) -> Response:
+        body = await request.json() if await request.body() else {}
+        result = await run_in_threadpool(partial(
+            store.build_collections,
+            user_id=_p(request).namespace(body.get("user_id")),
+        ))
+        return JSONResponse(result)
+
+    async def suggest_merges_route(request: Request) -> Response:
+        groups = await run_in_threadpool(partial(
+            store.suggest_tag_merges,
+            user_id=_p(request).namespace(request.query_params.get("user_id")),
+        ))
+        return JSONResponse(groups)
+
+    async def relations_route(request: Request) -> Response:
+        rels = await run_in_threadpool(partial(
+            store.relations,
+            user_id=_p(request).namespace(request.query_params.get("user_id")),
+            limit=int(request.query_params.get("limit", "500")),
+        ))
+        return JSONResponse([r.model_dump() for r in rels])
+
+    async def backfill_relations_route(request: Request) -> Response:
+        """One-time: extract typed relations from existing memories. Cheap and
+        resumable (only 2+ entity memories, one small call each, marked done)."""
+        body = await request.json() if await request.body() else {}
+        result = await run_in_threadpool(partial(
+            store.backfill_relations,
+            user_id=_p(request).namespace(body.get("user_id")),
+        ))
+        return JSONResponse(result)
+
     async def edit_tags_route(request: Request) -> Response:
         """Manual tag curation: rename, merge, or delete a tag across memories.
 
@@ -1492,6 +1550,11 @@ def create_app(
         Route("/api/v1/tags/synthetic", guarded(synthetic_tags_route), methods=["GET"]),
         Route("/api/v1/tags/abstract", guarded(abstract_tags_route), methods=["POST"]),
         Route("/api/v1/tags/edit", guarded(edit_tags_route), methods=["POST"]),
+        Route("/api/v1/tags/suggest-merges", guarded(suggest_merges_route), methods=["GET"]),
+        Route("/api/v1/relations", guarded(relations_route), methods=["GET"]),
+        Route("/api/v1/relations/backfill", guarded(backfill_relations_route), methods=["POST"]),
+        Route("/api/v1/collections", guarded(collections_route), methods=["GET"]),
+        Route("/api/v1/collections/build", guarded(build_collections_route), methods=["POST"]),
         Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),
         Route("/api/v1/search", guarded(search), methods=["POST"]),
         Route("/api/v1/context", guarded(context), methods=["POST"]),

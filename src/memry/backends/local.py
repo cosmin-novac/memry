@@ -19,6 +19,7 @@ import numpy as np
 
 from ..config import AnnConfig
 from ..models import (
+    Collection,
     Entity,
     EntityMention,
     Episode,
@@ -165,6 +166,15 @@ CREATE TABLE IF NOT EXISTS relations (
 CREATE INDEX IF NOT EXISTS idx_relations_subject ON relations(subject);
 CREATE INDEX IF NOT EXISTS idx_relations_object ON relations(object);
 CREATE INDEX IF NOT EXISTS idx_relations_user ON relations(user_id);
+CREATE TABLE IF NOT EXISTS collections (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    summary     TEXT NOT NULL DEFAULT '',
+    memory_ids  TEXT NOT NULL,
+    user_id     TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_collections_user ON collections(user_id);
 """
 
 _MEMORY_COLS = (
@@ -734,6 +744,52 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [self._row_to_relation(r) for r in rows]
 
+    # -- collections + vectors ---------------------------------------------
+    def memory_vectors(self, scope: Scope, *, limit: int = 5000):
+        clause, params = _scope_clause(scope)
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT id, embedding FROM memories WHERE {clause} "
+                "AND embedding IS NOT NULL AND invalid_at IS NULL "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [
+            (r["id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows
+        ]
+
+    def record_collection(self, collection: Collection) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO collections (id, title, summary, memory_ids, "
+                "user_id, created_at) VALUES (?,?,?,?,?,?)",
+                (collection.id, collection.title, collection.summary,
+                 json.dumps(collection.memory_ids), collection.user_id,
+                 collection.created_at),
+            )
+            self._db.commit()
+
+    def list_collections(self, scope: Scope) -> list[Collection]:
+        clause, params = _scope_clause(Scope(user_id=scope.user_id))
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM collections WHERE {clause} ORDER BY created_at DESC",
+                params,
+            ).fetchall()
+        return [
+            Collection(id=r["id"], title=r["title"], summary=r["summary"],
+                       memory_ids=json.loads(r["memory_ids"]), user_id=r["user_id"],
+                       created_at=r["created_at"])
+            for r in rows
+        ]
+
+    def clear_collections(self, scope: Scope) -> int:
+        clause, params = _scope_clause(Scope(user_id=scope.user_id))
+        with self._lock:
+            cur = self._db.execute(f"DELETE FROM collections WHERE {clause}", params)
+            self._db.commit()
+        return cur.rowcount
+
     # -- entities -----------------------------------------------------------
     @staticmethod
     def _row_to_entity(row: sqlite3.Row) -> Entity:
@@ -846,6 +902,21 @@ class LocalBackend(MemoryBackend):
                 (entity_id, limit),
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
+
+    def entities_of_memory(self, memory_id: str) -> list[Entity]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT e.* FROM entity_mentions em JOIN entities e ON e.id = em.entity_id "
+                "WHERE em.memory_id = ? AND e.merged_into IS NULL",
+                (memory_id,),
+            ).fetchall()
+        # distinct by id (a memory can mention an entity under several surfaces)
+        seen, out = set(), []
+        for r in rows:
+            if r["id"] not in seen:
+                seen.add(r["id"])
+                out.append(self._row_to_entity(r))
+        return out
 
     def merge_entities(self, keep_id: str, merge_id: str) -> bool:
         if keep_id == merge_id:

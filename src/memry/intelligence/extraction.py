@@ -224,6 +224,52 @@ def _parse_facts(raw: str) -> list[CandidateFact]:
     return facts
 
 
+RELATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "relations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "predicate": {"type": "string"},
+                    "object": {"type": "string"},
+                },
+                "required": ["subject", "predicate", "object"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["relations"],
+    "additionalProperties": False,
+}
+
+RELATION_SYSTEM = """Given a statement and the entities in it, list the typed
+edges that hold BETWEEN those entities. Subject and object must both be from the
+given entity list, spelled exactly. Predicate is a short snake_case verb phrase
+(works_on, uses, located_in, manages, part_of, member_of, reports_to). Only emit
+an edge the statement actually asserts; return [] otherwise. JSON only:
+{"relations": [{"subject": str, "predicate": str, "object": str}]}."""
+
+
+def extract_relations(llm: LLM, content: str, entities: list[str]) -> list[dict[str, str]]:
+    """Focused, cheap relation extraction for backfilling existing memories.
+
+    Deliberately small (one short prompt, only for memories that already have
+    two or more entities), so re-processing a store costs a fraction of a full
+    re-extraction."""
+    if len(entities) < 2:
+        return []
+    raw = llm.complete(
+        RELATION_SYSTEM,
+        f"Statement: {content}\nEntities: {', '.join(entities)}\nRelations as JSON.",
+        json_schema=RELATION_SCHEMA,
+    )
+    data = parse_lenient_json(raw)
+    return _parse_relations(data.get("relations", []) if isinstance(data, dict) else [])
+
+
 def _parse_relations(raw: Any) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     if not isinstance(raw, list):

@@ -16,6 +16,7 @@ from .models import (
     Episode,
     Memory,
     MemoryEvent,
+    Collection,
     Relation,
     Scope,
     SearchResult,
@@ -23,7 +24,7 @@ from .models import (
 )
 from .store import MemoryStore
 
-__version__ = "0.2.12"
+__version__ = "0.2.13"
 
 __all__ = [
     "MemoryStore",
@@ -40,6 +41,7 @@ __all__ = [
     "SearchResult",
     "SyntheticTag",
     "Relation",
+    "Collection",
     "AddResult",
     "AddAction",
     "CandidateFact",

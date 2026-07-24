@@ -85,3 +85,28 @@ def test_no_query_entity_means_no_expansion(store, graph):
 def test_relations_are_namespaced(store, graph):
     assert store.relations(user_id="ada")
     assert store.relations(user_id="someone-else") == []
+
+
+def test_backfill_relations_is_gated_and_idempotent(store):
+    """Backfill only calls the LLM for 2+ entity memories, and not twice."""
+    import sys
+    sys.path.insert(0, "tests")
+    from conftest import FakeLLM
+    import json as _json
+
+    ada = _entity(store, "Ada")
+    helios = _entity(store, "Helios")
+    m2 = _memory(store, "Ada works on Helios.", [ada.id, helios.id])
+    _memory(store, "Ada is tired today.", [ada.id])  # single entity -> skipped
+
+    llm = FakeLLM(); store.llm = llm
+    llm.queue(_json.dumps({"relations": [
+        {"subject": "Ada", "predicate": "works on", "object": "Helios"}]}))
+    res = store.backfill_relations(user_id="ada")
+    assert res["processed"] == 1 and res["skipped"] == 1 and res["relations_added"] == 1
+    assert len(llm.calls) == 1  # only the 2-entity memory hit the LLM
+    assert [r.predicate for r in store.relations(user_id="ada")] == ["works_on"]
+
+    before = len(llm.calls)
+    store.backfill_relations(user_id="ada")
+    assert len(llm.calls) == before  # everything marked done: no new tokens spent
