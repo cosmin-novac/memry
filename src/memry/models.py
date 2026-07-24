@@ -116,6 +116,9 @@ class CandidateFact(BaseModel):
     importance: float = 0.5
     categories: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
+    # (subject_surface, predicate, object_surface) triples between this fact's
+    # entities; resolved to typed Relation edges after entity linking.
+    relations: list[dict[str, str]] = Field(default_factory=list)
     # Carried onto the stored memory. Set to {"pending_distillation": True}
     # when extraction was requested but skipped (no LLM / LLM failure), so the
     # memory can be distilled later.
@@ -202,6 +205,25 @@ class MergeProposal(BaseModel):
     reason: str | None = None
     created_at: str = Field(default_factory=utcnow)
     decided_at: str | None = None
+
+
+class Relation(BaseModel):
+    """A typed edge between two entities, grounded in the memory that stated it.
+
+    Relations are what make multi-hop recall work: "what tool does Ada use?"
+    is answered by traversing ``Ada -works_on-> project -uses-> tool``, never by
+    similarity (the answer memory names neither Ada nor "tool"). Bi-temporal like
+    memories, so a relation can be superseded without being destroyed."""
+
+    id: str = Field(default_factory=new_id)
+    subject: str  # entity id
+    predicate: str  # normalized short verb phrase, e.g. "works_on", "uses"
+    object: str  # entity id
+    user_id: str | None = None
+    memory_id: str | None = None  # the memory that stated it (provenance)
+    created_at: str = Field(default_factory=utcnow)
+    valid_from: str = Field(default_factory=utcnow)
+    invalid_at: str | None = None
 
 
 class SyntheticTag(BaseModel):

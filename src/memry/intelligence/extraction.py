@@ -32,8 +32,23 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
                     "importance": {"type": "number"},
                     "categories": {"type": "array", "items": {"type": "string"}},
                     "entities": {"type": "array", "items": {"type": "string"}},
+                    "relations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "subject": {"type": "string"},
+                                "predicate": {"type": "string"},
+                                "object": {"type": "string"},
+                            },
+                            "required": ["subject", "predicate", "object"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
-                "required": ["content", "type", "importance", "categories", "entities"],
+                "required": [
+                    "content", "type", "importance", "categories", "entities", "relations",
+                ],
                 "additionalProperties": False,
             },
         }
@@ -73,9 +88,18 @@ Rules:
   decisions, ~0.4 minor details
 - type: "semantic" (stable fact/preference), "episodic" (dated event/plan),
   "procedural" (how-to / workflow rule)
+- relations: for each fact, list typed edges BETWEEN two of its entities as
+  {{"subject", "predicate", "object"}}. Subject and object MUST be entity
+  strings from this fact's "entities". The predicate is a short snake_case verb
+  phrase describing how they relate (works_on, uses, located_in, manages,
+  part_of, member_of, married_to, reports_to, depends_on). Only emit a relation
+  when the fact actually states a link between two entities; return [] otherwise.
+  These edges are what let later queries hop from one entity to another, so
+  prefer the specific, durable relationship over a vague one.
 
 Respond with JSON only: {{"facts": [{{"content": str, "type": str,
-"importance": number, "categories": [str], "entities": [str]}}]}}.
+"importance": number, "categories": [str], "entities": [str],
+"relations": [{{"subject": str, "predicate": str, "object": str}}]}}]}}.
 Return {{"facts": []}} if nothing is worth remembering."""
 
 
@@ -194,9 +218,25 @@ def _parse_facts(raw: str) -> list[CandidateFact]:
                 importance=min(max(importance, 0.0), 1.0),
                 categories=[str(c) for c in item.get("categories", []) if c],
                 entities=[str(e) for e in item.get("entities", []) if e],
+                relations=_parse_relations(item.get("relations", [])),
             )
         )
     return facts
+
+
+def _parse_relations(raw: Any) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    if not isinstance(raw, list):
+        return out
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        subj = str(r.get("subject", "")).strip()
+        pred = str(r.get("predicate", "")).strip().lower().replace(" ", "_")
+        obj = str(r.get("object", "")).strip()
+        if subj and pred and obj and subj.lower() != obj.lower():
+            out.append({"subject": subj, "predicate": pred, "object": obj})
+    return out
 
 
 def parse_lenient_json(raw: str) -> Any:

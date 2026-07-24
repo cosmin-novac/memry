@@ -25,6 +25,7 @@ from ..models import (
     Memory,
     MemoryEvent,
     MergeProposal,
+    Relation,
     Scope,
     SyntheticTag,
     utcnow,
@@ -150,6 +151,20 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS relations (
+    id         TEXT PRIMARY KEY,
+    subject    TEXT NOT NULL,
+    predicate  TEXT NOT NULL,
+    object     TEXT NOT NULL,
+    user_id    TEXT,
+    memory_id  TEXT,
+    created_at TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    invalid_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_relations_subject ON relations(subject);
+CREATE INDEX IF NOT EXISTS idx_relations_object ON relations(object);
+CREATE INDEX IF NOT EXISTS idx_relations_user ON relations(user_id);
 """
 
 _MEMORY_COLS = (
@@ -666,6 +681,58 @@ class LocalBackend(MemoryBackend):
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)
             )
             self._db.commit()
+
+    # -- typed relations ---------------------------------------------------
+    @staticmethod
+    def _row_to_relation(row: sqlite3.Row) -> Relation:
+        return Relation(
+            id=row["id"], subject=row["subject"], predicate=row["predicate"],
+            object=row["object"], user_id=row["user_id"], memory_id=row["memory_id"],
+            created_at=row["created_at"], valid_from=row["valid_from"],
+            invalid_at=row["invalid_at"],
+        )
+
+    def add_relation(self, relation: Relation) -> Relation:
+        with self._lock:
+            # dedupe: one active edge per (subject, predicate, object, namespace)
+            existing = self._db.execute(
+                "SELECT id FROM relations WHERE subject=? AND predicate=? AND object=? "
+                "AND IFNULL(user_id,'')=IFNULL(?,'') AND invalid_at IS NULL",
+                (relation.subject, relation.predicate, relation.object, relation.user_id),
+            ).fetchone()
+            if existing:
+                return relation
+            self._db.execute(
+                "INSERT INTO relations (id, subject, predicate, object, user_id, "
+                "memory_id, created_at, valid_from, invalid_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (relation.id, relation.subject, relation.predicate, relation.object,
+                 relation.user_id, relation.memory_id, relation.created_at,
+                 relation.valid_from, relation.invalid_at),
+            )
+            self._db.commit()
+        return relation
+
+    def list_relations(self, scope: Scope, *, limit: int = 1000) -> list[Relation]:
+        clause, params = _scope_clause(Scope(user_id=scope.user_id))
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM relations WHERE {clause} AND invalid_at IS NULL "
+                "ORDER BY created_at DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [self._row_to_relation(r) for r in rows]
+
+    def relations_of(self, entity_ids: list[str]) -> list[Relation]:
+        if not entity_ids:
+            return []
+        placeholders = ",".join("?" * len(entity_ids))
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM relations WHERE invalid_at IS NULL AND "
+                f"(subject IN ({placeholders}) OR object IN ({placeholders}))",
+                (*entity_ids, *entity_ids),
+            ).fetchall()
+        return [self._row_to_relation(r) for r in rows]
 
     # -- entities -----------------------------------------------------------
     @staticmethod

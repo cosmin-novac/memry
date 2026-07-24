@@ -34,6 +34,7 @@ Thumbs.db
 # Personal, machine-specific notes and scripts
 *.local.md
 *.local.py
+*.local.txt
 .remember/
 docs/assets/login-memry.png
 docs/assets/added-to-chatgpt.png

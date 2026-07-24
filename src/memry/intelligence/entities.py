@@ -86,17 +86,16 @@ def resolve_mentions(
     memory_id: str,
     memory_content: str,
     surfaces: list[str],
-) -> list[Entity]:
+) -> dict[str, Entity]:
     """Attach a memory's entity mentions, creating/reusing entities per the
-    conservative policy. Returns the entities the mentions attached to."""
-    attached: list[Entity] = []
-    seen: set[str] = set()
+    conservative policy. Returns a map of normalized surface -> entity, so the
+    caller can resolve relation triples to the entities they linked to."""
+    resolved: dict[str, Entity] = {}
     for surface in surfaces:
         surface = surface.strip()
         normalized = surface.lower()
-        if not normalized or normalized in seen:
+        if not normalized or normalized in resolved:
             continue
-        seen.add(normalized)
 
         candidates = backend.find_entities(normalized, scope)
         target: Entity | None = None
@@ -135,8 +134,8 @@ def resolve_mentions(
         backend.add_mention(
             EntityMention(entity_id=target.id, memory_id=memory_id, surface=surface)
         )
-        attached.append(target)
-    return attached
+        resolved[normalized] = target
+    return resolved
 
 
 def resolve_open_proposals(

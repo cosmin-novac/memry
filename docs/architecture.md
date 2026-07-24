@@ -210,8 +210,12 @@ self-hosted memory layer.
 - *Unproven extraction quality.* SOTA claims in this field are benchmark claims
   (LoCoMo/LongMemEval). Memry hasn't run them yet; until it does, "state of the art" is a
   design statement, not a measured one. Running those benchmarks is the very next step.
-- *No relations graph, no hierarchical summaries, no connectors.* Known roadmap items,
-  not accidents. Entities exist and disambiguate; edges between them are next.
+- *Typed relations, landing now; hierarchical summaries and connectors next.* Extraction
+  emits typed edges between entities (`Ada -works_on-> Helios -uses-> Postgres`), and search
+  fuses relation-traversal candidates with hybrid results so multi-hop questions - whose
+  answer shares no words with the query - are recoverable. A controlled benchmark
+  (`evals/retrieval_benchmark.py`) shows hybrid alone scores zero on those and typed-relation
+  traversal is exact and scale-stable. Coarse summary nodes over clusters are the next layer.
 - *Auth: config keys, runtime accounts, or OAuth.* Config tenants and admin keys for the
   simple case; runtime accounts (hashed API keys, scrypt passwords) plus a built-in OAuth
   2.1 authorization server (DCR, PKCE, refresh rotation, revocation) for self-service

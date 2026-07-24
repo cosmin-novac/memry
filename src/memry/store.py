@@ -23,6 +23,7 @@ from .intelligence.clustering import propose_synthetic_tags
 from .intelligence.context import build_context
 from .intelligence.decay import decay_sweep, effective_importance
 from .intelligence.entities import resolve_mentions, resolve_open_proposals
+from .intelligence.graph_retrieval import relational_memory_ids
 from .intelligence.extraction import extract_facts, verbatim_candidates, verify_coverage
 from .intelligence.reconcile import reconcile_candidate
 from .models import (
@@ -38,6 +39,7 @@ from .models import (
     MemoryEvent,
     MemoryType,
     MergeProposal,
+    Relation,
     Scope,
     SearchResult,
     SyntheticTag,
@@ -266,7 +268,7 @@ class MemoryStore:
             # Entity mentions attach to the memory the action landed on
             # (conservative disambiguation; see intelligence/entities.py).
             if action.event != "NONE" and action.memory_id and candidate.entities:
-                resolve_mentions(
+                resolved = resolve_mentions(
                     backend=self.backend,
                     llm=self.llm,
                     scope=scope,
@@ -274,7 +276,36 @@ class MemoryStore:
                     memory_content=action.content or candidate.content,
                     surfaces=candidate.entities,
                 )
+                self._resolve_relations(
+                    candidate.relations, resolved, scope, action.memory_id
+                )
         return actions
+
+    def _resolve_relations(
+        self,
+        relations: list[dict[str, str]],
+        resolved: dict[str, Any],
+        scope: Scope,
+        memory_id: str,
+    ) -> None:
+        """Turn (subject, predicate, object) surface triples into typed edges
+        between the entities they linked to. Both endpoints must have resolved
+        to real entities in this same memory, so an edge is always grounded."""
+        for rel in relations:
+            subj = resolved.get(str(rel.get("subject", "")).strip().lower())
+            obj = resolved.get(str(rel.get("object", "")).strip().lower())
+            predicate = str(rel.get("predicate", "")).strip().lower()
+            if subj is None or obj is None or not predicate or subj.id == obj.id:
+                continue
+            self.backend.add_relation(
+                Relation(
+                    subject=subj.id,
+                    predicate=predicate,
+                    object=obj.id,
+                    user_id=scope.user_id,
+                    memory_id=memory_id,
+                )
+            )
 
     def import_verbatim(
         self, rows: list[dict[str, Any]], *, user_id: str | None = None
@@ -435,6 +466,7 @@ class MemoryStore:
         categories: list[str] | None = None,
         since: str | None = None,
         until: str | None = None,
+        relational: bool = True,
     ) -> list[SearchResult]:
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         # No query text = browse by tag/date rather than rank by relevance.
@@ -445,9 +477,9 @@ class MemoryStore:
                 categories=categories, since=since, until=until,
             )
             return [SearchResult(memory=m, score=0.0) for m in memories]
-        # Date filtering is applied after ranking; over-fetch so a date window
-        # still yields a full page of the best matches within it.
-        fetch = limit if not (since or until) else min(max(limit * 8, 40), 500)
+        # Over-fetch when we will post-filter or fuse, so a full page survives.
+        wide = (since or until) or (relational and not categories)
+        fetch = limit if not wide else min(max(limit * 8, 40), 500)
         results = hybrid_search(
             backend=self.backend,
             embedder=self.embedder,
@@ -458,11 +490,48 @@ class MemoryStore:
             include_invalid=include_invalid,
             categories=categories,
         )
+        # Relational fusion: add memories reachable by typed relations from the
+        # query's entities (multi-hop answers hybrid alone scores at zero).
+        if relational and not categories:
+            rel_ids = relational_memory_ids(self.backend, scope, query, hops=2)
+            if rel_ids:
+                results = self._fuse_relational(results, rel_ids, include_invalid)
         if since or until:
-            results = [
-                r for r in results if _within(r.memory.created_at, since, until)
-            ][:limit]
-        return results
+            results = [r for r in results if _within(r.memory.created_at, since, until)]
+        return results[:limit]
+
+    def _fuse_relational(
+        self,
+        hybrid_results: list[SearchResult],
+        rel_ids: list[str],
+        include_invalid: bool,
+    ) -> list[SearchResult]:
+        """RRF-fuse hybrid results (ranked by relevance) with relational
+        candidates (ranked by graph distance). Hybrid keeps direct answers on
+        top; the relational list injects the hop-reachable ones."""
+        k = 60
+        rescue = 10  # only rescue memories hybrid buried (rank >= this) or missed
+        hybrid_rank = {r.memory.id: rank for rank, r in enumerate(hybrid_results)}
+        score: dict[str, float] = {}
+        for rank, r in enumerate(hybrid_results):
+            score[r.memory.id] = 1.0 / (k + rank)
+        for rank, mid in enumerate(rel_ids):
+            hr = hybrid_rank.get(mid)
+            # A memory hybrid already surfaced needs no graph boost; adding it
+            # would let a well-ranked neighbor outrank the true direct answer.
+            # Only the buried/absent (the multi-hop answers) get rescued.
+            if hr is None or hr >= rescue:
+                score[mid] = score.get(mid, 0.0) + 1.0 / (k + rank)
+        have: dict[str, SearchResult] = {r.memory.id: r for r in hybrid_results}
+        for mid in rel_ids:
+            if mid not in have:
+                memory = self.backend.get_memory(mid)
+                if memory is not None and (include_invalid or memory.invalid_at is None):
+                    have[mid] = SearchResult(memory=memory, score=0.0)
+        ranked = sorted(have.values(), key=lambda r: -score.get(r.memory.id, 0.0))
+        for r in ranked:
+            r.signals = {**r.signals, "fused": round(score.get(r.memory.id, 0.0), 5)}
+        return ranked
 
     def reconstruct_context(
         self,
@@ -650,6 +719,9 @@ class MemoryStore:
     ) -> list[Entity]:
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         return self.backend.list_entities(scope, include_merged=include_merged, limit=limit)
+
+    def relations(self, *, user_id: str | None = None, limit: int = 1000) -> list[Relation]:
+        return self.backend.list_relations(Scope(user_id=user_id), limit=limit)
 
     def entity(
         self, entity_id: str, *, owner_prefix: str | None = None

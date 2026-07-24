@@ -18,6 +18,7 @@ from ..models import (
     Memory,
     MemoryEvent,
     MergeProposal,
+    Relation,
     Scope,
     SyntheticTag,
 )
@@ -141,6 +142,19 @@ class MemoryBackend(ABC):
     def merge_entities(self, keep_id: str, merge_id: str) -> bool:
         """Fold ``merge_id`` into ``keep_id`` (repoint mentions, mark merged)."""
         return False
+
+    # -- typed relations (anchor -> anchor edges) -------------------------
+    # Default no-ops; LocalBackend implements. A backend without relations
+    # simply has no multi-hop graph; retrieval falls back to hybrid.
+    def add_relation(self, relation: Relation) -> Relation:
+        return relation
+
+    def list_relations(self, scope: Scope, *, limit: int = 1000) -> list[Relation]:
+        return []
+
+    def relations_of(self, entity_ids: list[str]) -> list[Relation]:
+        """Active relations touching any of these entities (either endpoint)."""
+        return []
 
     def add_proposal(self, proposal: MergeProposal) -> MergeProposal:
         return proposal
