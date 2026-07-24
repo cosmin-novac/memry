@@ -241,6 +241,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
 
     p = sub.add_parser(
+        "repair-dates",
+        help="recompute updated_at from the audit trail (token-free)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+
+    p = sub.add_parser(
         "build-collections",
         help="cluster memories into titled collections (LLM; a few calls/run)",
     )
@@ -404,6 +410,11 @@ def main(argv: list[str] | None = None) -> int:
                 [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
             )
             _print([store.backfill_entity_types(user_id=uid) for uid in namespaces])
+        elif args.command == "repair-dates":
+            namespaces = (
+                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
+            )
+            _print([store.repair_updated_at(user_id=uid) for uid in namespaces])
         elif args.command == "build-collections":
             if not store.llm.available:
                 print("no LLM configured; collections need one", file=sys.stderr)

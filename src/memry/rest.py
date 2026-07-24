@@ -1245,6 +1245,14 @@ def create_app(
         ))
         return JSONResponse(result)
 
+    async def repair_dates_route(request: Request) -> Response:
+        body = await request.json() if await request.body() else {}
+        result = await run_in_threadpool(partial(
+            store.repair_updated_at,
+            user_id=_p(request).namespace(body.get("user_id")),
+        ))
+        return JSONResponse(result)
+
     async def edit_tags_route(request: Request) -> Response:
         """Manual tag curation: rename, merge, or delete a tag across memories.
 
@@ -1543,29 +1551,43 @@ def create_app(
         scope[PRINCIPAL_SCOPE_KEY] = principal
         await mcp_app(scope, receive, send)
 
-    async def _tag_abstraction_scheduler() -> None:
-        """Weekly (configurable) tag abstraction per namespace.
-
-        Wakes periodically, runs abstraction for namespaces whose interval has
-        elapsed, and caps how many it does per wake so a server with many
-        accounts spreads the LLM work across cycles instead of bursting. The
-        last-run time is persisted (backend meta), so restarts don't re-run and
-        the cadence survives them.
+    async def _maintenance_scheduler() -> None:
+        """Periodic per-namespace maintenance: entity de-duplication (resolve
+        open merge proposals, auto-confirm clear matches) and, if enabled, tag
+        abstraction. Each task runs on its own interval; last-run times are
+        persisted (backend meta) so restarts don't re-run, and per-cycle work is
+        capped so a many-account server spreads LLM cost across cycles.
         """
-        cfg = store.config.tags
-        interval = max(cfg.interval_days, 0.001)
-        check_every = max(min(interval * 86400, 6 * 3600), 60)
+        tcfg = store.config.tags
+        tag_interval = max(tcfg.interval_days, 0.001)
+        dedup_interval = max(store.config.dedup_interval_days, 0.001)
+        check_every = max(min(min(tag_interval, dedup_interval) * 86400, 6 * 3600), 60)
         max_per_cycle = 25
+
+        def dedup_key(uid: str | None) -> str:
+            return f"entity_dedup:last_run:{uid or ''}"
+
         while True:
             try:
                 now = datetime.now(timezone.utc)
+                stamp = now.isoformat(timespec="seconds")
                 processed = 0
                 for uid in store.backend.distinct_user_ids() or [None]:
                     if processed >= max_per_cycle:
                         break
-                    if _tag_run_due(store.last_tag_run(uid), interval, now):
+                    did = False
+                    if store.config.dedup_entities and _tag_run_due(
+                        store.backend.get_meta(dedup_key(uid)), dedup_interval, now
+                    ):
+                        await run_in_threadpool(store.resolve_entities, user_id=uid)
+                        store.backend.set_meta(dedup_key(uid), stamp)
+                        did = True
+                    if tcfg.enabled and _tag_run_due(
+                        store.last_tag_run(uid), tag_interval, now
+                    ):
                         await run_in_threadpool(store.abstract_tags, user_id=uid)
-                        processed += 1
+                        did = True
+                    processed += 1 if did else 0
             except Exception:  # a scheduler hiccup must never take the server down
                 pass
             await asyncio.sleep(check_every)
@@ -1573,9 +1595,9 @@ def create_app(
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette):
         task: asyncio.Task | None = None
-        # Only schedule when it can do something: enabled and an LLM present.
-        if store.config.tags.enabled and store.llm.available:
-            task = asyncio.create_task(_tag_abstraction_scheduler())
+        # Schedule when there is maintenance to do and an LLM to do it with.
+        if (store.config.dedup_entities or store.config.tags.enabled) and store.llm.available:
+            task = asyncio.create_task(_maintenance_scheduler())
         try:
             async with mcp.session_manager.run():
                 yield
@@ -1606,6 +1628,7 @@ def create_app(
         Route("/api/v1/relations", guarded(relations_route), methods=["GET"]),
         Route("/api/v1/relations/backfill", guarded(backfill_relations_route), methods=["POST"]),
         Route("/api/v1/entities/backfill-types", guarded(backfill_entity_types_route), methods=["POST"]),
+        Route("/api/v1/memories/repair-dates", guarded(repair_dates_route), methods=["POST"]),
         Route("/api/v1/collections", guarded(collections_route), methods=["GET"]),
         Route("/api/v1/collections/build", guarded(build_collections_route), methods=["POST"]),
         Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),

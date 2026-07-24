@@ -60,7 +60,11 @@ class MemoryBackend(ABC):
         entities: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         source_episode_ids: list[str] | None = None,
-    ) -> Memory | None: ...
+        touch: bool = True,
+    ) -> Memory | None:
+        """``touch=False`` updates stored fields WITHOUT moving ``updated_at``
+        (for housekeeping like tagging/backfill/re-embedding, which must not
+        reset a memory's recency or decay age)."""
 
     @abstractmethod
     def invalidate_memory(
@@ -74,6 +78,10 @@ class MemoryBackend(ABC):
 
     @abstractmethod
     def get_memory(self, memory_id: str) -> Memory | None: ...
+
+    def set_memory_timestamp(self, memory_id: str, updated_at: str) -> None:
+        """Set updated_at directly (for repairing dates from the audit trail)."""
+        return None
 
     @abstractmethod
     def list_memories(

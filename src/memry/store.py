@@ -442,7 +442,7 @@ class MemoryStore:
             meta = {
                 k: v for k, v in memory.metadata.items() if k != "pending_distillation"
             }
-            self.backend.update_memory(memory_id, metadata=meta)
+            self.backend.update_memory(memory_id, metadata=meta, touch=False)
             return AddResult(
                 episode_ids=episode_ids,
                 warnings=["no facts extracted; memory kept verbatim"],
@@ -737,6 +737,26 @@ class MemoryStore:
     def relations(self, *, user_id: str | None = None, limit: int = 1000) -> list[Relation]:
         return self.backend.list_relations(Scope(user_id=user_id), limit=limit)
 
+    def repair_updated_at(self, *, user_id: str | None = None) -> dict[str, Any]:
+        """Reconstruct each memory's updated_at from its audit trail.
+
+        Housekeeping (tagging, relation backfill, re-embedding) used to bump
+        updated_at; this recomputes the true value as the time of the last
+        content-changing event (ADD/UPDATE/SUPERSEDE), or created_at if there was
+        none. Token-free; idempotent. Fixes recency and decay after such a run.
+        """
+        fixed = 0
+        for memory in self.get_all(user_id=user_id, include_invalid=True, limit=1_000_000):
+            times = [
+                e.created_at for e in self.backend.history(memory.id)
+                if e.event in ("ADD", "UPDATE", "SUPERSEDE")
+            ]
+            true_ts = max([memory.created_at, *times])
+            if true_ts != memory.updated_at:
+                self.backend.set_memory_timestamp(memory.id, true_ts)
+                fixed += 1
+        return {"fixed": fixed}
+
     def backfill_relations(
         self, *, user_id: str | None = None, limit: int = 100_000
     ) -> dict[str, Any]:
@@ -758,7 +778,8 @@ class MemoryStore:
             if len(entities) < 2:
                 summary["skipped"] += 1
                 self.backend.update_memory(
-                    memory.id, metadata={**memory.metadata, "relations_backfilled": True}
+                    memory.id, metadata={**memory.metadata, "relations_backfilled": True},
+                    touch=False,
                 )
                 continue
             by_norm = {e.normalized or e.name.lower(): e for e in entities}
@@ -780,7 +801,8 @@ class MemoryStore:
                 summary["relations_added"] += 1
             summary["processed"] += 1
             self.backend.update_memory(
-                memory.id, metadata={**memory.metadata, "relations_backfilled": True}
+                memory.id, metadata={**memory.metadata, "relations_backfilled": True},
+                touch=False,
             )
         return summary
 
@@ -978,7 +1000,7 @@ class MemoryStore:
             if tag in current:
                 continue
             self.backend.update_memory(
-                memory.id, categories=[*(memory.categories or []), tag]
+                memory.id, categories=[*(memory.categories or []), tag], touch=False
             )
             tagged += 1
         return tagged
@@ -1018,7 +1040,7 @@ class MemoryStore:
             if add and add not in {str(c).strip().lower() for c in kept}:
                 kept.append(add)
             if kept != cats:
-                self.backend.update_memory(memory.id, categories=kept)
+                self.backend.update_memory(memory.id, categories=kept, touch=False)
                 changed += 1
         scope = Scope(user_id=user_id)
         for tag in remove:
@@ -1054,7 +1076,8 @@ class MemoryStore:
             for memory, vector in zip(batch, vectors):
                 if vector:
                     self.backend.update_memory(
-                        memory.id, embedding=vector, embedding_model=self.embedder.model_id
+                        memory.id, embedding=vector, embedding_model=self.embedder.model_id,
+                        touch=False
                     )
                     count += 1
         rebuild = getattr(self.backend, "rebuild_ann", None)

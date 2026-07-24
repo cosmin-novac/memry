@@ -411,11 +411,16 @@ class LocalBackend(MemoryBackend):
         entities: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         source_episode_ids: list[str] | None = None,
+        touch: bool = True,
     ) -> Memory | None:
         from ..models import utcnow
 
-        sets: list[str] = ["updated_at = ?"]
-        params: list[Any] = [utcnow()]
+        # touch=False is for housekeeping (tagging, backfill markers, re-embedding):
+        # it changes stored fields without counting as a content edit, so the
+        # memory's updated_at - which drives recency ranking and decay age - is
+        # left alone. Only genuine content changes should move that clock.
+        sets: list[str] = ["updated_at = ?"] if touch else []
+        params: list[Any] = [utcnow()] if touch else []
         if content is not None:
             sets.append("content = ?")
             params.append(content)
@@ -443,6 +448,8 @@ class LocalBackend(MemoryBackend):
         if source_episode_ids is not None:
             sets.append("source_episode_ids = ?")
             params.append(json.dumps(source_episode_ids))
+        if not sets:  # nothing to change (touch=False with no fields)
+            return self.get_memory(memory_id)
         with self._lock:
             cur = self._db.execute(
                 f"UPDATE memories SET {', '.join(sets)} WHERE id = ?", (*params, memory_id)
@@ -453,6 +460,13 @@ class LocalBackend(MemoryBackend):
         if cur.rowcount == 0:
             return None
         return self.get_memory(memory_id)
+
+    def set_memory_timestamp(self, memory_id: str, updated_at: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE memories SET updated_at = ? WHERE id = ?", (updated_at, memory_id)
+            )
+            self._db.commit()
 
     def invalidate_memory(
         self, memory_id: str, *, superseded_by: str | None = None

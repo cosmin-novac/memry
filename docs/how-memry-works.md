@@ -30,6 +30,11 @@ Two important properties of a **Memory**:
 - **Derived, with provenance.** A memory links back to the episode(s) it came
   from (`source_episode_ids`), so you can always re-run a better extraction over
   the original text.
+- **`updated_at` tracks content, not housekeeping.** It moves only on a genuine
+  content change (a user edit, or a reconciliation UPDATE), because it drives
+  recency ranking and decay *age*. Tagging, relation backfill, and re-embedding
+  update the row with `touch=False` and leave `updated_at` alone. `created_at`
+  never changes after creation.
 
 ## The write path (what happens on `save`)
 
@@ -168,7 +173,13 @@ Concretely:
 
 ## Keeping it manageable
 
-- Reconciliation already prevents duplicate facts on write.
+- Reconciliation already prevents duplicate *facts* on write.
+- A weekly **maintenance autorun** de-duplicates *entities*: it re-judges open
+  merge proposals and auto-confirms clear same-entity matches, so duplicate
+  entities collapse over time (`dedup_entities`, on by default; bounded by the
+  number of open proposals). Trigger it now with `POST /api/v1/entities/resolve`.
+- If a past run ever bumped dates, **`memry repair-dates`** recomputes every
+  `updated_at` from the audit trail (token-free, idempotent).
 - Run **`memry backfill-relations`** once to extract relations from memories that
   predate the feature (cheap: only multi-entity memories, marked done so re-runs
   are free).

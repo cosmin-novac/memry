@@ -147,6 +147,11 @@ class Config(BaseModel):
     # token issuer and the resource identifier clients discover. Unset means no
     # OAuth endpoints, which is the right default for a private single-user box.
     public_url: str | None = None
+    # Periodic entity de-duplication: the maintenance autorun re-judges open
+    # merge proposals and auto-confirms clear same-entity matches, so duplicate
+    # entities collapse over time. Bounded by the number of open proposals.
+    dedup_entities: bool = True
+    dedup_interval_days: float = 7.0
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
