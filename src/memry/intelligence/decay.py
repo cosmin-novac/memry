@@ -27,7 +27,10 @@ def effective_importance(
         age_days = max(0.0, (now - parse_ts(memory.updated_at)).total_seconds() / 86400.0)
     except ValueError:
         return memory.importance
-    decay = math.pow(0.5, age_days / max(cfg.half_life_days, 0.01))
+    # type-aware half-life: episodic events fade faster, procedural rules persist
+    factor = cfg.half_life_by_type.get(memory.memory_type, 1.0)
+    half_life = max(cfg.half_life_days * factor, 0.01)
+    decay = math.pow(0.5, age_days / half_life)
     return memory.importance * (cfg.floor + (1.0 - cfg.floor) * decay)
 
 

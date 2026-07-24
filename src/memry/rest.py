@@ -121,7 +121,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openTags();return false" title="Tag manager: see every tag with its count and rename, combine or delete tags across all memories.">tags</a> · <a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
+<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openTags();return false" title="Tag manager: see every tag with its count and rename, combine or delete tags across all memories.">tags</a> · <a href="#" onclick="openEntities();return false" title="Entities and relations: people, projects, places and how they connect.">entities</a> ·<a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <input id="user" placeholder="user_id (all)" style="width:11rem">
@@ -156,6 +156,17 @@ user filter. Synthetic tags are flagged.</p>
 </div>
 <div id="tagsuggest"></div>
 <div id="taglist"></div>
+</div></div>
+<div class="modal" id="entmodal"><div class="sheet">
+<h2><button class="x" onclick="closeEntities()" title="close">✕</button>Entities &amp; relations</h2>
+<p class="hint">The people, projects, places and other things your memories mention,
+grouped by type, and the typed relations between them. Untyped ones came in before
+typing existed.</p>
+<div class="tagbar"><span class="sel" id="entcount"></span>
+  <button onclick="backfillTypes()" title="classify entities that have no type yet (one-time, cheap)">Backfill types</button></div>
+<div id="entlist"></div>
+<h2 style="font-size:.95rem;margin-top:1.1rem">Relations</h2>
+<div id="rellist"></div>
 </div></div>
 </main><script>
 // Auth rides the session cookie set at /login; no key to paste anymore.
@@ -658,6 +669,38 @@ async function suggestMerges(){
 async function applyMerge(g,i){
   await tagOp({op:'merge', tags:g.variants, to:g.canonical});
   const row=document.getElementById('sg'+i); if(row)row.remove();
+}
+
+// -- entities & relations --------------------------------------------------
+async function openEntities(){
+  document.getElementById('entmodal').classList.add('on');
+  await loadEntities();
+}
+function closeEntities(){ document.getElementById('entmodal').classList.remove('on'); }
+async function loadEntities(){
+  const u=uid()?'?user_id='+encodeURIComponent(uid()):'';
+  const [ents,rels]=await Promise.all([
+    api('/api/v1/entities'+(u||'?')+'&limit=100000'),
+    api('/api/v1/relations'+(u||'?')+'&limit=2000')]);
+  const name={}; ents.forEach(e=>name[e.id]=e.name);
+  document.getElementById('entcount').textContent=ents.length+' entities · '+rels.length+' relations';
+  // group by type
+  const byType={};
+  ents.forEach(e=>{(byType[e.entity_type||'untyped']=byType[e.entity_type||'untyped']||[]).push(e.name)});
+  const el=document.getElementById('entlist');
+  el.innerHTML=Object.keys(byType).sort().map(t=>`<div class="tagrow">
+    <span class="name"><span class="syn">${esc(t)}</span> ${byType[t].sort().map(esc).join(', ')}</span>
+    <span class="cnt">${byType[t].length}</span></div>`).join('')||'<div class="empty">No entities yet.</div>';
+  const rl=document.getElementById('rellist');
+  rl.innerHTML=rels.length?rels.map(r=>`<div class="tagrow"><span class="name">
+    <b>${esc(name[r.subject]||'?')}</b> <span class="cnt">${esc(r.predicate)}</span> <b>${esc(name[r.object]||'?')}</b>
+    </span></div>`).join(''):'<div class="empty">No relations yet. New saves add them; run “Backfill types” then relation backfill for old memories.</div>';
+}
+async function backfillTypes(){
+  const u=uid()?{user_id:uid()}:{};
+  const box=document.getElementById('entcount'); box.textContent='classifying…';
+  const r=await api('/api/v1/entities/backfill-types',{method:'POST',body:JSON.stringify(u)});
+  await loadEntities();
 }
 async function add(infer){
   const t=document.getElementById('newmem').value.trim(); if(!t)return;
@@ -1194,6 +1237,14 @@ def create_app(
         ))
         return JSONResponse(result)
 
+    async def backfill_entity_types_route(request: Request) -> Response:
+        body = await request.json() if await request.body() else {}
+        result = await run_in_threadpool(partial(
+            store.backfill_entity_types,
+            user_id=_p(request).namespace(body.get("user_id")),
+        ))
+        return JSONResponse(result)
+
     async def edit_tags_route(request: Request) -> Response:
         """Manual tag curation: rename, merge, or delete a tag across memories.
 
@@ -1554,6 +1605,7 @@ def create_app(
         Route("/api/v1/tags/suggest-merges", guarded(suggest_merges_route), methods=["GET"]),
         Route("/api/v1/relations", guarded(relations_route), methods=["GET"]),
         Route("/api/v1/relations/backfill", guarded(backfill_relations_route), methods=["POST"]),
+        Route("/api/v1/entities/backfill-types", guarded(backfill_entity_types_route), methods=["POST"]),
         Route("/api/v1/collections", guarded(collections_route), methods=["GET"]),
         Route("/api/v1/collections/build", guarded(build_collections_route), methods=["POST"]),
         Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),

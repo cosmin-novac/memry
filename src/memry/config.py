@@ -81,6 +81,18 @@ class DecayConfig(BaseModel):
     enabled: bool = True
     half_life_days: float = 90.0
     floor: float = 0.15  # decayed importance never drops below floor * importance
+    # Memory type shapes how fast a memory fades. Episodic memories are dated
+    # events that lose relevance as they age; procedural rules ("always do X")
+    # should persist; semantic facts sit in between. These multiply the base
+    # half-life per type, so type is a real behaviour, not just a label.
+    half_life_by_type: dict[str, float] = Field(
+        default_factory=lambda: {
+            "episodic": 0.5,     # fades about twice as fast
+            "semantic": 1.0,
+            "procedural": 3.0,   # persists about three times as long
+            "working": 0.25,     # short-lived scratch
+        }
+    )
 
 
 class AnnConfig(BaseModel):

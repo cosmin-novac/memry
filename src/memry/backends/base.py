@@ -130,6 +130,9 @@ class MemoryBackend(ABC):
         """Active (unmerged) entities with this normalized name, in scope."""
         return []
 
+    def set_entity_type(self, entity_id: str, entity_type: str) -> None:
+        return None
+
     def list_entities(
         self, scope: Scope, *, include_merged: bool = False, limit: int = 100
     ) -> list[Entity]:

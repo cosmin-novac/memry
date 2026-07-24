@@ -78,6 +78,52 @@ def _judge(
     return {"verdict": "unsure", "confidence": 0.5, "reason": "unparseable judgment"}
 
 
+_TYPE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "types": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "type": {"type": "string"}},
+                "required": ["name", "type"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["types"],
+    "additionalProperties": False,
+}
+
+_TYPE_SYSTEM = """Classify each entity name into one type: person, organization,
+project, product, place, event, concept, or other. Use "other" only when none
+fit. JSON only: {"types": [{"name": str, "type": str}]}."""
+
+
+def classify_entity_types(llm: LLM, names: list[str]) -> dict[str, str]:
+    """One call classifies a whole batch of entity names -> type. Cheap: many
+    entities per call, used to backfill entities that were linked before typing."""
+    from .extraction import ENTITY_TYPES, parse_lenient_json
+
+    if not names:
+        return {}
+    raw = llm.complete(
+        _TYPE_SYSTEM,
+        "Entities:\n" + "\n".join(f"- {n}" for n in names) + "\n\nTypes as JSON.",
+        json_schema=_TYPE_SCHEMA,
+    )
+    data = parse_lenient_json(raw)
+    out: dict[str, str] = {}
+    if isinstance(data, dict):
+        for item in data.get("types", []):
+            if isinstance(item, dict):
+                name = str(item.get("name", "")).strip().lower()
+                etype = str(item.get("type", "")).strip().lower()
+                if name and etype in ENTITY_TYPES:
+                    out[name] = etype
+    return out
+
+
 def resolve_mentions(
     *,
     backend: MemoryBackend,
@@ -86,10 +132,12 @@ def resolve_mentions(
     memory_id: str,
     memory_content: str,
     surfaces: list[str],
+    types: dict[str, str] | None = None,
 ) -> dict[str, Entity]:
     """Attach a memory's entity mentions, creating/reusing entities per the
     conservative policy. Returns a map of normalized surface -> entity, so the
     caller can resolve relation triples to the entities they linked to."""
+    types = types or {}
     resolved: dict[str, Entity] = {}
     for surface in surfaces:
         surface = surface.strip()
@@ -114,6 +162,7 @@ def resolve_mentions(
                 Entity(
                     name=surface,
                     normalized=normalized,
+                    entity_type=types.get(normalized),
                     user_id=scope.user_id,
                     agent_id=scope.agent_id,
                     run_id=scope.run_id,

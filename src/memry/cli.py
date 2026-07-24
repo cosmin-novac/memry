@@ -235,6 +235,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
 
     p = sub.add_parser(
+        "backfill-entity-types",
+        help="classify existing untyped entities (one-time, batched/cheap)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+
+    p = sub.add_parser(
         "build-collections",
         help="cluster memories into titled collections (LLM; a few calls/run)",
     )
@@ -390,6 +396,14 @@ def main(argv: list[str] | None = None) -> int:
                 [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
             )
             _print([store.backfill_relations(user_id=uid) for uid in namespaces])
+        elif args.command == "backfill-entity-types":
+            if not store.llm.available:
+                print("no LLM configured; entity typing needs one", file=sys.stderr)
+                return 1
+            namespaces = (
+                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
+            )
+            _print([store.backfill_entity_types(user_id=uid) for uid in namespaces])
         elif args.command == "build-collections":
             if not store.llm.available:
                 print("no LLM configured; collections need one", file=sys.stderr)

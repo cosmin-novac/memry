@@ -116,6 +116,7 @@ class CandidateFact(BaseModel):
     importance: float = 0.5
     categories: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
+    entity_types: dict[str, str] = Field(default_factory=dict)  # name_lower -> type
     # (subject_surface, predicate, object_surface) triples between this fact's
     # entities; resolved to typed Relation edges after entity linking.
     relations: list[dict[str, str]] = Field(default_factory=list)

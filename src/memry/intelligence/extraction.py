@@ -16,6 +16,11 @@ from typing import Any
 from ..models import MEMORY_TYPES, CandidateFact
 from ..providers.llm import LLM
 
+ENTITY_TYPES: tuple[str, ...] = (
+    "person", "organization", "project", "product", "place", "event",
+    "concept", "other",
+)
+
 EXTRACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -31,7 +36,21 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
                     },
                     "importance": {"type": "number"},
                     "categories": {"type": "array", "items": {"type": "string"}},
-                    "entities": {"type": "array", "items": {"type": "string"}},
+                    "entities": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "type": {
+                                    "type": "string",
+                                    "enum": ENTITY_TYPES,
+                                },
+                            },
+                            "required": ["name", "type"],
+                            "additionalProperties": False,
+                        },
+                    },
                     "relations": {
                         "type": "array",
                         "items": {
@@ -65,7 +84,8 @@ Extract:
 - stable facts about the user (identity, role, location, relationships)
 - preferences, opinions, goals, constraints
 - decisions made and commitments/plans (convert relative dates to absolute)
-- important entities and how they relate to the user
+- important entities, each with a type: person, organization, project, product,
+  place, event, concept, or other (use "other" only when none fit)
 - procedural learnings (how the user wants things done)
 
 Do NOT extract:
@@ -98,7 +118,8 @@ Rules:
   prefer the specific, durable relationship over a vague one.
 
 Respond with JSON only: {{"facts": [{{"content": str, "type": str,
-"importance": number, "categories": [str], "entities": [str],
+"importance": number, "categories": [str],
+"entities": [{{"name": str, "type": str}}],
 "relations": [{{"subject": str, "predicate": str, "object": str}}]}}]}}.
 Return {{"facts": []}} if nothing is worth remembering."""
 
@@ -217,11 +238,33 @@ def _parse_facts(raw: str) -> list[CandidateFact]:
                 memory_type=mtype,  # type: ignore[arg-type]
                 importance=min(max(importance, 0.0), 1.0),
                 categories=[str(c) for c in item.get("categories", []) if c],
-                entities=[str(e) for e in item.get("entities", []) if e],
+                **_parse_entities(item.get("entities", [])),
                 relations=_parse_relations(item.get("relations", [])),
             )
         )
     return facts
+
+
+def _parse_entities(raw: Any) -> dict[str, Any]:
+    """Accept both the typed form [{name,type}] and the legacy [str] form.
+    Returns kwargs {entities: [name], entity_types: {name_lower: type}}."""
+    names: list[str] = []
+    types: dict[str, str] = {}
+    if not isinstance(raw, list):
+        return {"entities": names, "entity_types": types}
+    for e in raw:
+        if isinstance(e, str):
+            name = e.strip()
+        elif isinstance(e, dict):
+            name = str(e.get("name", "")).strip()
+            etype = str(e.get("type", "")).strip().lower()
+            if name and etype in ENTITY_TYPES:
+                types[name.lower()] = etype
+        else:
+            continue
+        if name:
+            names.append(name)
+    return {"entities": names, "entity_types": types}
 
 
 RELATION_SCHEMA: dict[str, Any] = {

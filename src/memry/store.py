@@ -25,7 +25,11 @@ from .intelligence.clustering import propose_synthetic_tags, suggest_canonical_m
 from .intelligence.summaries import cluster_vectors, summarize_cluster
 from .intelligence.context import build_context
 from .intelligence.decay import decay_sweep, effective_importance
-from .intelligence.entities import resolve_mentions, resolve_open_proposals
+from .intelligence.entities import (
+    classify_entity_types,
+    resolve_mentions,
+    resolve_open_proposals,
+)
 from .intelligence.graph_retrieval import relational_memory_ids
 from .intelligence.extraction import (
     extract_facts,
@@ -284,6 +288,7 @@ class MemoryStore:
                     memory_id=action.memory_id,
                     memory_content=action.content or candidate.content,
                     surfaces=candidate.entities,
+                    types=candidate.entity_types,
                 )
                 self._resolve_relations(
                     candidate.relations, resolved, scope, action.memory_id
@@ -777,6 +782,33 @@ class MemoryStore:
             self.backend.update_memory(
                 memory.id, metadata={**memory.metadata, "relations_backfilled": True}
             )
+        return summary
+
+    def backfill_entity_types(
+        self, *, user_id: str | None = None, batch: int = 40
+    ) -> dict[str, Any]:
+        """Classify entities that were linked before typing existed. Batched:
+        one LLM call per ``batch`` entities, so a whole namespace is a handful of
+        calls. Only untyped entities are touched, so re-runs cost nothing."""
+        summary = {"typed": 0}
+        if not self.llm.available:
+            summary["skipped"] = "no LLM configured"
+            return summary
+        untyped = [
+            e for e in self.backend.list_entities(Scope(user_id=user_id), limit=1_000_000)
+            if not e.entity_type
+        ]
+        for i in range(0, len(untyped), batch):
+            group = untyped[i : i + batch]
+            try:
+                types = classify_entity_types(self.llm, [e.name for e in group])
+            except Exception:
+                continue
+            for e in group:
+                etype = types.get(e.name.lower())
+                if etype:
+                    self.backend.set_entity_type(e.id, etype)
+                    summary["typed"] += 1
         return summary
 
     def entity(

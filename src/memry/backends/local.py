@@ -903,6 +903,14 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
 
+    def set_entity_type(self, entity_id: str, entity_type: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE entities SET entity_type = ?, updated_at = ? WHERE id = ?",
+                (entity_type, utcnow(), entity_id),
+            )
+            self._db.commit()
+
     def entities_of_memory(self, memory_id: str) -> list[Entity]:
         with self._lock:
             rows = self._db.execute(

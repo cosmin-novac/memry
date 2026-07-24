@@ -85,34 +85,40 @@ question:
 3. **Filters** — an optional `categories` (tag) filter and a `since`/`until` date
    window. An empty query with just a tag or date *browses* instead of ranking.
 
-## Memory types: semantic / episodic / procedural
+## Memory types: semantic / episodic / procedural / working
 
-These are **descriptive labels only, today.** The extractor assigns one per fact:
+The extractor assigns one per fact, and the type now **shapes how fast a memory
+fades** (via `half_life_by_type` in `DecayConfig`):
 
-- **semantic** — a stable fact or preference ("Ada lives in Berlin").
+- **semantic** — a stable fact or preference ("Ada lives in Berlin"). Base rate.
 - **episodic** — a dated event or plan ("Ada launched Helios on 2026-03-01").
+  Fades about twice as fast: events lose relevance as they age.
 - **procedural** — a how-to or workflow rule ("always send Ada currency in EUR").
+  Persists about three times as long: rules should stick.
+- **working** — short-lived scratch; fades fastest.
 
-The type is stored and shown in the context block label (`[semantic · 2026-…]`),
-but it does **not** currently change retrieval ranking, decay, or storage. It is a
-lens for you and the agent, not a behaviour. (Making episodic memories decay
-faster, or procedural ones rank higher for how-to queries, would be a natural
-future use of the field; it does not happen yet.)
+So over time an old dated event decays out of retrieval sooner than a standing
+rule, even at equal starting importance. The type is also shown in the context
+block label (`[procedural · 2026-…]`). It does not (yet) change ranking within a
+single query, only how importance decays with age.
 
 ## Entities and their types
 
-Entities are **extracted and disambiguated but not yet typed.**
+Entities are **extracted, disambiguated, and typed.**
 
-- On save, the extractor lists the entity names in a fact. `resolve_mentions`
-  either reuses an existing entity (only when the LLM is confident they are the
-  same, to avoid conflating two people named "Jonas") or creates a new one and
-  files a **merge proposal** for the ambiguous case, which you confirm or reject.
-- The `entity_type` field (person / org / project / place / event) **exists in
-  the schema but is always `null`**: nothing populates it today. So entities are
-  real and linked, but untyped.
-- You can see them now via **`GET /api/v1/entities`** (and one entity with its
-  mentions and memories via `/api/v1/entities/{id}`). There is no dashboard view
-  yet, and types will read as null until entity typing is built.
+- On save, the extractor lists each entity in a fact with a `type` (person,
+  organization, project, product, place, event, concept, other), so typing costs
+  no extra call. `resolve_mentions` either reuses an existing entity (only when
+  the LLM is confident they are the same, to avoid conflating two people named
+  "Jonas") or creates a new typed one, filing a **merge proposal** for the
+  ambiguous case that you confirm or reject.
+- Entities linked before typing existed can be classified with
+  **`memry backfill-entity-types`** (or `POST /api/v1/entities/backfill-types`) -
+  batched, so a whole namespace is a handful of calls, and only untyped entities
+  are touched.
+- See them in the dashboard **"entities"** view (grouped by type, with the
+  relations between them and a "Backfill types" button), or via
+  **`GET /api/v1/entities`** and `/api/v1/relations`.
 
 ## Tags: a filter, not the structure
 
@@ -183,6 +189,7 @@ Concretely:
 | Entity extraction + conservative disambiguation + merge proposals | real |
 | Typed relations + relational retrieval (+ PPR fallback) | real |
 | Tag canonicalization, synthetic tags, collections | real (opt-in where noted) |
-| **Entity *types*** (person/event/…) | schema exists, **not populated** |
-| **Memory-type-driven behaviour** (decay/ranking by type) | **label only, no behaviour** |
-| Dashboard views for entities / relations / collections | API only, **no UI yet** |
+| Entity types (person/project/place/…) + typing backfill | real |
+| Memory-type-driven decay (episodic fades, procedural persists) | real |
+| Dashboard views for entities & relations | real; collections API-only (no UI yet) |
+| Memory-type effect on *ranking* (not just decay) | not yet |
