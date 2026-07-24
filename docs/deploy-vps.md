@@ -70,8 +70,10 @@ headers) embed the key in the URL instead:
 `https://memory.example.com/mcp/<MEMRY_API_KEY>` - full walkthrough in
 [connect-claude-ai.md](connect-claude-ai.md).
 
-The dashboard at `https://memory.example.com/` has a sign-in page: accounts use their
-name and password, the admin uses the API key ("Sign in as admin").
+The dashboard at `https://memory.example.com/` has one sign-in path for accounts. Create the
+first account with `memry account add`; that account is the administrator and signs in with
+its name and password. `MEMRY_API_KEY` remains for bearer-authenticated clients and recovery,
+not a second dashboard identity.
 
 ## Changing configuration
 

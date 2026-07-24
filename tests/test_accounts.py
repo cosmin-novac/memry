@@ -170,9 +170,9 @@ def test_first_account_key_uses_existing_admin_namespace(accounts):
     with TestClient(create_app(store, accounts=accounts)) as client:
         owner = {"Authorization": f"Bearer {owner_key}"}
         member = {"Authorization": f"Bearer {member_key}"}
-        assert [m["content"] for m in client.get("/api/v1/memories", headers=owner).json()] == [
-            "existing admin memory"
-        ]
+        assert [m["content"] for m in client.get(
+            "/api/v1/memories?user_id=member::default", headers=owner
+        ).json()] == ["existing admin memory"]
         assert client.get("/api/v1/memories", headers=member).json() == []
         client.post(
             "/api/v1/memories",
@@ -189,7 +189,7 @@ def test_account_key_authenticates_rest_and_is_namespaced(served):
     bob = {"Authorization": f"Bearer {bob_key}"}
 
     client.post("/api/v1/memories", headers=alice,
-                json={"content": "alice note", "infer": False})
+                json={"content": "alice note", "user_id": "bob", "infer": False})
     client.post("/api/v1/memories", headers=bob,
                 json={"content": "bob note", "infer": False})
 

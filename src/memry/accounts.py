@@ -317,11 +317,11 @@ class AccountStore:
         return row is None
 
     # -- dashboard sessions --------------------------------------------
-    def create_session(self, account: str | None) -> str:
-        """Open a dashboard session and return its cookie token.
+    def create_session(self, account: str) -> str:
+        """Open an account-scoped dashboard session and return its cookie token.
 
-        ``account`` None is an admin session. Like API keys, only a hash of the
-        token is stored, so a leaked database does not hand over live sessions.
+        Like API keys, only a hash of the token is stored, so a leaked database
+        does not hand over live sessions.
         """
         token = secrets.token_urlsafe(32)
         with self._lock:
@@ -334,10 +334,11 @@ class AccountStore:
         return token
 
     def resolve_session(self, token: str) -> tuple[str, str | None] | None:
-        """Map a cookie token to ("admin", None) or ("account", name), or None.
+        """Map a cookie token to ("account", name), or None.
 
-        Expired sessions and sessions whose account was deleted or disabled
-        return None, so revoking an account takes effect on the dashboard too.
+        Expired sessions, legacy operator sessions, and sessions whose account
+        was deleted or disabled return None, so dashboard access always belongs
+        to one runtime account.
         """
         if not token:
             return None
@@ -349,7 +350,7 @@ class AccountStore:
         if row is None or row["expires_at"] < time.time():
             return None
         if row["account"] is None:
-            return ("admin", None)
+            return None
         account = self.get_by_name(row["account"])
         if account is None or account.disabled:
             return None

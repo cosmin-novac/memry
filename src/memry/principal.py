@@ -6,9 +6,10 @@ That distinction is the whole point: an MCP tool argument or a REST body field
 is attacker-controlled, so a named principal must never be able to name a
 namespace outside its own.
 
-An administrator is unconfined: this includes the single-user default, the operator
-holding ``MEMRY_API_KEY``, and the first runtime account. Other named principals are
-transparently confined to ``<name>::<user>``.
+Administrator permission and memory ownership are independent. The operator
+holding ``MEMRY_API_KEY`` is the only unconfined principal. Runtime accounts,
+including the first account, are confined to one fixed memory space; configured
+tenants may retain ``<name>::<user>`` sub-namespaces for programmatic clients.
 """
 
 from __future__ import annotations
@@ -23,34 +24,44 @@ class Principal(BaseModel):
 
     name: str | None = None
     default_user: str = "default"
-    admin: bool = False  # named bootstrap accounts can also be unconfined
+    admin: bool = False
+    fixed_user: str | None = None
 
     @property
     def is_admin(self) -> bool:
+        """Whether this identity may perform administrative operations."""
         return self.name is None or self.admin
 
     @property
     def prefix(self) -> str | None:
-        """Namespace prefix every owned record must start with, or None for
-        admin. This is what gets handed to the store's ownership gate."""
-        return None if self.is_admin else f"{self.name}::"
+        """Ownership selector handed to the store.
+
+        ``None`` means unconfined operator access. A value ending in ``::`` is
+        a tenant prefix; every other value is one exact account namespace.
+        """
+        if self.name is None:
+            return None
+        return self.fixed_user or f"{self.name}::"
 
     def namespace(self, user_id: str | None) -> str | None:
-        """Map a caller-supplied user id into this principal's space.
-
-        For admin that is the id itself (including None, meaning "all
-        namespaces"). For anyone else the id is only ever a *sub*-namespace:
-        passing "victim" yields "alice::victim", never "victim".
-        """
-        if self.is_admin:
+        """Map caller input into this principal's server-enforced space."""
+        if self.name is None:
             return user_id
+        if self.fixed_user is not None:
+            return self.fixed_user
         return f"{self.name}::{user_id or self.default_user}"
 
     def owns(self, user_id: str | None) -> bool:
-        prefix = self.prefix
-        if prefix is None:
+        selector = self.prefix
+        if selector is None:
             return True
-        return bool(user_id) and user_id.startswith(prefix)
+        if not user_id:
+            return False
+        return (
+            user_id.startswith(selector)
+            if selector.endswith("::")
+            else user_id == selector
+        )
 
 
 ADMIN = Principal()

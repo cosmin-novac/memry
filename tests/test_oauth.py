@@ -137,8 +137,8 @@ def test_full_authorization_code_flow_yields_a_working_token(oauth_client):
     assert token.status_code == 200, token.text
     access = token.json()["access_token"]
 
-    # Alice is the first account, so OAuth grants her the same default namespace
-    # and unconfined access as the bootstrap administrator.
+    # Alice is the first account, so OAuth grants her only the existing default
+    # memory space. Her administrator role does not expose other accounts.
     mcp_call(client, access, "save_memories", {"content": "from oauth", "infer": False})
     owners = {m.content: m.user_id for m in store.get_all(limit=50)}
     assert owners == {"from oauth": "default"}

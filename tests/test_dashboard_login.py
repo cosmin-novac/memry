@@ -55,7 +55,7 @@ def test_open_mode_dashboard_needs_no_login():
 
 
 # ---------------------------------------------------------------- account login
-def test_first_account_login_sets_cookie_and_uses_admin_view(app_ctx):
+def test_first_account_login_sets_cookie_and_uses_own_memory_space(app_ctx):
     client, store, _ = app_ctx
     store.add("owner note", user_id="default", infer=False)
     store.add("bob note", user_id="bob::default", infer=False)
@@ -64,12 +64,12 @@ def test_first_account_login_sets_cookie_and_uses_admin_view(app_ctx):
     assert resp.status_code == 302 and resp.headers["location"] == "/"
     assert SESSION_COOKIE in resp.cookies
 
-    # The first account is the named administrator and sees the existing default
-    # namespace as well as later members' namespaces.
+    # Administrator is a role, not global access to other accounts' memories.
     listed = client.get("/api/v1/memories").json()
-    assert {memory["content"] for memory in listed} == {"owner note", "bob note"}
+    assert [memory["content"] for memory in listed] == ["owner note"]
     page = client.get("/")
     assert page.status_code == 200 and "@alice" in page.text
+    assert 'id="user"' not in page.text
 
 
 def test_later_account_login_remains_scoped(app_ctx):
@@ -114,19 +114,13 @@ def test_disabling_account_kills_an_existing_session(app_ctx):
     assert client.get("/api/v1/memories").status_code == 401
 
 
-# ---------------------------------------------------------------- admin login
-def test_admin_login_with_api_key(app_ctx):
-    client, store, _ = app_ctx
-    store.add("alice note", user_id="alice::default", infer=False)
-    store.add("bob note", user_id="bob::default", infer=False)
-
-    assert login(client, admin_key="wrong").status_code == 401
-    resp = login(client, admin_key="admin-key")
-    assert resp.status_code == 302
-    # admin session sees every namespace
-    listed = client.get("/api/v1/memories").json()
-    assert {m["content"] for m in listed} == {"alice note", "bob note"}
-    assert "@admin" in client.get("/").text
+# ------------------------------------------------------------ operator key UI
+def test_operator_key_is_not_a_separate_dashboard_identity(app_ctx):
+    client, _, _ = app_ctx
+    page = client.get("/login").text
+    assert "Sign in as admin" not in page
+    assert 'name="admin_key"' not in page
+    assert login(client, admin_key="admin-key").status_code == 401
 
 
 # ---------------------------------------------------------------- logout

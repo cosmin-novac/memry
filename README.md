@@ -52,8 +52,8 @@ candidate index. Multiple server replicas writing one store are not currently su
 
 **Multi-user, with real OAuth.** Beyond static config tenants, one server can host
 runtime-managed **accounts**, created with `memry account add`. The first account is the
-bootstrap administrator and keeps the existing default memory space; later accounts are
-confined to their own namespaces. Set `MEMRY_PUBLIC_URL` and Memry becomes an OAuth 2.1
+bootstrap administrator and keeps only the existing default memory space; every later
+account gets one private memory space. Set `MEMRY_PUBLIC_URL` and Memry becomes an OAuth 2.1
 authorization server for those accounts (dynamic client registration, PKCE, refresh,
 revocation, discovery
 at the domain root), so any OAuth-capable MCP client - Claude, Cursor, VS Code - can sign in
@@ -188,9 +188,10 @@ claude.ai as a custom connector, see
 
 ### Multi-user accounts
 
-One server can host multiple accounts. The first account is the bootstrap administrator:
-it uses the existing default namespace and can manage the whole server. Every account
-created after it is confined to its own `name::*` namespace. Manage them with the CLI:
+One server can host multiple accounts. The first account is the bootstrap administrator and
+uses only the existing default memory space. Every later account uses only its own
+`name::default` space. The role does not expose other accounts' memories. Manage accounts
+on the server with the CLI:
 
 ```bash
 memry account add alice --password s3cret    # creates it, prints an API key (shown once)

@@ -309,7 +309,7 @@ def create_server(
                 include_invalid=True,
                 limit=100_000,
             )
-            mine = [m for m in mine if (m.user_id or "").startswith(principal.prefix)]
+            mine = [m for m in mine if principal.owns(m.user_id)]
             return json.dumps(
                 {
                     "tenant": principal.name,

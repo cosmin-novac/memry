@@ -73,8 +73,9 @@ from .retrieval import hybrid_search
 def _owned(record: Any, owner_prefix: str | None) -> bool:
     """Ownership gate for every id-addressed operation.
 
-    ``owner_prefix`` None means admin: no confinement. Otherwise the record's
-    ``user_id`` must sit under that namespace prefix.
+    ``owner_prefix`` None means operator access with no confinement. A selector
+    ending in ``::`` is a tenant prefix; any other value is one exact account
+    namespace.
 
     This lives in the store rather than at each call site on purpose. Ids are
     guessable-ish and callers are many (REST handlers, MCP tools, the CLI, the
@@ -86,7 +87,14 @@ def _owned(record: Any, owner_prefix: str | None) -> bool:
     if owner_prefix is None:
         return True
     user_id = getattr(record, "user_id", None)
-    return bool(user_id) and str(user_id).startswith(owner_prefix)
+    if not user_id:
+        return False
+    value = str(user_id)
+    return (
+        value.startswith(owner_prefix)
+        if owner_prefix.endswith("::")
+        else value == owner_prefix
+    )
 
 
 def _tag_run_key(user_id: str | None) -> str:

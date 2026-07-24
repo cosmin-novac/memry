@@ -42,10 +42,10 @@ walkthrough (cloud-init, DNS, backups, uninstall): [deploy-vps.md](deploy-vps.md
 ## Securing the server
 
 1. **Set an API key** - `MEMRY_API_KEY=<random>` requires
-   `Authorization: Bearer <key>` on `/api/*`. The dashboard has a sign-in page at `/login`:
-   accounts sign in with their name and password, and the admin signs in with the API key
-   (under "Sign in as admin"). Login opens an HttpOnly session cookie, so there is no key to
-   paste on every visit; programmatic clients keep using the bearer header.
+   `Authorization: Bearer <key>` on `/api/*`. Create the first runtime account for the human
+   administrator. Every dashboard user signs in at `/login` with an account name and password;
+   the HttpOnly session cookie remains confined to that account's memories. Programmatic and
+   recovery clients keep using the operator bearer key.
 2. **Bind privately** - without a key, keep `--host 127.0.0.1` or terminate TLS + auth in a
    reverse proxy (Caddy/Traefik/nginx).
 3. **Backups** - snapshot `memry.db` plus its `-wal`/`-shm` files, or use
@@ -87,12 +87,11 @@ any MCP client, use **accounts** instead.
 ## Accounts and OAuth
 
 Accounts are runtime-managed identities (not config). The first account is the bootstrap
-administrator: it keeps the server's existing unprefixed/default memory space and has global
-access. Later accounts are confined to their own `<account>::<user>` namespaces exactly like
-tenants. Accounts are reachable either with an API key or through a real OAuth login from
-clients like Claude Code, Cursor, or VS Code that expect it. The bootstrap administrator can
-read and change every namespace, so protect its password, API keys, and OAuth sessions as
-carefully as `MEMRY_API_KEY`.
+administrator and keeps only the server's existing `default` memory space. Every later
+account gets one private `<account>::default` space. The administrator role does not grant
+access to other accounts' memories. Accounts are reachable either with an API key or through
+a real OAuth login from clients like Claude Code, Cursor, or VS Code. `MEMRY_API_KEY` remains
+the separate operator credential with global access and should be protected accordingly.
 
 Create accounts with the CLI:
 

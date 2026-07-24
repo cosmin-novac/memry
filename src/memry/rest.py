@@ -93,6 +93,7 @@ html.knowledge-open,body.knowledge-open{overflow:hidden}
 .tagrow .name b{font-weight:600}
 .tagrow .cnt{color:var(--dim);font-size:.78rem}
 .tagrow .syn{border:1px solid var(--accent);color:var(--accent);border-radius:999px;padding:0 .45rem;font-size:.68rem}
+.tagrow .entity-type{flex:0 0 6.5rem;text-align:center;white-space:nowrap}
 .tagrow .act{border:none;background:none;color:var(--dim);cursor:pointer;padding:.15rem .35rem;font-size:.8rem}
 .tagrow .act:hover{color:var(--accent)}.tagrow .act.del:hover{color:var(--warn)}
 .tagbar{display:flex;gap:.5rem;flex-wrap:wrap;margin:.8rem 0;align-items:center}
@@ -128,10 +129,9 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openKnowledge();return false" title="Browse topics, entities, relations, and collections in one place.">knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
+<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openKnowledge();return false" title="Browse topics, entities, relations, and collections in one place.">knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Uses the signed-in account's memory space.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
-  <input id="user" placeholder="user_id (all)" style="width:11rem">
   <span class="qwrap"><input id="q" placeholder="search memories…" oninput="toggleClear()">
     <button id="qclear" type="button" title="clear search and show all" onclick="clearSearch()">✕</button></span>
   <button class="primary" onclick="search()">Search</button>
@@ -171,8 +171,9 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <section class="kpanel" id="kpanel-entities" hidden>
   <div class="tagbar"><span class="sel" id="entcount"></span>
     <button onclick="backfillTypes()" title="classify entities that have no type yet">Backfill types</button></div>
-  <div id="entitydetail"></div><div id="entlist"></div>
+  <div id="entlist"></div>
   <h2 style="font-size:.95rem;margin-top:1.1rem">Merge proposals</h2><div id="proplist"></div>
+  <div id="entitydetail"></div>
 </section>
 <section class="kpanel" id="kpanel-relations" hidden><div id="rellist"></div></section>
 <section class="kpanel" id="kpanel-collections" hidden><div id="collist"></div></section>
@@ -180,9 +181,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 </main><script>
 // Auth rides the session cookie set at /login; no key to paste anymore.
 const H = {'Content-Type':'application/json'};
-// Empty box = no user filter: list EVERY namespace, so the list always
-// agrees with the stats line. (Accounts are namespaced server-side.)
-const uid = () => document.getElementById('user').value.trim();
+
 async function api(path, opts={}){
   const r = await fetch(path,{headers:H,...opts});
   if(r.status===401){ location.href='/login'; throw new Error('unauthorized'); }
@@ -604,14 +603,13 @@ window.addEventListener('resize',()=>drawMap(current));
 const PAGE=100; let offset=0;
 async function loadAll(more){
   if(!more){offset=0;current=[]}
-  const u=uid()?'&user_id='+encodeURIComponent(uid()):'';
-  const items=await api('/api/v1/memories?limit='+PAGE+'&offset='+offset+u);
+  const items=await api('/api/v1/memories?limit='+PAGE+'&offset='+offset);
   offset+=items.length; haveMore=items.length===PAGE;
   render(current.concat(items));
 }
 async function search(){
   const q=document.getElementById('q').value.trim(); if(!q)return loadAll();
-  const body={query:q,limit:20}; if(uid())body.user_id=uid();
+  const body={query:q,limit:20};
   const rs=await api('/api/v1/search',{method:'POST',body:JSON.stringify(body)});
   haveMore=false;
   render(rs.map(r=>({...r.memory,score:r.score})));
@@ -653,8 +651,7 @@ function updateSel(){
   document.getElementById('tagsel').textContent=n?`${n} selected`:'none selected';
 }
 async function loadTags(){
-  const u=uid()?'?user_id='+encodeURIComponent(uid()):'';
-  const topics=await api('/api/v1/categories'+u);
+  const topics=await api('/api/v1/categories');
   topics.sort((a,b)=>a.category.localeCompare(b.category));
   const el=document.getElementById('taglist');
   if(!topics.length){el.innerHTML='<div class="empty">No topics yet.</div>';return}
@@ -668,8 +665,7 @@ async function loadTags(){
   updateSel();
 }
 async function tagOp(body){
-  const payload={...body};if(uid())payload.user_id=uid();
-  const result=await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(payload)});
+  const result=await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(body)});
   await loadTags();activeCat=null;loadAll();return result;
 }
 async function renameTag(tag){
@@ -688,8 +684,7 @@ async function mergeTags(){
 }
 async function suggestMerges(){
   const box=document.getElementById('tagsuggest');box.innerHTML='<div class="hint">thinking...</div>';
-  const u=uid()?'?user_id='+encodeURIComponent(uid()):'';
-  const groups=await api('/api/v1/tags/suggest-merges'+u);
+  const groups=await api('/api/v1/tags/suggest-merges');
   await loadTags();
   if(!groups.length){box.innerHTML='<div class="hint">Obvious plural/format duplicates were merged automatically. No other variants found.</div>';return}
   box.innerHTML=groups.map((group,index)=>`<div class="tagrow" id="sg${index}">
@@ -703,18 +698,17 @@ async function applyMerge(group,index){
   const row=document.getElementById('sg'+index);if(row)row.remove();
 }
 async function loadEntities(){
-  const sep=uid()?'?user_id='+encodeURIComponent(uid())+'&':'?';
   const [entities,relations,proposals]=await Promise.all([
-    api('/api/v1/entities'+sep+'limit=100000&include_merged=true'),
-    api('/api/v1/relations'+sep+'limit=2000'),
-    api('/api/v1/entities/proposals'+sep+'limit=1000')]);
+    api('/api/v1/entities?limit=100000&include_merged=true'),
+    api('/api/v1/relations?limit=2000'),
+    api('/api/v1/entities/proposals?limit=1000')]);
   knowledgeNames={};entities.forEach(entity=>knowledgeNames[entity.id]=entity.name);
   const active=entities.filter(entity=>!entity.merged_into);
   document.getElementById('entcount').textContent=active.length+' entities, '+relations.length+' relations';
   const byType={};
   active.forEach(entity=>(byType[entity.entity_type||'untyped']??=[]).push(entity));
   document.getElementById('entlist').innerHTML=Object.keys(byType).sort().map(type=>`<div class="tagrow">
-    <span class="syn">${esc(type)}</span><span class="name">${byType[type].sort((a,b)=>a.name.localeCompare(b.name)).map(entity=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(entity.id)})'>${esc(entity.name)}</button>`).join(', ')}</span>
+    <span class="syn entity-type">${esc(type)}</span><span class="name">${byType[type].sort((a,b)=>a.name.localeCompare(b.name)).map(entity=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(entity.id)})'>${esc(entity.name)}</button>`).join(', ')}</span>
     <span class="cnt">${byType[type].length}</span></div>`).join('')||'<div class="empty">No entities yet.</div>';
   document.getElementById('rellist').innerHTML=relations.length?relations.map(relation=>`<div class="tagrow"><span class="name">
     <button class="entity-link" onclick='openEntity(${JSON.stringify(relation.subject)})'>${esc(knowledgeNames[relation.subject]||'?')}</button>
@@ -754,8 +748,7 @@ async function decideProposal(id,decision,button){
   await loadEntities();
 }
 async function loadCollections(){
-  const u=uid()?'?user_id='+encodeURIComponent(uid()):'';
-  const collections=await api('/api/v1/collections'+u);
+  const collections=await api('/api/v1/collections');
   document.getElementById('collist').innerHTML=collections.length?collections.map(collection=>`<div class="detail"><h3>${esc(collection.title)}</h3><div class="description">${esc(collection.summary||'')}</div><div class="hint">${collection.memory_ids.length} memories</div><div class="alias-list">${collection.memory_ids.slice(0,50).map((id,index)=>`<button class="entity-chip" onclick='showMemory(${JSON.stringify(id)})'>memory ${index+1}</button>`).join('')}</div></div>`).join(''):'<div class="empty">No synthesized collections yet.</div>';
 }
 async function showMemory(id){
@@ -763,16 +756,15 @@ async function showMemory(id){
   closeKnowledge();activeCat=null;haveMore=false;render([memory]);
 }
 async function backfillTypes(){
-  const payload=uid()?{user_id:uid()}:{};
   document.getElementById('entcount').textContent='classifying...';
-  await api('/api/v1/entities/backfill-types',{method:'POST',body:JSON.stringify(payload)});
+  await api('/api/v1/entities/backfill-types',{method:'POST',body:'{}'});
   await loadEntities();
 }
 async function add(infer){
   const t=document.getElementById('newmem').value.trim(); if(!t)return;
   const cs=document.getElementById('newcats').value.split(',').map(s=>s.trim()).filter(Boolean);
   const res=await api('/api/v1/memories',{method:'POST',
-    body:JSON.stringify({content:t,user_id:uid()||undefined,infer,categories:cs.length?cs:undefined})});
+    body:JSON.stringify({content:t,infer,categories:cs.length?cs:undefined})});
   if(res.warnings&&res.warnings.length)alert(res.warnings.join('\\n'));
   document.getElementById('newmem').value=''; document.getElementById('newcats').value='';
   loadAll(); loadStats();
@@ -797,10 +789,9 @@ async function saveEdit(id){
 }
 // Same JSONL shape as `memry export`, so files work with the CLI and back.
 async function exportMemories(){
-  const u=uid()?'&user_id='+encodeURIComponent(uid()):'';
   let all=[],off=0,page;
   do{
-    page=await api('/api/v1/memories?limit=500&offset='+off+u);
+    page=await api('/api/v1/memories?limit=500&offset='+off);
     all=all.concat(page); off+=page.length;
   }while(page.length===500);
   if(!all.length){alert('Nothing to export.');return}
@@ -822,7 +813,7 @@ async function importMemories(file){
   btn.textContent='importing…';
   try{
     const res=await api('/api/v1/import',{method:'POST',
-      body:JSON.stringify({memories:rows,user_id:uid()||undefined})});
+      body:JSON.stringify({memories:rows})});
     if(res&&res.imported!==undefined){
       const notes=[];
       if(res.deduplicated)notes.push(res.deduplicated+' duplicates skipped');
@@ -923,10 +914,6 @@ padding:.6rem;border:1px solid transparent;background:var(--accent);color:#04211
 font-weight:600}}
 .err{{background:color-mix(in srgb,var(--warn) 16%,transparent);border:1px solid var(--warn);
 color:var(--warn);border-radius:8px;padding:.5rem .7rem;font-size:.85rem;margin-bottom:1rem}}
-details{{margin-top:1.1rem;border-top:1px solid var(--line);padding-top:.7rem}}
-summary{{font-size:.8rem;color:var(--dim);cursor:pointer}}
-details button{{background:var(--panel);color:var(--text);border-color:var(--line);
-font-weight:400}}
 </style></head><body>
 <form class="card" method="post" action="/login">
 <h1><svg viewBox="0 0 64 64" width="20" height="20"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="#5eead4" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="#5eead4"/><circle cx="56" cy="20" r="3.2" fill="#5eead4" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="#5eead4" opacity=".7"/></svg><span>Mem</span>ry dashboard</h1>
@@ -936,12 +923,6 @@ font-weight:400}}
 <label for="password">Password</label>
 <input id="password" name="password" type="password" autocomplete="current-password">
 <button type="submit">Sign in</button>
-<details>
-<summary>Sign in as admin instead</summary>
-<label for="adminkey">Admin API key</label>
-<input id="adminkey" name="admin_key" type="password" autocomplete="off">
-<button type="submit">Sign in as admin</button>
-</details>
 </form></body></html>"""
 
 
@@ -1006,6 +987,11 @@ def create_app(
             name=account.name,
             default_user=default_user,
             admin=account.is_admin,
+            fixed_user=(
+                default_user
+                if account.is_admin
+                else f"{account.name}::{default_user}"
+            ),
         )
 
     def resolve_principal(token: str) -> Principal | None:
@@ -1060,9 +1046,7 @@ def create_app(
         row = accounts.resolve_session(request.cookies.get(SESSION_COOKIE, ""))
         if row is None:
             return None
-        kind, name = row
-        if kind == "admin":
-            return ADMIN
+        _, name = row
         account = accounts.get_by_name(name) if name else None
         return _account_principal(account) if account is not None else None
 
@@ -1091,7 +1075,7 @@ def create_app(
         return wrapper
 
     # -- dashboard login / session ---------------------------------------
-    def _set_session(response: Response, request: Request, account: str | None) -> None:
+    def _set_session(response: Response, request: Request, account: str) -> None:
         token = accounts.create_session(account)
         response.set_cookie(
             SESSION_COOKIE, token,
@@ -1112,13 +1096,6 @@ def create_app(
 
     async def login_submit(request: Request) -> Response:
         form = await request.form()
-        admin_key = str(form.get("admin_key", "")).strip()
-        if admin_key:
-            if not api_key or admin_key != api_key:
-                return _login_error("Wrong admin key.")
-            resp = RedirectResponse("/", status_code=302)
-            _set_session(resp, request, None)
-            return resp
 
         name = str(form.get("account", "")).strip()
         password = str(form.get("password", ""))
@@ -1461,7 +1438,7 @@ def create_app(
             )
             mine = [
                 m for m in everything
-                if (m.user_id or "").startswith(principal.prefix)
+                if principal.owns(m.user_id)
             ]
             data = {
                 "backend": data.get("backend"),

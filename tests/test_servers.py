@@ -95,6 +95,9 @@ def test_rest_health_and_dashboard(client):
     assert "ctx.strokeText(labelText" in dashboard
     assert "html.knowledge-open,body.knowledge-open{overflow:hidden}" in dashboard
     assert "function setKnowledgeOpen(open)" in dashboard
+    assert 'id="user"' not in dashboard
+    assert dashboard.index('id="entlist"') < dashboard.index('id="entitydetail"')
+    assert ".tagrow .entity-type{flex:0 0 6.5rem" in dashboard
 
 
 def test_rest_crud_and_search(client):

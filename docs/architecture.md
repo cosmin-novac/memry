@@ -190,10 +190,12 @@ requests history.
 - MCP runs locally over stdio or remotely over streamable HTTP.
 - `memry serve` hosts REST, the dashboard, OAuth endpoints when enabled, and `/mcp` in one
   Starlette/Uvicorn process.
-- A single admin bearer key, configured tenants, or runtime accounts can authenticate
-  network calls. The oldest/first runtime account is persisted as bootstrap administrator
-  and uses the existing unconfined/default namespace; later accounts and tenant principals
-  map public user IDs into confined namespaces.
+- A single operator bearer key, configured tenants, or runtime accounts can authenticate
+  network calls. The operator key is the explicit global credential. The oldest/first runtime
+  account is persisted as bootstrap administrator but is memory-confined to the existing
+  `default` space; every later account is confined to one `<name>::default` space. The
+  dashboard exposes no storage namespace selector. Administrator role and memory ownership
+  are independent, and knowledge merges never cross account boundaries.
 - Runtime API keys are stored as SHA-256 hashes; human passwords use scrypt with a random
   salt; comparisons are constant-time.
 - OAuth uses the MCP SDK authorization-server interfaces with dynamic client registration,
