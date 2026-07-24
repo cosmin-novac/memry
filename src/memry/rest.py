@@ -611,6 +611,7 @@ function updateSel(){
 async function loadTags(){
   const u=uid()?'?user_id='+encodeURIComponent(uid()):'';
   const cats=await api('/api/v1/categories'+u);
+  cats.sort((a,b)=>a.category.localeCompare(b.category));  // tag manager lists A→Z
   const el=document.getElementById('taglist');
   if(!cats.length){el.innerHTML='<div class="empty">No tags yet.</div>';return}
   el.innerHTML=cats.map(c=>`<div class="tagrow">

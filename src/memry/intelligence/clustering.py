@@ -82,15 +82,26 @@ CANONICALIZE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-CANONICALIZE_SYSTEM = """You clean up a tag vocabulary. Given the list of tags in
-use, group ones that are duplicates or variants of the SAME concept: singular
-/plural (project/projects), hyphen/space/case (writing-preference/writing
-preferences), abbreviations, and clear synonyms (finance/financial). For each
-group of two or more, pick the clearest canonical name (prefer one already in
-the list). Do NOT group tags that are merely related but genuinely distinct
-(running and diet are both health, but they are NOT the same tag - leave them).
-Preserve specificity; only merge what a person would call the same label.
-JSON only: {"groups": [{"canonical": str, "variants": [str, str, ...]}]}."""
+CANONICALIZE_SYSTEM = """You de-duplicate a tag vocabulary. Merging LOSES a
+distinction forever, so only merge tags that are literally the SAME label written
+differently. Merge ONLY these cases:
+- spacing/hyphen/underscore/case: "writing preferences" = "writing-preference"
+- singular/plural: "project" = "projects"
+- an abbreviation and its full form: "org" = "organization"
+- an exact synonym for the identical thing: "finance" = "financial"
+
+NEVER merge tags that name different aspects, contexts, or scopes, even when they
+are related. These are DISTINCT and must be LEFT ALONE:
+- "writing-style" vs "response-style" (style of books vs style of replies)
+- "tone" vs "style" (different attributes)
+- "running" vs "diet" (both health, but different)
+- "hardware" vs "hardware-limits" (a thing vs a constraint on it)
+When two tags could be confused, that ambiguity is fixed by making them MORE
+specific, not by collapsing them - so if in any doubt, do NOT merge.
+
+For each merge group of two or more true duplicates, give the clearest canonical
+name (prefer one already in the list). Return few, high-confidence groups, or an
+empty list. JSON only: {"groups": [{"canonical": str, "variants": [str, ...]}]}."""
 
 
 def suggest_canonical_merges(
