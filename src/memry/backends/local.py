@@ -29,6 +29,8 @@ from ..models import (
     Relation,
     Scope,
     SyntheticTag,
+    Topic,
+    TopicRelation,
     utcnow,
 )
 from .ann import HAS_USEARCH, HnswSidecar
@@ -70,6 +72,40 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(user_id, agent_id, run_id);
 CREATE INDEX IF NOT EXISTS idx_memories_invalid ON memories(invalid_at);
 
+CREATE TABLE IF NOT EXISTS topics (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    normalized TEXT NOT NULL,
+    user_id TEXT,
+    agent_id TEXT,
+    run_id TEXT,
+    provenance TEXT NOT NULL DEFAULT 'memory',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_scope_norm ON topics(
+    IFNULL(user_id, ''), IFNULL(agent_id, ''), IFNULL(run_id, ''), normalized
+);
+CREATE TABLE IF NOT EXISTS memory_topics (
+    memory_id TEXT NOT NULL,
+    topic_id TEXT NOT NULL,
+    PRIMARY KEY (memory_id, topic_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_topics_topic ON memory_topics(topic_id, memory_id);
+CREATE INDEX IF NOT EXISTS idx_memory_topics_memory ON memory_topics(memory_id, topic_id);
+CREATE TABLE IF NOT EXISTS topic_relations (
+    id TEXT PRIMARY KEY,
+    broader_topic_id TEXT NOT NULL,
+    narrower_topic_id TEXT NOT NULL,
+    user_id TEXT,
+    provenance TEXT NOT NULL DEFAULT 'synthetic',
+    created_at TEXT NOT NULL,
+    UNIQUE (broader_topic_id, narrower_topic_id)
+);
+CREATE INDEX IF NOT EXISTS idx_topic_relations_broader
+    ON topic_relations(broader_topic_id, narrower_topic_id);
+CREATE INDEX IF NOT EXISTS idx_topic_relations_narrower
+    ON topic_relations(narrower_topic_id, broader_topic_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content, content='memories', content_rowid='rowid'
 );
@@ -106,12 +142,16 @@ CREATE TABLE IF NOT EXISTS entities (
     user_id TEXT,
     agent_id TEXT,
     run_id TEXT,
+    description TEXT,
+    description_updated_at TEXT,
     metadata TEXT NOT NULL DEFAULT '{}',
     merged_into TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_entities_norm ON entities(normalized, user_id);
+CREATE INDEX IF NOT EXISTS idx_entities_norm ON entities(
+    normalized, user_id, agent_id, run_id
+);
 
 CREATE TABLE IF NOT EXISTS entity_mentions (
     id TEXT PRIMARY KEY,
@@ -122,6 +162,8 @@ CREATE TABLE IF NOT EXISTS entity_mentions (
 );
 CREATE INDEX IF NOT EXISTS idx_mentions_entity ON entity_mentions(entity_id);
 CREATE INDEX IF NOT EXISTS idx_mentions_memory ON entity_mentions(memory_id);
+CREATE INDEX IF NOT EXISTS idx_mentions_surface
+    ON entity_mentions(lower(trim(surface)), entity_id);
 
 CREATE TABLE IF NOT EXISTS entity_proposals (
     id TEXT PRIMARY KEY,
@@ -197,14 +239,22 @@ def _scope_clause(scope: Scope, prefix: str = "") -> tuple[str, list[Any]]:
     return (" AND ".join(clauses) if clauses else "1=1"), params
 
 
-def _category_clause(categories: list[str] | None, column: str) -> tuple[str, list[Any]]:
+def _category_clause(categories: list[str] | None, memory_id: str) -> tuple[str, list[Any]]:
     if not categories:
         return "1=1", []
-    placeholders = ",".join("?" * len(categories))
+    normalized = [c.strip().lower() for c in categories if c.strip()]
+    if not normalized:
+        return "1=1", []
+    placeholders = ",".join("?" * len(normalized))
     return (
-        f"EXISTS (SELECT 1 FROM json_each({column}) "
-        f"WHERE lower(json_each.value) IN ({placeholders}))",
-        [c.lower() for c in categories],
+        "EXISTS (WITH RECURSIVE descendants(topic_id, depth) AS ("
+        f"SELECT id, 0 FROM topics WHERE normalized IN ({placeholders}) "
+        "UNION SELECT tr.narrower_topic_id, d.depth + 1 FROM topic_relations tr "
+        "JOIN descendants d ON tr.broader_topic_id = d.topic_id "
+        "WHERE d.depth < 8) "
+        "SELECT 1 FROM memory_topics mt JOIN descendants d ON d.topic_id = mt.topic_id "
+        f"WHERE mt.memory_id = {memory_id})",
+        normalized,
     )
 
 
@@ -240,7 +290,13 @@ class LocalBackend(MemoryBackend):
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
+        self._ensure_entity_description_columns()
+        self._backfill_topics()
+        self._migrate_synthetic_topic_relations()
         self._db.commit()
+        self._has_metadata_aliases = self._db.execute(
+            "SELECT 1 FROM entities WHERE metadata LIKE '%\"aliases\"%' LIMIT 1"
+        ).fetchone() is not None
         self.db_path = db_path
         self._ann_cfg = ann or AnnConfig()
         # One sidecar per embedding model: a multiuser server with per-account
@@ -248,6 +304,179 @@ class LocalBackend(MemoryBackend):
         # would rebuild the whole HNSW index every time the model alternated.
         self._anns: dict[tuple[str, int], HnswSidecar] = {}
         self._ann_pending_saves = 0
+
+    # -- schema migration + normalized topics ----------------------------
+    def _ensure_entity_description_columns(self) -> None:
+        columns = {
+            row["name"] for row in self._db.execute("PRAGMA table_info(entities)").fetchall()
+        }
+        if "description" not in columns:
+            self._db.execute("ALTER TABLE entities ADD COLUMN description TEXT")
+        if "description_updated_at" not in columns:
+            self._db.execute(
+                "ALTER TABLE entities ADD COLUMN description_updated_at TEXT"
+            )
+
+    def _topic_locked(self, name: str, scope: Scope, provenance: str = "memory") -> Topic:
+        display = name.strip()
+        normalized = display.lower()
+        row = self._db.execute(
+            "SELECT * FROM topics WHERE normalized = ? AND user_id IS ? "
+            "AND agent_id IS ? AND run_id IS ?",
+            (normalized, scope.user_id, scope.agent_id, scope.run_id),
+        ).fetchone()
+        if row:
+            return self._row_to_topic(row)
+        topic = Topic(
+            name=display,
+            normalized=normalized,
+            user_id=scope.user_id,
+            agent_id=scope.agent_id,
+            run_id=scope.run_id,
+            provenance=provenance,
+        )
+        self._db.execute(
+            "INSERT INTO topics (id, name, normalized, user_id, agent_id, run_id, "
+            "provenance, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                topic.id, topic.name, topic.normalized, topic.user_id, topic.agent_id,
+                topic.run_id, topic.provenance, topic.created_at, topic.updated_at,
+            ),
+        )
+        return topic
+
+    @staticmethod
+    def _row_to_topic(row: sqlite3.Row) -> Topic:
+        return Topic(
+            id=row["id"], name=row["name"], normalized=row["normalized"],
+            user_id=row["user_id"], agent_id=row["agent_id"], run_id=row["run_id"],
+            provenance=row["provenance"], created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _sync_memory_topics_locked(
+        self,
+        memory_id: str,
+        categories: list[str],
+        scope: Scope,
+        provenance: str = "memory",
+    ) -> None:
+        self._db.execute("DELETE FROM memory_topics WHERE memory_id = ?", (memory_id,))
+        seen: set[str] = set()
+        for raw in categories:
+            name = str(raw).strip()
+            normalized = name.lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            topic = self._topic_locked(name, scope, provenance)
+            self._db.execute(
+                "INSERT OR IGNORE INTO memory_topics (memory_id, topic_id) VALUES (?,?)",
+                (memory_id, topic.id),
+            )
+
+    def _backfill_topics(self) -> None:
+        marker = self._db.execute(
+            "SELECT value FROM meta WHERE key = 'schema:topics:v1'"
+        ).fetchone()
+        if marker:
+            return
+        rows = self._db.execute(
+            "SELECT id, categories, user_id, agent_id, run_id FROM memories"
+        ).fetchall()
+        for row in rows:
+            self._sync_memory_topics_locked(
+                row["id"],
+                json.loads(row["categories"]),
+                Scope(
+                    user_id=row["user_id"], agent_id=row["agent_id"], run_id=row["run_id"]
+                ),
+            )
+        self._db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema:topics:v1', ?)",
+            (utcnow(),),
+        )
+
+    def _migrate_synthetic_topic_relations(self) -> None:
+        """Turn legacy copied umbrella tags into hierarchy edges exactly once."""
+        marker = self._db.execute(
+            "SELECT value FROM meta WHERE key = 'schema:topic-relations:v1'"
+        ).fetchone()
+        if marker:
+            return
+        rows = self._db.execute(
+            "SELECT tag, user_id, source_tags FROM synthetic_tags"
+        ).fetchall()
+        for row in rows:
+            tag = str(row["tag"]).strip()
+            sources = [
+                str(value).strip() for value in json.loads(row["source_tags"])
+                if str(value).strip()
+            ]
+            if not tag or not sources:
+                continue
+            scope = Scope(user_id=row["user_id"])
+            parent = self._topic_locked(tag, scope, provenance="synthetic")
+            for source in sources:
+                matches = self._db.execute(
+                    "SELECT * FROM topics WHERE normalized = ? AND user_id IS ?",
+                    (source.lower(), row["user_id"]),
+                ).fetchall()
+                if not matches:
+                    matches = [
+                        self._topic_locked(source, scope, provenance="memory").model_dump()
+                    ]
+                for match in matches:
+                    child_id = match["id"]
+                    if child_id == parent.id:
+                        continue
+                    relation = TopicRelation(
+                        broader_topic_id=parent.id,
+                        narrower_topic_id=child_id,
+                        user_id=row["user_id"],
+                        provenance="synthetic-migration",
+                    )
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO topic_relations "
+                        "(id, broader_topic_id, narrower_topic_id, user_id, provenance, created_at) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (
+                            relation.id, relation.broader_topic_id,
+                            relation.narrower_topic_id, relation.user_id,
+                            relation.provenance, relation.created_at,
+                        ),
+                    )
+            source_set = {source.lower() for source in sources}
+            memories = self._db.execute(
+                "SELECT id, categories, user_id, agent_id, run_id FROM memories "
+                "WHERE user_id IS ?",
+                (row["user_id"],),
+            ).fetchall()
+            for memory in memories:
+                categories = json.loads(memory["categories"])
+                normalized = {str(value).strip().lower() for value in categories}
+                if tag.lower() not in normalized or not normalized.intersection(source_set):
+                    continue
+                kept = [
+                    value for value in categories
+                    if str(value).strip().lower() != tag.lower()
+                ]
+                self._db.execute(
+                    "UPDATE memories SET categories = ? WHERE id = ?",
+                    (json.dumps(kept), memory["id"]),
+                )
+                self._sync_memory_topics_locked(
+                    memory["id"], kept,
+                    Scope(
+                        user_id=memory["user_id"], agent_id=memory["agent_id"],
+                        run_id=memory["run_id"],
+                    ),
+                )
+        self._db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) "
+            "VALUES ('schema:topic-relations:v1', ?)",
+            (utcnow(),),
+        )
 
     # -- ANN sidecar ----------------------------------------------------
     def _ann_index(self, model_id: str, dimensions: int) -> HnswSidecar | None:
@@ -393,6 +622,7 @@ class LocalBackend(MemoryBackend):
                     blob,
                 ),
             )
+            self._sync_memory_topics_locked(memory.id, memory.categories, memory.scope())
             if embedding and memory.embedding_model:
                 self._ann_add(memory.id, embedding, memory.embedding_model)
             self._db.commit()
@@ -454,8 +684,26 @@ class LocalBackend(MemoryBackend):
             cur = self._db.execute(
                 f"UPDATE memories SET {', '.join(sets)} WHERE id = ?", (*params, memory_id)
             )
+            if cur.rowcount and categories is not None:
+                row = self._db.execute(
+                    "SELECT user_id, agent_id, run_id FROM memories WHERE id = ?",
+                    (memory_id,),
+                ).fetchone()
+                self._sync_memory_topics_locked(
+                    memory_id,
+                    categories,
+                    Scope(
+                        user_id=row["user_id"], agent_id=row["agent_id"], run_id=row["run_id"]
+                    ),
+                )
             if cur.rowcount and embedding is not None and embedding_model is not None:
                 self._ann_add(memory_id, embedding, embedding_model)
+            if cur.rowcount and touch:
+                self._db.execute(
+                    "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
+                    "WHERE id IN (SELECT entity_id FROM entity_mentions WHERE memory_id = ?)",
+                    (utcnow(), memory_id),
+                )
             self._db.commit()
         if cur.rowcount == 0:
             return None
@@ -481,6 +729,17 @@ class LocalBackend(MemoryBackend):
             )
             if cur.rowcount:
                 self._ann_remove(memory_id)
+                changed_at = utcnow()
+                self._db.execute(
+                    "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
+                    "WHERE id IN (SELECT entity_id FROM entity_mentions WHERE memory_id = ?)",
+                    (changed_at, memory_id),
+                )
+                self._db.execute(
+                    "UPDATE relations SET invalid_at = ? "
+                    "WHERE memory_id = ? AND invalid_at IS NULL",
+                    (changed_at, memory_id),
+                )
             self._db.commit()
         if cur.rowcount == 0:
             return None
@@ -488,10 +747,27 @@ class LocalBackend(MemoryBackend):
 
     def delete_memory(self, memory_id: str) -> bool:
         with self._lock:
+            entity_ids = [
+                row["entity_id"]
+                for row in self._db.execute(
+                    "SELECT DISTINCT entity_id FROM entity_mentions WHERE memory_id = ?",
+                    (memory_id,),
+                ).fetchall()
+            ]
             cur = self._db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             if cur.rowcount:
                 self._ann_remove(memory_id)
                 self._db.execute("DELETE FROM ann_keys WHERE memory_id = ?", (memory_id,))
+                self._db.execute("DELETE FROM entity_mentions WHERE memory_id = ?", (memory_id,))
+                self._db.execute("DELETE FROM memory_topics WHERE memory_id = ?", (memory_id,))
+                self._db.execute("DELETE FROM relations WHERE memory_id = ?", (memory_id,))
+                if entity_ids:
+                    placeholders = ",".join("?" * len(entity_ids))
+                    self._db.execute(
+                        f"UPDATE entities SET updated_at = ?, description_updated_at = NULL "
+                        f"WHERE id IN ({placeholders})",
+                        (utcnow(), *entity_ids),
+                    )
             self._db.commit()
         return cur.rowcount > 0
 
@@ -512,7 +788,7 @@ class LocalBackend(MemoryBackend):
         categories: list[str] | None = None,
     ) -> list[Memory]:
         clause, params = _scope_clause(scope)
-        cat_clause, cat_params = _category_clause(categories, "categories")
+        cat_clause, cat_params = _category_clause(categories, "memories.id")
         if not include_invalid:
             clause += " AND invalid_at IS NULL"
         with self._lock:
@@ -550,7 +826,7 @@ class LocalBackend(MemoryBackend):
         categories: list[str] | None = None,
     ) -> list[tuple[Memory, float]]:
         clause, params = _scope_clause(scope)
-        cat_clause, cat_params = _category_clause(categories, "categories")
+        cat_clause, cat_params = _category_clause(categories, "memories.id")
         if not include_invalid:
             clause += " AND invalid_at IS NULL"
 
@@ -596,7 +872,7 @@ class LocalBackend(MemoryBackend):
             return []
         match = " OR ".join(f'"{t}"' for t in tokens[:32])
         clause, params = _scope_clause(scope, prefix="m.")
-        cat_clause, cat_params = _category_clause(categories, "m.categories")
+        cat_clause, cat_params = _category_clause(categories, "m.id")
         if not include_invalid:
             clause += " AND m.invalid_at IS NULL"
         sql = (
@@ -648,6 +924,211 @@ class LocalBackend(MemoryBackend):
                 created_at=r["created_at"],
             )
             for r in rows
+        ]
+
+    # -- normalized topics -------------------------------------------------
+    def upsert_topic(self, topic: Topic) -> Topic:
+        scope = Scope(user_id=topic.user_id, agent_id=topic.agent_id, run_id=topic.run_id)
+        with self._lock:
+            stored = self._topic_locked(topic.name, scope, topic.provenance)
+            self._db.commit()
+        return stored
+
+    def list_topics(self, scope: Scope, *, limit: int = 1000) -> list[Topic]:
+        clause, params = _scope_clause(scope)
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM topics WHERE {clause} ORDER BY normalized LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [self._row_to_topic(row) for row in rows]
+
+    def topic_counts(self, scope: Scope) -> list[dict[str, Any]]:
+        root_clause, root_params = _scope_clause(scope, prefix="root.")
+        memory_clause, memory_params = _scope_clause(scope, prefix="m.")
+        with self._lock:
+            rows = self._db.execute(
+                "WITH RECURSIVE descendants(root_id, topic_id, depth) AS ("
+                "SELECT id, id, 0 FROM topics UNION "
+                "SELECT d.root_id, tr.narrower_topic_id, d.depth + 1 "
+                "FROM descendants d JOIN topic_relations tr "
+                "ON tr.broader_topic_id = d.topic_id WHERE d.depth < 8) "
+                "SELECT root.normalized AS category, "
+                "COUNT(DISTINCT mt.memory_id) AS count FROM topics root "
+                "JOIN descendants d ON d.root_id = root.id "
+                "JOIN memory_topics mt ON mt.topic_id = d.topic_id "
+                "JOIN memories m ON m.id = mt.memory_id "
+                f"WHERE m.invalid_at IS NULL AND {root_clause} AND {memory_clause} "
+                "GROUP BY root.normalized HAVING count > 0 "
+                "ORDER BY count DESC, category",
+                (*root_params, *memory_params),
+            ).fetchall()
+        return [{"category": row["category"], "count": row["count"]} for row in rows]
+
+    def retag_topics(self, scope: Scope, remove: set[str], add: str | None) -> int:
+        normalized = {item.strip().lower() for item in remove if item.strip()}
+        if not normalized:
+            return 0
+        add = add.strip().lower() if add and add.strip() else None
+        placeholders = ",".join("?" * len(normalized))
+        topic_clause, topic_params = _scope_clause(scope, prefix="t.")
+        memory_clause, memory_params = _scope_clause(scope, prefix="m.")
+        with self._lock:
+            topic_rows = self._db.execute(
+                f"SELECT t.* FROM topics t WHERE {topic_clause} "
+                f"AND t.normalized IN ({placeholders})",
+                (*topic_params, *sorted(normalized)),
+            ).fetchall()
+            old_ids = {row["id"] for row in topic_rows}
+            target_ids: dict[str, str] = {}
+            if add:
+                for row in topic_rows:
+                    target = self._topic_locked(
+                        add,
+                        Scope(
+                            user_id=row["user_id"], agent_id=row["agent_id"],
+                            run_id=row["run_id"],
+                        ),
+                        provenance="user",
+                    )
+                    target_ids[row["id"]] = target.id
+
+            rows = self._db.execute(
+                "SELECT DISTINCT m.id, m.categories, m.user_id, m.agent_id, m.run_id "
+                "FROM memories m JOIN memory_topics mt ON mt.memory_id = m.id "
+                "JOIN topics t ON t.id = mt.topic_id "
+                f"WHERE m.invalid_at IS NULL AND {memory_clause} "
+                f"AND t.normalized IN ({placeholders})",
+                (*memory_params, *sorted(normalized)),
+            ).fetchall()
+            changed = 0
+            for row in rows:
+                categories = json.loads(row["categories"])
+                kept = [
+                    item for item in categories
+                    if str(item).strip().lower() not in normalized
+                ]
+                if add and add not in {str(item).strip().lower() for item in kept}:
+                    kept.append(add)
+                if kept == categories:
+                    continue
+                self._db.execute(
+                    "UPDATE memories SET categories = ? WHERE id = ?",
+                    (json.dumps(kept), row["id"]),
+                )
+                self._sync_memory_topics_locked(
+                    row["id"], kept,
+                    Scope(
+                        user_id=row["user_id"], agent_id=row["agent_id"],
+                        run_id=row["run_id"],
+                    ),
+                    provenance="user",
+                )
+                changed += 1
+
+            if old_ids:
+                edge_placeholders = ",".join("?" * len(old_ids))
+                edges = self._db.execute(
+                    "SELECT * FROM topic_relations "
+                    f"WHERE broader_topic_id IN ({edge_placeholders}) "
+                    f"OR narrower_topic_id IN ({edge_placeholders})",
+                    (*old_ids, *old_ids),
+                ).fetchall()
+                for edge in edges:
+                    self._db.execute(
+                        "DELETE FROM topic_relations WHERE id = ?", (edge["id"],)
+                    )
+                    if not add:
+                        continue
+                    broader = target_ids.get(edge["broader_topic_id"], edge["broader_topic_id"])
+                    narrower = target_ids.get(edge["narrower_topic_id"], edge["narrower_topic_id"])
+                    if broader == narrower:
+                        continue
+                    rewritten = TopicRelation(
+                        broader_topic_id=broader,
+                        narrower_topic_id=narrower,
+                        user_id=edge["user_id"],
+                        provenance=edge["provenance"],
+                        created_at=edge["created_at"],
+                    )
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO topic_relations "
+                        "(id, broader_topic_id, narrower_topic_id, user_id, provenance, created_at) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (
+                            rewritten.id, rewritten.broader_topic_id,
+                            rewritten.narrower_topic_id, rewritten.user_id,
+                            rewritten.provenance, rewritten.created_at,
+                        ),
+                    )
+
+            synthetic_rows = self._db.execute(
+                "SELECT * FROM synthetic_tags WHERE user_id IS ?", (scope.user_id,)
+            ).fetchall()
+            for synthetic in synthetic_rows:
+                tag = str(synthetic["tag"]).strip().lower()
+                sources = [
+                    str(value).strip().lower()
+                    for value in json.loads(synthetic["source_tags"])
+                    if str(value).strip()
+                ]
+                if tag in normalized:
+                    self._db.execute(
+                        "DELETE FROM synthetic_tags WHERE id = ?", (synthetic["id"],)
+                    )
+                    continue
+                rewritten_sources = [
+                    add if source in normalized and add else source
+                    for source in sources
+                    if source not in normalized or add
+                ]
+                rewritten_sources = list(dict.fromkeys(rewritten_sources))
+                self._db.execute(
+                    "UPDATE synthetic_tags SET tag = ?, source_tags = ? WHERE id = ?",
+                    (tag, json.dumps(rewritten_sources), synthetic["id"]),
+                )
+
+            for old_id in old_ids:
+                if target_ids.get(old_id) == old_id:
+                    continue
+                self._db.execute(
+                    "DELETE FROM topics WHERE id = ? "
+                    "AND NOT EXISTS (SELECT 1 FROM memory_topics WHERE topic_id = ?) "
+                    "AND NOT EXISTS (SELECT 1 FROM topic_relations "
+                    "WHERE broader_topic_id = ? OR narrower_topic_id = ?)",
+                    (old_id, old_id, old_id, old_id),
+                )
+            self._db.commit()
+        return changed
+
+    def add_topic_relation(self, relation: TopicRelation) -> TopicRelation:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR IGNORE INTO topic_relations "
+                "(id, broader_topic_id, narrower_topic_id, user_id, provenance, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    relation.id, relation.broader_topic_id, relation.narrower_topic_id,
+                    relation.user_id, relation.provenance, relation.created_at,
+                ),
+            )
+            self._db.commit()
+        return relation
+
+    def list_topic_relations(self, scope: Scope) -> list[TopicRelation]:
+        clause, params = _scope_clause(Scope(user_id=scope.user_id))
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM topic_relations WHERE {clause} ORDER BY created_at",
+                params,
+            ).fetchall()
+        return [
+            TopicRelation(
+                id=row["id"], broader_topic_id=row["broader_topic_id"],
+                narrower_topic_id=row["narrower_topic_id"], user_id=row["user_id"],
+                provenance=row["provenance"], created_at=row["created_at"],
+            )
+            for row in rows
         ]
 
     # -- synthetic tags + meta ---------------------------------------------
@@ -815,6 +1296,8 @@ class LocalBackend(MemoryBackend):
             user_id=row["user_id"],
             agent_id=row["agent_id"],
             run_id=row["run_id"],
+            description=row["description"],
+            description_updated_at=row["description_updated_at"],
             metadata=json.loads(row["metadata"]),
             merged_into=row["merged_into"],
             created_at=row["created_at"],
@@ -841,15 +1324,19 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             self._db.execute(
                 "INSERT INTO entities (id, name, normalized, entity_type, user_id, agent_id, "
-                "run_id, metadata, merged_into, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "run_id, description, description_updated_at, metadata, merged_into, "
+                "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     entity.id, entity.name, entity.normalized, entity.entity_type,
                     entity.user_id, entity.agent_id, entity.run_id,
+                    entity.description, entity.description_updated_at,
                     json.dumps(entity.metadata), entity.merged_into,
                     entity.created_at, entity.updated_at,
                 ),
             )
+            aliases = entity.metadata.get("aliases", [])
+            if aliases:
+                self._has_metadata_aliases = True
             self._db.commit()
         return entity
 
@@ -869,6 +1356,135 @@ class LocalBackend(MemoryBackend):
                 (normalized.strip().lower(), *params),
             ).fetchall()
         return [self._row_to_entity(r) for r in rows]
+
+    def _entity_candidates(
+        self, normalized: list[str], scope: Scope, *, limit: int
+    ) -> list[Entity]:
+        names = sorted({value.strip().lower() for value in normalized if value.strip()})
+        if not names:
+            return []
+        placeholders = ",".join("?" * len(names))
+        scope_clause, scope_params = _scope_clause(scope, prefix="e.")
+        indexed_sql = (
+            "WITH matched(id) AS ("
+            f"SELECT id FROM entities WHERE normalized IN ({placeholders}) "
+            "UNION "
+            "SELECT entity_id FROM entity_mentions "
+            f"WHERE lower(trim(surface)) IN ({placeholders}) "
+            "UNION "
+            "SELECT merged_into FROM entities WHERE merged_into IS NOT NULL "
+            f"AND normalized IN ({placeholders})"
+            ") SELECT e.* FROM matched JOIN entities e ON e.id = matched.id "
+            "WHERE e.merged_into IS NULL "
+            f"AND {scope_clause} ORDER BY e.updated_at DESC LIMIT ?"
+        )
+        with self._lock:
+            rows = self._db.execute(
+                indexed_sql,
+                (*names, *names, *names, *scope_params, limit),
+            ).fetchall()
+            # User aliases intentionally remain metadata until measurements earn
+            # a separate table. Pay the JSON scan only when indexed identity
+            # evidence found nothing and this database actually has such aliases.
+            if not rows and self._has_metadata_aliases:
+                rows = self._db.execute(
+                    "SELECT e.* FROM entities e "
+                    "WHERE e.merged_into IS NULL "
+                    f"AND {scope_clause} AND EXISTS ("
+                    "SELECT 1 FROM json_each(e.metadata, '$.aliases') alias "
+                    f"WHERE lower(trim(CAST(alias.value AS TEXT))) IN ({placeholders})"
+                    ") ORDER BY e.updated_at DESC LIMIT ?",
+                    (*scope_params, *names, limit),
+                ).fetchall()
+        return [self._row_to_entity(row) for row in rows]
+
+    def find_entity_candidates(
+        self, normalized: str, scope: Scope, *, limit: int = 20
+    ) -> list[Entity]:
+        return self._entity_candidates([normalized], scope, limit=limit)
+
+    def find_entities_by_aliases(
+        self, normalized: list[str], scope: Scope, *, limit: int = 50
+    ) -> list[Entity]:
+        return self._entity_candidates(normalized, scope, limit=limit)
+
+    def entity_aliases(self, entity_id: str) -> list[str]:
+        entity = self.get_entity(entity_id)
+        if entity is None:
+            return []
+        with self._lock:
+            surfaces = self._db.execute(
+                "SELECT DISTINCT surface FROM entity_mentions WHERE entity_id = ?",
+                (entity_id,),
+            ).fetchall()
+            merged_names = self._db.execute(
+                "SELECT name FROM entities WHERE merged_into = ?", (entity_id,)
+            ).fetchall()
+        values: list[str] = [entity.name]
+        values.extend(row["surface"] for row in surfaces)
+        values.extend(row["name"] for row in merged_names)
+        raw_aliases = entity.metadata.get("aliases", [])
+        if isinstance(raw_aliases, str):
+            raw_aliases = [raw_aliases]
+        if isinstance(raw_aliases, list):
+            values.extend(str(alias) for alias in raw_aliases)
+        aliases: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            display = value.strip()
+            key = display.lower()
+            if display and key not in seen:
+                seen.add(key)
+                aliases.append(display)
+        return aliases
+
+    def add_entity_alias(self, entity_id: str, alias: str) -> Entity | None:
+        display = alias.strip()
+        if not display:
+            return self.get_entity(entity_id)
+        with self._lock:
+            row = self._db.execute(
+                "SELECT name, metadata FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            metadata = json.loads(row["metadata"])
+            raw_aliases = metadata.get("aliases", [])
+            if isinstance(raw_aliases, str):
+                raw_aliases = [raw_aliases]
+            aliases = [str(value).strip() for value in raw_aliases if str(value).strip()]
+            known = {row["name"].strip().lower(), *(value.lower() for value in aliases)}
+            if display.lower() not in known:
+                aliases.append(display)
+                metadata["aliases"] = aliases
+                self._db.execute(
+                    "UPDATE entities SET metadata = ?, updated_at = ?, "
+                    "description_updated_at = NULL WHERE id = ?",
+                    (json.dumps(metadata), utcnow(), entity_id),
+                )
+                self._has_metadata_aliases = True
+                self._db.commit()
+        return self.get_entity(entity_id)
+
+    def set_entity_description(
+        self, entity_id: str, description: str, generated_at: str
+    ) -> Entity | None:
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE entities SET description = ?, description_updated_at = ? "
+                "WHERE id = ? AND merged_into IS NULL",
+                (description, generated_at, entity_id),
+            )
+            self._db.commit()
+        return self.get_entity(entity_id) if cur.rowcount else None
+
+    def entity_evidence_updated_at(self, entity_id: str) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT updated_at FROM entities WHERE id = ? AND merged_into IS NULL",
+                (entity_id,),
+            ).fetchone()
+        return row["updated_at"] if row else None
 
     def list_entities(
         self, scope: Scope, *, include_merged: bool = False, limit: int = 100
@@ -891,6 +1507,11 @@ class LocalBackend(MemoryBackend):
                 (mention.id, mention.entity_id, mention.memory_id, mention.surface,
                  mention.created_at),
             )
+            self._db.execute(
+                "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
+                "WHERE id = ?",
+                (mention.created_at, mention.entity_id),
+            )
             self._db.commit()
 
     def entity_mentions(self, entity_id: str) -> list[EntityMention]:
@@ -907,12 +1528,16 @@ class LocalBackend(MemoryBackend):
             for r in rows
         ]
 
-    def entity_memories(self, entity_id: str, limit: int = 10) -> list[Memory]:
+    def entity_memories(
+        self, entity_id: str, limit: int = 10, *, include_invalid: bool = False
+    ) -> list[Memory]:
+        active_clause = "" if include_invalid else " AND m.invalid_at IS NULL"
         with self._lock:
             rows = self._db.execute(
                 f"SELECT DISTINCT {', '.join('m.' + c.strip() for c in _MEMORY_COLS.split(','))} "
                 "FROM entity_mentions em JOIN memories m ON m.id = em.memory_id "
-                "WHERE em.entity_id = ? ORDER BY m.updated_at DESC LIMIT ?",
+                f"WHERE em.entity_id = ?{active_clause} "
+                "ORDER BY m.updated_at DESC LIMIT ?",
                 (entity_id, limit),
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
@@ -920,7 +1545,8 @@ class LocalBackend(MemoryBackend):
     def set_entity_type(self, entity_id: str, entity_type: str) -> None:
         with self._lock:
             self._db.execute(
-                "UPDATE entities SET entity_type = ?, updated_at = ? WHERE id = ?",
+                "UPDATE entities SET entity_type = ?, updated_at = ?, "
+                "description_updated_at = NULL WHERE id = ?",
                 (entity_type, utcnow(), entity_id),
             )
             self._db.commit()
@@ -940,22 +1566,66 @@ class LocalBackend(MemoryBackend):
                 out.append(self._row_to_entity(r))
         return out
 
+    def touch_entity(self, entity_id: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
+                "WHERE id = ?",
+                (utcnow(), entity_id),
+            )
+            self._db.commit()
+
     def merge_entities(self, keep_id: str, merge_id: str) -> bool:
         if keep_id == merge_id:
             return False
         with self._lock:
-            keep = self._db.execute("SELECT id FROM entities WHERE id = ?", (keep_id,)).fetchone()
+            keep = self._db.execute(
+                "SELECT id FROM entities WHERE id = ? AND merged_into IS NULL", (keep_id,)
+            ).fetchone()
+            if keep is None:
+                return False
+            changed_at = utcnow()
             cur = self._db.execute(
-                "UPDATE entities SET merged_into = ?, updated_at = ? "
+                "UPDATE entities SET merged_into = ?, updated_at = ?, "
+                "description_updated_at = NULL "
                 "WHERE id = ? AND merged_into IS NULL",
-                (keep_id, utcnow(), merge_id),
+                (keep_id, changed_at, merge_id),
             )
-            if not keep or cur.rowcount == 0:
+            if cur.rowcount == 0:
                 self._db.rollback()
                 return False
             self._db.execute(
                 "UPDATE entity_mentions SET entity_id = ? WHERE entity_id = ?",
                 (keep_id, merge_id),
+            )
+            self._db.execute(
+                "UPDATE relations SET subject = ? WHERE subject = ?", (keep_id, merge_id)
+            )
+            self._db.execute(
+                "UPDATE relations SET object = ? WHERE object = ?", (keep_id, merge_id)
+            )
+            self._db.execute(
+                "UPDATE relations SET invalid_at = ? "
+                "WHERE subject = object AND invalid_at IS NULL",
+                (changed_at,),
+            )
+            self._db.execute(
+                "UPDATE entity_proposals SET entity_a = ? WHERE entity_a = ?",
+                (keep_id, merge_id),
+            )
+            self._db.execute(
+                "UPDATE entity_proposals SET entity_b = ? WHERE entity_b = ?",
+                (keep_id, merge_id),
+            )
+            self._db.execute(
+                "UPDATE entity_proposals SET status = 'rejected', decided_at = ? "
+                "WHERE entity_a = entity_b AND status = 'proposed'",
+                (changed_at,),
+            )
+            self._db.execute(
+                "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
+                "WHERE id = ?",
+                (changed_at, keep_id),
             )
             self._db.commit()
         return True
@@ -1078,8 +1748,10 @@ class LocalBackend(MemoryBackend):
 
     def reset(self) -> None:
         with self._lock:
-            for table in ("memories", "episodes", "memory_events", "entities",
-                          "entity_mentions", "entity_proposals", "ann_keys"):
+            for table in (
+                "memory_topics", "topic_relations", "topics", "memories", "episodes",
+                "memory_events", "entities", "entity_mentions", "entity_proposals", "ann_keys",
+            ):
                 self._db.execute(f"DELETE FROM {table}")
             self._db.commit()
         for sidecar in self._anns.values():

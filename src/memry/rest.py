@@ -99,6 +99,12 @@ input,button,textarea{font:inherit;color:inherit;background:var(--panel);border:
 input:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
 button{cursor:pointer}button.primary{background:var(--accent);color:#04211c;border-color:transparent;font-weight:600}
 button.toggle[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+.knowledge-tabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.9rem 0}
+.knowledge-tabs button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+.kpanel[hidden]{display:none}.entity-link,.entity-chip{border:1px solid var(--line);background:none;color:var(--accent);border-radius:999px;padding:.05rem .45rem;font-size:.78rem}
+.entity-link{border:none;padding:.1rem .2rem}.entity-link:hover,.entity-chip:hover{border-color:var(--accent)}
+.detail{border:1px solid var(--line);border-radius:9px;padding:.75rem;margin:.7rem 0;background:color-mix(in srgb,var(--bg) 35%,transparent)}
+.detail h3{margin:0 0 .35rem;font-size:1rem}.detail .description{line-height:1.45}.alias-list{display:flex;gap:.35rem;flex-wrap:wrap;margin:.4rem 0}.alias-list span{border:1px solid var(--line);border-radius:999px;padding:.05rem .45rem;font-size:.75rem;color:var(--dim)}
 #stats{color:var(--dim);font-size:.85rem;margin-bottom:1rem}
 .mem{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.7rem .9rem;margin-bottom:.5rem}
 .mem .meta{color:var(--dim);font-size:.78rem;margin-top:.35rem;display:flex;gap:.8rem;flex-wrap:wrap}
@@ -121,7 +127,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openTags();return false" title="Tag manager: see every tag with its count and rename, combine or delete tags across all memories.">tags</a> · <a href="#" onclick="openEntities();return false" title="Entities and relations: people, projects, places and how they connect.">entities</a> ·<a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
+<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openKnowledge();return false" title="Browse topics, entities, relations, and collections in one place.">knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <input id="user" placeholder="user_id (all)" style="width:11rem">
@@ -135,7 +141,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <div id="addpanel" hidden>
 <textarea id="newmem" placeholder="Add to memory… (extraction runs if an LLM is configured)"></textarea>
 <div class="bar">
-  <input id="newcats" placeholder="categories, comma separated (optional)" style="flex:1;min-width:10rem">
+  <input id="newcats" placeholder="topics, comma separated (optional)" style="flex:1;min-width:10rem">
   <button class="primary" onclick="add(true)">Add (infer)</button>
   <button onclick="add(false)">Add verbatim</button>
 </div>
@@ -144,29 +150,31 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <div class="gx-ctrl"><button id="fsBtn" title="Fullscreen" aria-label="Fullscreen">⤢</button></div>
 <div class="gx-read" id="mapread"></div><div class="gx-stat" id="mapstat"></div></div>
 <div id="list"></div>
-<div class="modal" id="tagmodal"><div class="sheet">
-<h2><button class="x" onclick="closeTags()" title="close">✕</button>Tags</h2>
-<p class="hint">Every tag with its memory count. Combine near-duplicates, rename to a
-clearer label, or delete a tag from all memories. Changes apply across the current
-user filter. Synthetic tags are flagged.</p>
-<div class="tagbar">
-  <span class="sel" id="tagsel">none selected</span>
-  <button onclick="suggestMerges()" title="let the LLM propose duplicate/variant tags to merge">Suggest merges</button>
-  <button onclick="mergeTags()" title="combine the checked tags into one">Combine selected…</button>
+<div class="modal" id="knowmodal"><div class="sheet">
+<h2><button class="x" onclick="closeKnowledge()" title="close">x</button>Knowledge</h2>
+<p class="hint">Topics classify memories. People and things are stable entity hubs with aliases, a bounded description, and supporting memories. Relations and collections stay evidence-linked views.</p>
+<div class="knowledge-tabs">
+  <button id="ktab-topics" onclick="showKnowledge('topics')">Topics</button>
+  <button id="ktab-entities" onclick="showKnowledge('entities')">People &amp; things</button>
+  <button id="ktab-relations" onclick="showKnowledge('relations')">Relations</button>
+  <button id="ktab-collections" onclick="showKnowledge('collections')">Collections</button>
 </div>
-<div id="tagsuggest"></div>
-<div id="taglist"></div>
-</div></div>
-<div class="modal" id="entmodal"><div class="sheet">
-<h2><button class="x" onclick="closeEntities()" title="close">✕</button>Entities &amp; relations</h2>
-<p class="hint">The people, projects, places and other things your memories mention,
-grouped by type, and the typed relations between them. Untyped ones came in before
-typing existed.</p>
-<div class="tagbar"><span class="sel" id="entcount"></span>
-  <button onclick="backfillTypes()" title="classify entities that have no type yet (one-time, cheap)">Backfill types</button></div>
-<div id="entlist"></div>
-<h2 style="font-size:.95rem;margin-top:1.1rem">Relations</h2>
-<div id="rellist"></div>
+<section class="kpanel" id="kpanel-topics">
+  <div class="tagbar">
+    <span class="sel" id="tagsel">none selected</span>
+    <button onclick="suggestMerges()" title="let the LLM propose duplicate or variant topics to merge">Suggest merges</button>
+    <button onclick="mergeTags()" title="combine the checked topics into one">Combine selected...</button>
+  </div>
+  <div id="tagsuggest"></div><div id="taglist"></div>
+</section>
+<section class="kpanel" id="kpanel-entities" hidden>
+  <div class="tagbar"><span class="sel" id="entcount"></span>
+    <button onclick="backfillTypes()" title="classify entities that have no type yet">Backfill types</button></div>
+  <div id="entitydetail"></div><div id="entlist"></div>
+  <h2 style="font-size:.95rem;margin-top:1.1rem">Merge proposals</h2><div id="proplist"></div>
+</section>
+<section class="kpanel" id="kpanel-relations" hidden><div id="rellist"></div></section>
+<section class="kpanel" id="kpanel-collections" hidden><div id="collist"></div></section>
 </div></div>
 </main><script>
 // Auth rides the session cookie set at /login; no key to paste anymore.
@@ -211,6 +219,7 @@ function viewCard(m){
    <div>${esc(m.content)}</div>
    <div class="meta"><span class="tag">${m.memory_type||m.type||'semantic'}</span>
    ${(m.categories||[]).map(c=>`<span class="tag">#${esc(String(c))}</span>`).join('')}
+   ${(m.entity_links||[]).map(entity=>`<button class="entity-chip" onclick='openEntity(${JSON.stringify(entity.id)})'>${esc(entity.name)}</button>`).join('')}
    <span>@${esc(m.user_id||'(no user)')}</span>
    <span>imp ${(m.importance??0.5).toFixed(2)}</span>
    ${m.score!==undefined?`<span>score ${m.score.toFixed(3)}</span>`:''}
@@ -222,7 +231,7 @@ function editCard(m){
   return `<div class="mem">
    <textarea id="edit-note">${esc(m.content)}</textarea>
    <div class="bar" style="margin-bottom:0">
-     <input id="edit-cats" value="${esc((m.categories||[]).join(', '))}" placeholder="tags, comma separated (optional)" style="flex:1;min-width:8rem">
+     <input id="edit-cats" value="${esc((m.categories||[]).join(', '))}" placeholder="topics, comma separated (optional)" style="flex:1;min-width:8rem">
      <button class="primary" onclick="saveEdit('${m.id}')">Save</button>
      <button onclick="cancelEdit()">Cancel</button>
    </div></div>`;
@@ -608,98 +617,136 @@ function clearSearch(){
   activeCat=null; loadAll();   // x clears the box and resets to all
 }
 
-// -- tag manager -----------------------------------------------------------
-async function openTags(){
-  document.getElementById('tagmodal').classList.add('on');
-  await loadTags();
+// -- unified knowledge area -------------------------------------------------
+let knowledgeTab='topics',knowledgeNames={};
+async function openKnowledge(tab='topics'){
+  document.getElementById('knowmodal').classList.add('on');
+  showKnowledge(tab);
+  await Promise.all([loadTags(),loadEntities(),loadCollections()]);
 }
-function closeTags(){ document.getElementById('tagmodal').classList.remove('on'); }
-function tagSel(){ return [...document.querySelectorAll('.tagrow input:checked')].map(c=>c.value); }
+function closeKnowledge(){document.getElementById('knowmodal').classList.remove('on')}
+function openTags(){return openKnowledge('topics')}
+function openEntities(){return openKnowledge('entities')}
+function showKnowledge(tab){
+  knowledgeTab=tab;
+  for(const name of['topics','entities','relations','collections']){
+    document.getElementById('kpanel-'+name).hidden=name!==tab;
+    document.getElementById('ktab-'+name).setAttribute('aria-pressed',name===tab);
+  }
+}
+function tagSel(){return[...document.querySelectorAll('.tagrow input:checked')].map(c=>c.value)}
 function updateSel(){
   const n=tagSel().length;
-  document.getElementById('tagsel').textContent = n?`${n} selected`:'none selected';
+  document.getElementById('tagsel').textContent=n?`${n} selected`:'none selected';
 }
 async function loadTags(){
   const u=uid()?'?user_id='+encodeURIComponent(uid()):'';
-  const cats=await api('/api/v1/categories'+u);
-  cats.sort((a,b)=>a.category.localeCompare(b.category));  // tag manager lists A→Z
+  const topics=await api('/api/v1/categories'+u);
+  topics.sort((a,b)=>a.category.localeCompare(b.category));
   const el=document.getElementById('taglist');
-  if(!cats.length){el.innerHTML='<div class="empty">No tags yet.</div>';return}
-  el.innerHTML=cats.map(c=>`<div class="tagrow">
-    <input type="checkbox" value="${esc(c.category)}" onchange="updateSel()">
-    <span class="name"><b>${esc(c.category)}</b> <span class="cnt">${c.count}</span>
-      ${c.synthetic?'<span class="syn">synthetic</span>':''}</span>
-    <button class="act" title="rename this tag everywhere" onclick="renameTag('${esc(c.category)}')">rename</button>
-    <button class="act del" title="delete this tag from all memories" onclick="deleteTag('${esc(c.category)}')">delete</button>
+  if(!topics.length){el.innerHTML='<div class="empty">No topics yet.</div>';return}
+  el.innerHTML=topics.map(topic=>`<div class="tagrow">
+    <input type="checkbox" value="${esc(topic.category)}" onchange="updateSel()">
+    <span class="name"><b>${esc(topic.category)}</b> <span class="cnt">${topic.count}</span>
+      ${topic.synthetic?'<span class="syn">synthetic parent</span>':''}</span>
+    <button class="act" title="rename this topic everywhere" onclick='renameTag(${JSON.stringify(topic.category)})'>rename</button>
+    <button class="act del" title="delete this topic from all memories" onclick='deleteTag(${JSON.stringify(topic.category)})'>delete</button>
   </div>`).join('');
   updateSel();
 }
 async function tagOp(body){
-  const b={...body}; if(uid())b.user_id=uid();
-  const r=await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(b)});
-  await loadTags();
-  activeCat=null; loadAll();   // memories changed underneath us
-  return r;
+  const payload={...body};if(uid())payload.user_id=uid();
+  const result=await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(payload)});
+  await loadTags();activeCat=null;loadAll();return result;
 }
 async function renameTag(tag){
-  const to=prompt('Rename tag "'+tag+'" to:', tag); if(!to||to.trim()===tag)return;
-  await tagOp({op:'rename', tag, to:to.trim()});
+  const to=prompt('Rename topic "'+tag+'" to:',tag);if(!to||to.trim()===tag)return;
+  await tagOp({op:'rename',tag,to:to.trim()});
 }
 async function deleteTag(tag){
-  if(!confirm('Delete tag "'+tag+'" from all memories? The memories stay; only the tag is removed.'))return;
-  await tagOp({op:'delete', tag});
+  if(!confirm('Delete topic "'+tag+'" from all memories? The memories stay.'))return;
+  await tagOp({op:'delete',tag});
 }
 async function mergeTags(){
-  const sel=tagSel(); if(sel.length<2)return alert('Check at least two tags to combine.');
-  const to=prompt('Combine '+sel.length+' tags into one named:', sel[0]); if(!to||!to.trim())return;
-  await tagOp({op:'merge', tags:sel, to:to.trim()});
+  const selected=tagSel();if(selected.length<2)return alert('Check at least two topics to combine.');
+  const to=prompt('Combine '+selected.length+' topics into one named:',selected[0]);
+  if(!to||!to.trim())return;
+  await tagOp({op:'merge',tags:selected,to:to.trim()});
 }
 async function suggestMerges(){
-  const box=document.getElementById('tagsuggest');
-  box.innerHTML='<div class="hint">thinking…</div>';
+  const box=document.getElementById('tagsuggest');box.innerHTML='<div class="hint">thinking...</div>';
   const u=uid()?'?user_id='+encodeURIComponent(uid()):'';
   const groups=await api('/api/v1/tags/suggest-merges'+u);
-  if(!groups.length){box.innerHTML='<div class="hint">No duplicate or variant tags found.</div>';return}
-  box.innerHTML=groups.map((g,i)=>`<div class="tagrow" id="sg${i}">
-    <span class="name">merge <b>${g.variants.map(esc).join('</b>, <b>')}</b> → <b>${esc(g.canonical)}</b></span>
-    <button class="act" onclick='applyMerge(${JSON.stringify(g)},${i})'>apply</button>
-    <button class="act del" onclick="document.getElementById('sg${i}').remove()">dismiss</button>
+  if(!groups.length){box.innerHTML='<div class="hint">No duplicate or variant topics found.</div>';return}
+  box.innerHTML=groups.map((group,index)=>`<div class="tagrow" id="sg${index}">
+    <span class="name">merge <b>${group.variants.map(esc).join('</b>, <b>')}</b> into <b>${esc(group.canonical)}</b></span>
+    <button class="act" onclick='applyMerge(${JSON.stringify(group)},${index})'>apply</button>
+    <button class="act del" onclick="document.getElementById('sg${index}').remove()">dismiss</button>
   </div>`).join('');
 }
-async function applyMerge(g,i){
-  await tagOp({op:'merge', tags:g.variants, to:g.canonical});
-  const row=document.getElementById('sg'+i); if(row)row.remove();
+async function applyMerge(group,index){
+  await tagOp({op:'merge',tags:group.variants,to:group.canonical});
+  const row=document.getElementById('sg'+index);if(row)row.remove();
 }
-
-// -- entities & relations --------------------------------------------------
-async function openEntities(){
-  document.getElementById('entmodal').classList.add('on');
+async function loadEntities(){
+  const sep=uid()?'?user_id='+encodeURIComponent(uid())+'&':'?';
+  const [entities,relations,proposals]=await Promise.all([
+    api('/api/v1/entities'+sep+'limit=100000&include_merged=true'),
+    api('/api/v1/relations'+sep+'limit=2000'),
+    api('/api/v1/entities/proposals'+sep+'limit=1000')]);
+  knowledgeNames={};entities.forEach(entity=>knowledgeNames[entity.id]=entity.name);
+  const active=entities.filter(entity=>!entity.merged_into);
+  document.getElementById('entcount').textContent=active.length+' entities, '+relations.length+' relations';
+  const byType={};
+  active.forEach(entity=>(byType[entity.entity_type||'untyped']??=[]).push(entity));
+  document.getElementById('entlist').innerHTML=Object.keys(byType).sort().map(type=>`<div class="tagrow">
+    <span class="syn">${esc(type)}</span><span class="name">${byType[type].sort((a,b)=>a.name.localeCompare(b.name)).map(entity=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(entity.id)})'>${esc(entity.name)}</button>`).join(', ')}</span>
+    <span class="cnt">${byType[type].length}</span></div>`).join('')||'<div class="empty">No entities yet.</div>';
+  document.getElementById('rellist').innerHTML=relations.length?relations.map(relation=>`<div class="tagrow"><span class="name">
+    <button class="entity-link" onclick='openEntity(${JSON.stringify(relation.subject)})'>${esc(knowledgeNames[relation.subject]||'?')}</button>
+    <span class="cnt">${esc(relation.predicate)}</span>
+    <button class="entity-link" onclick='openEntity(${JSON.stringify(relation.object)})'>${esc(knowledgeNames[relation.object]||'?')}</button>
+    </span>${relation.memory_id?`<button class="act" onclick='showMemory(${JSON.stringify(relation.memory_id)})'>evidence</button>`:''}</div>`).join(''):'<div class="empty">No evidence-grounded relations yet.</div>';
+  document.getElementById('proplist').innerHTML=proposals.length?proposals.map(proposal=>`<div class="tagrow"><span class="name">
+    <b>${esc(knowledgeNames[proposal.entity_a]||proposal.entity_a)}</b> and <b>${esc(knowledgeNames[proposal.entity_b]||proposal.entity_b)}</b>
+    <span class="cnt">${esc(proposal.reason||'identity is uncertain')}</span></span>
+    <button class="act" onclick='decideProposal(${JSON.stringify(proposal.id)},"confirm")'>merge</button>
+    <button class="act del" onclick='decideProposal(${JSON.stringify(proposal.id)},"reject")'>keep separate</button></div>`).join(''):'<div class="empty">No open merge proposals.</div>';
+}
+async function openEntity(id){
+  document.getElementById('knowmodal').classList.add('on');showKnowledge('entities');
+  const box=document.getElementById('entitydetail');box.innerHTML='<div class="hint">loading entity...</div>';
+  const detail=await api('/api/v1/entities/'+encodeURIComponent(id));
+  const entity=detail.entity,aliases=detail.aliases||[];
+  box.innerHTML=`<div class="detail"><h3>${esc(entity.name)} ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
+    <div class="description">${esc(entity.description||'No active evidence to summarize yet.')}</div>
+    <div class="alias-list">${aliases.map(alias=>`<span>${esc(alias)}</span>`).join('')}</div>
+    <div class="bar"><input id="aliasinput" placeholder="add an alias"><button onclick='addAlias(${JSON.stringify(id)})'>Add alias</button></div>
+    <div class="hint">${detail.memories.length} active supporting memor${detail.memories.length===1?'y':'ies'}</div>
+    ${detail.memories.map(memory=>`<div class="tagrow"><span class="name">${esc(memory.content)}</span><button class="act" onclick='showMemory(${JSON.stringify(memory.id)})'>open</button></div>`).join('')||'<div class="empty">No active supporting memories.</div>'}</div>`;
+}
+async function addAlias(id){
+  const input=document.getElementById('aliasinput'),alias=input.value.trim();if(!alias)return;
+  await api('/api/v1/entities/'+encodeURIComponent(id)+'/aliases',{method:'POST',body:JSON.stringify({alias})});
+  await Promise.all([openEntity(id),loadEntities()]);
+}
+async function decideProposal(id,decision){
+  await api('/api/v1/entities/proposals/'+encodeURIComponent(id)+'/'+decision,{method:'POST',body:'{}'});
   await loadEntities();
 }
-function closeEntities(){ document.getElementById('entmodal').classList.remove('on'); }
-async function loadEntities(){
+async function loadCollections(){
   const u=uid()?'?user_id='+encodeURIComponent(uid()):'';
-  const [ents,rels]=await Promise.all([
-    api('/api/v1/entities'+(u||'?')+'&limit=100000'),
-    api('/api/v1/relations'+(u||'?')+'&limit=2000')]);
-  const name={}; ents.forEach(e=>name[e.id]=e.name);
-  document.getElementById('entcount').textContent=ents.length+' entities · '+rels.length+' relations';
-  // group by type
-  const byType={};
-  ents.forEach(e=>{(byType[e.entity_type||'untyped']=byType[e.entity_type||'untyped']||[]).push(e.name)});
-  const el=document.getElementById('entlist');
-  el.innerHTML=Object.keys(byType).sort().map(t=>`<div class="tagrow">
-    <span class="name"><span class="syn">${esc(t)}</span> ${byType[t].sort().map(esc).join(', ')}</span>
-    <span class="cnt">${byType[t].length}</span></div>`).join('')||'<div class="empty">No entities yet.</div>';
-  const rl=document.getElementById('rellist');
-  rl.innerHTML=rels.length?rels.map(r=>`<div class="tagrow"><span class="name">
-    <b>${esc(name[r.subject]||'?')}</b> <span class="cnt">${esc(r.predicate)}</span> <b>${esc(name[r.object]||'?')}</b>
-    </span></div>`).join(''):'<div class="empty">No relations yet. New saves add them; run “Backfill types” then relation backfill for old memories.</div>';
+  const collections=await api('/api/v1/collections'+u);
+  document.getElementById('collist').innerHTML=collections.length?collections.map(collection=>`<div class="detail"><h3>${esc(collection.title)}</h3><div class="description">${esc(collection.summary||'')}</div><div class="hint">${collection.memory_ids.length} memories</div><div class="alias-list">${collection.memory_ids.slice(0,50).map((id,index)=>`<button class="entity-chip" onclick='showMemory(${JSON.stringify(id)})'>memory ${index+1}</button>`).join('')}</div></div>`).join(''):'<div class="empty">No synthesized collections yet.</div>';
+}
+async function showMemory(id){
+  const memory=await api('/api/v1/memories/'+encodeURIComponent(id));
+  closeKnowledge();activeCat=null;haveMore=false;render([memory]);
 }
 async function backfillTypes(){
-  const u=uid()?{user_id:uid()}:{};
-  const box=document.getElementById('entcount'); box.textContent='classifying…';
-  const r=await api('/api/v1/entities/backfill-types',{method:'POST',body:JSON.stringify(u)});
+  const payload=uid()?{user_id:uid()}:{};
+  document.getElementById('entcount').textContent='classifying...';
+  await api('/api/v1/entities/backfill-types',{method:'POST',body:JSON.stringify(payload)});
   await loadEntities();
 }
 async function add(infer){
@@ -744,7 +791,7 @@ async function exportMemories(){
   a.click(); URL.revokeObjectURL(a.href);
 }
 // Additive: every row becomes a new verbatim memory in ONE bulk request
-// (server batches the embedding calls); nothing is deleted or deduplicated.
+// (server batches embeddings); nothing is deleted or overwritten, and duplicates are skipped.
 async function importMemories(file){
   if(!file)return;
   const text=((await file.text())||'').trim(); if(!text)return;
@@ -757,8 +804,12 @@ async function importMemories(file){
   try{
     const res=await api('/api/v1/import',{method:'POST',
       body:JSON.stringify({memories:rows,user_id:uid()||undefined})});
-    if(res&&res.imported!==undefined)
-      alert('Imported '+res.imported+' of '+rows.length+(res.skipped?' ('+res.skipped+' empty rows skipped)':'')+'.');
+    if(res&&res.imported!==undefined){
+      const notes=[];
+      if(res.deduplicated)notes.push(res.deduplicated+' duplicates skipped');
+      if(res.skipped)notes.push(res.skipped+' empty rows skipped');
+      alert('Imported '+res.imported+' of '+rows.length+(notes.length?' ('+notes.join(', ')+')':'')+'.');
+    }
     else alert((res&&res.error)||'Import failed.');
   }catch{alert('Import failed.')}
   btn.textContent='import';
@@ -1082,6 +1133,18 @@ def create_app(
             return [c.strip() for c in value.split(",") if c.strip()]
         return [str(c) for c in value]
 
+    def _memory_payload(memory) -> dict[str, Any]:
+        data = memory.model_dump()
+        data["entity_links"] = [
+            {
+                "id": entity.id,
+                "name": entity.name,
+                "entity_type": entity.entity_type,
+            }
+            for entity in store.backend.entities_of_memory(memory.id)
+        ]
+        return data
+
     async def list_memories(request: Request) -> Response:
         q = request.query_params
         memories = store.get_all(
@@ -1095,7 +1158,7 @@ def create_app(
             since=q.get("since") or None,
             until=q.get("until") or None,
         )
-        return JSONResponse([m.model_dump() for m in memories])
+        return JSONResponse([_memory_payload(memory) for memory in memories])
 
     async def create_memory(request: Request) -> Response:
         body = await request.json()
@@ -1125,7 +1188,7 @@ def create_app(
 
     async def get_memory(request: Request) -> Response:
         memory, error = _memory_or_error(request)
-        return error or JSONResponse(memory.model_dump())
+        return error or JSONResponse(_memory_payload(memory))
 
     async def patch_memory(request: Request) -> Response:
         _, error = _memory_or_error(request)
@@ -1140,7 +1203,7 @@ def create_app(
             metadata=body.get("metadata"),
             owner_prefix=_p(request).prefix,
         )
-        return JSONResponse(memory.model_dump())
+        return JSONResponse(_memory_payload(memory))
 
     async def delete_memory(request: Request) -> Response:
         _, error = _memory_or_error(request)
@@ -1341,7 +1404,7 @@ def create_app(
         ))
         return JSONResponse(
             [
-                {"memory": r.memory.model_dump(), "score": r.score, "signals": r.signals}
+                {"memory": _memory_payload(r.memory), "score": r.score, "signals": r.signals}
                 for r in results
             ]
         )
@@ -1388,16 +1451,38 @@ def create_app(
         return JSONResponse([e.model_dump() for e in entities])
 
     async def get_entity(request: Request) -> Response:
-        detail = store.entity(
-            request.path_params["entity_id"], owner_prefix=_p(request).prefix
-        )
+        detail = await run_in_threadpool(partial(
+            store.entity,
+            request.path_params["entity_id"],
+            owner_prefix=_p(request).prefix,
+        ))
         if detail is None:
             return JSONResponse({"error": "not found"}, status_code=404)
         return JSONResponse(
             {
                 "entity": detail["entity"].model_dump(),
-                "mentions": [m.model_dump() for m in detail["mentions"]],
-                "memories": [m.model_dump() for m in detail["memories"]],
+                "aliases": detail["aliases"],
+                "mentions": [mention.model_dump() for mention in detail["mentions"]],
+                "memories": [_memory_payload(memory) for memory in detail["memories"]],
+            }
+        )
+
+    async def add_entity_alias(request: Request) -> Response:
+        body = await request.json()
+        alias = str(body.get("alias", "")).strip()
+        if not alias:
+            return JSONResponse({"error": "alias required"}, status_code=400)
+        entity = store.add_entity_alias(
+            request.path_params["entity_id"],
+            alias,
+            owner_prefix=_p(request).prefix,
+        )
+        if entity is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(
+            {
+                "entity": entity.model_dump(),
+                "aliases": store.backend.entity_aliases(entity.id),
             }
         )
 
@@ -1646,6 +1731,11 @@ def create_app(
             guarded(reject_proposal), methods=["POST"],
         ),
         Route("/api/v1/entities/resolve", guarded(resolve_entities_route), methods=["POST"]),
+        Route(
+            "/api/v1/entities/{entity_id}/aliases",
+            guarded(add_entity_alias),
+            methods=["POST"],
+        ),
         Route("/api/v1/entities/{entity_id}", guarded(get_entity), methods=["GET"]),
     ]
     if oauth is not None:

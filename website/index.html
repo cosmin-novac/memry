@@ -275,7 +275,7 @@ footer a{color:var(--dim)}
       <div class="feat"><h3>MCP-native</h3>
         <p>Eight tools over stdio or streamable HTTP. Claude Code, Claude Desktop, Cursor, Windsurf, Codex - one server, every agent, shared memory.</p></div>
       <div class="feat"><h3>One SQLite file</h3>
-        <p>Episodes, memories, FTS5 index, embeddings, and events in a single file. Back it up with <code>cp</code>. No vector DB, no Postgres, no cloud.</p></div>
+        <p>Episodes, memories, FTS5, embeddings, topics, and entities in one local store. No external database, vector service, or cloud account.</p></div>
       <div class="feat"><h3>Works with zero keys</h3>
         <p>BM25 keyword search plus deterministic hash embeddings out of the box. Add <code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code> and extraction upgrades itself.</p></div>
       <div class="feat"><h3>Temporal memory</h3>
@@ -287,11 +287,11 @@ footer a{color:var(--dim)}
       <div class="feat"><h3>Scoped &amp; multi-agent</h3>
         <p>user / agent / run scoping, mem0-compatible. Point several agents at one server and they share what they learn.</p></div>
       <div class="feat"><h3>Pluggable everything</h3>
-        <p>Anthropic, OpenAI, or Ollama for extraction; OpenAI, Voyage, Ollama, or local hashing for embeddings; swappable storage backends - including a Mem0 adapter.</p></div>
+        <p>Anthropic, OpenAI, or Ollama for extraction; OpenAI, Voyage, Ollama, or local hashing for embeddings; SQLite for production and an optional Mem0 comparison adapter.</p></div>
       <div class="feat"><h3>Entities, disambiguated</h3>
         <p>Three ambiguous "Jonas" mentions stay three entities. Merges happen only when identity is clear, or when you confirm a recorded merge proposal.</p></div>
-      <div class="feat"><h3>Scales when you need it</h3>
-        <p>Optional HNSW vector index (<code>memry[ann]</code>) and a PostgreSQL + pgvector backend (<code>memry[postgres]</code>) for multi-writer fleets.</p></div>
+      <div class="feat"><h3>One server, many agents</h3>
+        <p>Many clients share one SQLite-backed Memry service. For larger stores, <code>memry[ann]</code> adds a rebuildable HNSW candidate index.</p></div>
       <div class="feat"><h3>Multi-tenant ready</h3>
         <p>Per-tenant API keys with transparent namespacing and strict isolation, plus category filters on every search surface.</p></div>
       <div class="feat"><h3>Benchmark it yourself</h3>

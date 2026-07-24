@@ -109,15 +109,13 @@ class AnnConfig(BaseModel):
 
 
 class TagAbstractionConfig(BaseModel):
-    """Periodic tag abstraction: an LLM looks at all of a namespace's tags and
-    proposes a few higher-level tags that cluster existing ones, then applies
-    each to every memory under it. Needs an LLM; a no-op without one.
+    """Optional topic abstraction.
 
-    Off by default: abstracting tag *strings* into broader tags tends to produce
-    generic labels that hurt retrieval. The better path (memory-based grouping +
-    canonicalization, surfaced as proposals rather than auto-applied) is being
-    built; manual curation lives in the dashboard Tag manager meanwhile."""
-
+    An LLM proposes higher-level topic parents and the store records hierarchy
+    edges to their existing members. Parent labels are not copied onto memories.
+    It is off by default because generic abstraction can hurt retrieval; run it
+    only when the resulting navigation is useful.
+    """
     enabled: bool = False
     interval_days: float = 7.0
     max_new_tags: int = 5  # propose at most this many higher-level tags per run
@@ -135,8 +133,7 @@ class TenantConfig(BaseModel):
 
 class Config(BaseModel):
     db_path: str = str(DEFAULT_DIR / "memry.db")
-    backend: Literal["local", "mem0", "postgres"] = "local"
-    postgres_dsn: str | None = None  # for backend="postgres"
+    backend: Literal["local", "mem0"] = "local"
     default_user_id: str = "default"
     api_key: str | None = None  # admin bearer token for the REST/MCP server
     tenants: list[TenantConfig] = Field(default_factory=list)
@@ -187,8 +184,6 @@ class Config(BaseModel):
                 d[section]["api_key"] = "***"
         if d.get("api_key"):
             d["api_key"] = "***"
-        if d.get("postgres_dsn"):
-            d["postgres_dsn"] = "***"
         for tenant in d.get("tenants", []):
             tenant["api_key"] = "***"
         return d
@@ -218,7 +213,6 @@ def _from_env() -> dict[str, Any]:
 
     put(None, "db_path", e("MEMRY_DB_PATH"))
     put(None, "backend", e("MEMRY_BACKEND"))
-    put(None, "postgres_dsn", e("MEMRY_POSTGRES_DSN"))
     put(None, "default_user_id", e("MEMRY_DEFAULT_USER"))
     put(None, "api_key", e("MEMRY_API_KEY"))
     put(None, "auth_db_path", e("MEMRY_AUTH_DB_PATH"))

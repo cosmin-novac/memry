@@ -15,6 +15,7 @@ relational questions gain the hop-reachable memories on top.
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 
 from ..backends.base import MemoryBackend
 from ..models import Scope
@@ -23,17 +24,33 @@ _MIN_SURFACE = 3  # ignore 1-2 char "entities" that would match everything
 
 
 def detect_query_entities(
-    backend: MemoryBackend, scope: Scope, query: str, *, cap: int = 200_000
+    backend: MemoryBackend, scope: Scope, query: str, *, cap: int = 128
 ) -> list[str]:
-    """Entity ids whose name appears in the query. Cheap surface match against
-    the (bounded) entity vocabulary; good enough to seed traversal."""
-    ql = f" {query.lower()} "
-    hits: list[str] = []
-    for e in backend.list_entities(scope, limit=cap):
-        name = (e.normalized or e.name.lower()).strip()
-        if len(name) >= _MIN_SURFACE and (name in ql or f" {name} " in ql):
-            hits.append(e.id)
-    return hits
+    """Resolve bounded query phrases through canonical and alias candidates.
+
+    Work scales with the query length, not the number of stored entities.
+    Longest phrases are tried first so multi-word names remain precise.
+    """
+    tokens = re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", query.lower(), re.UNICODE)
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for width in range(min(6, len(tokens)), 0, -1):
+        for start in range(0, len(tokens) - width + 1):
+            phrase = " ".join(tokens[start : start + width]).strip()
+            if len(phrase) < _MIN_SURFACE or phrase in seen:
+                continue
+            seen.add(phrase)
+            phrases.append(phrase)
+            if len(phrases) >= cap:
+                break
+        if len(phrases) >= cap:
+            break
+    if not phrases:
+        return []
+    return [
+        entity.id
+        for entity in backend.find_entities_by_aliases(phrases, scope, limit=50)
+    ]
 
 
 def expand_entities(

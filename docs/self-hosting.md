@@ -1,7 +1,8 @@
 # Self-hosting Memry
 
-Memry is a single Python process with a single SQLite file. There is nothing else to
-operate - no vector database, no queue, no Postgres.
+Memry is one Python process with SQLite and no external database, queue, or vector service.
+The default memory store is one `memry.db` file. Runtime accounts/OAuth currently add a
+small adjacent `auth.db`; see the architecture and duplication audit for that explicit limit.
 
 ## Option 1 - bare (recommended for personal use)
 
@@ -47,8 +48,9 @@ walkthrough (cloud-init, DNS, backups, uninstall): [deploy-vps.md](deploy-vps.md
    paste on every visit; programmatic clients keep using the bearer header.
 2. **Bind privately** - without a key, keep `--host 127.0.0.1` or terminate TLS + auth in a
    reverse proxy (Caddy/Traefik/nginx).
-3. **Backups** - the entire state is one SQLite file; snapshot it (plus `-wal`/`-shm`) or
-   use `memry export` for JSONL.
+3. **Backups** - snapshot `memry.db` plus its `-wal`/`-shm` files, or use
+   `memry export` for memory JSONL. If runtime accounts are enabled, back up the adjacent
+   `auth.db` in the same operation.
 
 ## Multi-tenant mode
 
@@ -127,9 +129,9 @@ Memry verifies the human against its own accounts, so no third-party IdP is requ
 
 | Situation | Setting |
 |---|---|
-| Faster vector search past ~5k memories | `pip install "memry[ann]"` - a usearch HNSW sidecar kicks in automatically (threshold configurable via `ann.min_rows`); `memry reindex` rebuilds it |
-| Multiple server processes / machines writing one store | `pip install "memry[postgres]"`, then `MEMRY_BACKEND=postgres` and `MEMRY_POSTGRES_DSN=postgresql://...` (needs pgvector; use the `pgvector/pgvector` Docker image or any managed Postgres) |
-| One process, one machine | keep the default SQLite backend - it is the simplest and plenty fast |
+| Faster vector search past ~5k memories | `pip install "memry[ann]"` - a usearch HNSW sidecar supplies candidates above the configured threshold; `memry reindex` rebuilds it |
+| Many agents or devices sharing memory | Point every client at the same `memry serve` URL. They share one server process and one SQLite store. |
+| Several server replicas or machines writing one store | Unsupported. Do not point multiple Memry processes at the same database file. This would require a separately reviewed storage architecture. |
 
 ## Connecting agents to a shared server
 
@@ -177,21 +179,23 @@ memry abstract-tags           # LLM clusters tags into higher-level ones now
 A weekly `sweep` in cron/Task Scheduler keeps long-running stores lean; forgotten memories
 are invalidated (auditable, recoverable), never destroyed.
 
-## Managing tags
+## Managing topics and entities
 
-The dashboard has a **Tag manager** (the "tags" link next to sign out): every tag with its
-memory count, where you can **rename** a tag, **combine** several near-duplicates into one, or
-**delete** a tag from all memories. Changes apply across your current user filter and the
-memories themselves are never removed, only their labels. The same operations are available
-over REST at `POST /api/v1/tags/edit` (`{op: "rename"|"merge"|"delete", ...}`).
+The dashboard's **Knowledge** area contains Topics, People and things, Relations, and
+Collections. Topics show memory counts and can be renamed, combined, or deleted under the
+current user filter. The same topic operations remain available at
+`POST /api/v1/tags/edit` for API compatibility.
 
-There is also an optional, **off-by-default** weekly LLM pass that clusters a namespace's tags
-into higher-level ones and applies them (`MEMRY_TAG_ABSTRACTION=on`,
-`MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7`, or `memry abstract-tags` on demand). It is off by
-default because abstracting tag strings tends to produce generic labels that don't help
-retrieval; prefer the Tag manager, and a memory-grounded proposal engine is on the roadmap.
-Tags it created are flagged synthetic in `/api/v1/categories` and listed at
+An optional, off-by-default LLM pass proposes higher-level parents such as `health` over
+`running` and `sleep` (`MEMRY_TAG_ABSTRACTION=on`,
+`MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7`, or `memry abstract-tags`). Memry stores hierarchy
+edges and expands a parent filter at query time; it does not copy the parent label onto each
+memory. Synthetic parents remain visible through `/api/v1/categories` and
 `GET /api/v1/tags/synthetic`.
+
+People and things open as entity hubs with aliases, a bounded description, and active
+supporting memories. Relations can open their evidence memory, and collections link to their
+members.
 
 ## Searching by tag and date
 

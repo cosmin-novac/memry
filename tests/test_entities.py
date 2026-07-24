@@ -152,3 +152,124 @@ def test_entity_scoping_isolated(store, fake_llm):
     store.add("about another jonas", user_id="bob")
     assert len(store.entities(user_id="ada")) == 1
     assert len(store.entities(user_id="bob")) == 1
+
+
+def test_entity_memories_exclude_invalid_by_default(verbatim_store):
+    from memry.models import Entity, EntityMention, Memory
+
+    backend = verbatim_store.backend
+    entity = backend.insert_entity(
+        Entity(name="Cosmin", user_id="ada", updated_at="2020-01-01T00:00:00+00:00")
+    )
+    memory = backend.insert_memory(Memory(content="Cosmin is a good student", user_id="ada"))
+    backend.add_mention(
+        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Cosmin")
+    )
+
+    assert [m.id for m in backend.entity_memories(entity.id)] == [memory.id]
+    backend.invalidate_memory(memory.id)
+
+    assert backend.entity_memories(entity.id) == []
+    assert [m.id for m in backend.entity_memories(entity.id, include_invalid=True)] == [memory.id]
+    assert backend.get_entity(entity.id).updated_at > "2020-01-01T00:00:00+00:00"
+
+
+def test_hard_delete_removes_mentions_and_touches_entity(verbatim_store):
+    from memry.models import Entity, EntityMention, Memory
+
+    backend = verbatim_store.backend
+    entity = backend.insert_entity(
+        Entity(name="Cosmin", user_id="ada", updated_at="2020-01-01T00:00:00+00:00")
+    )
+    memory = backend.insert_memory(Memory(content="Cosmin studies physics", user_id="ada"))
+    backend.add_mention(
+        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Cosmin")
+    )
+
+    assert backend.delete_memory(memory.id)
+    assert backend.entity_mentions(entity.id) == []
+    assert backend.entity_memories(entity.id, include_invalid=True) == []
+    assert backend.get_entity(entity.id).updated_at > "2020-01-01T00:00:00+00:00"
+
+
+def test_merge_touches_surviving_entity(verbatim_store):
+    from memry.models import Entity
+
+    backend = verbatim_store.backend
+    keep = backend.insert_entity(
+        Entity(name="Cosmin", user_id="ada", updated_at="2020-01-01T00:00:00+00:00")
+    )
+    merge = backend.insert_entity(Entity(name="Cozmin", user_id="ada"))
+
+    assert backend.merge_entities(keep.id, merge.id)
+    assert backend.get_entity(keep.id).updated_at > "2020-01-01T00:00:00+00:00"
+
+def test_aliases_are_derived_and_user_aliases_are_indexed(verbatim_store):
+    from memry.models import Entity, EntityMention, Memory, Scope
+
+    backend = verbatim_store.backend
+    entity = backend.insert_entity(Entity(name="Cosmin Popescu", user_id="ada"))
+    memory = backend.insert_memory(
+        Memory(content="C. Popescu teaches physics", user_id="ada")
+    )
+    backend.add_mention(
+        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="C. Popescu")
+    )
+    assert verbatim_store.add_entity_alias(entity.id, "Costi") is not None
+
+    aliases = backend.entity_aliases(entity.id)
+    assert aliases == ["Cosmin Popescu", "C. Popescu", "Costi"]
+    assert [candidate.id for candidate in backend.find_entity_candidates(
+        "costi", Scope(user_id="ada")
+    )] == [entity.id]
+    assert [candidate.id for candidate in backend.find_entity_candidates(
+        "c. popescu", Scope(user_id="ada")
+    )] == [entity.id]
+
+
+def test_entity_description_is_lazy_bounded_and_active_only(verbatim_store):
+    from memry.models import Entity, EntityMention, Memory
+
+    backend = verbatim_store.backend
+    entity = backend.insert_entity(Entity(name="Cosmin", entity_type="person", user_id="ada"))
+    active = backend.insert_memory(
+        Memory(content="Cosmin is a strong physics student.", user_id="ada")
+    )
+    obsolete = backend.insert_memory(
+        Memory(content="Cosmin studies chemistry.", user_id="ada")
+    )
+    for memory in (active, obsolete):
+        backend.add_mention(
+            EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Cosmin")
+        )
+
+    first = verbatim_store.entity(entity.id)
+    assert "physics" in first["entity"].description
+    assert "chemistry" in first["entity"].description
+    assert first["entity"].description_updated_at is not None
+
+    backend.invalidate_memory(obsolete.id)
+    stale = backend.get_entity(entity.id)
+    assert stale.description_updated_at is None
+    refreshed = verbatim_store.entity(entity.id)
+    assert "physics" in refreshed["entity"].description
+    assert "chemistry" not in refreshed["entity"].description
+    assert [memory.id for memory in refreshed["memories"]] == [active.id]
+
+
+def test_entity_description_is_in_reconstructed_context(verbatim_store):
+    from memry.models import Entity, EntityMention, Memory
+
+    backend = verbatim_store.backend
+    entity = backend.insert_entity(Entity(name="Cosmin", user_id="ada"))
+    memory = backend.insert_memory(
+        Memory(content="Cosmin is a good student.", user_id="ada")
+    )
+    backend.add_mention(
+        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Cosmin")
+    )
+
+    context = verbatim_store.reconstruct_context("What do we know about Cosmin?", user_id="ada")
+    assert "## Known entities" in context.text
+    assert "Cosmin is a good student" in context.text
+    assert memory.id in context.memory_ids

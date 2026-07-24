@@ -174,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
     ep = entity_sub.add_parser("merge", help="merge entity MERGE_ID into KEEP_ID directly")
     ep.add_argument("keep_id")
     ep.add_argument("merge_id")
+    ep = entity_sub.add_parser("alias", help="add a user-supplied alias to an entity")
+    ep.add_argument("entity_id")
+    ep.add_argument("alias")
     ep = entity_sub.add_parser("resolve", help="re-judge open proposals with the LLM")
     _scope_args(ep)
 
@@ -321,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
                 _print(
                     {
                         "entity": detail["entity"].model_dump(),
+                        "aliases": detail["aliases"],
                         "mentions": [m.model_dump() for m in detail["mentions"]],
                         "memories": [
                             {"id": m.id, "content": m.content} for m in detail["memories"]
@@ -338,6 +342,12 @@ def main(argv: list[str] | None = None) -> int:
                 _print({"rejected": store.reject_merge(args.proposal_id)})
             elif sub_command == "merge":
                 _print({"merged": store.merge_entities(args.keep_id, args.merge_id)})
+            elif sub_command == "alias":
+                entity = store.add_entity_alias(args.entity_id, args.alias)
+                if entity is None:
+                    print("not found", file=sys.stderr)
+                    return 1
+                _print({"entity": entity.model_dump(), "aliases": store.backend.entity_aliases(entity.id)})
             elif sub_command == "resolve":
                 _print(store.resolve_entities(user_id=getattr(args, "user", None)))
         elif args.command == "add":

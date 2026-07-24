@@ -155,6 +155,30 @@ class SearchResult(BaseModel):
     signals: dict[str, float] = Field(default_factory=dict)
 
 
+class Topic(BaseModel):
+    """A canonical classification label within one memory scope."""
+
+    id: str = Field(default_factory=new_id)
+    name: str
+    normalized: str = ""
+    user_id: str | None = None
+    agent_id: str | None = None
+    run_id: str | None = None
+    provenance: str = "memory"
+    created_at: str = Field(default_factory=utcnow)
+    updated_at: str = Field(default_factory=utcnow)
+
+
+class TopicRelation(BaseModel):
+    """A taxonomy edge: ``broader`` contains the narrower topic."""
+
+    id: str = Field(default_factory=new_id)
+    broader_topic_id: str
+    narrower_topic_id: str
+    user_id: str | None = None
+    provenance: str = "synthetic"
+    created_at: str = Field(default_factory=utcnow)
+
 class Entity(BaseModel):
     """A distinct real-world thing (person/org/place/...) referenced by memories.
 
@@ -170,6 +194,8 @@ class Entity(BaseModel):
     user_id: str | None = None
     agent_id: str | None = None
     run_id: str | None = None
+    description: str | None = None
+    description_updated_at: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     merged_into: str | None = None
     created_at: str = Field(default_factory=utcnow)

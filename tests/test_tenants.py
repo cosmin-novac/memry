@@ -138,10 +138,28 @@ def test_rest_entities_endpoints(multi):
 
     detail = client.get(f"/api/v1/entities/{entity_id}", headers=ACME).json()
     assert detail["entity"]["name"] == "Jonas"
+    assert detail["aliases"] == ["Jonas"]
     assert len(detail["memories"]) == 1
+    listed_memories = client.get(
+        "/api/v1/memories", headers=ACME, params={"user_id": "u1"}
+    ).json()
+    assert listed_memories[0]["entity_links"][0]["id"] == entity_id
 
-    # other tenant cannot see it
+    alias = client.post(
+        f"/api/v1/entities/{entity_id}/aliases",
+        headers=ACME,
+        json={"alias": "Jo"},
+    )
+    assert alias.status_code == 200
+    assert alias.json()["aliases"] == ["Jonas", "Jo"]
+
+    # other tenant cannot read or mutate it
     assert client.get(f"/api/v1/entities/{entity_id}", headers=GLOBEX).status_code == 404
+    assert client.post(
+        f"/api/v1/entities/{entity_id}/aliases",
+        headers=GLOBEX,
+        json={"alias": "stolen"},
+    ).status_code == 404
 
 
 def test_mcp_tool_writes_land_in_the_tenant_namespace(multi):

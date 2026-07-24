@@ -111,7 +111,7 @@ def suggest_canonical_merges(
 
     Returns validated ``{"canonical", "variants"}`` groups where every variant
     is a real existing tag and the group merges 2+ of them. Nothing is applied;
-    the caller (Tag manager) shows these for one-click approval."""
+    the caller (Knowledge > Topics) shows these for one-click approval."""
     known = {str(t["category"]).strip().lower() for t in tags}
     known.discard("")
     if len(known) < 2:

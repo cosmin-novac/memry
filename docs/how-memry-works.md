@@ -15,9 +15,9 @@ indexes and organization layered on top.
 |---|---|---|---|
 | **Episode** | A raw message, stored verbatim, immutable. The source of truth. | `episodes` table | every `add()`; never edited |
 | **Memory** | One distilled, self-contained fact/event/statement. Bi-temporal. | `memories` table | extraction + reconciliation |
-| **Entity** | A distinct thing a memory mentions (a person, org, project…). | `entities` + `entity_mentions` | entity linking on save |
+| **Entity** | A stable referent hub with aliases, a derived description, and linked evidence. | `entities` + `entity_mentions` | entity linking on save; description on first use |
 | **Relation** | A typed edge between two entities (`Ada -works_on-> Helios`). | `relations` table | relation extraction on save |
-| **Category (tag)** | A free-form label on a memory. A filter, not structure. | `categories` JSON on each memory | extraction, or you |
+| **Topic** | A scoped classification and filter, with optional parent/child hierarchy. | `topics` + `memory_topics` + `topic_relations` | extraction, user, or abstraction |
 | **Collection** | A titled, summarized cluster of memories. Navigation only. | `collections` table | `build_collections` (on demand) |
 
 Two important properties of a **Memory**:
@@ -121,34 +121,26 @@ Entities are **extracted, disambiguated, and typed.**
   **`memry backfill-entity-types`** (or `POST /api/v1/entities/backfill-types`) -
   batched, so a whole namespace is a handful of calls, and only untyped entities
   are touched.
-- See them in the dashboard **"entities"** view (grouped by type, with the
-  relations between them and a "Backfill types" button), or via
-  **`GET /api/v1/entities`** and `/api/v1/relations`.
+- See them under **Knowledge -> People and things**, grouped by type with aliases,
+  descriptions, active evidence, and merge controls. Relations have their own Knowledge
+  tab. The same data is available through **`GET /api/v1/entities`** and
+  `/api/v1/relations`.
 
-## Tags: a filter, not the structure
+## Topics: indexed classification, not identity
 
-Tags (`categories`) are free-form labels. They are the **weakest** organizing
-primitive and are deliberately kept that way. The rule the design follows:
+Public APIs still call the topic list `categories` for compatibility. Internally, topics are
+canonical scoped rows linked to memories through an indexed many-to-many table. They never
+enter entity disambiguation: `health` is a classification, while `Jonas` may refer to several
+people.
 
-> Put specificity in tags and entities; put abstraction in a layer *above*, never
-> by collapsing the specific away.
-
-Concretely:
-
-- **Canonicalization ("Suggest merges")** only de-duplicates the *same* label
-  written differently (`writing preferences` = `writing-preference`, `project` =
-  `projects`). It must never merge distinct-but-related tags (`writing-style` and
-  `response-style` are different and stay separate). Merging loses a distinction
-  permanently, so it is conservative by design; when a tag is ambiguous, the fix
-  is to make it *more specific*, not to fold it into a neighbour.
-- **The Tag manager** (dashboard, "tags" link) lists every tag A→Z with its count
-  and lets you rename, combine true duplicates, or delete a tag across all
-  memories.
-- **Synthetic tags** and **collections** are the "abstraction above" layer:
-  higher-level groupings that sit on top of the specific tags without replacing
-  them. Both are opt-in and off by default (synthetic-tag auto-abstraction turned
-  out to produce vague labels, so it is disabled; collections are on-demand).
-
+- The **Topics** tab in the dashboard Knowledge area lists topics A-to-Z with counts and
+  supports rename, combine, and delete operations.
+- "Suggest merges" only proposes spelling or synonym variants of the same classification;
+  distinct related topics remain separate.
+- Synthetic abstraction creates hierarchy edges such as `health` broader than `running`.
+  The parent is not copied onto the child memories. Filtering by `health` expands through
+  the hierarchy at query time.
+- Collections remain separate generated maps over memory clusters.
 ## How the layers fit together
 
 ```
@@ -160,15 +152,15 @@ Concretely:
             │
         episodes               ← immutable source of truth
             │
-          tags                 ← a clean cross-cutting filter over memories
+     topic links              ← indexed cross-cutting filters and hierarchy
 ```
 
 - **Memories** are the atoms; **episodes** are what they came from.
 - **Entities + relations** are where retrieval intelligence lives: they turn a
   bag of facts into a graph you can traverse, which is the only thing that makes
   multi-hop questions answerable.
-- **Tags** cut across memories as a filter; keep them specific and de-duplicated.
-- **Collections** (and synthetic tags) are an optional map on top, not a place
+- **Topics** cut across memories as indexed filters; hierarchy provides abstraction without copying labels.
+- **Collections** and synthetic topic parents are optional maps on top, not places
   facts live.
 
 ## Keeping it manageable
@@ -183,8 +175,8 @@ Concretely:
 - Run **`memry backfill-relations`** once to extract relations from memories that
   predate the feature (cheap: only multi-entity memories, marked done so re-runs
   are free).
-- Use the **Tag manager** + conservative "Suggest merges" to keep the tag
-  vocabulary clean; prefer specific tags.
+- Use **Knowledge → Topics** and conservative "Suggest merges" to keep the
+  classification vocabulary clean; prefer specific topics.
 - Run **`memry build-collections`** on demand when you want a fresh map; it never
   runs on a schedule, so it spends no tokens unasked.
 - Nothing the system does destroys data: forgetting is invalidation, and every
@@ -199,8 +191,8 @@ Concretely:
 | Hybrid retrieval (vector + BM25 + recency/importance) | real |
 | Entity extraction + conservative disambiguation + merge proposals | real |
 | Typed relations + relational retrieval (+ PPR fallback) | real |
-| Tag canonicalization, synthetic tags, collections | real (opt-in where noted) |
+| Normalized topics, hierarchy expansion, canonicalization, collections | real (abstraction/collections opt-in) |
 | Entity types (person/project/place/…) + typing backfill | real |
 | Memory-type-driven decay (episodic fades, procedural persists) | real |
-| Dashboard views for entities & relations | real; collections API-only (no UI yet) |
+| Unified Knowledge dashboard for topics, entity hubs, relations, and collections | real |
 | Memory-type effect on *ranking* (not just decay) | not yet |

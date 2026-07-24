@@ -23,14 +23,15 @@ from .backends.base import MemoryBackend
 from .config import Config
 from .intelligence.clustering import propose_synthetic_tags, suggest_canonical_merges
 from .intelligence.summaries import cluster_vectors, summarize_cluster
-from .intelligence.context import build_context
+from .intelligence.context import build_context, estimate_tokens
 from .intelligence.decay import decay_sweep, effective_importance
 from .intelligence.entities import (
     classify_entity_types,
     resolve_mentions,
     resolve_open_proposals,
+    synthesize_entity_description,
 )
-from .intelligence.graph_retrieval import relational_memory_ids
+from .intelligence.graph_retrieval import detect_query_entities, relational_memory_ids
 from .intelligence.extraction import (
     extract_facts,
     extract_relations,
@@ -56,6 +57,8 @@ from .models import (
     Scope,
     SearchResult,
     SyntheticTag,
+    Topic,
+    TopicRelation,
     utcnow,
 )
 from .providers.embeddings import Embedder, build_embedder
@@ -176,7 +179,8 @@ class MemoryStore:
         ]
         if not episodes:
             return AddResult()
-        self.backend.add_episodes(episodes)
+        if episodes:
+            self.backend.add_episodes(episodes)
         episode_ids = [e.id for e in episodes]
 
         candidates: list[CandidateFact]
@@ -321,17 +325,34 @@ class MemoryStore:
                 )
             )
 
-    def import_verbatim(
-        self, rows: list[dict[str, Any]], *, user_id: str | None = None
-    ) -> dict[str, Any]:
-        """Bulk verbatim import (dashboard/CLI import, restoring exports).
+    def _has_near_duplicate(
+        self,
+        embedding: list[float],
+        scope: Scope,
+        threshold: float,
+    ) -> bool:
+        matches = self.backend.vector_search(
+            embedding,
+            self.embedder.model_id,
+            scope,
+            limit=1,
+        )
+        return bool(matches and matches[0][1] >= threshold)
 
-        Rows are trusted as already-curated facts: no extraction, no
-        reconciliation, and embeddings are fetched in batched provider calls,
-        so importing N memories costs O(N/batch) HTTP round-trips instead of
-        two or three per row. Each row needs "content"; user_id, categories,
-        memory_type, and importance are optional (a row's own user_id wins
-        over the call-level default)."""
+    def import_verbatim(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        user_id: str | None = None,
+        dedup: bool = True,
+        dedup_threshold: float = 0.97,
+    ) -> dict[str, Any]:
+        """Bulk verbatim import without extraction or reconciliation.
+
+        Embeddings are fetched in batches. Duplicate rows in the same import and
+        near-identical memories already in the target user scope are skipped by
+        default without creating orphan episodes.
+        """
         default_uid = user_id or self.config.default_user_id
         prepared: list[dict[str, Any]] = []
         skipped = 0
@@ -362,19 +383,12 @@ class MemoryStore:
                 }
             )
         if not prepared:
-            return {"imported": 0, "skipped": skipped, "memory_ids": []}
-
-        episodes = [
-            Episode(
-                content=p["content"],
-                user_id=p["user_id"],
-                agent_id=p["agent_id"],
-                run_id=p["run_id"],
-                metadata={"imported": True},
-            )
-            for p in prepared
-        ]
-        self.backend.add_episodes(episodes)
+            return {
+                "imported": 0,
+                "skipped": skipped,
+                "deduplicated": 0,
+                "memory_ids": [],
+            }
 
         vectors: list[list[float] | None] = [None] * len(prepared)
         if self.embedder.dimensions:
@@ -385,19 +399,49 @@ class MemoryStore:
                     embedded = self.embedder.embed([p["content"] for p in batch])
                 except Exception:
                     embedded = []  # import anyway; `memry reindex` can backfill
-                for offset, vec in enumerate(embedded):
-                    vectors[start + offset] = vec or None
+                for offset, vector in enumerate(embedded):
+                    vectors[start + offset] = vector or None
+
+        accepted: list[tuple[dict[str, Any], list[float] | None]] = []
+        deduplicated = 0
+        seen_content: set[tuple[str, str]] = set()
+        for row, vector in zip(prepared, vectors):
+            if dedup:
+                key = (row["user_id"], row["content"].strip().lower())
+                if key in seen_content:
+                    deduplicated += 1
+                    continue
+                seen_content.add(key)
+                if vector and self._has_near_duplicate(
+                    vector, Scope(user_id=row["user_id"]), dedup_threshold
+                ):
+                    deduplicated += 1
+                    continue
+            accepted.append((row, vector))
+
+        episodes = [
+            Episode(
+                content=row["content"],
+                user_id=row["user_id"],
+                agent_id=row["agent_id"],
+                run_id=row["run_id"],
+                metadata={"imported": True},
+            )
+            for row, _ in accepted
+        ]
+        if episodes:
+            self.backend.add_episodes(episodes)
 
         memory_ids: list[str] = []
-        for p, episode, vector in zip(prepared, episodes, vectors):
+        for (row, vector), episode in zip(accepted, episodes):
             memory = Memory(
-                content=p["content"],
-                memory_type=p["memory_type"],
-                user_id=p["user_id"],
-                agent_id=p["agent_id"],
-                run_id=p["run_id"],
-                importance=p["importance"],
-                categories=p["categories"],
+                content=row["content"],
+                memory_type=row["memory_type"],
+                user_id=row["user_id"],
+                agent_id=row["agent_id"],
+                run_id=row["run_id"],
+                importance=row["importance"],
+                categories=row["categories"],
                 source_episode_ids=[episode.id],
             )
             if vector:
@@ -412,8 +456,12 @@ class MemoryStore:
                 )
             )
             memory_ids.append(stored.id)
-        return {"imported": len(memory_ids), "skipped": skipped, "memory_ids": memory_ids}
-
+        return {
+            "imported": len(memory_ids),
+            "skipped": skipped,
+            "deduplicated": deduplicated,
+            "memory_ids": memory_ids,
+        }
     def distill(
         self, memory_id: str, *, owner_prefix: str | None = None
     ) -> AddResult | None:
@@ -557,10 +605,53 @@ class MemoryStore:
         token_budget: int = 1200,
         limit: int = 20,
     ) -> ContextResult:
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         results = self.search(
             query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit
         )
-        return build_context(results, token_budget=token_budget)
+        entity_text, entity_memory_ids = self._entity_context(
+            scope, query, token_budget=min(300, max(80, token_budget // 4))
+        )
+        remaining = max(0, token_budget - estimate_tokens(entity_text))
+        memory_context = build_context(results, token_budget=remaining)
+        parts = [part for part in (entity_text, memory_context.text) if part]
+        combined = "\n\n".join(parts)
+        memory_ids = list(dict.fromkeys([*entity_memory_ids, *memory_context.memory_ids]))
+        return ContextResult(
+            text=combined,
+            memory_ids=memory_ids,
+            token_estimate=estimate_tokens(combined) if combined else 0,
+        )
+
+    def _entity_context(
+        self, scope: Scope, query: str, *, token_budget: int
+    ) -> tuple[str, list[str]]:
+        entity_ids = detect_query_entities(self.backend, scope, query)[:3]
+        if not entity_ids:
+            return "", []
+        header = "## Known entities (memry)\n"
+        used = estimate_tokens(header)
+        lines: list[str] = []
+        memory_ids: list[str] = []
+        for entity_id in entity_ids:
+            entity = self._refresh_entity_description(entity_id)
+            if entity is None or not entity.description:
+                continue
+            label = entity.name
+            if entity.entity_type:
+                label += f" ({entity.entity_type})"
+            line = f"- {label}: {entity.description}"
+            cost = estimate_tokens(line) + 1
+            if used + cost > token_budget:
+                continue
+            lines.append(line)
+            used += cost
+            memory_ids.extend(
+                memory.id for memory in self.backend.entity_memories(entity.id, limit=20)
+            )
+        if not lines:
+            return "", []
+        return header + "\n".join(lines), list(dict.fromkeys(memory_ids))
 
     def get(self, memory_id: str, *, owner_prefix: str | None = None) -> Memory | None:
         memory = self.backend.get_memory(memory_id)
@@ -574,6 +665,10 @@ class MemoryStore:
         run_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Category histogram over active memories, largest count first."""
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        indexed = self.backend.topic_counts(scope)
+        if indexed is not None:
+            return indexed
         counter: dict[str, int] = {}
         for memory in self.get_all(
             user_id=user_id, agent_id=agent_id, run_id=run_id, limit=1_000_000
@@ -833,18 +928,69 @@ class MemoryStore:
                     summary["typed"] += 1
         return summary
 
+    def _refresh_entity_description(
+        self, entity_id: str, *, force: bool = False
+    ) -> Entity | None:
+        entity = self.backend.get_entity(entity_id)
+        if entity is None or not entity.is_active:
+            return None
+        evidence_updated_at = self.backend.entity_evidence_updated_at(entity_id)
+        if (
+            not force
+            and entity.description is not None
+            and entity.description_updated_at is not None
+            and (
+                evidence_updated_at is None
+                or entity.description_updated_at >= evidence_updated_at
+            )
+        ):
+            return entity
+        memories = self.backend.entity_memories(entity_id, limit=50)
+        description = synthesize_entity_description(
+            self.llm,
+            entity,
+            [memory.content for memory in memories],
+            self.backend.entity_aliases(entity_id),
+        )
+        generated_at = utcnow()
+        stored = self.backend.set_entity_description(
+            entity_id, description, generated_at
+        )
+        if stored is not None:
+            return stored
+        entity.description = description
+        entity.description_updated_at = generated_at
+        return entity
+
     def entity(
-        self, entity_id: str, *, owner_prefix: str | None = None
+        self,
+        entity_id: str,
+        *,
+        owner_prefix: str | None = None,
+        refresh_description: bool = True,
     ) -> dict[str, Any] | None:
-        """One entity with its mentions and the memories that mention it."""
+        """One entity hub with aliases and active supporting memories."""
         entity = self.backend.get_entity(entity_id)
         if not _owned(entity, owner_prefix):
             return None
+        if refresh_description:
+            entity = self._refresh_entity_description(entity_id)
+            if entity is None:
+                return None
         return {
             "entity": entity,
+            "aliases": self.backend.entity_aliases(entity_id),
             "mentions": self.backend.entity_mentions(entity_id),
             "memories": self.backend.entity_memories(entity_id, limit=20),
         }
+
+    def add_entity_alias(
+        self, entity_id: str, alias: str, *, owner_prefix: str | None = None
+    ) -> Entity | None:
+        entity = self.backend.get_entity(entity_id)
+        if not _owned(entity, owner_prefix):
+            return None
+        return self.backend.add_entity_alias(entity_id, alias)
 
     def merge_proposals(
         self,
@@ -903,12 +1049,10 @@ class MemoryStore:
         return self.backend.list_synthetic_tags(Scope(user_id=user_id))
 
     def abstract_tags(self, *, user_id: str | None = None) -> dict[str, Any]:
-        """Ask the LLM for higher-level tags over this namespace's tags, then
-        write each onto every memory carrying one of its member tags.
+        """Create higher-level topic nodes and hierarchy edges.
 
-        Returns a summary dict. A no-op (``{"applied": []}``) when no LLM is
-        configured or there are too few tags to cluster - callers can run this
-        unconditionally. Records each synthetic tag and stamps the run time.
+        Parent labels are not copied onto memories. Query-time hierarchy
+        expansion makes a parent filter include memories linked to its children.
         """
         cfg = self.config.tags
         summary: dict[str, Any] = {"user_id": user_id, "applied": []}
@@ -928,15 +1072,50 @@ class MemoryStore:
             max_new=cfg.max_new_tags,
             min_cluster=cfg.min_cluster_size,
         )
+        all_topics = self.backend.list_topics(Scope(user_id=user_id), limit=100_000)
         for proposal in proposals:
-            tag = proposal["tag"]
-            members = proposal["members"]
-            tagged = self._apply_tag_to_members(user_id, tag, members)
+            tag = proposal["tag"].strip().lower()
+            members = [
+                member.strip().lower()
+                for member in proposal["members"]
+                if member.strip()
+            ]
+            parent = self.backend.upsert_topic(
+                Topic(name=tag, normalized=tag, user_id=user_id, provenance="synthetic")
+            )
+            relations_added = 0
+            for member in members:
+                children = [topic for topic in all_topics if topic.normalized == member]
+                if not children:
+                    children = [
+                        self.backend.upsert_topic(
+                            Topic(
+                                name=member,
+                                normalized=member,
+                                user_id=user_id,
+                                provenance="memory",
+                            )
+                        )
+                    ]
+                    all_topics.extend(children)
+                for child in children:
+                    if child.id == parent.id:
+                        continue
+                    self.backend.add_topic_relation(
+                        TopicRelation(
+                            broader_topic_id=parent.id,
+                            narrower_topic_id=child.id,
+                            user_id=user_id,
+                            provenance="synthetic",
+                        )
+                    )
+                    relations_added += 1
             self.backend.record_synthetic_tag(
                 SyntheticTag(tag=tag, source_tags=members, user_id=user_id)
             )
+            all_topics.append(parent)
             summary["applied"].append(
-                {"tag": tag, "source_tags": members, "memories_tagged": tagged}
+                {"tag": tag, "source_tags": members, "relations_added": relations_added}
             )
         self._stamp_tag_run(user_id)
         return summary
@@ -983,27 +1162,10 @@ class MemoryStore:
 
     def suggest_tag_merges(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
         """One-shot canonicalization suggestions (variant/synonym merges) for the
-        Tag manager. No LLM -> empty list, so callers can call unconditionally."""
+        Knowledge Topics view. No LLM -> empty list, so callers can call it safely."""
         if not self.llm.available:
             return []
         return suggest_canonical_merges(self.llm, self.categories(user_id=user_id))
-
-    def _apply_tag_to_members(
-        self, user_id: str | None, tag: str, members: list[str]
-    ) -> int:
-        """Add ``tag`` to every active memory carrying one of ``members``."""
-        tagged = 0
-        for memory in self.get_all(
-            user_id=user_id, categories=members, limit=1_000_000
-        ):
-            current = [str(c).strip().lower() for c in memory.categories or []]
-            if tag in current:
-                continue
-            self.backend.update_memory(
-                memory.id, categories=[*(memory.categories or []), tag], touch=False
-            )
-            tagged += 1
-        return tagged
 
     # -- manual tag curation -----------------------------------------------
     def rename_tag(self, tag: str, to: str, *, user_id: str | None = None) -> int:
@@ -1031,6 +1193,12 @@ class MemoryStore:
         remove = {r for r in remove if r}
         if not remove:
             return 0
+        scope = Scope(user_id=user_id)
+        indexed = self.backend.retag_topics(scope, remove, add)
+        if indexed is not None:
+            for tag in remove:
+                self.backend.delete_synthetic_tag(scope, tag)
+            return indexed
         changed = 0
         for memory in self.get_all(
             user_id=user_id, categories=list(remove), limit=1_000_000

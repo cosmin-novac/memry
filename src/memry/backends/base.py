@@ -2,8 +2,8 @@
 
 The application layer (``MemoryStore``) and the intelligence layer only ever
 talk to this interface, so backends are replaceable: the default is the local
-SQLite engine; a Mem0 adapter ships as an optional interop/benchmark backend,
-and Postgres/Qdrant/etc. can be added without touching callers.
+SQLite engine; a deliberately reduced Mem0 adapter exists only for interop and
+benchmarking. SQLite is the sole production persistence implementation.
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ from ..models import (
     Relation,
     Scope,
     SyntheticTag,
+    Topic,
+    TopicRelation,
 )
 
 if TYPE_CHECKING:
@@ -125,9 +127,31 @@ class MemoryBackend(ABC):
         here; ``None`` means "use memry's hybrid fusion" (the default)."""
         return None
 
+    # -- topics -----------------------------------------------------------
+    def upsert_topic(self, topic: Topic) -> Topic:
+        return topic
+
+    def list_topics(self, scope: Scope, *, limit: int = 1000) -> list[Topic]:
+        return []
+
+    def topic_counts(self, scope: Scope) -> list[dict[str, Any]] | None:
+        """Active-memory counts, or ``None`` when topics are unsupported."""
+        return None
+
+    def retag_topics(
+        self, scope: Scope, remove: set[str], add: str | None
+    ) -> int | None:
+        """Set-based topic edit, or ``None`` when an adapter has no topic store."""
+        return None
+
+    def add_topic_relation(self, relation: TopicRelation) -> TopicRelation:
+        return relation
+
+    def list_topic_relations(self, scope: Scope) -> list[TopicRelation]:
+        return []
     # -- entities ---------------------------------------------------------
     # Default implementations are no-ops so adapters without entity support
-    # (e.g. Mem0) stay valid; LocalBackend and PostgresBackend override all.
+    # (e.g. Mem0) stay valid; LocalBackend implements the production behavior.
     def insert_entity(self, entity: Entity) -> Entity:
         return entity
 
@@ -137,6 +161,41 @@ class MemoryBackend(ABC):
     def find_entities(self, normalized: str, scope: Scope) -> list[Entity]:
         """Active (unmerged) entities with this normalized name, in scope."""
         return []
+
+    def find_entity_candidates(
+        self, normalized: str, scope: Scope, *, limit: int = 20
+    ) -> list[Entity]:
+        """Active entities matching a canonical name or derived alias."""
+        return self.find_entities(normalized, scope)[:limit]
+
+    def find_entities_by_aliases(
+        self, normalized: list[str], scope: Scope, *, limit: int = 50
+    ) -> list[Entity]:
+        seen: set[str] = set()
+        matches: list[Entity] = []
+        for value in normalized:
+            for entity in self.find_entity_candidates(value, scope, limit=limit):
+                if entity.id not in seen:
+                    seen.add(entity.id)
+                    matches.append(entity)
+                    if len(matches) >= limit:
+                        return matches
+        return matches
+
+    def entity_aliases(self, entity_id: str) -> list[str]:
+        entity = self.get_entity(entity_id)
+        return [entity.name] if entity else []
+
+    def add_entity_alias(self, entity_id: str, alias: str) -> Entity | None:
+        return None
+
+    def set_entity_description(
+        self, entity_id: str, description: str, generated_at: str
+    ) -> Entity | None:
+        return None
+
+    def entity_evidence_updated_at(self, entity_id: str) -> str | None:
+        return None
 
     def set_entity_type(self, entity_id: str, entity_type: str) -> None:
         return None
@@ -152,13 +211,19 @@ class MemoryBackend(ABC):
     def entity_mentions(self, entity_id: str) -> list[EntityMention]:
         return []
 
-    def entity_memories(self, entity_id: str, limit: int = 10) -> list[Memory]:
-        """Memories that mention this entity (following merges)."""
+    def entity_memories(
+        self, entity_id: str, limit: int = 10, *, include_invalid: bool = False
+    ) -> list[Memory]:
+        """Memories that mention this entity. Active evidence is the default."""
         return []
 
     def entities_of_memory(self, memory_id: str) -> list[Entity]:
         """The entities a single memory mentions (for relation backfill)."""
         return []
+
+    def touch_entity(self, entity_id: str) -> None:
+        """Mark an entity hub stale after its evidence changes."""
+        return None
 
     def merge_entities(self, keep_id: str, merge_id: str) -> bool:
         """Fold ``merge_id`` into ``keep_id`` (repoint mentions, mark merged)."""
@@ -213,7 +278,7 @@ class MemoryBackend(ABC):
 
     # -- synthetic tags + key/value meta ----------------------------------
     # Default no-ops so adapters without their own storage (e.g. Mem0) stay
-    # valid; LocalBackend and PostgresBackend override. A backend that does not
+    # valid; LocalBackend implements persistence. An adapter that does not
     # persist these simply won't remember synthetic tags or scheduler state -
     # tag abstraction degrades to "runs but doesn't record", never crashes.
     def record_synthetic_tag(self, tag: SyntheticTag) -> None:

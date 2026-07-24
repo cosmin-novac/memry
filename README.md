@@ -10,7 +10,7 @@ memry mcp        # your agent now has long-term memory
 Memry gives any MCP-capable agent - Claude Code, Claude Desktop, Cursor, Windsurf,
 Codex - durable long-term memory. It distills conversations into discrete facts,
 reconciles each new fact against what it already knows, and serves the result back as
-token-budgeted context. All state is a single SQLite file on your machine: no vector
+token-budgeted context. All memory state is a single SQLite file on your machine: no vector
 database, no queue, no cloud account, and it works with zero API keys.
 
 ## Why Memry
@@ -38,16 +38,15 @@ re-run a better extraction pipeline over the original episodes.
 and a shared name is never enough to merge two of them: unclear cases stay separate
 ("three Jonases") with a merge proposal you confirm or reject once the evidence is in.
 
-**Tags organize themselves.** With an LLM, Memry periodically clusters your accumulated
-tags into a few higher-level ones (a synthetic `health` over `running`/`diet`/`sleep`) and
-applies them to matching memories, so a long tail of specific labels rolls up into
-navigable topics. Search and list by tag or by date window, not just by relevance.
+**Topics organize themselves.** With an LLM, Memry can cluster accumulated topics into
+higher-level parents (a synthetic `health` over `running`/`diet`/`sleep`). It stores this
+as hierarchy edges instead of copying `health` onto every memory, and expands parent
+filters at query time. Search and list by topic or by date window, not just relevance.
 
-**It scales when needed and stays simple when not.** Optional extras add a usearch HNSW
-index for larger stores (`memry[ann]`) and a PostgreSQL + pgvector backend for
-multi-writer deployments (`memry[postgres]`). Per-tenant API keys with strict isolation
-(`MEMRY_TENANTS`) let one server serve several teams. The default remains a zero-ops
-single file.
+**It stays simple as one shared service.** SQLite is the sole production store. One Memry
+server can serve many agents, devices, and tenant namespaces without an external database.
+For larger stores, the optional `memry[ann]` extra adds a rebuildable usearch HNSW
+candidate index. Multiple server replicas writing one store are not currently supported.
 
 **Multi-user, with real OAuth.** Beyond static config tenants, one server can host
 runtime-managed **accounts**, each confined to its own namespace, created with
@@ -162,8 +161,8 @@ memry serve --host 0.0.0.0 --port 8787
 ```
 
 The dashboard shows your memories with inline editing, search, JSONL
-export/import, and a galaxy map of your tags: heavily-used tags gravitate to
-the gold core, the working set orbits in the teal belt, and one-off tags
+export/import, a unified Knowledge area, and a galaxy map of your topics: heavily-used topics gravitate to
+the gold core, the working set orbits in the teal belt, and one-off topics
 drift at the violet rim. Links are co-occurrence; click a planet to filter.
 
 ![Memry dashboard: galaxy tag map and memory list](docs/assets/dashboard.png)
@@ -271,7 +270,7 @@ memry eval --dataset evals/datasets/synthetic_v1.jsonl -k 5
 The harness ingests each case through the full write path, then scores retrieval
 (recall@k, MRR, latency p50/p95). It is deterministic and offline, so it runs in CI.
 LoCoMo and LongMemEval can be formatted into the same JSONL schema to compare providers,
-configs, and backends (including the Mem0 adapter) under identical conditions. The
+configs, plus the optional Mem0 comparison adapter, under identical conditions. The
 landscape survey behind the design is in
 [docs/research/competitive-analysis.md](docs/research/competitive-analysis.md).
 
@@ -283,7 +282,7 @@ src/memry/
   config.py            # env + file config, provider auto-detection
   store.py             # MemoryStore - the public API
   retrieval.py         # hybrid search: RRF + recency + importance
-  backends/            # storage interface, local SQLite engine, Mem0 adapter
+  backends/            # production SQLite engine + optional Mem0 eval adapter
   intelligence/        # extraction, reconciliation, decay, context building
   providers/           # LLMs (Anthropic/OpenAI/Ollama) & embeddings (+hash fallback)
   mcp_server.py        # MCP tools (stdio + streamable HTTP)

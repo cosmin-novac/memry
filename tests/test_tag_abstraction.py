@@ -72,12 +72,16 @@ def test_abstract_tags_applies_and_records(seeded):
     ]}))
     result = store.abstract_tags(user_id="ada")
 
-    applied = {a["tag"]: a["memories_tagged"] for a in result["applied"]}
+    applied = {a["tag"]: a["relations_added"] for a in result["applied"]}
     assert applied == {"health": 4, "career": 2}
 
-    # the synthetic tag is now on each member memory
+    # Parent topics are not copied onto memories; hierarchy expansion is read-time.
     run_mem = next(m for m in store.get_all(user_id="ada", limit=50) if m.content == "ran 10k")
-    assert "health" in run_mem.categories and "running" in run_mem.categories
+    assert run_mem.categories == ["running"]
+    health = store.get_all(user_id="ada", categories=["health"], limit=50)
+    assert {memory.content for memory in health} == {
+        "ran 10k", "ate salad", "slept 8h", "saw doctor",
+    }
 
     # and it is remembered as synthetic
     recorded = {t.tag: sorted(t.source_tags) for t in store.synthetic_tags(user_id="ada")}
@@ -132,7 +136,7 @@ def test_abstract_tags_records_run_and_is_idempotent_on_reruns(seeded):
 
     run_mem = next(m for m in store.get_all(user_id="ada", limit=50) if m.content == "ran 10k")
     tags_before = sorted(run_mem.categories)
-    # a second run that re-proposes the same tag must not duplicate it on memories
+    # a second run that re-proposes the same parent must not rewrite memories
     store.llm.queue(json.dumps({"clusters": [
         {"tag": "health", "members": ["running", "diet", "sleep", "doctor"]},
     ]}))

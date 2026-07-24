@@ -87,6 +87,66 @@ def test_relations_are_namespaced(store, graph):
     assert store.relations(user_id="someone-else") == []
 
 
+def test_relation_lifecycle_follows_evidence_memory(store):
+    subject = _entity(store, "Ada")
+    obj = _entity(store, "Helios")
+
+    invalidated = _memory(store, "Ada works on Helios.", [subject.id, obj.id])
+    store.backend.add_relation(
+        Relation(
+            subject=subject.id,
+            predicate="works_on",
+            object=obj.id,
+            user_id="ada",
+            memory_id=invalidated.id,
+        )
+    )
+    assert len(store.relations(user_id="ada")) == 1
+    store.backend.invalidate_memory(invalidated.id)
+    assert store.relations(user_id="ada") == []
+
+    deleted = _memory(store, "Ada leads Helios.", [subject.id, obj.id])
+    store.backend.add_relation(
+        Relation(
+            subject=subject.id,
+            predicate="leads",
+            object=obj.id,
+            user_id="ada",
+            memory_id=deleted.id,
+        )
+    )
+    assert len(store.relations(user_id="ada")) == 1
+    assert store.backend.delete_memory(deleted.id)
+    assert store.relations(user_id="ada") == []
+
+
+def test_entity_merge_repoints_relations_and_removes_self_edges(store):
+    keep = _entity(store, "Cosmin")
+    duplicate = _entity(store, "Cozmin")
+    project = _entity(store, "Helios")
+    store.backend.add_relation(
+        Relation(
+            subject=duplicate.id,
+            predicate="works_on",
+            object=project.id,
+            user_id="ada",
+        )
+    )
+    store.backend.add_relation(
+        Relation(
+            subject=keep.id,
+            predicate="same_as",
+            object=duplicate.id,
+            user_id="ada",
+        )
+    )
+
+    assert store.backend.merge_entities(keep.id, duplicate.id)
+    relations = store.relations(user_id="ada")
+    assert [(relation.subject, relation.object) for relation in relations] == [
+        (keep.id, project.id)
+    ]
+
 def test_backfill_relations_is_gated_and_idempotent(store):
     """Backfill only calls the LLM for 2+ entity memories, and not twice."""
     import sys
@@ -110,3 +170,19 @@ def test_backfill_relations_is_gated_and_idempotent(store):
     before = len(llm.calls)
     store.backfill_relations(user_id="ada")
     assert len(llm.calls) == before  # everything marked done: no new tokens spent
+
+
+def test_query_entity_detection_uses_bounded_candidate_lookup(store, monkeypatch):
+    from memry.intelligence.graph_retrieval import detect_query_entities
+    from memry.models import Entity, Scope
+
+    entity = store.backend.insert_entity(Entity(name="Cosmin Popescu", user_id="ada"))
+    store.backend.add_entity_alias(entity.id, "Costi")
+
+    def vocabulary_scan_is_a_bug(*args, **kwargs):
+        raise AssertionError("query detection must not scan the entity vocabulary")
+
+    monkeypatch.setattr(store.backend, "list_entities", vocabulary_scan_is_a_bug)
+    assert detect_query_entities(
+        store.backend, Scope(user_id="ada"), "What is Costi working on?"
+    ) == [entity.id]

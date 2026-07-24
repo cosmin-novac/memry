@@ -83,9 +83,11 @@ def test_export_import_roundtrip(capsys, tmp_path):
     dump = tmp_path / "dump.jsonl"
     dump.write_text("\n".join(lines), encoding="utf-8")
 
-    # import into a different user scope via records' user_id (kept from export)
+    # Re-importing the same export is idempotent in the original user scope.
     _, out = run(capsys, "import", str(dump))
-    assert json.loads(out)["imported"] == 2
+    result = json.loads(out)
+    assert result["imported"] == 0
+    assert result["deduplicated"] == 2
 
 
 def test_reindex_and_sweep(capsys):

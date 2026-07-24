@@ -55,6 +55,63 @@ Respond with JSON only:
 
 AUTO_CONFIRM_CONFIDENCE = 0.9
 
+DESCRIPTION_MAX_CHARS = 1200
+DESCRIPTION_MAX_WORDS = 300
+DESCRIPTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"description": {"type": "string"}},
+    "required": ["description"],
+    "additionalProperties": False,
+}
+DESCRIPTION_SYSTEM = """Write a compact, evidence-grounded description of one entity
+for a long-term memory system. Use only the supplied active memories. Preserve
+concrete dates, numbers, preferences, constraints, and negations. If evidence
+conflicts, state the conflict instead of choosing a side. Do not infer missing
+facts. Aim for 100-300 tokens. Respond with JSON only: {"description": string}."""
+
+
+def _bound_description(value: str) -> str:
+    text = " ".join(value.split()).strip()
+    words = text.split()
+    if len(words) > DESCRIPTION_MAX_WORDS:
+        text = " ".join(words[:DESCRIPTION_MAX_WORDS])
+    if len(text) > DESCRIPTION_MAX_CHARS:
+        text = text[: DESCRIPTION_MAX_CHARS - 1].rsplit(" ", 1)[0] + "…"
+    return text
+
+
+def synthesize_entity_description(
+    llm: LLM,
+    entity: Entity,
+    facts: list[str],
+    aliases: list[str] | None = None,
+) -> str:
+    """Build a bounded cache from active evidence; degrade to a factual excerpt."""
+    clean_facts = [" ".join(fact.split()).strip() for fact in facts if fact.strip()]
+    if not clean_facts:
+        return ""
+    fallback = _bound_description(" ".join(clean_facts[:6]))
+    if not llm.available:
+        return fallback
+    aliases = aliases or [entity.name]
+    evidence = "\n".join(f"- {fact}" for fact in clean_facts[:40])
+    prompt = (
+        f"Entity: {entity.name}\n"
+        f"Type: {entity.entity_type or 'unknown'}\n"
+        f"Aliases: {', '.join(aliases[:20])}\n\n"
+        f"Active evidence:\n{evidence}"
+    )
+    try:
+        raw = llm.complete(DESCRIPTION_SYSTEM, prompt, json_schema=DESCRIPTION_SCHEMA)
+        parsed = parse_lenient_json(raw)
+        if isinstance(parsed, dict):
+            description = parsed.get("description")
+            if isinstance(description, str) and description.strip():
+                return _bound_description(description)
+    except Exception:
+        pass
+    return fallback
+
 
 def _judge(
     llm: LLM, existing: Entity, existing_facts: list[str], new_fact: str, surface: str
@@ -62,9 +119,11 @@ def _judge(
     if not llm.available:
         return {"verdict": "unsure", "confidence": 0.5, "reason": "no LLM: same name only"}
     facts = "\n".join(f"- {f}" for f in existing_facts) or "- (no facts recorded)"
+    description = existing.description or "(no synthesized description yet)"
     raw = llm.complete(
         IDENTITY_SYSTEM,
-        f'EXISTING entity "{existing.name}", known facts:\n{facts}\n\n'
+        f'EXISTING entity "{existing.name}"\nDescription: {description}\n'
+        f'Recent evidence:\n{facts}\n\n'
         f'NEW fact mentioning "{surface}":\n- {new_fact}',
         json_schema=IDENTITY_SCHEMA,
     )
@@ -145,7 +204,7 @@ def resolve_mentions(
         if not normalized or normalized in resolved:
             continue
 
-        candidates = backend.find_entities(normalized, scope)
+        candidates = backend.find_entity_candidates(normalized, scope)
         target: Entity | None = None
         proposals: list[tuple[Entity, dict[str, Any]]] = []
         for candidate in candidates:

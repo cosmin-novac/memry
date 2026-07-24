@@ -1,9 +1,9 @@
 """Accounts: the identities a multiuser Memry server can authenticate.
 
-Deliberately a separate SQLite file from the memory store. The memory layer has
-three interchangeable backends (local, postgres, mem0) and identity should not
-have to be implemented three times, nor should choosing mem0 mean losing the
-ability to have accounts at all. Auth is small, local, and always SQLite.
+Accounts currently use a separate SQLite file from the memory store. That kept
+identity independent of the selectable Mem0 comparison adapter, but it also
+creates a second backup and migration lifecycle. SQLite is now the sole production
+store, so consolidation is an explicit follow-up decision in the duplication audit.
 
 Two credential kinds, for two different callers:
 
