@@ -137,10 +137,11 @@ def test_full_authorization_code_flow_yields_a_working_token(oauth_client):
     assert token.status_code == 200, token.text
     access = token.json()["access_token"]
 
-    # the token actually works on MCP, and writes land in alice's namespace
+    # Alice is the first account, so OAuth grants her the same default namespace
+    # and unconfined access as the bootstrap administrator.
     mcp_call(client, access, "save_memories", {"content": "from oauth", "infer": False})
     owners = {m.content: m.user_id for m in store.get_all(limit=50)}
-    assert owners == {"from oauth": "alice::default"}
+    assert owners == {"from oauth": "default"}
 
 
 def test_pkce_is_enforced(oauth_client):

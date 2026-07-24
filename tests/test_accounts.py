@@ -7,6 +7,7 @@ as isolated as the key that proves who it is.
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 from conftest import mcp_call
@@ -29,9 +30,10 @@ def accounts() -> AccountStore:
 
 @pytest.fixture
 def served(accounts):
-    """A server whose only credentials are accounts (no admin key, no tenants)."""
+    """A server with a bootstrap owner plus two confined member accounts."""
     cfg = Config(db_path=":memory:", api_key="admin-key")
     store = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64))
+    accounts.create("owner")
     alice_key = accounts.issue_key(accounts.create("alice").name)
     bob_key = accounts.issue_key(accounts.create("bob").name)
     app = create_app(store, accounts=accounts)
@@ -40,6 +42,14 @@ def served(accounts):
 
 
 # ---------------------------------------------------------------- credentials
+def test_first_account_is_admin_and_later_accounts_are_members(accounts):
+    owner = accounts.create("owner")
+    member = accounts.create("member")
+
+    assert owner.is_admin is True
+    assert member.is_admin is False
+
+
 def test_api_keys_are_stored_hashed_only(accounts):
     accounts.create("alice")
     key = accounts.issue_key("alice")
@@ -107,7 +117,72 @@ def test_auth_db_sits_next_to_the_memory_db(tmp_path):
     assert default_auth_db_path(":memory:") == ":memory:"
 
 
+def test_legacy_auth_db_promotes_only_its_oldest_account(tmp_path):
+    path = tmp_path / "auth.db"
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE accounts (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            password TEXT,
+            disabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            metadata TEXT NOT NULL DEFAULT '{}'
+        );
+        INSERT INTO accounts VALUES ('old', 'owner', NULL, 0, '2025-01-01', '{}');
+        INSERT INTO accounts VALUES ('new', 'member', NULL, 0, '2025-01-02', '{}');
+    """)
+    db.close()
+
+    migrated = AccountStore(str(path))
+    try:
+        assert migrated.get_by_name("owner").is_admin is True
+        assert migrated.get_by_name("member").is_admin is False
+        assert migrated.create("later").is_admin is False
+    finally:
+        migrated.close()
+
+
+def test_deleted_admin_role_is_not_silently_reassigned(tmp_path):
+    path = tmp_path / "auth.db"
+    accounts = AccountStore(str(path))
+    accounts.create("owner")
+    accounts.create("member")
+    assert accounts.delete("owner") is True
+    accounts.close()
+
+    reopened = AccountStore(str(path))
+    try:
+        assert reopened.get_by_name("member").is_admin is False
+        assert reopened.create("later").is_admin is False
+    finally:
+        reopened.close()
+
+
 # ---------------------------------------------------------------- confinement
+def test_first_account_key_uses_existing_admin_namespace(accounts):
+    cfg = Config(db_path=":memory:")
+    store = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64))
+    owner_key = accounts.issue_key(accounts.create("owner").name)
+    member_key = accounts.issue_key(accounts.create("member").name)
+    store.add("existing admin memory", user_id="default", infer=False)
+
+    with TestClient(create_app(store, accounts=accounts)) as client:
+        owner = {"Authorization": f"Bearer {owner_key}"}
+        member = {"Authorization": f"Bearer {member_key}"}
+        assert [m["content"] for m in client.get("/api/v1/memories", headers=owner).json()] == [
+            "existing admin memory"
+        ]
+        assert client.get("/api/v1/memories", headers=member).json() == []
+        client.post(
+            "/api/v1/memories",
+            headers=owner,
+            json={"content": "owner memory", "infer": False},
+        )
+
+    assert {memory.user_id for memory in store.get_all(limit=10)} == {"default"}
+
+
 def test_account_key_authenticates_rest_and_is_namespaced(served):
     client, store, alice_key, bob_key = served
     alice = {"Authorization": f"Bearer {alice_key}"}
@@ -160,6 +235,7 @@ def test_accounts_and_config_tenants_coexist():
         tenants=[TenantConfig(name="acme", api_key="acme-key")],
     )
     store = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64))
+    accounts.create("owner")
     accounts.create("alice")
     alice_key = accounts.issue_key("alice")
     app = create_app(store, accounts=accounts)

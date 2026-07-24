@@ -107,6 +107,8 @@ The public field and API name remains `categories` for compatibility. During the
 window, the JSON category list is also written as a compatibility projection; it is not a
 second knowledge concept.
 
+Mechanical separator and singular/plural duplicates are merged deterministically once two
+real stored labels map to the same form. Semantic synonym merges remain reviewable.
 Synthetic umbrella topics are hierarchy edges, for example `health` broader than
 `running`. The parent label is not copied onto every child memory. Filters expand the
 hierarchy in SQLite at query time, so taxonomy changes do not rewrite the memory corpus.
@@ -118,13 +120,15 @@ An entity is a stable identity hub for a person, organization, project, product,
 event, concept, or other referent. `EntityMention` is the authoritative link from a memory
 to an entity and keeps the observed surface text.
 
-Names and aliases discover identity candidates; they never prove identity. Candidate
-lookup uses indexed canonical names, observed mention surfaces, and merged names. Optional
-user aliases stored in entity metadata use a fallback scan only when indexed evidence finds
-nothing. Context decides whether a candidate is the same
-referent. Ambiguous cases remain separate and create merge proposals. Confirmed merges
-retain the losing entity with `merged_into`, repoint mentions and relations, and preserve
-its name as alias evidence.
+Names and aliases discover identity candidates. Candidate lookup uses indexed canonical
+names, observed mention surfaces, and merged names. Optional user aliases stored in entity
+metadata use a fallback scan only when indexed evidence finds nothing. An exact multi-part
+name plus meaningful contextual overlap is a deterministic identity match unless known types
+conflict or the model finds a concrete contradiction. A shared short name or full name
+without contextual overlap remains separate and creates a merge proposal. Proposal actions
+resolve each endpoint through `merged_into`, so already-satisfied and stale proposals are
+idempotent. Confirmed merges retain the losing entity, repoint mentions and relations, and
+preserve its name as alias evidence.
 
 Each entity has two derived profile fields only:
 
@@ -187,7 +191,9 @@ requests history.
 - `memry serve` hosts REST, the dashboard, OAuth endpoints when enabled, and `/mcp` in one
   Starlette/Uvicorn process.
 - A single admin bearer key, configured tenants, or runtime accounts can authenticate
-  network calls. Tenant principals map public user IDs into confined namespaces.
+  network calls. The oldest/first runtime account is persisted as bootstrap administrator
+  and uses the existing unconfined/default namespace; later accounts and tenant principals
+  map public user IDs into confined namespaces.
 - Runtime API keys are stored as SHA-256 hashes; human passwords use scrypt with a random
   salt; comparisons are constant-time.
 - OAuth uses the MCP SDK authorization-server interfaces with dynamic client registration,

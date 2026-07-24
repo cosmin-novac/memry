@@ -150,3 +150,33 @@ def test_topic_edits_preserve_and_remove_hierarchy(verbatim_store):
     assert [memory.content for memory in store.get_all(
         user_id="ada", categories=["jogging"]
     )] == ["Ada runs"]
+
+def test_plural_topic_is_merged_automatically_on_write(verbatim_store):
+    verbatim_store.add("Ada likes vegetables", user_id="ada", infer=False, categories=["foods"])
+    verbatim_store.add("Ada plans meals", user_id="ada", infer=False, categories=["food"])
+
+    assert verbatim_store.categories(user_id="ada") == [
+        {"category": "food", "count": 2}
+    ]
+    assert {
+        tuple(memory.categories)
+        for memory in verbatim_store.get_all(user_id="ada", limit=10)
+    } == {("food",)}
+
+
+def test_existing_plural_topics_are_merged_by_maintenance(verbatim_store):
+    backend = verbatim_store.backend
+    backend.insert_memory(
+        Memory(content="one", user_id="ada", categories=["project"])
+    )
+    backend.insert_memory(
+        Memory(content="two", user_id="ada", categories=["projects"])
+    )
+
+    assert verbatim_store.merge_obvious_topics(user_id="ada") == {
+        "groups_merged": 1,
+        "memories_changed": 1,
+    }
+    assert verbatim_store.categories(user_id="ada") == [
+        {"category": "project", "count": 2}
+    ]

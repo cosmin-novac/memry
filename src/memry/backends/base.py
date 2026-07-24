@@ -158,6 +158,20 @@ class MemoryBackend(ABC):
     def get_entity(self, entity_id: str) -> Entity | None:
         return None
 
+    def resolve_entity_id(self, entity_id: str) -> str | None:
+        """Follow ``merged_into`` links to the active entity ID."""
+        current = entity_id
+        seen: set[str] = set()
+        while current not in seen:
+            seen.add(current)
+            entity = self.get_entity(current)
+            if entity is None:
+                return None
+            if entity.merged_into is None:
+                return entity.id
+            current = entity.merged_into
+        return None
+
     def find_entities(self, normalized: str, scope: Scope) -> list[Entity]:
         """Active (unmerged) entities with this normalized name, in scope."""
         return []

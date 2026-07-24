@@ -1,24 +1,23 @@
-"""Entity resolution with conservative disambiguation.
+"""Entity resolution with evidence-based disambiguation.
 
-The rule (set by design, not tunable prompts): **same name is never enough to
-merge.** When a new memory mentions "Jonas" and one or more entities named
-Jonas already exist, an identity judgment runs per candidate:
+A shared short name is never enough to merge. An exact multi-part name plus
+meaningful contextual overlap is treated as the same identity unless known types
+conflict or the model finds a concrete contradiction. Otherwise an identity
+judgment runs per candidate:
 
 - ``same`` (confident)  -> the mention attaches to the existing entity
-- ``unsure``            -> a NEW entity is created and a merge *proposal* is
-                           recorded for later - automatic confirmation when the
-                           evidence becomes clear, or a human decision
+- ``unsure``            -> a new entity is created and a merge proposal is
+                           recorded for later automatic or human resolution
 - ``different``         -> a new entity, no proposal
 
-Without an LLM the safe default applies: keep separate + propose. Wrongly kept
-apart is recoverable (merge later); wrongly merged is corrupted memory.
-
-``resolve_open_proposals`` re-judges proposed pairs as evidence accumulates and
-auto-confirms only clear, high-confidence matches.
+Without an LLM, deterministic full-name-and-context matches still collapse; less
+certain matches stay separate and recoverable. ``resolve_open_proposals`` follows
+prior merge chains and auto-confirms only deterministic or high-confidence matches.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..backends.base import MemoryBackend
@@ -42,14 +41,17 @@ You are given an EXISTING entity (with facts that mention it) and a NEW fact
 that mentions the same name. Decide whether they refer to the same real-world
 person/organization/place/thing.
 
-- "same": clearly the same entity (strongly consistent roles, relationships,
-  or context)
-- "different": clearly a different entity (conflicting roles, relationships,
-  ages, locations, or types)
+- "same": clearly the same entity (matching full name plus compatible context,
+  or strongly consistent roles, relationships, or identifiers)
+- "different": clearly a different entity (concrete conflicting ages, locations,
+  relationships, identifiers, or types)
 - "unsure": the name matches but the evidence is insufficient either way
 
-Be conservative: prefer "unsure" over "same" unless the evidence is strong.
-A wrong merge corrupts memory; a deferred merge is harmless.
+A person can have several jobs, hobbies, purchases, projects, or public roles. Different
+activities are not a contradiction. In a personal memory store, an exact first-and-last
+name in overlapping context strongly favors "same" unless concrete evidence conflicts.
+Do not demand a public profile or unique identifier when the stored context already aligns.
+Be conservative when only a short/common name matches.
 Respond with JSON only:
 {"verdict": "same"|"unsure"|"different", "confidence": 0..1, "reason": short}"""
 
@@ -112,6 +114,76 @@ def synthesize_entity_description(
         pass
     return fallback
 
+
+_NAME_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_CONTEXT_STOPWORDS = {
+    "about", "after", "again", "also", "and", "are", "been", "before",
+    "being", "but", "can", "does", "existing", "fact", "for", "from",
+    "had", "has", "have", "into", "its", "new", "not", "person", "same",
+    "that", "the", "their", "them", "then", "they", "this", "user", "was",
+    "were", "with", "work", "works", "would",
+}
+
+
+def _name_words(value: str) -> tuple[str, ...]:
+    return tuple(_NAME_WORD_RE.findall(value.casefold()))
+
+
+def _context_stem(token: str) -> str:
+    if len(token) > 6 and token.endswith("ing"):
+        token = token[:-3]
+        if len(token) > 3 and token[-1] == token[-2]:
+            token = token[:-1]
+    elif len(token) > 5 and token.endswith("ied"):
+        token = token[:-3] + "y"
+    elif len(token) > 5 and token.endswith("ed"):
+        token = token[:-2]
+    elif len(token) > 5 and token.endswith("ies"):
+        token = token[:-3] + "y"
+    elif len(token) > 4 and token.endswith("s") and not token.endswith(("ss", "us")):
+        token = token[:-1]
+    return token
+
+
+def _context_words(value: str, name_words: tuple[str, ...]) -> set[str]:
+    return {
+        stem
+        for raw in _NAME_WORD_RE.findall(value.casefold())
+        if raw not in name_words and raw not in _CONTEXT_STOPWORDS and len(raw) >= 3
+        for stem in [_context_stem(raw)]
+        if len(stem) >= 3 and stem not in _CONTEXT_STOPWORDS
+    }
+
+
+def _obvious_same_entity(
+    existing: Entity,
+    existing_facts: list[str],
+    other_name: str,
+    other_facts: list[str],
+    other_type: str | None = None,
+) -> bool:
+    """Deterministic high-confidence identity match.
+
+    Exact multi-part names are not enough by themselves. They become an automatic
+    match when the two evidence sets also share meaningful context and their known
+    types do not conflict. This catches repeated first+last-name memories without
+    conflating unrelated people who happen to share a common full name.
+    """
+    existing_name = _name_words(existing.name)
+    if len(existing_name) < 2 or existing_name != _name_words(other_name):
+        return False
+    if existing.entity_type and other_type and existing.entity_type != other_type:
+        return False
+    left = _context_words(" ".join(existing_facts), existing_name)
+    right = _context_words(" ".join(other_facts), existing_name)
+    if not left or not right:
+        return False
+    shared = left & right
+    if len(shared) >= 2:
+        return True
+    return bool(shared) and max(map(len, shared)) >= 6 and (
+        len(shared) / min(len(left), len(right)) >= 0.12
+    )
 
 def _judge(
     llm: LLM, existing: Entity, existing_facts: list[str], new_fact: str, surface: str
@@ -208,9 +280,25 @@ def resolve_mentions(
         target: Entity | None = None
         proposals: list[tuple[Entity, dict[str, Any]]] = []
         for candidate in candidates:
-            facts = [m.content for m in backend.entity_memories(candidate.id, limit=3)]
+            facts = [m.content for m in backend.entity_memories(candidate.id, limit=5)]
             judgment = _judge(llm, candidate, facts, memory_content, surface)
-            if judgment["verdict"] == "same" and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE:
+            high_conflict = (
+                judgment["verdict"] == "different"
+                and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
+            )
+            if (
+                judgment["verdict"] == "same"
+                and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
+            ) or (
+                not high_conflict
+                and _obvious_same_entity(
+                    candidate,
+                    facts,
+                    surface,
+                    [memory_content],
+                    types.get(normalized),
+                )
+            ):
                 target = candidate
                 break
             if judgment["verdict"] in ("same", "unsure"):
@@ -253,36 +341,60 @@ def resolve_open_proposals(
     scope: Scope,
     auto_confirm: bool = True,
 ) -> dict[str, int]:
-    """Re-judge open proposals with the evidence accumulated since. Only clear,
-    high-confidence "same" verdicts auto-merge; everything else stays for the
-    user. Returns counts per outcome."""
+    """Resolve obvious/stale proposals and re-judge the remaining pairs.
+
+    Entity IDs are first followed through merge history, making maintenance safe
+    for proposals created before another merge changed either endpoint.
+    """
     outcome = {"confirmed": 0, "rejected": 0, "kept": 0}
     for proposal in backend.list_proposals(scope, status="proposed", limit=1000):
-        entity_a = backend.get_entity(proposal.entity_a)
-        entity_b = backend.get_entity(proposal.entity_b)
-        if entity_a is None or entity_b is None or not entity_a.is_active or not entity_b.is_active:
+        entity_a_id = backend.resolve_entity_id(proposal.entity_a)
+        entity_b_id = backend.resolve_entity_id(proposal.entity_b)
+        if entity_a_id is None or entity_b_id is None:
             backend.set_proposal_status(proposal.id, "rejected")
             outcome["rejected"] += 1
             continue
-        if not llm.available:
-            outcome["kept"] += 1
+        if entity_a_id == entity_b_id:
+            backend.set_proposal_status(proposal.id, "confirmed")
+            outcome["confirmed"] += 1
             continue
-        facts_a = [m.content for m in backend.entity_memories(entity_a.id, limit=5)]
-        facts_b = [m.content for m in backend.entity_memories(entity_b.id, limit=5)]
+        entity_a = backend.get_entity(entity_a_id)
+        entity_b = backend.get_entity(entity_b_id)
+        if entity_a is None or entity_b is None:
+            backend.set_proposal_status(proposal.id, "rejected")
+            outcome["rejected"] += 1
+            continue
+        facts_a = [m.content for m in backend.entity_memories(entity_a.id, limit=8)]
+        facts_b = [m.content for m in backend.entity_memories(entity_b.id, limit=8)]
         judgment = _judge(
-            llm, entity_a, facts_a,
+            llm,
+            entity_a,
+            facts_a,
             " / ".join(facts_b) or f"(entity named {entity_b.name}, no facts)",
             entity_b.name,
         )
-        if (
-            auto_confirm
-            and judgment["verdict"] == "same"
+        high_conflict = (
+            judgment["verdict"] == "different"
             and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
-        ):
-            backend.merge_entities(entity_a.id, entity_b.id)
+        )
+        obvious = _obvious_same_entity(
+            entity_a,
+            facts_a,
+            entity_b.name,
+            facts_b,
+            entity_b.entity_type,
+        )
+        should_merge = auto_confirm and (
+            (
+                judgment["verdict"] == "same"
+                and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
+            )
+            or (obvious and not high_conflict)
+        )
+        if should_merge and backend.merge_entities(entity_a.id, entity_b.id):
             backend.set_proposal_status(proposal.id, "confirmed")
             outcome["confirmed"] += 1
-        elif judgment["verdict"] == "different" and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE:
+        elif high_conflict:
             backend.set_proposal_status(proposal.id, "rejected")
             outcome["rejected"] += 1
         else:

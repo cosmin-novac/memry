@@ -55,21 +55,32 @@ def test_open_mode_dashboard_needs_no_login():
 
 
 # ---------------------------------------------------------------- account login
-def test_account_login_sets_cookie_and_scopes_the_view(app_ctx):
+def test_first_account_login_sets_cookie_and_uses_admin_view(app_ctx):
     client, store, _ = app_ctx
-    store.add("alice note", user_id="alice::default", infer=False)
+    store.add("owner note", user_id="default", infer=False)
     store.add("bob note", user_id="bob::default", infer=False)
 
     resp = login(client, account="alice", password="hunter2")
     assert resp.status_code == 302 and resp.headers["location"] == "/"
     assert SESSION_COOKIE in resp.cookies
 
-    # the cookie now authenticates the dashboard API, scoped to alice
+    # The first account is the named administrator and sees the existing default
+    # namespace as well as later members' namespaces.
     listed = client.get("/api/v1/memories").json()
-    assert [m["content"] for m in listed] == ["alice note"]
-    # and the page itself renders (no redirect) and names the account
+    assert {memory["content"] for memory in listed} == {"owner note", "bob note"}
     page = client.get("/")
     assert page.status_code == 200 and "@alice" in page.text
+
+
+def test_later_account_login_remains_scoped(app_ctx):
+    client, store, _ = app_ctx
+    store.add("owner note", user_id="default", infer=False)
+    store.add("bob note", user_id="bob::default", infer=False)
+
+    resp = login(client, account="bob", password="bobpw")
+    assert resp.status_code == 302
+    listed = client.get("/api/v1/memories").json()
+    assert [memory["content"] for memory in listed] == ["bob note"]
 
 
 def test_wrong_password_does_not_log_in(app_ctx):

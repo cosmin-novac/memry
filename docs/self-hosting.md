@@ -86,10 +86,13 @@ any MCP client, use **accounts** instead.
 
 ## Accounts and OAuth
 
-Accounts are runtime-managed identities (not config), each confined to its own
-`<account>::<user>` namespace exactly like a tenant. They exist so a shared Memry server
-can hand every person their own isolated space, reachable either with an API key or through
-a real OAuth login from clients like Claude Code, Cursor, or VS Code that expect it.
+Accounts are runtime-managed identities (not config). The first account is the bootstrap
+administrator: it keeps the server's existing unprefixed/default memory space and has global
+access. Later accounts are confined to their own `<account>::<user>` namespaces exactly like
+tenants. Accounts are reachable either with an API key or through a real OAuth login from
+clients like Claude Code, Cursor, or VS Code that expect it. The bootstrap administrator can
+read and change every namespace, so protect its password, API keys, and OAuth sessions as
+carefully as `MEMRY_API_KEY`.
 
 Create accounts with the CLI:
 

@@ -15,9 +15,9 @@ Two credential kinds, for two different callers:
   These are low entropy and guessable, so they get scrypt with a per-account
   salt.
 
-An account's name is its namespace: account ``alice`` owns ``alice::*``, the
-same shape config tenants already use, so the two are one mechanism to the rest
-of the server.
+The first account is the bootstrap administrator and uses the server's existing
+unconfined/default namespace. Later accounts use their names as namespace prefixes:
+account ``alice`` owns ``alice::*``, the same shape config tenants already use.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     name         TEXT NOT NULL UNIQUE,
     password     TEXT,
     disabled     INTEGER NOT NULL DEFAULT 0,
+    is_admin     INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT NOT NULL,
     metadata     TEXT NOT NULL DEFAULT '{}'
 );
@@ -105,12 +106,15 @@ def verify_password(password: str, stored: str | None) -> bool:
 class Account:
     """A row of the accounts table."""
 
-    __slots__ = ("id", "name", "disabled", "created_at", "metadata", "_password")
+    __slots__ = (
+        "id", "name", "disabled", "is_admin", "created_at", "metadata", "_password"
+    )
 
     def __init__(self, row: sqlite3.Row) -> None:
         self.id: str = row["id"]
         self.name: str = row["name"]
         self.disabled: bool = bool(row["disabled"])
+        self.is_admin: bool = bool(row["is_admin"])
         self.created_at: str = row["created_at"]
         self.metadata: str = row["metadata"]
         self._password: str | None = row["password"]
@@ -138,6 +142,20 @@ class AccountStore:
         if db_path != ":memory:":
             self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(_SCHEMA)
+        columns = {
+            row["name"] for row in self._db.execute("PRAGMA table_info(accounts)")
+        }
+        legacy_accounts = "is_admin" not in columns
+        if legacy_accounts:
+            self._db.execute(
+                "ALTER TABLE accounts ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+            )
+            # One-time migration only: preserve the historical first account as
+            # bootstrap administrator without ever auto-promoting a replacement.
+            self._db.execute(
+                "UPDATE accounts SET is_admin = 1 WHERE id = ("
+                "SELECT id FROM accounts ORDER BY created_at, rowid LIMIT 1)"
+            )
         self._db.commit()
         self.db_path = db_path
 
@@ -158,7 +176,7 @@ class AccountStore:
 
     # -- accounts ------------------------------------------------------
     def create(self, name: str, *, password: str | None = None) -> Account:
-        """Create an account. Raises ValueError if the name is taken."""
+        """Create an account; the first account becomes bootstrap administrator."""
         name = name.strip()
         if not name:
             raise ValueError("account name must not be empty")
@@ -167,14 +185,18 @@ class AccountStore:
             # space nest inside another's
             raise ValueError("account name must not contain '::'")
         with self._lock:
+            is_admin = self._db.execute(
+                "SELECT 1 FROM accounts LIMIT 1"
+            ).fetchone() is None
             try:
                 self._db.execute(
-                    "INSERT INTO accounts (id, name, password, created_at) "
-                    "VALUES (?, ?, ?, ?)",
+                    "INSERT INTO accounts (id, name, password, is_admin, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
                     (
                         new_id(),
                         name,
                         hash_password(password) if password else None,
+                        1 if is_admin else 0,
                         utcnow(),
                     ),
                 )

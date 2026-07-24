@@ -1,19 +1,16 @@
-"""Tag abstraction: propose higher-level tags that cluster existing ones.
+"""Topic vocabulary cleanup and higher-level abstraction.
 
-Given the flat list of tags a namespace has accumulated (each an ad-hoc label
-from extraction or the user), an LLM is asked to step back and name a few
-broader themes - a "synthetic" tag like ``health`` that groups ``running``,
-``diet``, ``sleep``, ``doctor``. Each synthetic tag is then written onto every
-memory carrying one of its member tags, giving a coarse index over a store that
-would otherwise only have long-tail specifics.
+Mechanical formatting and singular/plural duplicates are detected deterministically.
+An optional LLM can propose exact synonym merges and broader synthetic topics. Broader
+topics are stored as hierarchy edges rather than copied onto every member memory.
 
-This is deliberately conservative: the model may only cluster tags that already
-exist (it cannot invent membership out of nothing), and a cluster must group at
-least ``min_cluster_size`` of them, so a synthetic tag always earns its place.
+Both paths are conservative: merge candidates must be real stored labels, and a
+synthetic cluster must contain enough existing topics to earn its place.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..providers.llm import LLM
@@ -104,6 +101,57 @@ name (prefer one already in the list). Return few, high-confidence groups, or an
 empty list. JSON only: {"groups": [{"canonical": str, "variants": [str, ...]}]}."""
 
 
+_TOPIC_SEPARATOR_RE = re.compile(r"[-_\s]+")
+_UNINFLECTED_TOPICS = {
+    "alias", "atlas", "bias", "business", "canvas", "chaos", "gas", "mathematics",
+    "news", "physics", "series", "species", "status",
+}
+
+
+def _singular_topic_word(word: str) -> str:
+    if len(word) <= 3 or word in _UNINFLECTED_TOPICS:
+        return word
+    if word.endswith("ies"):
+        return word[:-3] + "y"
+    if word.endswith(("ches", "shes", "sses", "xes", "zes")):
+        return word[:-2]
+    if word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
+
+
+def _obvious_topic_key(value: str) -> str:
+    words = [word for word in _TOPIC_SEPARATOR_RE.split(value.casefold().strip()) if word]
+    if not words:
+        return ""
+    words[-1] = _singular_topic_word(words[-1])
+    return " ".join(words)
+
+
+def obvious_canonical_merges(tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Find deterministic formatting and singular/plural duplicates.
+
+    A key is only actionable when two real stored labels map to it, so a lone
+    word is never rewritten by a speculative inflection rule.
+    """
+    known = {str(tag["category"]).strip().casefold() for tag in tags}
+    known.discard("")
+    grouped: dict[str, list[str]] = {}
+    for topic in sorted(known):
+        key = _obvious_topic_key(topic)
+        if key:
+            grouped.setdefault(key, []).append(topic)
+    merges: list[dict[str, Any]] = []
+    for key, variants in grouped.items():
+        if len(variants) < 2:
+            continue
+        canonical = key if key in variants else min(
+            variants,
+            key=lambda value: (value.count("-") + value.count("_"), len(value), value),
+        )
+        merges.append({"canonical": canonical, "variants": variants, "automatic": True})
+    return merges
+
 def suggest_canonical_merges(
     llm: LLM, tags: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -116,6 +164,9 @@ def suggest_canonical_merges(
     known.discard("")
     if len(known) < 2:
         return []
+    obvious = obvious_canonical_merges(tags)
+    if not llm.available:
+        return obvious
     listing = ", ".join(sorted(known))
     raw = llm.complete(
         CANONICALIZE_SYSTEM,
@@ -124,9 +175,9 @@ def suggest_canonical_merges(
     )
     data = parse_lenient_json(raw)
     if not isinstance(data, dict):
-        return []
-    out: list[dict[str, Any]] = []
-    used: set[str] = set()
+        return obvious
+    out: list[dict[str, Any]] = list(obvious)
+    used: set[str] = {variant for group in obvious for variant in group["variants"]}
     for group in data.get("groups", []):
         if not isinstance(group, dict):
             continue

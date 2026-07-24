@@ -1576,33 +1576,35 @@ class LocalBackend(MemoryBackend):
             self._db.commit()
 
     def merge_entities(self, keep_id: str, merge_id: str) -> bool:
-        if keep_id == merge_id:
-            return False
+        """Idempotently fold both IDs' active roots into one entity."""
         with self._lock:
-            keep = self._db.execute(
-                "SELECT id FROM entities WHERE id = ? AND merged_into IS NULL", (keep_id,)
-            ).fetchone()
-            if keep is None:
+            keep_root = self.resolve_entity_id(keep_id)
+            merge_root = self.resolve_entity_id(merge_id)
+            if keep_root is None or merge_root is None:
                 return False
+            if keep_root == merge_root:
+                return True
             changed_at = utcnow()
             cur = self._db.execute(
                 "UPDATE entities SET merged_into = ?, updated_at = ?, "
                 "description_updated_at = NULL "
                 "WHERE id = ? AND merged_into IS NULL",
-                (keep_id, changed_at, merge_id),
+                (keep_root, changed_at, merge_root),
             )
             if cur.rowcount == 0:
                 self._db.rollback()
                 return False
             self._db.execute(
                 "UPDATE entity_mentions SET entity_id = ? WHERE entity_id = ?",
-                (keep_id, merge_id),
+                (keep_root, merge_root),
             )
             self._db.execute(
-                "UPDATE relations SET subject = ? WHERE subject = ?", (keep_id, merge_id)
+                "UPDATE relations SET subject = ? WHERE subject = ?",
+                (keep_root, merge_root),
             )
             self._db.execute(
-                "UPDATE relations SET object = ? WHERE object = ?", (keep_id, merge_id)
+                "UPDATE relations SET object = ? WHERE object = ?",
+                (keep_root, merge_root),
             )
             self._db.execute(
                 "UPDATE relations SET invalid_at = ? "
@@ -1611,21 +1613,21 @@ class LocalBackend(MemoryBackend):
             )
             self._db.execute(
                 "UPDATE entity_proposals SET entity_a = ? WHERE entity_a = ?",
-                (keep_id, merge_id),
+                (keep_root, merge_root),
             )
             self._db.execute(
                 "UPDATE entity_proposals SET entity_b = ? WHERE entity_b = ?",
-                (keep_id, merge_id),
+                (keep_root, merge_root),
             )
             self._db.execute(
-                "UPDATE entity_proposals SET status = 'rejected', decided_at = ? "
+                "UPDATE entity_proposals SET status = 'confirmed', decided_at = ? "
                 "WHERE entity_a = entity_b AND status = 'proposed'",
                 (changed_at,),
             )
             self._db.execute(
                 "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
                 "WHERE id = ?",
-                (changed_at, keep_id),
+                (changed_at, keep_root),
             )
             self._db.commit()
         return True

@@ -113,10 +113,10 @@ Entities are **extracted, disambiguated, and typed.**
 
 - On save, the extractor lists each entity in a fact with a `type` (person,
   organization, project, product, place, event, concept, other), so typing costs
-  no extra call. `resolve_mentions` either reuses an existing entity (only when
-  the LLM is confident they are the same, to avoid conflating two people named
-  "Jonas") or creates a new typed one, filing a **merge proposal** for the
-  ambiguous case that you confirm or reject.
+  no extra call. `resolve_mentions` reuses an existing entity when the model is
+  confident or when an exact multi-part name has meaningful contextual overlap.
+  A shared short name or full name without supporting context stays separate and
+  creates a **merge proposal** that can be confirmed or rejected.
 - Entities linked before typing existed can be classified with
   **`memry backfill-entity-types`** (or `POST /api/v1/entities/backfill-types`) -
   batched, so a whole namespace is a handful of calls, and only untyped entities
@@ -135,8 +135,9 @@ people.
 
 - The **Topics** tab in the dashboard Knowledge area lists topics A-to-Z with counts and
   supports rename, combine, and delete operations.
-- "Suggest merges" only proposes spelling or synonym variants of the same classification;
-  distinct related topics remain separate.
+- Separator and conservative singular/plural duplicates such as `food`/`foods` merge
+  automatically. "Suggest merges" proposes semantic synonyms for review; distinct related
+  topics remain separate.
 - Synthetic abstraction creates hierarchy edges such as `health` broader than `running`.
   The parent is not copied onto the child memories. Filtering by `health` expands through
   the hierarchy at query time.
@@ -166,10 +167,10 @@ people.
 ## Keeping it manageable
 
 - Reconciliation already prevents duplicate *facts* on write.
-- A weekly **maintenance autorun** de-duplicates *entities*: it re-judges open
-  merge proposals and auto-confirms clear same-entity matches, so duplicate
-  entities collapse over time (`dedup_entities`, on by default; bounded by the
-  number of open proposals). Trigger it now with `POST /api/v1/entities/resolve`.
+- A weekly **maintenance autorun** de-duplicates entities and mechanical topic variants.
+  It follows prior merge chains, auto-confirms deterministic full-name/context matches,
+  and re-judges remaining open proposals (`dedup_entities`, on by default; bounded by the
+  number of open proposals). Trigger entity resolution with `POST /api/v1/entities/resolve`.
 - If a past run ever bumped dates, **`memry repair-dates`** recomputes every
   `updated_at` from the audit trail (token-free, idempotent).
 - Run **`memry backfill-relations`** once to extract relations from memories that

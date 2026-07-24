@@ -81,7 +81,8 @@ input,button,textarea{font:inherit;color:inherit;background:var(--panel);border:
 .qwrap input{flex:1;padding-right:1.9rem}
 #qclear{position:absolute;right:.3rem;top:50%;transform:translateY(-50%);border:none;background:none;color:var(--dim);padding:.2rem .4rem;font-size:.9rem;line-height:1;display:none}
 #qclear:hover{color:var(--accent)}
-.modal{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.55);display:none;align-items:flex-start;justify-content:center;padding:4rem 1rem;overflow:auto}
+html.knowledge-open,body.knowledge-open{overflow:hidden}
+.modal{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.55);display:none;align-items:flex-start;justify-content:center;padding:4rem 1rem;overflow:auto;overscroll-behavior:contain}
 .modal.on{display:flex}
 .modal .sheet{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(96vw,44rem);padding:1.2rem 1.3rem}
 .modal h2{margin:.1rem 0 .2rem;font-size:1.05rem}.modal h2 .x{float:right;cursor:pointer;color:var(--dim);border:none;background:none;font-size:1rem}
@@ -478,8 +479,9 @@ function galaxyFrame(now){
     ctx.beginPath();ctx.arc(pl.x,pl.y,pl.r+age*46,0,Math.PI*2);ctx.stroke();
   }
   ctx.globalAlpha=1;
-  // planets: flat crisp discs, varied memory dots, gated counts and labels
-  for(const n of G.nodes){
+  // Draw the hovered planet last so its disc and label are always in front.
+  const planetOrder=hov?[...G.nodes.filter(node=>node!==hov),hov]:G.nodes;
+  for(const n of planetOrder){
     const p=pts[n.tag],x=p.x,y=p.y,A=emph(n),c=gTone(n,dark);
     const glowTarget=Math.max(activeCat===n.tag?1:0,n===hov?hoverMix:0);
     n.h+=(glowTarget-n.h)*(reducedMotion?1:0.14);
@@ -531,8 +533,14 @@ function galaxyFrame(now){
       if('letterSpacing'in ctx)ctx.letterSpacing='1.5px';
       ctx.textAlign='center';ctx.textBaseline='top';
       const label=n.tag.length>18?n.tag.slice(0,17)+'…':n.tag;
+      const labelText=label.toUpperCase()+' · '+n.count,labelY=y+n.radius+8+3*n.h;
       ctx.fillStyle=lit?TEXT:hexA(DIM.length===7?DIM:'#8494ab',0.95);
-      ctx.fillText(label.toUpperCase()+' · '+n.count,x,y+n.radius+8+3*n.h);
+      if(n===hov&&hoverMix>0.04){
+        ctx.lineWidth=5;ctx.lineJoin='round';
+        ctx.strokeStyle=dark?'rgba(4,6,12,0.94)':'rgba(245,247,250,0.96)';
+        ctx.strokeText(labelText,x,labelY);
+      }
+      ctx.fillText(labelText,x,labelY);
       if('letterSpacing'in ctx)ctx.letterSpacing='0px';
     }
   }
@@ -619,12 +627,17 @@ function clearSearch(){
 
 // -- unified knowledge area -------------------------------------------------
 let knowledgeTab='topics',knowledgeNames={};
+function setKnowledgeOpen(open){
+  document.getElementById('knowmodal').classList.toggle('on',open);
+  document.documentElement.classList.toggle('knowledge-open',open);
+  document.body.classList.toggle('knowledge-open',open);
+}
 async function openKnowledge(tab='topics'){
-  document.getElementById('knowmodal').classList.add('on');
+  setKnowledgeOpen(true);
   showKnowledge(tab);
   await Promise.all([loadTags(),loadEntities(),loadCollections()]);
 }
-function closeKnowledge(){document.getElementById('knowmodal').classList.remove('on')}
+function closeKnowledge(){setKnowledgeOpen(false)}
 function openTags(){return openKnowledge('topics')}
 function openEntities(){return openKnowledge('entities')}
 function showKnowledge(tab){
@@ -677,7 +690,8 @@ async function suggestMerges(){
   const box=document.getElementById('tagsuggest');box.innerHTML='<div class="hint">thinking...</div>';
   const u=uid()?'?user_id='+encodeURIComponent(uid()):'';
   const groups=await api('/api/v1/tags/suggest-merges'+u);
-  if(!groups.length){box.innerHTML='<div class="hint">No duplicate or variant topics found.</div>';return}
+  await loadTags();
+  if(!groups.length){box.innerHTML='<div class="hint">Obvious plural/format duplicates were merged automatically. No other variants found.</div>';return}
   box.innerHTML=groups.map((group,index)=>`<div class="tagrow" id="sg${index}">
     <span class="name">merge <b>${group.variants.map(esc).join('</b>, <b>')}</b> into <b>${esc(group.canonical)}</b></span>
     <button class="act" onclick='applyMerge(${JSON.stringify(group)},${index})'>apply</button>
@@ -710,11 +724,11 @@ async function loadEntities(){
   document.getElementById('proplist').innerHTML=proposals.length?proposals.map(proposal=>`<div class="tagrow"><span class="name">
     <b>${esc(knowledgeNames[proposal.entity_a]||proposal.entity_a)}</b> and <b>${esc(knowledgeNames[proposal.entity_b]||proposal.entity_b)}</b>
     <span class="cnt">${esc(proposal.reason||'identity is uncertain')}</span></span>
-    <button class="act" onclick='decideProposal(${JSON.stringify(proposal.id)},"confirm")'>merge</button>
-    <button class="act del" onclick='decideProposal(${JSON.stringify(proposal.id)},"reject")'>keep separate</button></div>`).join(''):'<div class="empty">No open merge proposals.</div>';
+    <button class="act" onclick='decideProposal(${JSON.stringify(proposal.id)},"confirm",this)'>merge</button>
+    <button class="act del" onclick='decideProposal(${JSON.stringify(proposal.id)},"reject",this)'>keep separate</button></div>`).join(''):'<div class="empty">No open merge proposals.</div>';
 }
 async function openEntity(id){
-  document.getElementById('knowmodal').classList.add('on');showKnowledge('entities');
+  setKnowledgeOpen(true);showKnowledge('entities');
   const box=document.getElementById('entitydetail');box.innerHTML='<div class="hint">loading entity...</div>';
   const detail=await api('/api/v1/entities/'+encodeURIComponent(id));
   const entity=detail.entity,aliases=detail.aliases||[];
@@ -730,8 +744,13 @@ async function addAlias(id){
   await api('/api/v1/entities/'+encodeURIComponent(id)+'/aliases',{method:'POST',body:JSON.stringify({alias})});
   await Promise.all([openEntity(id),loadEntities()]);
 }
-async function decideProposal(id,decision){
-  await api('/api/v1/entities/proposals/'+encodeURIComponent(id)+'/'+decision,{method:'POST',body:'{}'});
+async function decideProposal(id,decision,button){
+  if(button)button.disabled=true;
+  try{
+    const result=await api('/api/v1/entities/proposals/'+encodeURIComponent(id)+'/'+decision,{method:'POST',body:'{}'});
+    const ok=decision==='confirm'?result.confirmed:result.rejected;
+    if(!ok)alert('That proposal changed while this view was open. The list has been refreshed.');
+  }catch(error){alert('Could not update that merge proposal.');}
   await loadEntities();
 }
 async function loadCollections(){
@@ -982,6 +1001,13 @@ def create_app(
     def _unauthorized() -> JSONResponse:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
+    def _account_principal(account) -> Principal:
+        return Principal(
+            name=account.name,
+            default_user=default_user,
+            admin=account.is_admin,
+        )
+
     def resolve_principal(token: str) -> Principal | None:
         """Map a bearer token to who it acts as, or None to reject it.
 
@@ -996,11 +1022,13 @@ def create_app(
             return Principal(name=tenants[token], default_user=default_user)
         account = accounts.account_for_key(token)
         if account is not None:
-            return Principal(name=account.name, default_user=default_user)
+            return _account_principal(account)
         if oauth is not None:
             granted = oauth.verify_access_token(token)
             if granted is not None and granted.subject:
-                return Principal(name=granted.subject, default_user=default_user)
+                account = accounts.get_by_name(granted.subject)
+                if account is not None and not account.disabled:
+                    return _account_principal(account)
         return None
 
     def _is_configured_key(value: str) -> bool:
@@ -1035,7 +1063,8 @@ def create_app(
         kind, name = row
         if kind == "admin":
             return ADMIN
-        return Principal(name=name, default_user=default_user)
+        account = accounts.get_by_name(name) if name else None
+        return _account_principal(account) if account is not None else None
 
     def _authenticate(request: Request) -> Principal | None:
         """Who this request acts as: bearer token first, then session cookie."""
@@ -1112,7 +1141,7 @@ def create_app(
         principal = _authenticate(request)
         if principal is None:
             return RedirectResponse("/login", status_code=302)
-        who = "admin" if principal.is_admin else principal.name
+        who = principal.name or "admin"
         return HTMLResponse(_DASHBOARD.replace("__WHOAMI__", html.escape(who)))
 
     async def health(request: Request) -> Response:
@@ -1276,9 +1305,11 @@ def create_app(
         return JSONResponse(result)
 
     async def suggest_merges_route(request: Request) -> Response:
+        user_id = _p(request).namespace(request.query_params.get("user_id"))
+        await run_in_threadpool(partial(store.merge_obvious_topics, user_id=user_id))
         groups = await run_in_threadpool(partial(
             store.suggest_tag_merges,
-            user_id=_p(request).namespace(request.query_params.get("user_id")),
+            user_id=user_id,
         ))
         return JSONResponse(groups)
 
@@ -1506,14 +1537,20 @@ def create_app(
         if error:
             return error
         ok = store.confirm_merge(proposal.id, owner_prefix=_p(request).prefix)
-        return JSONResponse({"confirmed": ok, "proposal_id": proposal.id})
+        return JSONResponse(
+            {"confirmed": ok, "proposal_id": proposal.id},
+            status_code=200 if ok else 409,
+        )
 
     async def reject_proposal(request: Request) -> Response:
         proposal, error = _proposal_guard(request)
         if error:
             return error
         ok = store.reject_merge(proposal.id, owner_prefix=_p(request).prefix)
-        return JSONResponse({"rejected": ok, "proposal_id": proposal.id})
+        return JSONResponse(
+            {"rejected": ok, "proposal_id": proposal.id},
+            status_code=200 if ok else 409,
+        )
 
     async def resolve_entities_route(request: Request) -> Response:
         body = await request.json() if await request.body() else {}
@@ -1637,8 +1674,8 @@ def create_app(
         await mcp_app(scope, receive, send)
 
     async def _maintenance_scheduler() -> None:
-        """Periodic per-namespace maintenance: entity de-duplication (resolve
-        open merge proposals, auto-confirm clear matches) and, if enabled, tag
+        """Periodic per-namespace maintenance: deterministic topic cleanup,
+        entity de-duplication (resolve stale/obvious proposals), and optional tag
         abstraction. Each task runs on its own interval; last-run times are
         persisted (backend meta) so restarts don't re-run, and per-cycle work is
         capped so a many-account server spreads LLM cost across cycles.
@@ -1650,7 +1687,7 @@ def create_app(
         max_per_cycle = 25
 
         def dedup_key(uid: str | None) -> str:
-            return f"entity_dedup:last_run:{uid or ''}"
+            return f"entity_dedup:v2:last_run:{uid or ''}"
 
         while True:
             try:
@@ -1664,10 +1701,11 @@ def create_app(
                     if store.config.dedup_entities and _tag_run_due(
                         store.backend.get_meta(dedup_key(uid)), dedup_interval, now
                     ):
+                        await run_in_threadpool(store.merge_obvious_topics, user_id=uid)
                         await run_in_threadpool(store.resolve_entities, user_id=uid)
                         store.backend.set_meta(dedup_key(uid), stamp)
                         did = True
-                    if tcfg.enabled and _tag_run_due(
+                    if tcfg.enabled and store.llm.available and _tag_run_due(
                         store.last_tag_run(uid), tag_interval, now
                     ):
                         await run_in_threadpool(store.abstract_tags, user_id=uid)
@@ -1680,8 +1718,10 @@ def create_app(
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette):
         task: asyncio.Task | None = None
-        # Schedule when there is maintenance to do and an LLM to do it with.
-        if (store.config.dedup_entities or store.config.tags.enabled) and store.llm.available:
+        # Deterministic de-duplication works without an LLM; abstraction does not.
+        if store.config.dedup_entities or (
+            store.config.tags.enabled and store.llm.available
+        ):
             task = asyncio.create_task(_maintenance_scheduler())
         try:
             async with mcp.session_manager.run():

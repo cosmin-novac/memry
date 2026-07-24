@@ -34,13 +34,15 @@ inspectable event, and every search hit carries its score signals (BM25, vector,
 recency, importance). When a memory looks wrong, you can trace where it came from, or
 re-run a better extraction pipeline over the original episodes.
 
-**Entities are disambiguated, not name-matched.** Mentions become first-class entities,
-and a shared name is never enough to merge two of them: unclear cases stay separate
-("three Jonases") with a merge proposal you confirm or reject once the evidence is in.
+**Entities are disambiguated by evidence.** Mentions become first-class entities. An exact
+first-and-last name with overlapping context merges automatically; a shared short name or
+full name without supporting context stays separate with a reviewable merge proposal.
+Prior merges are followed, so an older proposal cannot leave a broken merge target.
 
-**Topics organize themselves.** With an LLM, Memry can cluster accumulated topics into
-higher-level parents (a synthetic `health` over `running`/`diet`/`sleep`). It stores this
-as hierarchy edges instead of copying `health` onto every memory, and expands parent
+**Topics organize themselves.** Mechanical variants such as `food`/`foods` merge without
+review. With an LLM, Memry can also propose exact synonyms and cluster accumulated topics
+into higher-level parents (a synthetic `health` over `running`/`diet`/`sleep`). It stores
+parents as hierarchy edges instead of copying `health` onto every memory, and expands parent
 filters at query time. Search and list by topic or by date window, not just relevance.
 
 **It stays simple as one shared service.** SQLite is the sole production store. One Memry
@@ -49,9 +51,11 @@ For larger stores, the optional `memry[ann]` extra adds a rebuildable usearch HN
 candidate index. Multiple server replicas writing one store are not currently supported.
 
 **Multi-user, with real OAuth.** Beyond static config tenants, one server can host
-runtime-managed **accounts**, each confined to its own namespace, created with
-`memry account add`. Set `MEMRY_PUBLIC_URL` and Memry becomes an OAuth 2.1 authorization
-server for those accounts (dynamic client registration, PKCE, refresh, revocation, discovery
+runtime-managed **accounts**, created with `memry account add`. The first account is the
+bootstrap administrator and keeps the existing default memory space; later accounts are
+confined to their own namespaces. Set `MEMRY_PUBLIC_URL` and Memry becomes an OAuth 2.1
+authorization server for those accounts (dynamic client registration, PKCE, refresh,
+revocation, discovery
 at the domain root), so any OAuth-capable MCP client - Claude, Cursor, VS Code - can sign in
 and get a token scoped to that account. No IdP required; Memry verifies against its own
 accounts. Off by default: the single-user path stays keyless. See
@@ -184,8 +188,9 @@ claude.ai as a custom connector, see
 
 ### Multi-user accounts
 
-One server can host isolated accounts, each confined to its own `name::*`
-namespace. Manage them with the CLI:
+One server can host multiple accounts. The first account is the bootstrap administrator:
+it uses the existing default namespace and can manage the whole server. Every account
+created after it is confined to its own `name::*` namespace. Manage them with the CLI:
 
 ```bash
 memry account add alice --password s3cret    # creates it, prints an API key (shown once)

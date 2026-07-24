@@ -89,7 +89,12 @@ def client():
 
 def test_rest_health_and_dashboard(client):
     assert client.get("/health").json()["status"] == "ok"
-    assert "memry" in client.get("/").text
+    dashboard = client.get("/").text
+    assert "memry" in dashboard
+    assert "const planetOrder=hov?" in dashboard
+    assert "ctx.strokeText(labelText" in dashboard
+    assert "html.knowledge-open,body.knowledge-open{overflow:hidden}" in dashboard
+    assert "function setKnowledgeOpen(open)" in dashboard
 
 
 def test_rest_crud_and_search(client):

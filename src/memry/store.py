@@ -21,7 +21,11 @@ import numpy as np
 from .backends import build_backend
 from .backends.base import MemoryBackend
 from .config import Config
-from .intelligence.clustering import propose_synthetic_tags, suggest_canonical_merges
+from .intelligence.clustering import (
+    obvious_canonical_merges,
+    propose_synthetic_tags,
+    suggest_canonical_merges,
+)
 from .intelligence.summaries import cluster_vectors, summarize_cluster
 from .intelligence.context import build_context, estimate_tokens
 from .intelligence.decay import decay_sweep, effective_importance
@@ -237,6 +241,43 @@ class MemoryStore:
             candidate.metadata = {"pending_distillation": True}
         return candidates
 
+    def _canonicalize_obvious_topics(
+        self, candidates: list[CandidateFact], scope: Scope
+    ) -> None:
+        incoming = {
+            str(category).strip().casefold()
+            for candidate in candidates
+            for category in candidate.categories
+            if str(category).strip()
+        }
+        if not incoming:
+            return
+        existing = {
+            topic.normalized
+            for topic in self.backend.list_topics(scope, limit=100_000)
+        }
+        groups = obvious_canonical_merges(
+            [{"category": topic} for topic in existing | incoming]
+        )
+        replacements: dict[str, str] = {}
+        for group in groups:
+            canonical = group["canonical"]
+            variants = set(group["variants"])
+            replacements.update({variant: canonical for variant in variants})
+            stored_variants = (variants - {canonical}) & existing
+            if stored_variants:
+                self.backend.retag_topics(scope, stored_variants, canonical)
+        for candidate in candidates:
+            rewritten: list[str] = []
+            seen: set[str] = set()
+            for raw in candidate.categories:
+                normalized = str(raw).strip().casefold()
+                canonical = replacements.get(normalized, normalized)
+                if canonical and canonical not in seen:
+                    seen.add(canonical)
+                    rewritten.append(canonical)
+            candidate.categories = rewritten
+
     def _apply_candidates(
         self,
         candidates: list[CandidateFact],
@@ -256,6 +297,7 @@ class MemoryStore:
         ADD followed by N UPDATEs on one id). Memories touched by this call
         are therefore accumulated into the exclusion set as we go.
         """
+        self._canonicalize_obvious_topics(candidates, scope)
         excluded: set[str] = set(exclude_ids or ())
         actions: list[AddAction] = []
         for candidate in candidates:
@@ -999,16 +1041,43 @@ class MemoryStore:
         status: str | None = "proposed",
         limit: int = 100,
     ) -> list[MergeProposal]:
-        return self.backend.list_proposals(Scope(user_id=user_id), status=status, limit=limit)
+        proposals = self.backend.list_proposals(
+            Scope(user_id=user_id), status=status, limit=limit
+        )
+        if status != "proposed":
+            return proposals
+        active: list[MergeProposal] = []
+        for proposal in proposals:
+            entity_a = self.backend.resolve_entity_id(proposal.entity_a)
+            entity_b = self.backend.resolve_entity_id(proposal.entity_b)
+            if entity_a is None or entity_b is None:
+                self.backend.set_proposal_status(proposal.id, "rejected")
+                continue
+            if entity_a == entity_b:
+                self.backend.set_proposal_status(proposal.id, "confirmed")
+                continue
+            active.append(
+                proposal.model_copy(update={"entity_a": entity_a, "entity_b": entity_b})
+            )
+        return active
 
     def confirm_merge(
         self, proposal_id: str, *, owner_prefix: str | None = None
     ) -> bool:
-        """User (or system) confirms: entity_b is folded into entity_a."""
+        """Confirm a proposal after resolving both endpoints through merge history."""
         proposal = self.backend.get_proposal(proposal_id)
         if not _owned(proposal, owner_prefix) or proposal.status != "proposed":
             return False
-        if not self.backend.merge_entities(proposal.entity_a, proposal.entity_b):
+        entity_a = self.backend.resolve_entity_id(proposal.entity_a)
+        entity_b = self.backend.resolve_entity_id(proposal.entity_b)
+        if entity_a is None or entity_b is None:
+            return False
+        if owner_prefix is not None and not all(
+            _owned(self.backend.get_entity(entity_id), owner_prefix)
+            for entity_id in (entity_a, entity_b)
+        ):
+            return False
+        if entity_a != entity_b and not self.backend.merge_entities(entity_a, entity_b):
             return False
         self.backend.set_proposal_status(proposal_id, "confirmed")
         return True
@@ -1026,13 +1095,17 @@ class MemoryStore:
     def merge_entities(
         self, keep_id: str, merge_id: str, *, owner_prefix: str | None = None
     ) -> bool:
-        """Direct user-driven merge outside of any proposal."""
+        """Idempotent direct merge outside of a proposal."""
+        keep_root = self.backend.resolve_entity_id(keep_id)
+        merge_root = self.backend.resolve_entity_id(merge_id)
+        if keep_root is None or merge_root is None:
+            return False
         if owner_prefix is not None and not all(
-            _owned(self.backend.get_entity(eid), owner_prefix)
-            for eid in (keep_id, merge_id)
+            _owned(self.backend.get_entity(entity_id), owner_prefix)
+            for entity_id in (keep_root, merge_root)
         ):
             return False
-        return self.backend.merge_entities(keep_id, merge_id)
+        return self.backend.merge_entities(keep_root, merge_root)
 
     def resolve_entities(self, *, user_id: str | None = None) -> dict[str, int]:
         """Re-judge open proposals with accumulated evidence; auto-confirm only
@@ -1160,11 +1233,28 @@ class MemoryStore:
             summary["collections"] += 1
         return summary
 
+    def merge_obvious_topics(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Automatically collapse deterministic formatting/plural duplicates."""
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        categories = self.categories(
+            user_id=user_id, agent_id=agent_id, run_id=run_id
+        )
+        groups = obvious_canonical_merges(categories)
+        changed = 0
+        for group in groups:
+            remove = set(group["variants"]) - {group["canonical"]}
+            result = self.backend.retag_topics(scope, remove, group["canonical"])
+            changed += result or 0
+        return {"groups_merged": len(groups), "memories_changed": changed}
+
     def suggest_tag_merges(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
-        """One-shot canonicalization suggestions (variant/synonym merges) for the
-        Knowledge Topics view. No LLM -> empty list, so callers can call it safely."""
-        if not self.llm.available:
-            return []
+        """Suggest exact synonyms after deterministic duplicate detection."""
         return suggest_canonical_merges(self.llm, self.categories(user_id=user_id))
 
     # -- manual tag curation -----------------------------------------------

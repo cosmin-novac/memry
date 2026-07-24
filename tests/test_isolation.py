@@ -38,6 +38,11 @@ def test_namespaces_are_derived_not_supplied():
     # admin is unconfined, including the "every namespace" None
     assert ADMIN.namespace(None) is None
     assert ADMIN.namespace("u1") == "u1"
+    named_admin = Principal(name="owner", admin=True)
+    assert named_admin.is_admin is True
+    assert named_admin.prefix is None
+    assert named_admin.namespace(None) is None
+    assert named_admin.namespace("u1") == "u1"
 
 
 def test_get_is_gated(seeded):

@@ -33,9 +33,9 @@ def test_suggest_merges_keeps_only_real_variant_groups(seeded):
         {"canonical": "running", "variants": ["running"]},    # size 1 -> dropped
     ]}))
     groups = seeded.suggest_tag_merges(user_id="u")
+    # project/projects was already collapsed deterministically during ingestion.
     assert groups == [
         {"canonical": "finance", "variants": ["finance", "financial"]},
-        {"canonical": "project", "variants": ["project", "projects"]},
     ]
 
 

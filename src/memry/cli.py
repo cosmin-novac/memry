@@ -57,8 +57,8 @@ def _account_command(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            accounts.create(name, password=args.password)
-            out = {"account": name, "created": True}
+            account = accounts.create(name, password=args.password)
+            out = {"account": name, "created": True, "admin": account.is_admin}
             if not args.no_key:
                 # printed once and never recoverable: only the hash is stored
                 out["api_key"] = accounts.issue_key(name, label="initial")
@@ -69,6 +69,7 @@ def _account_command(args: argparse.Namespace) -> int:
             _print([
                 {
                     "name": a.name,
+                    "admin": a.is_admin,
                     "disabled": a.disabled,
                     "has_password": a.has_password,
                     "keys": len(accounts.keys_for(a.name)),

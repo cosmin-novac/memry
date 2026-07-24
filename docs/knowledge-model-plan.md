@@ -197,8 +197,15 @@ Merge resolution follows two steps:
    full entity vocabulary.
 2. **Identity decision:** compare type, synthesized description, and a small set
    of linked memories. Alias overlap raises a candidate; it never auto-merges by
-   itself. Duplicate normalized names remain legal because two people can both
-   be called Cosmin.
+   itself. An exact first-and-last name plus overlapping meaningful context is a
+   deterministic same-person signal unless known types conflict or the model finds
+   a concrete contradiction. Different jobs, hobbies, purchases, or projects are
+   additive evidence, not contradictions. The same full name without contextual
+   overlap remains separate because two people can share a name.
+
+Proposal actions always follow `merged_into` chains to active entity IDs. If another
+merge already satisfied the proposal, confirmation succeeds idempotently and the stale
+proposal is closed instead of leaving a broken action.
 
 This separation should reduce LLM work: deterministic name/alias lookup narrows
 the candidate set, and the bounded descriptions provide compact context for the
@@ -258,6 +265,10 @@ During migration, keep `Memory.categories` and all REST/MCP/Python category
 arguments as a compatibility projection. Backfill topics and links, dual-write,
 compare counts and filter results, then switch reads to the indexed links. Do not
 force callers to adopt new names in the same release as the storage migration.
+
+Mechanical duplicates are normalized automatically once both real labels exist:
+separator variants and conservative singular/plural pairs such as `food`/`foods` merge
+on ingestion and scheduled maintenance. Semantic synonym decisions remain reviewable.
 
 Synthetic topics are hierarchy edges such as `health broader_than running`, not
 umbrella strings copied onto every member memory. Query expansion follows those edges
@@ -346,7 +357,8 @@ Phases 0 through 5 are implemented in the current repository state: active-only 
 evidence, mutation-aware description freshness, normalized indexed topics and migration,
 indexed canonical/observed/merged-name discovery with metadata-alias fallback, lazy
 bounded descriptions, entity-focused context, entity chips, hierarchy edges, legacy
-synthetic-tag migration, and the unified Knowledge dashboard.
+synthetic-tag migration, deterministic entity/topic duplicate cleanup, merge-chain-safe
+proposal actions, and the unified Knowledge dashboard.
 Phase 6 remains explicitly deferred. Focused tests and the reproducible topic-filter
 benchmark are checked in; public end-to-end memory benchmarks remain outstanding.
 ## Validation gates
