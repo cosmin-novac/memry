@@ -77,6 +77,25 @@ h1 .datalinks a{color:var(--dim);text-decoration:none;border-bottom:1px dotted v
 h1 .datalinks a:hover{color:var(--accent);border-bottom-color:var(--accent)}
 .bar{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem}
 input,button,textarea{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem}
+.qwrap{position:relative;flex:1;min-width:12rem;display:flex}
+.qwrap input{flex:1;padding-right:1.9rem}
+#qclear{position:absolute;right:.3rem;top:50%;transform:translateY(-50%);border:none;background:none;color:var(--dim);padding:.2rem .4rem;font-size:.9rem;line-height:1;display:none}
+#qclear:hover{color:var(--accent)}
+.modal{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.55);display:none;align-items:flex-start;justify-content:center;padding:4rem 1rem;overflow:auto}
+.modal.on{display:flex}
+.modal .sheet{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(96vw,44rem);padding:1.2rem 1.3rem}
+.modal h2{margin:.1rem 0 .2rem;font-size:1.05rem}.modal h2 .x{float:right;cursor:pointer;color:var(--dim);border:none;background:none;font-size:1rem}
+.modal .hint{color:var(--dim);font-size:.8rem;margin:0 0 .9rem}
+.tagrow{display:flex;align-items:center;gap:.5rem;padding:.32rem .1rem;border-bottom:1px solid var(--line)}
+.tagrow input[type=checkbox]{width:auto;flex:none}
+.tagrow .name{flex:1;min-width:0}
+.tagrow .name b{font-weight:600}
+.tagrow .cnt{color:var(--dim);font-size:.78rem}
+.tagrow .syn{border:1px solid var(--accent);color:var(--accent);border-radius:999px;padding:0 .45rem;font-size:.68rem}
+.tagrow .act{border:none;background:none;color:var(--dim);cursor:pointer;padding:.15rem .35rem;font-size:.8rem}
+.tagrow .act:hover{color:var(--accent)}.tagrow .act.del:hover{color:var(--warn)}
+.tagbar{display:flex;gap:.5rem;flex-wrap:wrap;margin:.8rem 0;align-items:center}
+.tagbar .sel{color:var(--dim);font-size:.82rem;margin-right:auto}
 input:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
 button{cursor:pointer}button.primary{background:var(--accent);color:#04211c;border-color:transparent;font-weight:600}
 button.toggle[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
@@ -102,13 +121,13 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
+<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openTags();return false" title="Tag manager: see every tag with its count and rename, combine or delete tags across all memories.">tags</a> · <a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Respects the user_id filter box.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, user_id, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <input id="user" placeholder="user_id (all)" style="width:11rem">
-  <input id="q" placeholder="search memories…" style="flex:1;min-width:12rem">
+  <span class="qwrap"><input id="q" placeholder="search memories…" oninput="toggleClear()">
+    <button id="qclear" type="button" title="clear search and show all" onclick="clearSearch()">✕</button></span>
   <button class="primary" onclick="search()">Search</button>
-  <button onclick="activeCat=null;loadAll()">All</button>
   <button class="toggle" id="addbtn" onclick="togglePanel('add')">+ Add</button>
   <button class="toggle" id="mapbtn" onclick="togglePanel('map')">Map</button>
 </div>
@@ -125,6 +144,17 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <div class="gx-ctrl"><button id="fsBtn" title="Fullscreen" aria-label="Fullscreen">⤢</button></div>
 <div class="gx-read" id="mapread"></div><div class="gx-stat" id="mapstat"></div></div>
 <div id="list"></div>
+<div class="modal" id="tagmodal"><div class="sheet">
+<h2><button class="x" onclick="closeTags()" title="close">✕</button>Tags</h2>
+<p class="hint">Every tag with its memory count. Combine near-duplicates, rename to a
+clearer label, or delete a tag from all memories. Changes apply across the current
+user filter. Synthetic tags are flagged.</p>
+<div class="tagbar">
+  <span class="sel" id="tagsel">none selected</span>
+  <button onclick="mergeTags()" title="combine the checked tags into one">Combine selected…</button>
+</div>
+<div id="taglist"></div>
+</div></div>
 </main><script>
 // Auth rides the session cookie set at /login; no key to paste anymore.
 const H = {'Content-Type':'application/json'};
@@ -555,6 +585,60 @@ async function search(){
   const rs=await api('/api/v1/search',{method:'POST',body:JSON.stringify(body)});
   haveMore=false;
   render(rs.map(r=>({...r.memory,score:r.score})));
+}
+function toggleClear(){
+  document.getElementById('qclear').style.display =
+    document.getElementById('q').value ? 'block' : 'none';
+}
+function clearSearch(){
+  const q=document.getElementById('q'); q.value=''; toggleClear();
+  activeCat=null; loadAll();   // x clears the box and resets to all
+}
+
+// -- tag manager -----------------------------------------------------------
+async function openTags(){
+  document.getElementById('tagmodal').classList.add('on');
+  await loadTags();
+}
+function closeTags(){ document.getElementById('tagmodal').classList.remove('on'); }
+function tagSel(){ return [...document.querySelectorAll('.tagrow input:checked')].map(c=>c.value); }
+function updateSel(){
+  const n=tagSel().length;
+  document.getElementById('tagsel').textContent = n?`${n} selected`:'none selected';
+}
+async function loadTags(){
+  const u=uid()?'?user_id='+encodeURIComponent(uid()):'';
+  const cats=await api('/api/v1/categories'+u);
+  const el=document.getElementById('taglist');
+  if(!cats.length){el.innerHTML='<div class="empty">No tags yet.</div>';return}
+  el.innerHTML=cats.map(c=>`<div class="tagrow">
+    <input type="checkbox" value="${esc(c.category)}" onchange="updateSel()">
+    <span class="name"><b>${esc(c.category)}</b> <span class="cnt">${c.count}</span>
+      ${c.synthetic?'<span class="syn">synthetic</span>':''}</span>
+    <button class="act" title="rename this tag everywhere" onclick="renameTag('${esc(c.category)}')">rename</button>
+    <button class="act del" title="delete this tag from all memories" onclick="deleteTag('${esc(c.category)}')">delete</button>
+  </div>`).join('');
+  updateSel();
+}
+async function tagOp(body){
+  const b={...body}; if(uid())b.user_id=uid();
+  const r=await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(b)});
+  await loadTags();
+  activeCat=null; loadAll();   // memories changed underneath us
+  return r;
+}
+async function renameTag(tag){
+  const to=prompt('Rename tag "'+tag+'" to:', tag); if(!to||to.trim()===tag)return;
+  await tagOp({op:'rename', tag, to:to.trim()});
+}
+async function deleteTag(tag){
+  if(!confirm('Delete tag "'+tag+'" from all memories? The memories stay; only the tag is removed.'))return;
+  await tagOp({op:'delete', tag});
+}
+async function mergeTags(){
+  const sel=tagSel(); if(sel.length<2)return alert('Check at least two tags to combine.');
+  const to=prompt('Combine '+sel.length+' tags into one named:', sel[0]); if(!to||!to.trim())return;
+  await tagOp({op:'merge', tags:sel, to:to.trim()});
 }
 async function add(infer){
   const t=document.getElementById('newmem').value.trim(); if(!t)return;
@@ -1051,6 +1135,32 @@ def create_app(
         ))
         return JSONResponse(result)
 
+    async def edit_tags_route(request: Request) -> Response:
+        """Manual tag curation: rename, merge, or delete a tag across memories.
+
+        {op: "rename", tag, to} | {op: "merge", tags: [...], to} |
+        {op: "delete", tag}
+        """
+        body = await request.json()
+        op = body.get("op")
+        user_id = _p(request).namespace(body.get("user_id"))
+        try:
+            if op == "rename":
+                changed = await run_in_threadpool(partial(
+                    store.rename_tag, body["tag"], body["to"], user_id=user_id))
+            elif op == "merge":
+                changed = await run_in_threadpool(partial(
+                    store.merge_tags, body["tags"], body["to"], user_id=user_id))
+            elif op == "delete":
+                changed = await run_in_threadpool(partial(
+                    store.delete_tag, body["tag"], user_id=user_id))
+            else:
+                return JSONResponse({"error": "op must be rename|merge|delete"},
+                                    status_code=400)
+        except (KeyError, TypeError):
+            return JSONResponse({"error": "missing fields for op"}, status_code=400)
+        return JSONResponse({"op": op, "memories_changed": changed})
+
     async def import_memories_route(request: Request) -> Response:
         """Bulk verbatim import: a JSON array of rows, or {memories: [...],
         user_id?}. One request instead of one POST per memory."""
@@ -1381,6 +1491,7 @@ def create_app(
         Route("/api/v1/categories", guarded(list_categories_route), methods=["GET"]),
         Route("/api/v1/tags/synthetic", guarded(synthetic_tags_route), methods=["GET"]),
         Route("/api/v1/tags/abstract", guarded(abstract_tags_route), methods=["POST"]),
+        Route("/api/v1/tags/edit", guarded(edit_tags_route), methods=["POST"]),
         Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),
         Route("/api/v1/search", guarded(search), methods=["POST"]),
         Route("/api/v1/context", guarded(context), methods=["POST"]),

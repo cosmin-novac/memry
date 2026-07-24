@@ -776,6 +776,48 @@ class MemoryStore:
             tagged += 1
         return tagged
 
+    # -- manual tag curation -----------------------------------------------
+    def rename_tag(self, tag: str, to: str, *, user_id: str | None = None) -> int:
+        """Rename one tag to another across every memory. Returns the count."""
+        return self._retag(user_id, {tag.strip().lower()}, to.strip().lower())
+
+    def merge_tags(self, tags: list[str], to: str, *, user_id: str | None = None) -> int:
+        """Combine several tags into one across every memory."""
+        remove = {t.strip().lower() for t in tags if t.strip()}
+        return self._retag(user_id, remove, to.strip().lower())
+
+    def delete_tag(self, tag: str, *, user_id: str | None = None) -> int:
+        """Remove a tag from every memory (the memories stay)."""
+        return self._retag(user_id, {tag.strip().lower()}, None)
+
+    def _retag(
+        self, user_id: str | None, remove: set[str], add: str | None
+    ) -> int:
+        """Strip ``remove`` tags from matching memories and optionally add
+        ``add``, preserving the other tags and their original casing.
+
+        Once a tag is curated by hand its synthetic marker is dropped: the tag
+        is now the user's, not the system's guess.
+        """
+        remove = {r for r in remove if r}
+        if not remove:
+            return 0
+        changed = 0
+        for memory in self.get_all(
+            user_id=user_id, categories=list(remove), limit=1_000_000
+        ):
+            cats = list(memory.categories or [])
+            kept = [c for c in cats if str(c).strip().lower() not in remove]
+            if add and add not in {str(c).strip().lower() for c in kept}:
+                kept.append(add)
+            if kept != cats:
+                self.backend.update_memory(memory.id, categories=kept)
+                changed += 1
+        scope = Scope(user_id=user_id)
+        for tag in remove:
+            self.backend.delete_synthetic_tag(scope, tag)
+        return changed
+
     def _stamp_tag_run(self, user_id: str | None) -> None:
         self.backend.set_meta(_tag_run_key(user_id), utcnow())
 

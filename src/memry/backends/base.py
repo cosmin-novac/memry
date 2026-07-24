@@ -171,6 +171,9 @@ class MemoryBackend(ABC):
     def list_synthetic_tags(self, scope: Scope) -> list[SyntheticTag]:
         return []
 
+    def delete_synthetic_tag(self, scope: Scope, tag: str) -> None:
+        return None
+
     def distinct_user_ids(self) -> list[str | None]:
         """Namespaces present in the store, for the maintenance scheduler."""
         return []

@@ -99,9 +99,14 @@ class AnnConfig(BaseModel):
 class TagAbstractionConfig(BaseModel):
     """Periodic tag abstraction: an LLM looks at all of a namespace's tags and
     proposes a few higher-level tags that cluster existing ones, then applies
-    each to every memory under it. Needs an LLM; a no-op without one."""
+    each to every memory under it. Needs an LLM; a no-op without one.
 
-    enabled: bool = True
+    Off by default: abstracting tag *strings* into broader tags tends to produce
+    generic labels that hurt retrieval. The better path (memory-based grouping +
+    canonicalization, surfaced as proposals rather than auto-applied) is being
+    built; manual curation lives in the dashboard Tag manager meanwhile."""
+
+    enabled: bool = False
     interval_days: float = 7.0
     max_new_tags: int = 5  # propose at most this many higher-level tags per run
     min_cluster_size: int = 2  # a new tag must group at least this many existing tags

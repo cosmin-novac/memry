@@ -173,13 +173,17 @@ def create_server(
         run_id: str = "",
         limit: int = 8,
         categories: str = "",
+        since: str = "",
+        until: str = "",
     ) -> str:
         """Search long-term memory for what you already know. Call this at the
         start of a session AND whenever the conversation turns to a new topic,
         project, person, or decision - recall before you answer, so you don't
         contradict or re-ask what the user already told you. Returns the most
-        relevant memories, best first. Optionally restrict to categories
-        (comma-separated, e.g. "diet,health").
+        relevant memories, best first. You can also search by tag and date:
+        restrict to categories (comma-separated, e.g. "diet,health") and/or to a
+        date window with since/until (YYYY-MM-DD, e.g. since="2026-01-01"). Pass
+        an empty query with just categories or a date to browse rather than rank.
         """
         category_list = [c.strip() for c in categories.split(",") if c.strip()] or None
         results = await _threaded(
@@ -190,6 +194,8 @@ def create_server(
             run_id=run_id or None,
             limit=limit,
             categories=category_list,
+            since=since or None,
+            until=until or None,
         )
         return json.dumps(
             [_memory_row(r.memory, r.score) for r in results], ensure_ascii=False
@@ -213,17 +219,36 @@ def create_server(
         return ctx.text or "(no relevant memories yet)"
 
     @mcp.tool()
-    async def list_memories(user_id: str = "", limit: int = 50) -> str:
-        """List the most recently updated memories for a user."""
-        memories = await _threaded(store.get_all, user_id=_uid(user_id), limit=limit)
+    async def list_memories(
+        user_id: str = "",
+        limit: int = 50,
+        categories: str = "",
+        since: str = "",
+        until: str = "",
+    ) -> str:
+        """List memories, most recently updated first. Optionally filter by tag
+        (categories, comma-separated) and/or a date window (since/until as
+        YYYY-MM-DD) to browse what was recorded about a topic or in a period."""
+        category_list = [c.strip() for c in categories.split(",") if c.strip()] or None
+        memories = await _threaded(
+            store.get_all, user_id=_uid(user_id), limit=limit,
+            categories=category_list, since=since or None, until=until or None,
+        )
         return json.dumps([_memory_row(m) for m in memories], ensure_ascii=False)
 
     @mcp.tool()
     async def list_categories(user_id: str = "") -> str:
         """List all memory categories (tags) with their memory counts, sorted
         by count descending. Use this to see how knowledge is organized before
-        drilling into a category with search_memories."""
+        drilling into a category with search_memories. Some tags are synthetic:
+        higher-level themes Memry adds to cluster related tags."""
         cats = await _threaded(store.categories, user_id=_uid(user_id))
+        synthetic = {
+            t.tag for t in await _threaded(store.synthetic_tags, user_id=_uid(user_id))
+        }
+        for c in cats:
+            if c["category"] in synthetic:
+                c["synthetic"] = True
         return json.dumps(cats, ensure_ascii=False)
 
     @mcp.tool()

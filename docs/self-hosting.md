@@ -177,24 +177,21 @@ memry abstract-tags           # LLM clusters tags into higher-level ones now
 A weekly `sweep` in cron/Task Scheduler keeps long-running stores lean; forgotten memories
 are invalidated (auditable, recoverable), never destroyed.
 
-## Tag abstraction
+## Managing tags
 
-With an LLM configured, Memry periodically (weekly by default) looks at all the tags a
-namespace has accumulated and proposes a few **higher-level tags** that cluster related
-ones - a synthetic `health` over `running`/`diet`/`sleep`, say - then applies each to every
-matching memory, giving a coarse index over an otherwise long-tail set of labels. It
-remembers which tags it invented (`GET /api/v1/tags/synthetic`; they're flagged in
-`/api/v1/categories`), so they're distinguishable and never re-proposed.
+The dashboard has a **Tag manager** (the "tags" link next to sign out): every tag with its
+memory count, where you can **rename** a tag, **combine** several near-duplicates into one, or
+**delete** a tag from all memories. Changes apply across your current user filter and the
+memories themselves are never removed, only their labels. The same operations are available
+over REST at `POST /api/v1/tags/edit` (`{op: "rename"|"merge"|"delete", ...}`).
 
-The server runs this on a schedule; the cadence and off-switch live in config:
-
-```bash
-MEMRY_TAG_ABSTRACTION=off              # disable entirely (default: on with an LLM)
-MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7  # how often the scheduler runs per namespace
-```
-
-Run it on demand any time with `memry abstract-tags` (or `POST /api/v1/tags/abstract`).
-Without an LLM it is a no-op, so zero-key installs are unaffected.
+There is also an optional, **off-by-default** weekly LLM pass that clusters a namespace's tags
+into higher-level ones and applies them (`MEMRY_TAG_ABSTRACTION=on`,
+`MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7`, or `memry abstract-tags` on demand). It is off by
+default because abstracting tag strings tends to produce generic labels that don't help
+retrieval; prefer the Tag manager, and a memory-grounded proposal engine is on the roadmap.
+Tags it created are flagged synthetic in `/api/v1/categories` and listed at
+`GET /api/v1/tags/synthetic`.
 
 ## Searching by tag and date
 

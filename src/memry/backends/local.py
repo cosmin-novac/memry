@@ -637,6 +637,15 @@ class LocalBackend(MemoryBackend):
             for r in rows
         ]
 
+    def delete_synthetic_tag(self, scope: Scope, tag: str) -> None:
+        clause, params = _scope_clause(Scope(user_id=scope.user_id))
+        with self._lock:
+            self._db.execute(
+                f"DELETE FROM synthetic_tags WHERE {clause} AND lower(tag) = ?",
+                (*params, tag.strip().lower()),
+            )
+            self._db.commit()
+
     def distinct_user_ids(self) -> list[str | None]:
         with self._lock:
             rows = self._db.execute(
