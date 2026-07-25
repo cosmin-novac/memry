@@ -1,10 +1,8 @@
 """Memry MCP server.
 
 Exposes the memory layer to any MCP client (Claude Code, Claude Desktop,
-Cursor, Windsurf, Codex, ...) over stdio or streamable HTTP.
-
-    memry mcp                      # stdio (for local agent config)
-    memry mcp --transport http     # streamable HTTP on :8787/mcp
+Cursor, Windsurf, Codex, ...). ``memry mcp`` runs locally over stdio;
+``memry serve`` mounts the same tools remotely at ``/mcp``.
 """
 
 from __future__ import annotations
@@ -84,7 +82,7 @@ def create_server(
     # The SDK's DNS-rebinding protection only accepts localhost-style Host
     # headers, which 421s every request arriving through a reverse proxy on a
     # public domain. That protection exists for unauthenticated localhost
-    # servers; Memry's HTTP transport carries its own bearer auth.
+    # servers; the mounted `memry serve` path applies Memry's bearer auth.
     mcp = FastMCP(
         "memry",
         instructions=INSTRUCTIONS,
@@ -173,6 +171,7 @@ def create_server(
         run_id: str = "",
         limit: int = 8,
         categories: str = "",
+        entity_id: str = "",
         since: str = "",
         until: str = "",
     ) -> str:
@@ -180,8 +179,8 @@ def create_server(
         start of a session AND whenever the conversation turns to a new topic,
         project, person, or decision - recall before you answer, so you don't
         contradict or re-ask what the user already told you. Returns the most
-        relevant memories, best first. You can also search by tag and date:
-        restrict to categories (comma-separated, e.g. "diet,health") and/or to a
+        relevant memories, best first. You can also filter by topic, entity, and date:
+        restrict to categories (comma-separated), an exact entity ID, and/or a
         date window with since/until (YYYY-MM-DD, e.g. since="2026-01-01"). Pass
         an empty query with just categories or a date to browse rather than rank.
         """
@@ -194,6 +193,7 @@ def create_server(
             run_id=run_id or None,
             limit=limit,
             categories=category_list,
+            entity_id=entity_id or None,
             since=since or None,
             until=until or None,
         )
@@ -223,16 +223,18 @@ def create_server(
         user_id: str = "",
         limit: int = 50,
         categories: str = "",
+        entity_id: str = "",
         since: str = "",
         until: str = "",
     ) -> str:
         """List memories, most recently updated first. Optionally filter by tag
-        (categories, comma-separated) and/or a date window (since/until as
-        YYYY-MM-DD) to browse what was recorded about a topic or in a period."""
+        (categories, comma-separated), exact entity ID, and/or a date window
+        (since/until as YYYY-MM-DD) to browse what was recorded about a topic or in a period."""
         category_list = [c.strip() for c in categories.split(",") if c.strip()] or None
         memories = await _threaded(
             store.get_all, user_id=_uid(user_id), limit=limit,
-            categories=category_list, since=since or None, until=until or None,
+            categories=category_list, entity_id=entity_id or None,
+            since=since or None, until=until or None,
         )
         return json.dumps([_memory_row(m) for m in memories], ensure_ascii=False)
 
@@ -326,18 +328,14 @@ def create_server(
     return mcp
 
 
-def main(
-    transport: str = "stdio",
-    host: str = "127.0.0.1",
-    port: int = 8787,
-    config: Config | None = None,
-) -> None:
+def main(config: Config | None = None) -> None:
+    """Run the local stdio MCP server.
+
+    Remote MCP is served only by ``memry serve``, which applies the configured
+    network authentication and mounts these same tools at ``/mcp``.
+    """
     store = MemoryStore(config)
-    server = create_server(store, host=host, port=port)
-    if transport == "http":
-        server.run(transport="streamable-http")
-    else:
-        server.run()
+    create_server(store).run()
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
 # Self-hosting Memry
 
 Memry is one Python process with SQLite and no external database, queue, or vector service.
-The default memory store is one `memry.db` file. Runtime accounts/OAuth currently add a
-small adjacent `auth.db`; see the architecture and duplication audit for that explicit limit.
+Knowledge lives in `memry.db`; runtime accounts and OAuth live in the adjacent `auth.db`.
+Keeping them separate prevents knowledge restore/reset operations from changing login data.
+A complete server backup must include both files.
 
 ## Option 1 - bare (recommended for personal use)
 
@@ -14,7 +15,8 @@ memry serve --host 0.0.0.0 --port 8787
 - Dashboard: `http://<host>:8787/`
 - REST API: `http://<host>:8787/api/v1/...`
 - MCP (streamable HTTP): `http://<host>:8787/mcp`
-- Data: `~/.memry/memry.db` (override with `MEMRY_DB_PATH`)
+- Knowledge data: `~/.memry/memry.db` (override with `MEMRY_DB_PATH`)
+- Login data: `~/.memry/auth.db` when accounts/OAuth are used (override with `MEMRY_AUTH_DB_PATH`)
 
 ## Option 2 - Docker
 
@@ -48,9 +50,10 @@ walkthrough (cloud-init, DNS, backups, uninstall): [deploy-vps.md](deploy-vps.md
    recovery clients keep using the operator bearer key.
 2. **Bind privately** - without a key, keep `--host 127.0.0.1` or terminate TLS + auth in a
    reverse proxy (Caddy/Traefik/nginx).
-3. **Backups** - snapshot `memry.db` plus its `-wal`/`-shm` files, or use
-   `memry export` for memory JSONL. If runtime accounts are enabled, back up the adjacent
-   `auth.db` in the same operation.
+3. **Backups** - a complete server backup must capture `memry.db` and `auth.db`
+   together, including any live SQLite `-wal`/`-shm` files. A directory/volume snapshot
+   does that. `memry export` is a lossless knowledge backup, but it does not include
+   accounts, sessions, OAuth clients, or tokens from `auth.db`.
 
 ## Multi-tenant mode
 
@@ -103,7 +106,9 @@ memry account disable alice                 # keys and tokens stop working immed
 ```
 
 Accounts live in `auth.db` next to your memory database (override with `MEMRY_AUTH_DB_PATH`).
-An account's API key works on both `/api` and `/mcp`, including the `/mcp/<key>` URL form.
+Back it up together with `memry.db`; a knowledge export alone cannot restore accounts or
+OAuth state. An account's API key works on both `/api` and `/mcp`, including the
+`/mcp/<key>` URL form.
 
 **OAuth.** Set a public URL and Memry becomes an OAuth 2.1 authorization server for its own
 accounts:
@@ -174,9 +179,12 @@ After switching embedding providers, run `memry reindex` once to re-embed the st
 ```bash
 memry sweep --threshold 0.1   # soft-forget stale, low-importance memories
 memry stats                   # counts, providers, db path
-memry export > backup.jsonl   # JSONL backup (memories incl. invalidated)
+memry export > backup.json    # knowledge only: IDs, provenance, entities, relations, history
 memry abstract-tags           # LLM clusters tags into higher-level ones now
 ```
+
+When accounts or OAuth are enabled, also back up `auth.db` with `memry.db`. The JSON export
+does not contain login data.
 
 A weekly `sweep` in cron/Task Scheduler keeps long-running stores lean; forgotten memories
 are invalidated (auditable, recoverable), never destroyed.

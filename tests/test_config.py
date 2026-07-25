@@ -7,7 +7,7 @@ import pytest
 from memry.config import Config
 
 KEYS = [
-    "MEMRY_CONFIG", "MEMRY_DB_PATH", "MEMRY_BACKEND", "MEMRY_DEFAULT_USER",
+    "MEMRY_CONFIG", "MEMRY_DB_PATH", "MEMRY_DEFAULT_USER",
     "MEMRY_API_KEY", "MEMRY_LLM_PROVIDER", "MEMRY_LLM_MODEL", "MEMRY_LLM_API_KEY",
     "MEMRY_LLM_BASE_URL", "MEMRY_LLM_EFFORT", "MEMRY_EMBEDDING_PROVIDER",
     "MEMRY_EMBEDDING_MODEL", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "VOYAGE_API_KEY",
@@ -24,7 +24,6 @@ def clean_env(monkeypatch, tmp_path):
 
 def test_defaults_zero_key(tmp_path):
     cfg = Config.load()
-    assert cfg.backend == "local"
     assert cfg.llm.provider == "none"
     assert cfg.embedding.provider == "hash"
     assert cfg.default_user_id == "default"
@@ -44,7 +43,7 @@ def test_env_overrides(monkeypatch, tmp_path):
 
 def test_file_config_env_wins(monkeypatch, tmp_path):
     file = tmp_path / "config.json"
-    file.write_text(json.dumps({"default_user_id": "from-file", "backend": "local",
+    file.write_text(json.dumps({"default_user_id": "from-file",
                                 "llm": {"provider": "openai"}}), encoding="utf-8")
     monkeypatch.setenv("MEMRY_CONFIG", str(file))
     monkeypatch.setenv("MEMRY_DEFAULT_USER", "from-env")

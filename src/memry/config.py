@@ -133,7 +133,6 @@ class TenantConfig(BaseModel):
 
 class Config(BaseModel):
     db_path: str = str(DEFAULT_DIR / "memry.db")
-    backend: Literal["local", "mem0"] = "local"
     default_user_id: str = "default"
     api_key: str | None = None  # admin bearer token for the REST/MCP server
     tenants: list[TenantConfig] = Field(default_factory=list)
@@ -212,7 +211,6 @@ def _from_env() -> dict[str, Any]:
             data.setdefault(section, {})[key] = value
 
     put(None, "db_path", e("MEMRY_DB_PATH"))
-    put(None, "backend", e("MEMRY_BACKEND"))
     put(None, "default_user_id", e("MEMRY_DEFAULT_USER"))
     put(None, "api_key", e("MEMRY_API_KEY"))
     put(None, "auth_db_path", e("MEMRY_AUTH_DB_PATH"))

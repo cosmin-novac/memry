@@ -146,6 +146,27 @@ def test_rest_categories(client):
     assert cats == [{"category": "work", "count": 2}, {"category": "diet", "count": 1}]
 
 
+def test_rest_lossless_export_and_idempotent_restore(client):
+    client.post("/api/v1/memories", json={
+        "content": "backup this", "user_id": "backup-user", "infer": False,
+        "categories": ["backup"],
+    })
+    response = client.get("/api/v1/export", params={"user_id": "backup-user"})
+    assert response.status_code == 200
+    backup = response.json()
+    assert backup["format"] == "memry-backup"
+    assert backup["tables"]["memories"][0]["content"] == "backup this"
+    assert backup["tables"]["episodes"]
+    assert backup["tables"]["memory_events"]
+
+    restored = client.post("/api/v1/import", json=backup)
+    assert restored.status_code == 200
+    assert restored.json()["inserted"] == 0
+
+    backup["tables"]["memories"][0]["content"] = "conflicting content"
+    conflict = client.post("/api/v1/import", json=backup)
+    assert conflict.status_code == 409
+
 def test_rest_bulk_import(client):
     rows = [
         {"content": "row one", "categories": ["a"]},

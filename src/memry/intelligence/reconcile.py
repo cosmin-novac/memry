@@ -17,7 +17,7 @@ Without an LLM, reconciliation degrades to exact-duplicate detection.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 from ..backends.base import MemoryBackend
 from ..config import RetrievalConfig
@@ -86,6 +86,7 @@ def reconcile_candidate(
     llm: LLM,
     episode_ids: list[str],
     retrieval_cfg: RetrievalConfig | None = None,
+    prepare_update: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> AddAction:
     """Apply one candidate fact against the store and return what happened."""
 
@@ -136,6 +137,7 @@ def reconcile_candidate(
         new_content = str(decision.get("content") or candidate.content)
         embedding = _embed_or_none(embedder, new_content)
         merged_sources = list(dict.fromkeys(target.source_episode_ids + episode_ids))
+        prepared = prepare_update(target.id, new_content) if prepare_update else {}
         backend.update_memory(
             target.id,
             content=new_content,
@@ -143,6 +145,7 @@ def reconcile_candidate(
             embedding_model=embedder.model_id if embedding else None,
             importance=max(target.importance, candidate.importance),
             source_episode_ids=merged_sources,
+            **prepared,
         )
         backend.add_event(
             MemoryEvent(

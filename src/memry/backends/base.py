@@ -1,9 +1,9 @@
 """Storage backend interface.
 
-The application layer (``MemoryStore``) and the intelligence layer only ever
-talk to this interface, so backends are replaceable: the default is the local
-SQLite engine; a deliberately reduced Mem0 adapter exists only for interop and
-benchmarking. SQLite is the sole production persistence implementation.
+MemoryStore and the intelligence layer use this interface to isolate
+persistence behavior. Production always constructs the local SQLite engine.
+Explicit backend injection exists only for tests and comparison/import
+utilities; it is not a runtime configuration choice.
 """
 
 from __future__ import annotations
@@ -60,6 +60,7 @@ class MemoryBackend(ABC):
         memory_type: str | None = None,
         categories: list[str] | None = None,
         entities: list[str] | None = None,
+        mentions: list[EntityMention] | None = None,
         metadata: dict[str, Any] | None = None,
         source_episode_ids: list[str] | None = None,
         touch: bool = True,
@@ -94,6 +95,7 @@ class MemoryBackend(ABC):
         limit: int = 100,
         offset: int = 0,
         categories: list[str] | None = None,
+        entity_id: str | None = None,
     ) -> list[Memory]: ...
 
     # -- search primitives ---------------------------------------------
@@ -106,6 +108,7 @@ class MemoryBackend(ABC):
         limit: int = 20,
         include_invalid: bool = False,
         categories: list[str] | None = None,
+        entity_id: str | None = None,
     ) -> list[tuple[Memory, float]]:
         """Cosine similarity over stored vectors (same embedding model only)."""
 
@@ -117,6 +120,7 @@ class MemoryBackend(ABC):
         limit: int = 20,
         include_invalid: bool = False,
         categories: list[str] | None = None,
+        entity_id: str | None = None,
     ) -> list[tuple[Memory, float]]:
         """Full-text (BM25) search. Higher score = better."""
 
@@ -320,6 +324,15 @@ class MemoryBackend(ABC):
 
     @abstractmethod
     def history(self, memory_id: str) -> list[MemoryEvent]: ...
+
+    # -- lossless backup / restore ---------------------------------------
+    def export_backup(self, scope: Scope) -> dict[str, Any]:
+        raise NotImplementedError("this backend cannot create lossless Memry backups")
+
+    def import_backup(
+        self, backup: dict[str, Any], *, owner_prefix: str | None = None
+    ) -> dict[str, Any]:
+        raise NotImplementedError("this backend cannot restore lossless Memry backups")
 
     # -- maintenance ------------------------------------------------------
     @abstractmethod

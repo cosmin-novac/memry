@@ -8,6 +8,7 @@ history. WAL mode + a process-wide lock make it safe for the MCP/REST servers.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import sqlite3
@@ -225,6 +226,27 @@ _MEMORY_COLS = (
     "source_episode_ids, embedding_model"
 )
 
+_BACKUP_TABLE_KEYS: dict[str, tuple[str, ...]] = {
+    "episodes": ("id",),
+    "memories": ("id",),
+    "memory_events": ("id",),
+    "topics": ("id",),
+    "memory_topics": ("memory_id", "topic_id"),
+    "topic_relations": ("id",),
+    "entities": ("id",),
+    "entity_mentions": ("id",),
+    "entity_proposals": ("id",),
+    "synthetic_tags": ("id",),
+    "relations": ("id",),
+    "collections": ("id",),
+}
+_BACKUP_ORDER = tuple(_BACKUP_TABLE_KEYS)
+_BACKUP_USER_TABLES = {
+    "episodes", "memories", "topics", "topic_relations", "entities",
+    "entity_proposals", "synthetic_tags", "relations", "collections",
+}
+_BACKUP_BYTES = "__memry_base64__"
+
 _WORD_RE = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -255,6 +277,16 @@ def _category_clause(categories: list[str] | None, memory_id: str) -> tuple[str,
         "SELECT 1 FROM memory_topics mt JOIN descendants d ON d.topic_id = mt.topic_id "
         f"WHERE mt.memory_id = {memory_id})",
         normalized,
+    )
+
+
+def _entity_clause(entity_id: str | None, memory_id: str) -> tuple[str, list[Any]]:
+    if not entity_id:
+        return "1=1", []
+    return (
+        "EXISTS (SELECT 1 FROM entity_mentions em "
+        f"WHERE em.memory_id = {memory_id} AND em.entity_id = ?)",
+        [entity_id],
     )
 
 
@@ -639,11 +671,15 @@ class LocalBackend(MemoryBackend):
         memory_type: str | None = None,
         categories: list[str] | None = None,
         entities: list[str] | None = None,
+        mentions: list[EntityMention] | None = None,
         metadata: dict[str, Any] | None = None,
         source_episode_ids: list[str] | None = None,
         touch: bool = True,
     ) -> Memory | None:
         from ..models import utcnow
+
+        if mentions is not None and any(m.memory_id != memory_id for m in mentions):
+            raise ValueError("replacement mention belongs to another memory")
 
         # touch=False is for housekeeping (tagging, backfill markers, re-embedding):
         # it changes stored fields without counting as a content edit, so the
@@ -696,9 +732,35 @@ class LocalBackend(MemoryBackend):
                         user_id=row["user_id"], agent_id=row["agent_id"], run_id=row["run_id"]
                     ),
                 )
+            if cur.rowcount and mentions is not None:
+                old_entity_ids = {
+                    row["entity_id"] for row in self._db.execute(
+                        "SELECT DISTINCT entity_id FROM entity_mentions WHERE memory_id = ?",
+                        (memory_id,),
+                    ).fetchall()
+                }
+                self._db.execute(
+                    "DELETE FROM entity_mentions WHERE memory_id = ?", (memory_id,)
+                )
+                self._db.executemany(
+                    "INSERT INTO entity_mentions "
+                    "(id, entity_id, memory_id, surface, created_at) VALUES (?,?,?,?,?)",
+                    [
+                        (m.id, m.entity_id, m.memory_id, m.surface, m.created_at)
+                        for m in mentions
+                    ],
+                )
+                affected = old_entity_ids | {m.entity_id for m in mentions}
+                if affected:
+                    placeholders = ",".join("?" * len(affected))
+                    self._db.execute(
+                        "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
+                        f"WHERE id IN ({placeholders})",
+                        (utcnow(), *sorted(affected)),
+                    )
             if cur.rowcount and embedding is not None and embedding_model is not None:
                 self._ann_add(memory_id, embedding, embedding_model)
-            if cur.rowcount and touch:
+            if cur.rowcount and touch and mentions is None:
                 self._db.execute(
                     "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
                     "WHERE id IN (SELECT entity_id FROM entity_mentions WHERE memory_id = ?)",
@@ -786,16 +848,18 @@ class LocalBackend(MemoryBackend):
         limit: int = 100,
         offset: int = 0,
         categories: list[str] | None = None,
+        entity_id: str | None = None,
     ) -> list[Memory]:
         clause, params = _scope_clause(scope)
         cat_clause, cat_params = _category_clause(categories, "memories.id")
+        entity_clause, entity_params = _entity_clause(entity_id, "memories.id")
         if not include_invalid:
             clause += " AND invalid_at IS NULL"
         with self._lock:
             rows = self._db.execute(
                 f"SELECT {_MEMORY_COLS} FROM memories WHERE {clause} AND {cat_clause} "
-                "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                (*params, *cat_params, limit, offset),
+                f"AND {entity_clause} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (*params, *cat_params, *entity_params, limit, offset),
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
 
@@ -824,9 +888,11 @@ class LocalBackend(MemoryBackend):
         limit: int = 20,
         include_invalid: bool = False,
         categories: list[str] | None = None,
+        entity_id: str | None = None,
     ) -> list[tuple[Memory, float]]:
         clause, params = _scope_clause(scope)
         cat_clause, cat_params = _category_clause(categories, "memories.id")
+        entity_clause, entity_params = _entity_clause(entity_id, "memories.id")
         if not include_invalid:
             clause += " AND invalid_at IS NULL"
 
@@ -842,9 +908,9 @@ class LocalBackend(MemoryBackend):
                     rows = self._db.execute(
                         f"SELECT {_MEMORY_COLS}, embedding FROM memories "
                         f"WHERE id IN (SELECT memory_id FROM ann_keys WHERE key IN ({key_ph})) "
-                        f"AND {clause} AND {cat_clause} "
+                        f"AND {clause} AND {cat_clause} AND {entity_clause} "
                         "AND embedding IS NOT NULL AND embedding_model = ?",
-                        (*keys, *params, *cat_params, embedding_model),
+                        (*keys, *params, *cat_params, *entity_params, embedding_model),
                     ).fetchall()
                 if len(rows) >= limit:
                     return self._score_rows(rows, embedding, limit)
@@ -853,9 +919,9 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             rows = self._db.execute(
                 f"SELECT {_MEMORY_COLS}, embedding FROM memories "
-                f"WHERE {clause} AND {cat_clause} "
+                f"WHERE {clause} AND {cat_clause} AND {entity_clause} "
                 "AND embedding IS NOT NULL AND embedding_model = ?",
-                (*params, *cat_params, embedding_model),
+                (*params, *cat_params, *entity_params, embedding_model),
             ).fetchall()
         return self._score_rows(rows, embedding, limit)
 
@@ -866,6 +932,7 @@ class LocalBackend(MemoryBackend):
         limit: int = 20,
         include_invalid: bool = False,
         categories: list[str] | None = None,
+        entity_id: str | None = None,
     ) -> list[tuple[Memory, float]]:
         tokens = _WORD_RE.findall(query)
         if not tokens:
@@ -873,6 +940,7 @@ class LocalBackend(MemoryBackend):
         match = " OR ".join(f'"{t}"' for t in tokens[:32])
         clause, params = _scope_clause(scope, prefix="m.")
         cat_clause, cat_params = _category_clause(categories, "m.id")
+        entity_clause, entity_params = _entity_clause(entity_id, "m.id")
         if not include_invalid:
             clause += " AND m.invalid_at IS NULL"
         sql = (
@@ -880,10 +948,12 @@ class LocalBackend(MemoryBackend):
             "bm25(memories_fts) AS rank_score "
             "FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid "
             f"WHERE memories_fts MATCH ? AND {clause} AND {cat_clause} "
-            "ORDER BY rank_score LIMIT ?"
+            f"AND {entity_clause} ORDER BY rank_score LIMIT ?"
         )
         with self._lock:
-            rows = self._db.execute(sql, (match, *params, *cat_params, limit)).fetchall()
+            rows = self._db.execute(
+                sql, (match, *params, *cat_params, *entity_params, limit)
+            ).fetchall()
         # bm25() returns lower-is-better (negative); flip to higher-is-better.
         return [(_row_to_memory(r), -float(r["rank_score"])) for r in rows]
 
@@ -1690,6 +1760,256 @@ class LocalBackend(MemoryBackend):
             self._db.commit()
         return self.get_proposal(proposal_id) if cur.rowcount else None
 
+    # -- lossless backup / restore ---------------------------------------
+    @staticmethod
+    def _backup_value(value: Any) -> Any:
+        if isinstance(value, bytes):
+            return {_BACKUP_BYTES: base64.b64encode(value).decode("ascii")}
+        return value
+
+    @staticmethod
+    def _restore_value(value: Any) -> Any:
+        if isinstance(value, dict) and set(value) == {_BACKUP_BYTES}:
+            try:
+                return base64.b64decode(value[_BACKUP_BYTES], validate=True)
+            except (ValueError, TypeError) as exc:
+                raise ValueError("backup contains invalid binary data") from exc
+        return value
+
+    def _select_backup_rows(
+        self, table: str, where: str = "1=1", params: tuple[Any, ...] = ()
+    ) -> list[dict[str, Any]]:
+        keys = _BACKUP_TABLE_KEYS[table]
+        rows = self._db.execute(
+            f"SELECT * FROM {table} WHERE {where} ORDER BY {', '.join(keys)}", params
+        ).fetchall()
+        return [
+            {key: self._backup_value(value) for key, value in dict(row).items()}
+            for row in rows
+        ]
+
+    def _backup_rows_for_ids(
+        self, table: str, column: str, values: set[str]
+    ) -> list[dict[str, Any]]:
+        if not values:
+            return []
+        placeholders = ",".join("?" * len(values))
+        return self._select_backup_rows(
+            table, f"{column} IN ({placeholders})", tuple(sorted(values))
+        )
+
+    def _backup_rows_for_users(
+        self, table: str, user_ids: set[str | None]
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[str] = []
+        named = sorted(value for value in user_ids if value is not None)
+        if named:
+            clauses.append(f"user_id IN ({','.join('?' * len(named))})")
+            params.extend(named)
+        if None in user_ids:
+            clauses.append("user_id IS NULL")
+        if not clauses:
+            return []
+        return self._select_backup_rows(table, " OR ".join(clauses), tuple(params))
+
+    def export_backup(self, scope: Scope) -> dict[str, Any]:
+        """Export exact source records; FTS and ANN remain derived indexes."""
+        with self._lock:
+            clause, params = _scope_clause(scope)
+            tables: dict[str, list[dict[str, Any]]] = {
+                "episodes": self._select_backup_rows("episodes", clause, tuple(params)),
+                "memories": self._select_backup_rows("memories", clause, tuple(params)),
+                "topics": self._select_backup_rows("topics", clause, tuple(params)),
+                "entities": self._select_backup_rows("entities", clause, tuple(params)),
+            }
+            memory_ids = {row["id"] for row in tables["memories"]}
+            topic_ids = {row["id"] for row in tables["topics"]}
+            entity_ids = {row["id"] for row in tables["entities"]}
+            user_ids = {
+                row["user_id"]
+                for table in ("episodes", "memories", "topics", "entities")
+                for row in tables[table]
+            }
+            if scope.user_id is not None:
+                user_ids.add(scope.user_id)
+
+            if scope.is_empty():
+                for table in (
+                    "memory_events", "memory_topics", "topic_relations",
+                    "entity_mentions", "entity_proposals", "synthetic_tags",
+                    "relations", "collections",
+                ):
+                    tables[table] = self._select_backup_rows(table)
+            else:
+                tables["memory_events"] = self._backup_rows_for_ids(
+                    "memory_events", "memory_id", memory_ids
+                )
+                tables["memory_topics"] = [
+                    row for row in self._backup_rows_for_ids(
+                        "memory_topics", "memory_id", memory_ids
+                    ) if row["topic_id"] in topic_ids
+                ]
+                tables["topic_relations"] = [
+                    row for row in self._backup_rows_for_ids(
+                        "topic_relations", "broader_topic_id", topic_ids
+                    ) if row["narrower_topic_id"] in topic_ids
+                ]
+                tables["entity_mentions"] = [
+                    row for row in self._backup_rows_for_ids(
+                        "entity_mentions", "memory_id", memory_ids
+                    ) if row["entity_id"] in entity_ids
+                ]
+                tables["entity_proposals"] = [
+                    row for row in self._backup_rows_for_ids(
+                        "entity_proposals", "entity_a", entity_ids
+                    ) if row["entity_b"] in entity_ids
+                ]
+                tables["relations"] = [
+                    row for row in self._backup_rows_for_ids(
+                        "relations", "subject", entity_ids
+                    ) if row["object"] in entity_ids
+                    and (row["memory_id"] is None or row["memory_id"] in memory_ids)
+                ]
+                tables["synthetic_tags"] = self._backup_rows_for_users(
+                    "synthetic_tags", user_ids
+                )
+                collections = self._backup_rows_for_users("collections", user_ids)
+                if scope.agent_id is not None or scope.run_id is not None:
+                    collections = [
+                        row for row in collections
+                        if set(json.loads(row["memory_ids"])) <= memory_ids
+                    ]
+                tables["collections"] = collections
+
+            ordered = {table: tables.get(table, []) for table in _BACKUP_ORDER}
+        return {
+            "format": "memry-backup", "version": 1, "created_at": utcnow(),
+            "scope": scope.model_dump(), "tables": ordered,
+        }
+
+    @staticmethod
+    def _backup_owner_matches(user_id: Any, owner_prefix: str | None) -> bool:
+        if owner_prefix is None:
+            return True
+        if not isinstance(user_id, str):
+            return False
+        return user_id.startswith(owner_prefix) if owner_prefix.endswith("::") else user_id == owner_prefix
+
+    def _validate_backup(
+        self, backup: dict[str, Any], owner_prefix: str | None
+    ) -> dict[str, list[dict[str, Any]]]:
+        if backup.get("format") != "memry-backup" or backup.get("version") != 1:
+            raise ValueError("unsupported Memry backup format or version")
+        raw_tables = backup.get("tables")
+        if not isinstance(raw_tables, dict) or set(raw_tables) != set(_BACKUP_ORDER):
+            raise ValueError("backup table set is incomplete or unknown")
+        tables: dict[str, list[dict[str, Any]]] = {}
+        for table in _BACKUP_ORDER:
+            raw_rows = raw_tables[table]
+            if not isinstance(raw_rows, list):
+                raise ValueError(f"backup table {table} must be a list")
+            columns = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
+            rows: list[dict[str, Any]] = []
+            for raw in raw_rows:
+                if not isinstance(raw, dict) or set(raw) != columns:
+                    raise ValueError(f"backup row for {table} has the wrong columns")
+                row = {key: self._restore_value(value) for key, value in raw.items()}
+                if table in _BACKUP_USER_TABLES and not self._backup_owner_matches(
+                    row.get("user_id"), owner_prefix
+                ):
+                    raise ValueError(f"backup contains {table} outside this account")
+                rows.append(row)
+            tables[table] = rows
+
+        memory_ids = {row["id"] for row in tables["memories"]}
+        episode_ids = {row["id"] for row in tables["episodes"]}
+        topic_ids = {row["id"] for row in tables["topics"]}
+        entity_ids = {row["id"] for row in tables["entities"]}
+        for row in tables["memories"]:
+            sources = json.loads(row["source_episode_ids"])
+            if not isinstance(sources, list) or not set(sources) <= episode_ids:
+                raise ValueError("memory provenance references episodes outside the backup")
+        for row in tables["memory_events"]:
+            if row["memory_id"] not in memory_ids and owner_prefix is not None:
+                raise ValueError("memory history references a memory outside the backup")
+        for row in tables["memory_topics"]:
+            if row["memory_id"] not in memory_ids or row["topic_id"] not in topic_ids:
+                raise ValueError("topic assignment references data outside the backup")
+        for row in tables["topic_relations"]:
+            if row["broader_topic_id"] not in topic_ids or row["narrower_topic_id"] not in topic_ids:
+                raise ValueError("topic hierarchy references data outside the backup")
+        for row in tables["entity_mentions"]:
+            if row["memory_id"] not in memory_ids or row["entity_id"] not in entity_ids:
+                raise ValueError("entity link references data outside the backup")
+        for row in tables["entity_proposals"]:
+            if row["entity_a"] not in entity_ids or row["entity_b"] not in entity_ids:
+                raise ValueError("entity merge decision references data outside the backup")
+        for row in tables["relations"]:
+            if row["subject"] not in entity_ids or row["object"] not in entity_ids:
+                raise ValueError("entity relation references data outside the backup")
+            if row["memory_id"] is not None and row["memory_id"] not in memory_ids:
+                raise ValueError("entity relation evidence is outside the backup")
+        for row in tables["collections"]:
+            members = json.loads(row["memory_ids"])
+            if not isinstance(members, list) or not set(members) <= memory_ids:
+                raise ValueError("collection references memories outside the backup")
+        return tables
+
+    def import_backup(
+        self, backup: dict[str, Any], *, owner_prefix: str | None = None
+    ) -> dict[str, Any]:
+        """Restore exact records transactionally; never rewrite an identity."""
+        with self._lock:
+            tables = self._validate_backup(backup, owner_prefix)
+            inserted = unchanged = 0
+            by_table: dict[str, dict[str, int]] = {}
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                for table in _BACKUP_ORDER:
+                    table_inserted = table_unchanged = 0
+                    keys = _BACKUP_TABLE_KEYS[table]
+                    for row in tables[table]:
+                        where = " AND ".join(f"{key} = ?" for key in keys)
+                        existing = self._db.execute(
+                            f"SELECT * FROM {table} WHERE {where}",
+                            tuple(row[key] for key in keys),
+                        ).fetchone()
+                        if existing is not None:
+                            if dict(existing) != row:
+                                identity = ", ".join(f"{key}={row[key]!r}" for key in keys)
+                                raise ValueError(f"backup conflicts with existing {table} row ({identity})")
+                            table_unchanged += 1; unchanged += 1
+                            continue
+                        columns = tuple(row)
+                        self._db.execute(
+                            f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+                            tuple(row[column] for column in columns),
+                        )
+                        table_inserted += 1; inserted += 1
+                    by_table[table] = {"inserted": table_inserted, "unchanged": table_unchanged}
+                self._db.execute(
+                    "INSERT OR IGNORE INTO ann_keys (memory_id) SELECT id FROM memories WHERE embedding IS NOT NULL"
+                )
+                self._db.commit()
+            except sqlite3.IntegrityError as exc:
+                self._db.rollback()
+                raise ValueError(f"backup conflicts with existing indexed data: {exc}") from exc
+            except Exception:
+                self._db.rollback(); raise
+            self._has_metadata_aliases = self._db.execute(
+                "SELECT 1 FROM entities WHERE metadata LIKE '%\"aliases\"%' LIMIT 1"
+            ).fetchone() is not None
+            models = self._db.execute(
+                "SELECT embedding_model, MAX(length(embedding)) FROM memories "
+                "WHERE embedding IS NOT NULL AND embedding_model IS NOT NULL GROUP BY embedding_model"
+            ).fetchall()
+        for model_id, byte_length in models:
+            self.rebuild_ann(model_id, int(byte_length) // 4)
+        return {
+            "format": "memry-backup", "version": 1,
+            "inserted": inserted, "unchanged": unchanged, "tables": by_table,
+        }
     # -- maintenance --------------------------------------------------------
     def all_memories_iter(self, include_invalid: bool = True) -> list[Memory]:
         clause = "1=1" if include_invalid else "invalid_at IS NULL"

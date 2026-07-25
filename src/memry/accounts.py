@@ -1,9 +1,9 @@
 """Accounts: the identities a multiuser Memry server can authenticate.
 
-Accounts currently use a separate SQLite file from the memory store. That kept
-identity independent of the selectable Mem0 comparison adapter, but it also
-creates a second backup and migration lifecycle. SQLite is now the sole production
-store, so consolidation is an explicit follow-up decision in the duplication audit.
+Accounts intentionally use a separate SQLite file from the memory store.
+Knowledge export, import, and reset therefore cannot overwrite login credentials,
+sessions, OAuth clients, or tokens. The operational cost is explicit: a complete
+server backup must include both memry.db and auth.db.
 
 Two credential kinds, for two different callers:
 
@@ -68,7 +68,7 @@ _SCRYPT_P = 1
 
 
 def default_auth_db_path(db_path: str) -> str:
-    """Auth DB sits next to the memory DB, so a backup of one finds the other."""
+    """Keep auth beside memory so one directory or volume backup captures both."""
     if db_path == ":memory:":
         return ":memory:"
     return str(Path(db_path).with_name("auth.db"))

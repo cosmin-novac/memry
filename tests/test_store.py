@@ -238,6 +238,7 @@ def test_update_merges_existing_memory(store, fake_llm):
         decision(
             "UPDATE", target=0, content="User works at Northwind as a data engineer"
         ),
+        facts_response(fact("User works at Northwind as a data engineer")),
     )
     result = store.add("I'm a data engineer there", user_id="ada")
     assert result.actions[0].event == "UPDATE"

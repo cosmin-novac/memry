@@ -77,17 +77,18 @@ def test_export_import_roundtrip(capsys, tmp_path):
     run(capsys, "add", "fact one", "-u", "ada")
     run(capsys, "add", "fact two", "-u", "ada")
     _, out = run(capsys, "export", "-u", "ada")
-    lines = [line for line in out.splitlines() if line.strip()]
-    assert len(lines) == 2
+    backup = json.loads(out)
+    assert backup["format"] == "memry-backup"
+    assert len(backup["tables"]["memories"]) == 2
 
-    dump = tmp_path / "dump.jsonl"
-    dump.write_text("\n".join(lines), encoding="utf-8")
+    dump = tmp_path / "backup.json"
+    dump.write_text(json.dumps(backup), encoding="utf-8")
 
-    # Re-importing the same export is idempotent in the original user scope.
+    # Re-importing the same backup preserves identities and is idempotent.
     _, out = run(capsys, "import", str(dump))
     result = json.loads(out)
-    assert result["imported"] == 0
-    assert result["deduplicated"] == 2
+    assert result["inserted"] == 0
+    assert result["unchanged"] > 0
 
 
 def test_reindex_and_sweep(capsys):
@@ -110,3 +111,8 @@ def test_eval_command(capsys):
 def test_no_command_shows_help(capsys):
     code, _ = run(capsys)
     assert code == 1
+
+
+def test_direct_http_mcp_launcher_is_removed():
+    with pytest.raises(SystemExit):
+        main(["mcp", "--transport", "http"])

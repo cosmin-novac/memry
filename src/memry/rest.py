@@ -76,11 +76,15 @@ h1 .datalinks{float:right;font-size:.75rem;font-weight:400;color:var(--dim)}
 h1 .datalinks a{color:var(--dim);text-decoration:none;border-bottom:1px dotted var(--dim);cursor:help}
 h1 .datalinks a:hover{color:var(--accent);border-bottom-color:var(--accent)}
 .bar{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem}
-input,button,textarea{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem}
+input,button,textarea,select{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem}
 .qwrap{position:relative;flex:1;min-width:12rem;display:flex}
 .qwrap input{flex:1;padding-right:1.9rem}
 #qclear{position:absolute;right:.3rem;top:50%;transform:translateY(-50%);border:none;background:none;color:var(--dim);padding:.2rem .4rem;font-size:.9rem;line-height:1;display:none}
 #qclear:hover{color:var(--accent)}
+.search-filters{display:grid;grid-template-columns:minmax(10rem,1fr) minmax(10rem,1fr) minmax(12rem,1.4fr);gap:.5rem;margin:-.45rem 0 1rem}
+.search-filters label{display:flex;flex-direction:column;gap:.2rem;color:var(--dim);font-size:.72rem}
+.search-filters input,.search-filters select{width:100%;min-width:0;color:var(--text)}
+@media(max-width:650px){.search-filters{grid-template-columns:1fr}}
 html.knowledge-open,body.knowledge-open{overflow:hidden}
 .modal{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.55);display:none;align-items:flex-start;justify-content:center;padding:4rem 1rem;overflow:auto;overscroll-behavior:contain}
 .modal.on{display:flex}
@@ -98,7 +102,7 @@ html.knowledge-open,body.knowledge-open{overflow:hidden}
 .tagrow .act:hover{color:var(--accent)}.tagrow .act.del:hover{color:var(--warn)}
 .tagbar{display:flex;gap:.5rem;flex-wrap:wrap;margin:.8rem 0;align-items:center}
 .tagbar .sel{color:var(--dim);font-size:.82rem;margin-right:auto}
-input:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
+input:focus,textarea:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
 button{cursor:pointer}button.primary{background:var(--accent);color:#04211c;border-color:transparent;font-weight:600}
 button.toggle[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
 .knowledge-tabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.9rem 0}
@@ -129,7 +133,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openKnowledge();return false" title="Browse topics, entities, relations, and collections in one place.">knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download memories as a .jsonl file: one JSON object per line with content, categories, user_id, type and importance. Same format as the CLI command memry export. Uses the signed-in account's memory space.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Additive import from a memry export: a .jsonl file (one JSON object per line) or a JSON array. Each row needs a content field; categories, memory_type and importance are optional. Nothing is deleted or overwritten.">import</a></span></h1>
+<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openKnowledge();return false" title="Browse tags, entities, relations, and collections in one place.">knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <span class="qwrap"><input id="q" placeholder="search memories…" oninput="toggleClear()">
@@ -138,11 +142,16 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <button class="toggle" id="addbtn" onclick="togglePanel('add')">+ Add</button>
   <button class="toggle" id="mapbtn" onclick="togglePanel('map')">Map</button>
 </div>
+<div class="search-filters" aria-label="Search filters">
+  <label>Date<input id="filter-date" type="date" onchange="toggleClear()"></label>
+  <label>Tag<select id="filter-topic" onchange="toggleClear()"><option value="">Any tag</option></select></label>
+  <label>Person or thing<select id="filter-entity" onchange="toggleClear()"><option value="">Any person or thing</option></select></label>
+</div>
 <input type="file" id="importfile" accept=".json,.jsonl,.txt,application/json" hidden onchange="importMemories(this.files[0]);this.value=''">
 <div id="addpanel" hidden>
 <textarea id="newmem" placeholder="Add to memory… (extraction runs if an LLM is configured)"></textarea>
 <div class="bar">
-  <input id="newcats" placeholder="topics, comma separated (optional)" style="flex:1;min-width:10rem">
+  <input id="newcats" placeholder="tags, comma separated (optional)" style="flex:1;min-width:10rem">
   <button class="primary" onclick="add(true)">Add (infer)</button>
   <button onclick="add(false)">Add verbatim</button>
 </div>
@@ -153,9 +162,9 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <div id="list"></div>
 <div class="modal" id="knowmodal"><div class="sheet">
 <h2><button class="x" onclick="closeKnowledge()" title="close">x</button>Knowledge</h2>
-<p class="hint">Topics classify memories. People and things are stable entity hubs with aliases, a bounded description, and supporting memories. Relations and collections stay evidence-linked views.</p>
+<p class="hint">Tags classify memories. People and things are stable entity hubs with aliases, a bounded description, and supporting memories. Relations and collections stay evidence-linked views.</p>
 <div class="knowledge-tabs">
-  <button id="ktab-topics" onclick="showKnowledge('topics')">Topics</button>
+  <button id="ktab-topics" onclick="showKnowledge('topics')">Tags</button>
   <button id="ktab-entities" onclick="showKnowledge('entities')">People &amp; things</button>
   <button id="ktab-relations" onclick="showKnowledge('relations')">Relations</button>
   <button id="ktab-collections" onclick="showKnowledge('collections')">Collections</button>
@@ -163,8 +172,8 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <section class="kpanel" id="kpanel-topics">
   <div class="tagbar">
     <span class="sel" id="tagsel">none selected</span>
-    <button onclick="suggestMerges()" title="let the LLM propose duplicate or variant topics to merge">Suggest merges</button>
-    <button onclick="mergeTags()" title="combine the checked topics into one">Combine selected...</button>
+    <button onclick="suggestMerges()" title="let the LLM propose duplicate or variant tags to merge">Suggest merges</button>
+    <button onclick="mergeTags()" title="combine the checked tags into one">Combine selected...</button>
   </div>
   <div id="tagsuggest"></div><div id="taglist"></div>
 </section>
@@ -201,7 +210,7 @@ function togglePanel(name){
   localStorage.setItem('memry_show_'+name,panels[name]?'1':'0');
   syncPanels();
 }
-let current=[],activeCat=null,haveMore=false,editingId=null,hoverTag=null;
+let current=[],activeCat=null,haveMore=false,editingId=null,hoverTag=null,searchActive=false;
 let hoverFocusTag=null,hoverFocusMix=0,hoverFadeStarted=0;
 const HOVER_FADE_MS=500;
 const cats=m=>((m.categories&&m.categories.length)?m.categories:['(untagged)']).map(c=>String(c).toLowerCase());
@@ -209,7 +218,7 @@ function render(items){
   current=items; drawMap(items);
   const shown=activeCat?items.filter(m=>cats(m).includes(activeCat)):items;
   const el=document.getElementById('list');
-  if(!shown.length&&!haveMore){el.innerHTML='<div class="empty">'+(activeCat?'No memories under #'+esc(activeCat)+'.':'No memories yet.')+'</div>';return}
+  if(!shown.length&&!haveMore){el.innerHTML='<div class="empty">'+(activeCat?'No memories under #'+esc(activeCat)+'.':(searchActive?'No memories match this search.':'No memories yet.'))+'</div>';return}
   el.innerHTML=shown.map(m=>m.id===editingId?editCard(m):viewCard(m)).join('')
    +(haveMore?'<div class="bar"><button onclick="loadAll(true)">Load more</button></div>':'');
 }
@@ -231,7 +240,7 @@ function editCard(m){
   return `<div class="mem">
    <textarea id="edit-note">${esc(m.content)}</textarea>
    <div class="bar" style="margin-bottom:0">
-     <input id="edit-cats" value="${esc((m.categories||[]).join(', '))}" placeholder="topics, comma separated (optional)" style="flex:1;min-width:8rem">
+     <input id="edit-cats" value="${esc((m.categories||[]).join(', '))}" placeholder="tags, comma separated (optional)" style="flex:1;min-width:8rem">
      <button class="primary" onclick="saveEdit('${m.id}')">Save</button>
      <button onclick="cancelEdit()">Cancel</button>
    </div></div>`;
@@ -601,26 +610,55 @@ window.addEventListener('keydown',e=>{if(e.key==='Escape'&&gMaxed)setMaxed(false
 document.addEventListener('fullscreenchange',()=>{if(G){sizeGalaxy();if(reducedMotion)galaxyFrame(performance.now())}});
 window.addEventListener('resize',()=>drawMap(current));
 const PAGE=100; let offset=0;
+function searchFilters(){
+  return {
+    date:document.getElementById('filter-date').value,
+    topic:document.getElementById('filter-topic').value,
+    entity:document.getElementById('filter-entity').value
+  };
+}
+async function loadSearchFilters(){
+  const topicSelect=document.getElementById('filter-topic');
+  const entitySelect=document.getElementById('filter-entity');
+  const selectedTopic=topicSelect.value,selectedEntity=entitySelect.value;
+  const [topics,entities]=await Promise.all([
+    api('/api/v1/categories'),api('/api/v1/entities?limit=10000')]);
+  topicSelect.innerHTML='<option value="">Any tag</option>'+topics
+    .sort((a,b)=>a.category.localeCompare(b.category))
+    .map(topic=>`<option value="${esc(topic.category)}">${esc(topic.category)} (${topic.count})</option>`).join('');
+  entitySelect.innerHTML='<option value="">Any person or thing</option>'+entities
+    .sort((a,b)=>a.name.localeCompare(b.name))
+    .map(entity=>`<option value="${esc(entity.id)}">${esc(entity.name)}${entity.entity_type?' · '+esc(entity.entity_type):''}</option>`).join('');
+  topicSelect.value=selectedTopic;entitySelect.value=selectedEntity;
+}
 async function loadAll(more){
-  if(!more){offset=0;current=[]}
+  if(!more){offset=0;current=[];searchActive=false}
   const items=await api('/api/v1/memories?limit='+PAGE+'&offset='+offset);
   offset+=items.length; haveMore=items.length===PAGE;
   render(current.concat(items));
 }
 async function search(){
-  const q=document.getElementById('q').value.trim(); if(!q)return loadAll();
-  const body={query:q,limit:20};
+  const q=document.getElementById('q').value.trim(),filters=searchFilters();
+  if(!q&&!filters.date&&!filters.topic&&!filters.entity)return loadAll();
+  const body={query:q,limit:100};
+  if(filters.date){body.since=filters.date;body.until=filters.date}
+  if(filters.topic)body.categories=[filters.topic];
+  if(filters.entity)body.entity_id=filters.entity;
   const rs=await api('/api/v1/search',{method:'POST',body:JSON.stringify(body)});
-  haveMore=false;
+  haveMore=false;searchActive=true;
   render(rs.map(r=>({...r.memory,score:r.score})));
 }
 function toggleClear(){
+  const filters=searchFilters();
   document.getElementById('qclear').style.display =
-    document.getElementById('q').value ? 'block' : 'none';
+    document.getElementById('q').value||filters.date||filters.topic||filters.entity ? 'block' : 'none';
 }
 function clearSearch(){
-  const q=document.getElementById('q'); q.value=''; toggleClear();
-  activeCat=null; loadAll();   // x clears the box and resets to all
+  document.getElementById('q').value='';
+  document.getElementById('filter-date').value='';
+  document.getElementById('filter-topic').value='';
+  document.getElementById('filter-entity').value='';
+  activeCat=null;toggleClear();loadAll();
 }
 
 // -- unified knowledge area -------------------------------------------------
@@ -654,31 +692,31 @@ async function loadTags(){
   const topics=await api('/api/v1/categories');
   topics.sort((a,b)=>a.category.localeCompare(b.category));
   const el=document.getElementById('taglist');
-  if(!topics.length){el.innerHTML='<div class="empty">No topics yet.</div>';return}
+  if(!topics.length){el.innerHTML='<div class="empty">No tags yet.</div>';return}
   el.innerHTML=topics.map(topic=>`<div class="tagrow">
     <input type="checkbox" value="${esc(topic.category)}" onchange="updateSel()">
     <span class="name"><b>${esc(topic.category)}</b> <span class="cnt">${topic.count}</span>
       ${topic.synthetic?'<span class="syn">synthetic parent</span>':''}</span>
-    <button class="act" title="rename this topic everywhere" onclick='renameTag(${JSON.stringify(topic.category)})'>rename</button>
-    <button class="act del" title="delete this topic from all memories" onclick='deleteTag(${JSON.stringify(topic.category)})'>delete</button>
+    <button class="act" title="rename this tag everywhere" onclick='renameTag(${JSON.stringify(topic.category)})'>rename</button>
+    <button class="act del" title="delete this tag from all memories" onclick='deleteTag(${JSON.stringify(topic.category)})'>delete</button>
   </div>`).join('');
   updateSel();
 }
 async function tagOp(body){
   const result=await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(body)});
-  await loadTags();activeCat=null;loadAll();return result;
+  await Promise.all([loadTags(),loadSearchFilters()]);activeCat=null;loadAll();return result;
 }
 async function renameTag(tag){
-  const to=prompt('Rename topic "'+tag+'" to:',tag);if(!to||to.trim()===tag)return;
+  const to=prompt('Rename tag "'+tag+'" to:',tag);if(!to||to.trim()===tag)return;
   await tagOp({op:'rename',tag,to:to.trim()});
 }
 async function deleteTag(tag){
-  if(!confirm('Delete topic "'+tag+'" from all memories? The memories stay.'))return;
+  if(!confirm('Delete tag "'+tag+'" from all memories? The memories stay.'))return;
   await tagOp({op:'delete',tag});
 }
 async function mergeTags(){
-  const selected=tagSel();if(selected.length<2)return alert('Check at least two topics to combine.');
-  const to=prompt('Combine '+selected.length+' topics into one named:',selected[0]);
+  const selected=tagSel();if(selected.length<2)return alert('Check at least two tags to combine.');
+  const to=prompt('Combine '+selected.length+' tags into one named:',selected[0]);
   if(!to||!to.trim())return;
   await tagOp({op:'merge',tags:selected,to:to.trim()});
 }
@@ -783,47 +821,47 @@ async function saveEdit(id){
   const content=document.getElementById('edit-note').value.trim(); if(!content)return;
   const cats=document.getElementById('edit-cats').value.split(',').map(s=>s.trim()).filter(Boolean);
   const updated=await api('/api/v1/memories/'+id,{method:'PATCH',body:JSON.stringify({content,categories:cats})});
+  if(updated.error){alert(updated.error);return}
   editingId=null;
   current=current.map(m=>m.id===id?{...m,...updated}:m);
   render(current);
 }
-// Same JSONL shape as `memry export`, so files work with the CLI and back.
 async function exportMemories(){
-  let all=[],off=0,page;
-  do{
-    page=await api('/api/v1/memories?limit=500&offset='+off);
-    all=all.concat(page); off+=page.length;
-  }while(page.length===500);
-  if(!all.length){alert('Nothing to export.');return}
+  const backup=await api('/api/v1/export');
+  if(backup.error){alert(backup.error);return}
   const a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([all.map(m=>JSON.stringify(m)).join('\\n')+'\\n'],{type:'application/json'}));
-  a.download='memry-export-'+new Date().toISOString().slice(0,10)+'.jsonl';
+  a.href=URL.createObjectURL(new Blob([JSON.stringify(backup,null,2)+'\\n'],{type:'application/json'}));
+  a.download='memry-backup-'+new Date().toISOString().slice(0,10)+'.json';
   a.click(); URL.revokeObjectURL(a.href);
 }
-// Additive: every row becomes a new verbatim memory in ONE bulk request
-// (server batches embeddings); nothing is deleted or overwritten, and duplicates are skipped.
 async function importMemories(file){
   if(!file)return;
   const text=((await file.text())||'').trim(); if(!text)return;
-  let rows;
-  try{rows=text.startsWith('[')?JSON.parse(text):text.split('\\n').map(l=>l.trim()).filter(Boolean).map(l=>JSON.parse(l));}
-  catch{alert('Not a valid JSON or JSONL export file.');return}
-  if(!Array.isArray(rows))rows=[rows];
+  let payload;
+  try{payload=JSON.parse(text)}
+  catch{
+    try{payload=text.split('\\n').map(line=>line.trim()).filter(Boolean).map(line=>JSON.parse(line))}
+    catch{alert('Not a valid Memry JSON or JSONL file.');return}
+  }
+  const isBackup=payload&&payload.format==='memry-backup';
+  const rows=Array.isArray(payload)?payload:[payload];
+  const body=isBackup?payload:{memories:rows};
   const btn=document.getElementById('importbtn');
   btn.textContent='importing…';
   try{
-    const res=await api('/api/v1/import',{method:'POST',
-      body:JSON.stringify({memories:rows})});
-    if(res&&res.imported!==undefined){
+    const res=await api('/api/v1/import',{method:'POST',body:JSON.stringify(body)});
+    if(res&&res.error)alert(res.error);
+    else if(isBackup)alert('Backup restored: '+res.inserted+' records added, '+res.unchanged+' already identical.');
+    else if(res&&res.imported!==undefined){
       const notes=[];
       if(res.deduplicated)notes.push(res.deduplicated+' duplicates skipped');
       if(res.skipped)notes.push(res.skipped+' empty rows skipped');
       alert('Imported '+res.imported+' of '+rows.length+(notes.length?' ('+notes.join(', ')+')':'')+'.');
     }
-    else alert((res&&res.error)||'Import failed.');
+    else alert('Import failed.');
   }catch{alert('Import failed.')}
   btn.textContent='import';
-  loadAll(); loadStats();
+  loadAll();loadStats();loadSearchFilters();
 }
 async function loadStats(){
   const s=await api('/api/v1/stats');
@@ -832,7 +870,7 @@ async function loadStats(){
     `${s.episodes??0} episodes · backend ${s.backend} · llm ${s.llm} · embeddings ${s.embedder}`;
 }
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
-syncPanels(); loadStats(); loadAll();
+syncPanels(); loadStats(); loadSearchFilters(); loadAll();
 </script></body></html>"""
 
 
@@ -1139,6 +1177,17 @@ def create_app(
             return [c.strip() for c in value.split(",") if c.strip()]
         return [str(c) for c in value]
 
+    def _resolve_entity_filter(
+        request: Request, value: Any
+    ) -> tuple[str | None, Response | None]:
+        if not value:
+            return None, None
+        entity_id = store.backend.resolve_entity_id(str(value))
+        entity = store.backend.get_entity(entity_id) if entity_id else None
+        if entity is None or not _p(request).owns(entity.user_id):
+            return None, JSONResponse({"error": "entity not found"}, status_code=404)
+        return entity.id, None
+
     def _memory_payload(memory) -> dict[str, Any]:
         data = memory.model_dump()
         data["entity_links"] = [
@@ -1153,6 +1202,9 @@ def create_app(
 
     async def list_memories(request: Request) -> Response:
         q = request.query_params
+        entity_id, error = _resolve_entity_filter(request, q.get("entity_id"))
+        if error:
+            return error
         memories = store.get_all(
             user_id=_p(request).namespace(q.get("user_id")),
             agent_id=q.get("agent_id"),
@@ -1161,6 +1213,7 @@ def create_app(
             limit=int(q.get("limit", "100")),
             offset=int(q.get("offset", "0")),
             categories=_parse_categories(q.get("categories")),
+            entity_id=entity_id,
             since=q.get("since") or None,
             until=q.get("until") or None,
         )
@@ -1201,14 +1254,18 @@ def create_app(
         if error:
             return error
         body = await request.json()
-        memory = store.update(
-            request.path_params["memory_id"],
-            content=body.get("content"),
-            importance=body.get("importance"),
-            categories=body.get("categories"),
-            metadata=body.get("metadata"),
-            owner_prefix=_p(request).prefix,
-        )
+        try:
+            memory = await run_in_threadpool(partial(
+                store.update,
+                request.path_params["memory_id"],
+                content=body.get("content"),
+                importance=body.get("importance"),
+                categories=body.get("categories"),
+                metadata=body.get("metadata"),
+                owner_prefix=_p(request).prefix,
+            ))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
         return JSONResponse(_memory_payload(memory))
 
     async def delete_memory(request: Request) -> Response:
@@ -1350,10 +1407,33 @@ def create_app(
             return JSONResponse({"error": "missing fields for op"}, status_code=400)
         return JSONResponse({"op": op, "memories_changed": changed})
 
+    async def export_memories_route(request: Request) -> Response:
+        q = request.query_params
+        try:
+            backup = await run_in_threadpool(partial(
+                store.export_backup,
+                user_id=_p(request).namespace(q.get("user_id")),
+                agent_id=q.get("agent_id"),
+                run_id=q.get("run_id"),
+            ))
+        except NotImplementedError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=501)
+        return JSONResponse(backup)
     async def import_memories_route(request: Request) -> Response:
-        """Bulk verbatim import: a JSON array of rows, or {memories: [...],
-        user_id?}. One request instead of one POST per memory."""
+        """Restore a lossless backup or accept legacy additive memory rows."""
         body = await request.json()
+        principal = _p(request)
+        if isinstance(body, dict) and body.get("format") == "memry-backup":
+            try:
+                result = await run_in_threadpool(partial(
+                    store.import_backup, body, owner_prefix=principal.prefix
+                ))
+            except NotImplementedError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=501)
+            except ValueError as exc:
+                status = 409 if "conflict" in str(exc).lower() else 400
+                return JSONResponse({"error": str(exc)}, status_code=status)
+            return JSONResponse(result, status_code=201 if result["inserted"] else 200)
         rows = body if isinstance(body, list) else body.get("memories")
         if not isinstance(rows, list) or not rows:
             return JSONResponse(
@@ -1361,7 +1441,6 @@ def create_app(
                 status_code=400,
             )
         default_uid = None if isinstance(body, list) else body.get("user_id")
-        principal = _p(request)
         sanitized = [
             {**row, "user_id": principal.namespace(row.get("user_id") or default_uid)}
             for row in rows
@@ -1398,6 +1477,9 @@ def create_app(
 
     async def search(request: Request) -> Response:
         body = await request.json()
+        entity_id, error = _resolve_entity_filter(request, body.get("entity_id"))
+        if error:
+            return error
         results = await run_in_threadpool(partial(
             store.search,
             body.get("query", ""),
@@ -1407,6 +1489,7 @@ def create_app(
             limit=int(body.get("limit", 10)),
             include_invalid=bool(body.get("include_invalid", False)),
             categories=_parse_categories(body.get("categories")),
+            entity_id=entity_id,
             since=body.get("since") or None,
             until=body.get("until") or None,
         ))
@@ -1733,6 +1816,7 @@ def create_app(
         Route("/api/v1/memories/repair-dates", guarded(repair_dates_route), methods=["POST"]),
         Route("/api/v1/collections", guarded(collections_route), methods=["GET"]),
         Route("/api/v1/collections/build", guarded(build_collections_route), methods=["POST"]),
+        Route("/api/v1/export", guarded(export_memories_route), methods=["GET"]),
         Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),
         Route("/api/v1/search", guarded(search), methods=["POST"]),
         Route("/api/v1/context", guarded(context), methods=["POST"]),

@@ -14,12 +14,13 @@ backends, LLMs, and embedders are all replaceable underneath it.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Any
 
 import numpy as np
 
-from .backends import build_backend
 from .backends.base import MemoryBackend
+from .backends.local import LocalBackend
 from .config import Config
 from .intelligence.clustering import (
     obvious_canonical_merges,
@@ -147,7 +148,7 @@ class MemoryStore:
         embedder: Embedder | None = None,
     ) -> None:
         self.config = config or Config.load()
-        self.backend = backend or build_backend(self.config)
+        self.backend = backend or LocalBackend(self.config.db_path, ann=self.config.ann)
         self.llm = llm or build_llm(self.config.llm)
         self.embedder = embedder or build_embedder(self.config.embedding)
 
@@ -328,13 +329,16 @@ class MemoryStore:
                 llm=self.llm,
                 episode_ids=episode_ids,
                 retrieval_cfg=self.config.retrieval,
+                prepare_update=lambda memory_id, final_content: (
+                    self._reanalyze_edited_entities(memory_id, final_content, scope)
+                ),
             )
             actions.append(action)
             if action.event != "NONE" and action.memory_id:
                 excluded.add(action.memory_id)
             # Entity mentions attach to the memory the action landed on
             # (conservative disambiguation; see intelligence/entities.py).
-            if action.event != "NONE" and action.memory_id and candidate.entities:
+            if action.event not in ("NONE", "UPDATE") and action.memory_id and candidate.entities:
                 resolved = resolve_mentions(
                     backend=self.backend,
                     llm=self.llm,
@@ -374,6 +378,83 @@ class MemoryStore:
                     memory_id=memory_id,
                 )
             )
+
+    def _reanalyze_edited_entities(
+        self, memory_id: str, content: str, scope: Scope
+    ) -> dict[str, Any]:
+        """Return the complete entity fields for edited memory text.
+
+        With an LLM, extraction and identity resolution finish before the
+        caller replaces the stored text and mentions. Without one, Memry can
+        still retain or remove existing links by matching their known aliases;
+        zero-key mode cannot discover a brand-new entity name.
+        """
+        if not self.llm.available:
+            surfaces: list[str] = []
+            mentions: list[EntityMention] = []
+            for entity in self.backend.entities_of_memory(memory_id):
+                aliases = sorted(
+                    self.backend.entity_aliases(entity.id), key=len, reverse=True
+                )
+                surface = next(
+                    (
+                        alias for alias in aliases
+                        if alias and re.search(
+                            rf"(?<!\w){re.escape(alias)}(?!\w)",
+                            content,
+                            flags=re.IGNORECASE,
+                        )
+                    ),
+                    None,
+                )
+                if surface:
+                    surfaces.append(surface)
+                    mentions.append(
+                        EntityMention(
+                            entity_id=entity.id,
+                            memory_id=memory_id,
+                            surface=surface,
+                        )
+                    )
+            return {"entities": surfaces, "mentions": mentions}
+        try:
+            candidates = extract_facts(
+                self.llm, [{"role": "user", "content": content}]
+            )
+            surfaces = []
+            types: dict[str, str] = {}
+            seen: set[str] = set()
+            for candidate in candidates:
+                types.update(candidate.entity_types)
+                for surface in candidate.entities:
+                    normalized = surface.strip().lower()
+                    if normalized and normalized not in seen:
+                        seen.add(normalized)
+                        surfaces.append(surface.strip())
+            resolved = resolve_mentions(
+                backend=self.backend,
+                llm=self.llm,
+                scope=scope,
+                memory_id=memory_id,
+                memory_content=content,
+                surfaces=surfaces,
+                types=types,
+                attach=False,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"memory text was not changed because entity re-analysis failed: {exc}"
+            ) from exc
+        mentions = [
+            EntityMention(
+                entity_id=resolved[surface.lower()].id,
+                memory_id=memory_id,
+                surface=surface,
+            )
+            for surface in surfaces
+            if surface.lower() in resolved
+        ]
+        return {"entities": surfaces, "mentions": mentions}
 
     def _has_near_duplicate(
         self,
@@ -512,6 +593,23 @@ class MemoryStore:
             "deduplicated": deduplicated,
             "memory_ids": memory_ids,
         }
+    def export_backup(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Export exact knowledge records for this scope as one versioned bundle."""
+        return self.backend.export_backup(
+            Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        )
+
+    def import_backup(
+        self, backup: dict[str, Any], *, owner_prefix: str | None = None
+    ) -> dict[str, Any]:
+        """Restore a Memry backup exactly and transactionally."""
+        return self.backend.import_backup(backup, owner_prefix=owner_prefix)
     def distill(
         self, memory_id: str, *, owner_prefix: str | None = None
     ) -> AddResult | None:
@@ -576,21 +674,26 @@ class MemoryStore:
         limit: int = 10,
         include_invalid: bool = False,
         categories: list[str] | None = None,
+        entity_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
         relational: bool = True,
     ) -> list[SearchResult]:
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        if entity_id:
+            entity_id = self.backend.resolve_entity_id(entity_id)
+            if entity_id is None:
+                return []
         # No query text = browse by tag/date rather than rank by relevance.
         if not (query or "").strip():
             memories = self.get_all(
                 user_id=user_id, agent_id=agent_id, run_id=run_id,
                 include_invalid=include_invalid, limit=limit,
-                categories=categories, since=since, until=until,
+                categories=categories, entity_id=entity_id, since=since, until=until,
             )
             return [SearchResult(memory=m, score=0.0) for m in memories]
         # Over-fetch when we will post-filter or fuse, so a full page survives.
-        wide = (since or until) or (relational and not categories)
+        wide = (since or until) or (relational and not categories and not entity_id)
         fetch = limit if not wide else min(max(limit * 8, 40), 500)
         results = hybrid_search(
             backend=self.backend,
@@ -601,10 +704,11 @@ class MemoryStore:
             cfg=self.config.retrieval,
             include_invalid=include_invalid,
             categories=categories,
+            entity_id=entity_id,
         )
         # Relational fusion: add memories reachable by typed relations from the
         # query's entities (multi-hop answers hybrid alone scores at zero).
-        if relational and not categories:
+        if relational and not categories and not entity_id:
             rel_ids = relational_memory_ids(self.backend, scope, query, hops=2)
             if rel_ids:
                 results = self._fuse_relational(results, rel_ids, include_invalid)
@@ -742,20 +846,25 @@ class MemoryStore:
         limit: int = 100,
         offset: int = 0,
         categories: list[str] | None = None,
+        entity_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
     ) -> list[Memory]:
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        if entity_id:
+            entity_id = self.backend.resolve_entity_id(entity_id)
+            if entity_id is None:
+                return []
         if not (since or until):
             return self.backend.list_memories(
                 scope, include_invalid=include_invalid, limit=limit, offset=offset,
-                categories=categories,
+                categories=categories, entity_id=entity_id,
             )
         # Date-windowed browse: the filter is backend-agnostic (applied here), so
         # pull a broad page ordered by the backend, filter, then paginate.
         rows = self.backend.list_memories(
             scope, include_invalid=include_invalid, limit=1_000_000, offset=0,
-            categories=categories,
+            categories=categories, entity_id=entity_id,
         )
         rows = [m for m in rows if _within(m.created_at, since, until)]
         return rows[offset : offset + limit]
@@ -798,6 +907,11 @@ class MemoryStore:
         old = self.backend.get_memory(memory_id)
         if not _owned(old, owner_prefix):
             return None
+        entity_update: dict[str, Any] = {}
+        if content is not None and content != old.content:
+            entity_update = self._reanalyze_edited_entities(
+                memory_id, content, old.scope()
+            )
         embedding = None
         embedding_model = None
         if content is not None and self.embedder.dimensions:
@@ -814,6 +928,7 @@ class MemoryStore:
             importance=importance,
             categories=categories,
             metadata=metadata,
+            **entity_update,
         )
         if updated and content is not None and content != old.content:
             self.backend.add_event(

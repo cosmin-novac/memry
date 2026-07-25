@@ -1,7 +1,6 @@
 """Memry command-line interface.
 
     memry mcp                     run the MCP server (stdio)
-    memry mcp --transport http    run the MCP server (streamable HTTP)
     memry serve                   REST API + dashboard + /mcp
     memry add "text" -u ada       add a memory
     memry search "query" -u ada   search memories
@@ -11,7 +10,7 @@
     memry stats                   store statistics
     memry sweep                   decay sweep (soft-forget stale memories)
     memry reindex                 re-embed all memories
-    memry export / import         JSONL export/import of memories
+    memry export / import         lossless backup/restore; legacy JSON imports
     memry config                  print resolved configuration
     memry eval --dataset <path>   run the retrieval eval harness
 """
@@ -128,10 +127,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"memry {__version__}")
     sub = parser.add_subparsers(dest="command")
 
-    p = sub.add_parser("mcp", help="run the MCP server")
-    p.add_argument("--transport", choices=["stdio", "http"], default="stdio")
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8787)
+    sub.add_parser("mcp", help="run the local stdio MCP server")
+
 
     p = sub.add_parser("serve", help="run REST API + dashboard + /mcp")
     p.add_argument("--host", default="127.0.0.1")
@@ -150,6 +147,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-n", "--limit", type=int, default=10)
     p.add_argument("-c", "--category", action="append", default=None,
                    help="restrict to a category (repeatable)")
+    p.add_argument("--entity", default=None, help="restrict to an exact entity ID")
+    p.add_argument("--since", default=None, help="created on/after YYYY-MM-DD")
+    p.add_argument("--until", default=None, help="created on/before YYYY-MM-DD")
 
     p = sub.add_parser("list", help="list memories")
     _scope_args(p)
@@ -157,6 +157,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--all", action="store_true", help="include invalidated memories")
     p.add_argument("-c", "--category", action="append", default=None,
                    help="restrict to a category (repeatable)")
+    p.add_argument("--entity", default=None, help="restrict to an exact entity ID")
+    p.add_argument("--since", default=None, help="created on/after YYYY-MM-DD")
+    p.add_argument("--until", default=None, help="created on/before YYYY-MM-DD")
 
     p = sub.add_parser("entities", help="inspect and disambiguate entities")
     entity_sub = p.add_subparsers(dest="entities_command")
@@ -258,10 +261,10 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
-    p = sub.add_parser("export", help="export memories as JSONL to stdout")
+    p = sub.add_parser("export", help="export a lossless JSON backup to stdout")
     _scope_args(p)
 
-    p = sub.add_parser("import", help="import memories from a JSONL file (verbatim)")
+    p = sub.add_parser("import", help="restore a Memry backup or import legacy JSON/JSONL")
     p.add_argument("path")
 
     sub.add_parser("config", help="print resolved configuration (keys redacted)")
@@ -279,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "mcp":
         from .mcp_server import main as mcp_main
 
-        mcp_main(transport=args.transport, host=args.host, port=args.port)
+        mcp_main()
         return 0
 
     if args.command == "serve":
@@ -360,7 +363,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "search":
             results = store.search(
                 args.query, user_id=args.user, agent_id=args.agent, run_id=args.run,
-                limit=args.limit, categories=args.category,
+                limit=args.limit, categories=args.category, entity_id=args.entity,
+                since=args.since, until=args.until,
             )
             _print(
                 [
@@ -373,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
             memories = store.get_all(
                 user_id=args.user, agent_id=args.agent, run_id=args.run,
                 include_invalid=args.all, limit=args.limit, categories=args.category,
+                entity_id=args.entity, since=args.since, until=args.until,
             )
             _print([m.model_dump(exclude={"metadata", "source_episode_ids"}) for m in memories])
         elif args.command == "context":
@@ -438,16 +443,24 @@ def main(argv: list[str] | None = None) -> int:
             count = store.reindex()
             _print({"reindexed": count, "embedder": store.embedder.model_id})
         elif args.command == "export":
-            for memory in store.get_all(
+            backup = store.export_backup(
                 user_id=args.user, agent_id=args.agent, run_id=args.run,
-                include_invalid=True, limit=1_000_000,
-            ):
-                print(memory.model_dump_json())
+            )
+            print(json.dumps(backup, ensure_ascii=False))
         elif args.command == "import":
             with open(args.path, encoding="utf-8") as fh:
-                rows = [json.loads(line) for line in fh if line.strip()]
-            result = store.import_verbatim(rows)
-            _print({k: v for k, v in result.items() if k != "memory_ids"})
+                text = fh.read().strip()
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                payload = [json.loads(line) for line in text.splitlines() if line.strip()]
+            if isinstance(payload, dict) and payload.get("format") == "memry-backup":
+                result = store.import_backup(payload)
+            else:
+                rows = payload if isinstance(payload, list) else [payload]
+                result = store.import_verbatim(rows)
+                result = {k: v for k, v in result.items() if k != "memory_ids"}
+            _print(result)
     finally:
         store.close()
     return 0

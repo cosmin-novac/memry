@@ -32,6 +32,7 @@ def hybrid_search(
     cfg: RetrievalConfig | None = None,
     include_invalid: bool = False,
     categories: list[str] | None = None,
+    entity_id: str | None = None,
     now: datetime | None = None,
 ) -> list[SearchResult]:
     cfg = cfg or RetrievalConfig()
@@ -42,12 +43,26 @@ def hybrid_search(
     # circuit the vector/keyword fusion but still get recency/importance boosts.
     native = backend.native_search(query, scope, n)
     if native is not None:
+        if categories:
+            wanted = {value.strip().casefold() for value in categories if value.strip()}
+            native = [
+                (memory, score) for memory, score in native
+                if wanted & {value.casefold() for value in memory.categories}
+            ]
+        if entity_id:
+            allowed = {
+                memory.id for memory in backend.entity_memories(
+                    entity_id, limit=n, include_invalid=include_invalid
+                )
+            }
+            native = [(memory, score) for memory, score in native if memory.id in allowed]
         memories = {m.id: m for m, _ in native}
         fused = {m.id: s for m, s in native}
         signals_by_id = {m.id: {"native": s} for m, s in native}
     else:
         keyword = backend.keyword_search(
-            query, scope, n, include_invalid=include_invalid, categories=categories
+            query, scope, n, include_invalid=include_invalid, categories=categories,
+            entity_id=entity_id,
         )
         vector: list[tuple[Memory, float]] = []
         if embedder.dimensions:
@@ -56,6 +71,7 @@ def hybrid_search(
                 vector = backend.vector_search(
                     qvec, embedder.model_id, scope, n,
                     include_invalid=include_invalid, categories=categories,
+                    entity_id=entity_id,
                 )
             except Exception:
                 vector = []  # embedding service down -> degrade to keyword-only

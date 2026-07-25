@@ -36,5 +36,4 @@ Thumbs.db
 *.local.py
 *.local.txt
 .remember/
-docs/assets/login-memry.png
-docs/assets/added-to-chatgpt.png
+local/

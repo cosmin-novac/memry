@@ -1,18 +1,12 @@
-"""Mem0 adapter backend (optional: ``pip install memry[mem0]``).
+"""Mem0 comparison/import adapter (optional: pip install memry[mem0]).
 
-Delegates storage + retrieval to the mem0 OSS engine while keeping Memry's
-intelligence layer in charge: memories are written with ``infer=False`` so
-mem0 never runs its own extraction - our extraction/reconciliation decides
-what gets stored.
+This module is never selected by Config, the CLI, REST, MCP, or either server.
+Comparison and import code may instantiate it directly when it needs to read
+or exercise Mem0 through Memry's storage interface.
 
-Why this exists:
-- interop / migration path for existing mem0 deployments;
-- an apples-to-apples baseline inside the memry eval harness.
-
-Known caveats (documented, by design - these are exactly the gaps the local
-backend fills): no raw-episode store, no temporal invalidation (invalidate
-falls back to hard delete), and event history is limited to what
-``mem0.history()`` records.
+It is deliberately incomplete: Mem0 has no Memry raw-episode store or temporal
+invalidation, and event history is limited to what mem0.history() returns.
+It must not be used as persistence for a running Memry product.
 """
 
 from __future__ import annotations
@@ -34,13 +28,13 @@ def _scope_kwargs(scope: Scope) -> dict[str, str]:
     return kwargs
 
 
-class Mem0Backend(MemoryBackend):
-    def __init__(self, config: Any) -> None:
+class Mem0ComparisonAdapter(MemoryBackend):
+    def __init__(self) -> None:
         try:
             from mem0 import Memory as Mem0Memory
         except ImportError as exc:  # pragma: no cover - env dependent
             raise RuntimeError(
-                "The mem0 backend requires mem0ai: pip install 'memry[mem0]'"
+                "The Mem0 comparison adapter requires mem0ai: pip install 'memry[mem0]'"
             ) from exc
         self._m = Mem0Memory()
 
@@ -111,11 +105,27 @@ class Mem0Backend(MemoryBackend):
         return self._record_to_memory(rec) if rec else None
 
     def list_memories(
-        self, scope: Scope, *, include_invalid: bool = False, limit: int = 100, offset: int = 0
+        self,
+        scope: Scope,
+        *,
+        include_invalid: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+        categories: list[str] | None = None,
+        entity_id: str | None = None,
     ) -> list[Memory]:
-        result = self._m.get_all(**_scope_kwargs(scope), limit=limit)
+        if entity_id:
+            return []  # the reduced Mem0 adapter has no stable entity IDs
+        result = self._m.get_all(**_scope_kwargs(scope), limit=limit + offset)
         records = result.get("results", []) if isinstance(result, dict) else (result or [])
-        return [self._record_to_memory(r) for r in records]
+        memories = [self._record_to_memory(r) for r in records]
+        if categories:
+            wanted = {value.strip().casefold() for value in categories if value.strip()}
+            memories = [
+                memory for memory in memories
+                if wanted & {value.casefold() for value in memory.categories}
+            ]
+        return memories[offset : offset + limit]
 
     # -- search ------------------------------------------------------------
     def native_search(self, query: str, scope: Scope, limit: int = 20):
@@ -125,10 +135,16 @@ class Mem0Backend(MemoryBackend):
             (self._record_to_memory(r), float(r.get("score", 0.0) or 0.0)) for r in records
         ]
 
-    def vector_search(self, embedding, embedding_model, scope, limit=20, include_invalid=False):
+    def vector_search(
+        self, embedding, embedding_model, scope, limit=20, include_invalid=False,
+        categories=None, entity_id=None,
+    ):
         return []  # native_search covers retrieval for this backend
 
-    def keyword_search(self, query, scope, limit=20, include_invalid=False):
+    def keyword_search(
+        self, query, scope, limit=20, include_invalid=False,
+        categories=None, entity_id=None,
+    ):
         return []  # native_search covers retrieval for this backend
 
     # -- events --------------------------------------------------------------

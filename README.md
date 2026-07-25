@@ -10,13 +10,13 @@ memry mcp        # your agent now has long-term memory
 Memry gives any MCP-capable agent - Claude Code, Claude Desktop, Cursor, Windsurf,
 Codex - durable long-term memory. It distills conversations into discrete facts,
 reconciles each new fact against what it already knows, and serves the result back as
-token-budgeted context. All memory state is a single SQLite file on your machine: no vector
+token-budgeted context. All knowledge state is a single SQLite file on your machine: no vector
 database, no queue, no cloud account, and it works with zero API keys.
 
 ## Why Memry
 
 **It runs anywhere, with nothing.** The default install needs no services and no keys:
-storage is one SQLite file, retrieval falls back to FTS5 BM25 plus deterministic hash
+knowledge storage is one SQLite file, retrieval falls back to FTS5 BM25 plus deterministic hash
 embeddings, and writes are stored verbatim. Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`
 and the same pipeline upgrades itself to LLM extraction and real embeddings. Local-first
 is the default, not a demo mode.
@@ -62,9 +62,9 @@ accounts. Off by default: the single-user path stays keyless. See
 [docs/self-hosting.md](docs/self-hosting.md#accounts-and-oauth).
 
 **You can measure it.** A built-in eval harness scores retrieval (recall@k, MRR, latency
-percentiles) deterministically and offline, and the pluggable backend interface includes
-a [Mem0](https://github.com/mem0ai/mem0) adapter so you can benchmark against it under
-identical conditions.
+percentiles) deterministically and offline. An optional
+[Mem0](https://github.com/mem0ai/mem0) adapter lets comparison or import tooling read and
+exercise Mem0 under the same interface; it cannot be selected as Memry's runtime store.
 
 ## Quickstart
 
@@ -164,8 +164,8 @@ memry serve --host 0.0.0.0 --port 8787
 # MCP (HTTP): http://localhost:8787/mcp
 ```
 
-The dashboard shows your memories with inline editing, search, JSONL
-export/import, a unified Knowledge area, and a galaxy map of your topics: heavily-used topics gravitate to
+The dashboard shows your memories with inline editing, filtered search, lossless JSON
+backup/restore, a unified Knowledge area, and a galaxy map of your topics: heavily-used topics gravitate to
 the gold core, the working set orbits in the teal belt, and one-off topics
 drift at the violet rim. Links are co-occurrence; click a planet to filter.
 
@@ -257,8 +257,8 @@ Everything works with defaults. Override via env vars, `~/.memry/config.json`, o
 
 | Env var | Default | Notes |
 |---|---|---|
-| `MEMRY_DB_PATH` | `~/.memry/memry.db` | single SQLite file |
-| `MEMRY_BACKEND` | `local` | `local` \| `mem0` (needs `memry[mem0]`) |
+| `MEMRY_DB_PATH` | `~/.memry/memry.db` | knowledge SQLite file; back it up with `auth.db` when accounts are enabled |
+| `MEMRY_AUTH_DB_PATH` | next to `MEMRY_DB_PATH` as `auth.db` | accounts and OAuth; include it in every complete server backup |
 | `MEMRY_DEFAULT_USER` | `default` | user scope when the agent doesn't pass one |
 | `MEMRY_LLM_PROVIDER` | auto | `anthropic` \| `openai` \| `ollama` \| `none` - auto-detected from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` |
 | `MEMRY_LLM_MODEL` | per provider | `claude-opus-4-8` / `gpt-5-mini` / `llama3.1` (use `claude-haiku-4-5` for cheaper extraction) |
@@ -288,12 +288,12 @@ src/memry/
   config.py            # env + file config, provider auto-detection
   store.py             # MemoryStore - the public API
   retrieval.py         # hybrid search: RRF + recency + importance
-  backends/            # production SQLite engine + optional Mem0 eval adapter
+  backends/            # storage contract + the production SQLite engine
   intelligence/        # extraction, reconciliation, decay, context building
   providers/           # LLMs (Anthropic/OpenAI/Ollama) & embeddings (+hash fallback)
   mcp_server.py        # MCP tools (stdio + streamable HTTP)
   rest.py              # REST API + dashboard + /mcp mount
-  evals/               # retrieval eval harness
+  evals/               # retrieval eval harness; supports explicit comparison adapters
 ```
 
 ## Development

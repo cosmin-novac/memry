@@ -2,8 +2,7 @@
 
 This document records the architecture that exists in the repository, the product reason
 for each consequential choice, and the limits that follow from it. It is descriptive, not
-a roadmap. Planned knowledge-model work is tracked separately in
-[knowledge-model-features.md](knowledge-model-features.md).
+a roadmap.
 
 ## 1. Product topology
 
@@ -25,9 +24,12 @@ Agents and applications
     intelligence and retrieval
               |
        LocalBackend (SQLite)
-        |-- memry.db: product data and search indexes
-        |-- auth.db: runtime accounts and OAuth state, when used
+        |-- memry.db: knowledge data and search indexes
         `-- *.usearch: optional rebuildable ANN sidecars
+
+    account and OAuth store
+              |
+        auth.db: accounts, sessions, clients, and tokens
 ```
 
 The VPS bundle adds Caddy in front of the single Memry process for HTTPS and reverse
@@ -36,8 +38,9 @@ proxying. There is no supported horizontally scaled or active-active write topol
 ### Why SQLite is the only production store
 
 The actual product requirement is a self-hosted memory service that is cheap to install,
-backup, and operate. One SQLite file satisfies that requirement and is already the storage
-used by the shipped Docker and VPS deployments. Maintaining a second SQL implementation
+backup, and operate. SQLite satisfies that requirement without an external database
+service and is already used by the shipped Docker and VPS deployments. Maintaining a
+second SQL implementation
 did not serve a demonstrated customer deployment and made every schema or knowledge
 feature require two implementations, two migrations, and two test paths. PostgreSQL was
 therefore removed.
@@ -66,6 +69,18 @@ load target, or product requirement that needed that topology. A later history r
 folded the change into root commit `6e74c9c902f1198ef135777b3f642d74d2519e68`. The
 SQLite-only decision reverses that unsupported architecture choice explicitly.
 
+### Why Mem0 is comparison/import-only
+
+Mem0 runtime selection was removed on 2026-07-24. Its reduced adapter cannot preserve
+Memry episodes, invalidation history, normalized topics, entity links, relations,
+descriptions, or collections. Offering it as a runtime setting therefore made the same
+product silently behave differently and lose features depending on one environment
+variable. No user or deployment depended on that mode.
+
+The business decision is one complete runtime product on SQLite. The optional `mem0ai`
+dependency and adapter remain available only to explicit comparison/import code, where
+those limits are visible and intentional.
+
 ## 2. Main layers
 
 | Layer | Responsibility | Important rule |
@@ -76,12 +91,11 @@ SQLite-only decision reverses that unsupported architecture choice explicitly.
 | Retrieval | FTS5/BM25, vectors, reciprocal-rank fusion, recency/importance, entity graph expansion | Invalidated evidence is excluded by default and work is bounded. |
 | Providers | LLM and embedding integrations | External providers are optional; zero-key fallbacks remain functional. |
 | Production persistence | `LocalBackend` | SQLite is the sole production source of truth. |
-| Evaluation adapter | `Mem0Backend` | Optional and reduced; it is for interop/benchmarking, not a second production contract. |
 
-The `MemoryBackend` interface remains useful for isolating persistence in tests and for the
-Mem0 comparison adapter. It must not be interpreted as a promise that every adapter
-supports every Memry feature. Silent default no-ops in that interface are listed as a
-cleanup risk in [duplication-audit.md](duplication-audit.md).
+The `MemoryBackend` interface isolates persistence and permits explicit test fixtures.
+`MemoryStore` always constructs `LocalBackend` in normal operation. The optional Mem0
+adapter can only be instantiated directly by comparison/import code; there is no config,
+environment variable, CLI flag, REST option, or server option that selects it.
 
 ## 3. Stored knowledge model
 
@@ -99,13 +113,14 @@ A memory has content, one memory type, importance, public `categories`, compatib
 IDs, and validity fields (`valid_from`, `invalid_at`, `superseded_by`). The validity fields
 preserve old claims instead of pretending that the latest claim erased history.
 
-### Topics
+### Tags (backend names: categories and topics)
 
-Topics are deterministic classification labels such as `health` or `finance`. Their
-canonical storage is the normalized `topics` table plus the indexed `memory_topics` join.
-The public field and API name remains `categories` for compatibility. During the migration
-window, the JSON category list is also written as a compatibility projection; it is not a
-second knowledge concept.
+The product and dashboard call deterministic classification labels such as `health` or
+`finance` **tags**. The existing Python/REST field remains `categories`. Internally, the
+normalized `topics` table plus the indexed `memory_topics` join provides canonicalization,
+hierarchy, counts, and filtering. The memory's JSON `categories` list is the public projection
+returned with each memory. Both are updated together deliberately; they are not competing
+knowledge concepts and no rename or data migration is planned.
 
 Mechanical separator and singular/plural duplicates are merged deterministically once two
 real stored labels map to the same form. Semantic synonym merges remain reviewable.
@@ -163,6 +178,12 @@ For `store.add(...)`:
 6. Store evidence-grounded relations whose endpoints resolved in that memory.
 7. Append audit events.
 
+When existing memory text is edited manually or rewritten by reconciliation, Memry analyzes
+the final text before committing the change and replaces that memory's entity-name snapshot
+and authoritative mention links together. A failed LLM analysis leaves the old text and links
+unchanged. In zero-key mode, existing links are retained or removed by exact known-alias
+matching; discovering a brand-new entity still requires an LLM.
+
 Entity descriptions and synthetic topic hierarchy are not mandatory write-path work. This
 keeps ingestion latency and provider cost bounded.
 
@@ -187,9 +208,14 @@ requests history.
 ## 6. Product surfaces and security
 
 - The Python API and `memry` CLI expose the same store workflows.
-- MCP runs locally over stdio or remotely over streamable HTTP.
-- `memry serve` hosts REST, the dashboard, OAuth endpoints when enabled, and `/mcp` in one
-  Starlette/Uvicorn process.
+- `memry mcp` runs only the local stdio transport.
+- Remote streamable HTTP/HTTPS MCP is available at `/mcp` only through `memry serve`, which
+  hosts REST, the dashboard, OAuth endpoints when enabled, and MCP in one Starlette/Uvicorn
+  process. Caddy supplies HTTPS in the VPS bundle.
+- The standalone `memry mcp --transport http` launcher was removed on 2026-07-24. Removing it
+  does not affect local stdio clients or remote clients pointed at a `memry serve` URL. It
+  removes an MCP-only network server that bypassed Memry's account, OAuth, and bearer-key
+  middleware and otherwise acted as the global administrator.
 - A single operator bearer key, configured tenants, or runtime accounts can authenticate
   network calls. The operator key is the explicit global credential. The oldest/first runtime
   account is persisted as bootstrap administrator but is memory-confined to the existing
@@ -204,9 +230,17 @@ requests history.
 - The dashboard uses an HTTP-only session cookie. OAuth discovery is mounted at the domain
   root; MCP is mounted at `/mcp`.
 
-Runtime accounts and OAuth state currently live in `auth.db`, separate from `memry.db`.
-That is current behavior, not an assertion that two database files are ideal; the
-consolidation option is recorded in the duplication audit.
+### Why memory and login data use separate files
+
+This separation was kept deliberately on 2026-07-24. `memry.db` contains knowledge and
+search data. `auth.db` contains accounts, password hashes, sessions, OAuth clients, and
+tokens. As a result, knowledge export, import, or reset cannot overwrite who can log in or
+invalidate credentials accidentally. That is the product benefit.
+
+The cost is operational: a complete server backup must include both `memry.db` and
+`auth.db` from the same point in time. They live in the same directory by default and in
+the same Docker data volume, so one coordinated directory or volume snapshot captures
+both. `memry export` is a lossless knowledge backup only; it does not contain login data.
 
 ## 7. Technologies used
 
@@ -222,7 +256,7 @@ it.
 | SQLite through Python `sqlite3` | Yes | Sole production persistence for memories; also the current runtime account/OAuth store. |
 | SQLite WAL | Yes for file databases | Permits reads while the single server process serializes writes. |
 | SQLite FTS5 | Yes | Content index and BM25 keyword retrieval. |
-| SQLite JSON1 | Yes during compatibility migration | Reads legacy category JSON and metadata aliases; normalized topic links are the indexed path. |
+| SQLite JSON1 | Yes | Reads the public `categories` projection and metadata aliases; normalized topic links are the indexed path. |
 | NumPy | Yes | Float32 embeddings, exact cosine scoring, clustering, and vector math. |
 | Pydantic 2 | Yes | Configuration and typed domain/API models. |
 | JSON and JSONL | Yes | Configuration values, REST payloads, exports/imports, provider structured output, and eval datasets. |
@@ -255,7 +289,7 @@ it.
 | Voyage embeddings HTTP API | Optional | Alternative semantic embeddings. |
 | Ollama HTTP API | Optional | Local LLM and embedding provider. |
 | usearch HNSW | Optional extra `memry[ann]` | Persistent approximate-nearest-neighbor candidate sidecars for larger stores. |
-| Mem0 / `mem0ai` | Optional extra `memry[mem0]` | Reduced interop and comparison adapter, not a full production backend. |
+| Mem0 / `mem0ai` | Optional extra `memry[mem0]` | Used only when comparison/import code explicitly instantiates the reduced adapter; never selected by the running product. |
 
 ### Build, test, and deployment
 
@@ -272,9 +306,9 @@ it.
 ## 8. Current limits and non-promises
 
 - One Memry process owns a production database. Multiple write replicas are unsupported.
-- SQLite and `auth.db` backups must be coordinated; ANN sidecars may be discarded and
+- Complete backups must capture `memry.db` and `auth.db` together; ANN sidecars may be discarded and
   rebuilt.
-- The Mem0 adapter does not implement the complete knowledge contract.
+- The Mem0 adapter is comparison/import-only and is not a supported runtime persistence path.
 - There is no external IdP/SSO integration, per-key rate limiter, queue, separate vector
   database, or distributed cache.
 - Description faithfulness and end-to-end memory quality still require public evaluation;
@@ -282,10 +316,16 @@ it.
 - Exact inline entity highlighting is deferred because mention surfaces do not provide
   unambiguous character spans. Reliable entity chips are the shipped navigation path.
 
-## 9. Decision discipline
+## 9. Decision record
 
-Consequential architecture changes must be recorded with product need, alternatives,
-business benefit, costs, migration, and validation before implementation. Accepted
-knowledge-model decisions and their live status are maintained in
-[knowledge-model-features.md](knowledge-model-features.md). Potential simplifications are
-listed without silently applying them in [duplication-audit.md](duplication-audit.md).
+| Decision | Product reason | Implemented? |
+|---|---|---:|
+| SQLite is the only runtime database | One complete, cheap self-hosted product is more valuable than maintaining an unused second SQL implementation. | Yes |
+| Mem0 is comparison/import-only | Its adapter cannot preserve the complete Memry knowledge model and no runtime user depended on it. | Yes |
+| Knowledge and login data remain in `memry.db` and `auth.db` | Knowledge restore/reset cannot overwrite credentials; a complete server backup must capture both files together. | Yes |
+| Local MCP uses `memry mcp`; remote MCP uses `/mcp` from `memry serve` | This preserves local zero-port use and one network server where configured authentication is applied. The separate unauthenticated HTTP launcher added risk without a used product case. | Yes |
+| Edited memory text is re-analyzed for entity links | Entity chips and entity filters must describe the current text, not names left behind by an older version. | Yes |
+| The UI says tags; the public backend field remains `categories`; normalized storage remains `topics`/`memory_topics` | Users get one familiar word without a breaking API/schema rename. | Yes |
+
+Any future consequential architecture change must be added here with its product reason and
+implementation status before it is treated as decided work.

@@ -6,6 +6,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from memry.config import Config
+from memry.models import Entity, EntityMention
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
 from memry.rest import create_app
@@ -19,6 +20,14 @@ def _seed(store):
     store.add("berlin trip", user_id="ada", infer=False, categories=["travel"])
     store.add("amsterdam move", user_id="ada", infer=False, categories=["travel", "home"])
     store.add("dark mode", user_id="ada", infer=False, categories=["prefs"])
+    berlin = next(m for m in store.get_all(user_id="ada") if m.content == "berlin trip")
+    entity = store.backend.insert_entity(Entity(
+        name="Berlin", normalized="berlin", entity_type="place", user_id="ada"
+    ))
+    store.backend.add_mention(EntityMention(
+        entity_id=entity.id, memory_id=berlin.id, surface="Berlin"
+    ))
+    return entity.id
 
 
 @pytest.fixture
@@ -62,6 +71,19 @@ def test_get_all_filters_by_tag(store):
     assert [m.content for m in prefs] == ["dark mode"]
 
 
+def test_entity_filter_uses_exact_mentions_and_intersects_with_topics(store):
+    entity_id = store.entities(user_id="ada")[0].id
+    assert [m.content for m in store.get_all(user_id="ada", entity_id=entity_id)] == [
+        "berlin trip"
+    ]
+    hits = store.search("trip", user_id="ada", entity_id=entity_id)
+    assert [hit.memory.content for hit in hits] == ["berlin trip"]
+    assert store.search(
+        "", user_id="ada", entity_id=entity_id, categories=["prefs"]
+    ) == []
+    assert store.get_all(user_id="ada", entity_id="missing") == []
+
+
 def test_get_all_date_window_excludes_everything_in_the_future(store):
     assert store.get_all(user_id="ada", since="2999-01-01") == []
     assert len(store.get_all(user_id="ada", since="2000-01-01")) == 3
@@ -70,7 +92,7 @@ def test_get_all_date_window_excludes_everything_in_the_future(store):
 # ---------------------------------------------------------------- over REST + MCP
 def test_rest_search_accepts_date_and_tag_filters():
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
-    _seed(store)
+    entity_id = _seed(store)
     with TestClient(create_app(store)) as client:
         # tag browse with empty query
         r = client.post("/api/v1/search", json={"query": "", "categories": ["travel"]})
@@ -81,3 +103,17 @@ def test_rest_search_accepts_date_and_tag_filters():
         # list endpoint takes the same filters as query params
         r = client.get("/api/v1/memories", params={"categories": "prefs"})
         assert [m["content"] for m in r.json()] == ["dark mode"]
+        # entity IDs use exact mention links and intersect with topic filters
+        r = client.post("/api/v1/search", json={"query": "", "entity_id": entity_id})
+        assert [h["memory"]["content"] for h in r.json()] == ["berlin trip"]
+        r = client.get("/api/v1/memories", params={
+            "entity_id": entity_id, "categories": "prefs"
+        })
+        assert r.json() == []
+        assert client.post(
+            "/api/v1/search", json={"query": "", "entity_id": "missing"}
+        ).status_code == 404
+        page = client.get("/").text
+        assert all(marker in page for marker in (
+            'id="filter-date"', 'id="filter-topic"', 'id="filter-entity"'
+        ))

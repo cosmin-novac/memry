@@ -118,19 +118,33 @@ adds a second way in.
 
 ## Backups
 
-All state is one SQLite file in the `memry_memry-data` volume:
+The `memry_memry-data` volume contains two durable SQLite files when accounts are used:
+
+- `memry.db` - knowledge, search indexes, provenance, relations, and history;
+- `auth.db` - accounts, password hashes, sessions, OAuth clients, and tokens.
+
+A complete server backup must capture both files from the same point in time. Prefer a
+snapshot of the whole `memry_memry-data` volume. If your provider cannot snapshot Docker
+volumes, stop the Memry service, copy both database files (and any `-wal`/`-shm` files),
+then start it again. Do not treat a live copy of only `memry.db` as a full backup.
+
+`memry export` creates a lossless **knowledge-only** backup. It is useful in addition to
+the volume backup, but it does not contain login or OAuth data from `auth.db`:
 
 ```bash
 docker compose --env-file /opt/memry/.env \
   -f /opt/memry/app/deploy/vps/docker-compose.yml \
-  exec memry sh -c "memry export" > backup.jsonl
+  exec -T memry memry export > backup.json
 ```
 
-or snapshot the volume itself. A nightly cron line on the VPS is enough:
+A nightly knowledge export can use:
 
 ```bash
-0 3 * * * docker compose --env-file /opt/memry/.env -f /opt/memry/app/deploy/vps/docker-compose.yml exec -T memry memry export > /root/memry-backup-$(date +\%F).jsonl
+0 3 * * * docker compose --env-file /opt/memry/.env -f /opt/memry/app/deploy/vps/docker-compose.yml exec -T memry memry export > /root/memry-knowledge-$(date +\%F).json
 ```
+
+Schedule the coordinated volume snapshot separately; the cron line above is not a complete
+account-enabled server backup.
 
 ## Uninstall
 

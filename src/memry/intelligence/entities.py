@@ -264,10 +264,12 @@ def resolve_mentions(
     memory_content: str,
     surfaces: list[str],
     types: dict[str, str] | None = None,
+    attach: bool = True,
 ) -> dict[str, Entity]:
     """Attach a memory's entity mentions, creating/reusing entities per the
     conservative policy. Returns a map of normalized surface -> entity, so the
-    caller can resolve relation triples to the entities they linked to."""
+    caller can resolve relation triples to the entities they linked to. Pass
+    ``attach=False`` when the caller will replace all mentions atomically."""
     types = types or {}
     resolved: dict[str, Entity] = {}
     for surface in surfaces:
@@ -327,9 +329,10 @@ def resolve_mentions(
                         )
                     )
 
-        backend.add_mention(
-            EntityMention(entity_id=target.id, memory_id=memory_id, surface=surface)
-        )
+        if attach:
+            backend.add_mention(
+                EntityMention(entity_id=target.id, memory_id=memory_id, surface=surface)
+            )
         resolved[normalized] = target
     return resolved
 

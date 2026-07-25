@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from conftest import fact, facts_response, decision
 
 
@@ -388,3 +390,44 @@ def test_confirm_merge_follows_already_merged_endpoint(verbatim_store):
     assert verbatim_store.confirm_merge(legacy.id)
     assert backend.get_proposal(legacy.id).status == "confirmed"
     assert backend.resolve_entity_id(old.id) == keep.id
+
+
+def test_memory_edit_reanalyzes_and_replaces_entity_links(store, fake_llm):
+    from memry.models import Entity, EntityMention, Memory
+
+    backend = store.backend
+    old_entity = backend.insert_entity(Entity(name="Cosmin", user_id="ada"))
+    memory = backend.insert_memory(
+        Memory(content="Cosmin is a good student.", entities=["Cosmin"], user_id="ada")
+    )
+    backend.add_mention(
+        EntityMention(entity_id=old_entity.id, memory_id=memory.id, surface="Cosmin")
+    )
+    fake_llm.queue(
+        facts_response(fact("Ada is a good student.", entities=["Ada"]))
+    )
+
+    updated = store.update(memory.id, content="Ada is a good student.")
+
+    assert updated.entities == ["Ada"]
+    assert [entity.name for entity in backend.entities_of_memory(memory.id)] == ["Ada"]
+    assert backend.entity_memories(old_entity.id) == []
+
+
+def test_memory_edit_analysis_failure_keeps_text_and_links(store):
+    from memry.models import Entity, EntityMention, Memory
+
+    backend = store.backend
+    entity = backend.insert_entity(Entity(name="Cosmin", user_id="ada"))
+    memory = backend.insert_memory(
+        Memory(content="Cosmin is a good student.", entities=["Cosmin"], user_id="ada")
+    )
+    backend.add_mention(
+        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Cosmin")
+    )
+
+    with pytest.raises(ValueError, match="entity re-analysis failed"):
+        store.update(memory.id, content="Ada is a good student.")
+
+    assert backend.get_memory(memory.id).content == "Cosmin is a good student."
+    assert [linked.id for linked in backend.entities_of_memory(memory.id)] == [entity.id]
