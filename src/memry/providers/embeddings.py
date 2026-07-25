@@ -38,6 +38,10 @@ class Embedder(ABC):
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts. Returns one vector per input."""
 
+    def close(self) -> None:
+        """Release reusable provider connections."""
+        return None
+
 
 class NoneEmbedder(Embedder):
     """No embeddings: retrieval degrades to keyword (BM25) + recency + importance."""
@@ -100,15 +104,18 @@ class OpenAIEmbedder(Embedder):
         self.base_url = (cfg.base_url or "https://api.openai.com").rstrip("/")
         self.api_key = cfg.api_key or os.environ.get("OPENAI_API_KEY", "")
         self.timeout = cfg.timeout
+        self._client = httpx.Client(timeout=self.timeout)
+
+    def close(self) -> None:
+        self._client.close()
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        resp = httpx.post(
+        resp = self._client.post(
             f"{self.base_url}/v1/embeddings",
             headers={"Authorization": f"Bearer {self.api_key}"},
             json={"model": self._model, "input": texts},
-            timeout=self.timeout,
         )
         resp.raise_for_status()
         data = sorted(resp.json()["data"], key=lambda d: d["index"])
@@ -123,14 +130,17 @@ class OllamaEmbedder(Embedder):
         self.dimensions = cfg.dimensions or 768
         self.base_url = (cfg.base_url or "http://localhost:11434").rstrip("/")
         self.timeout = cfg.timeout
+        self._client = httpx.Client(timeout=self.timeout)
+
+    def close(self) -> None:
+        self._client.close()
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        resp = httpx.post(
+        resp = self._client.post(
             f"{self.base_url}/api/embed",
             json={"model": self._model, "input": texts},
-            timeout=self.timeout,
         )
         resp.raise_for_status()
         return resp.json()["embeddings"]
@@ -149,15 +159,18 @@ class VoyageEmbedder(Embedder):
         self.base_url = (cfg.base_url or "https://api.voyageai.com").rstrip("/")
         self.api_key = cfg.api_key or os.environ.get("VOYAGE_API_KEY", "")
         self.timeout = cfg.timeout
+        self._client = httpx.Client(timeout=self.timeout)
+
+    def close(self) -> None:
+        self._client.close()
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        resp = httpx.post(
+        resp = self._client.post(
             f"{self.base_url}/v1/embeddings",
             headers={"Authorization": f"Bearer {self.api_key}"},
             json={"model": self._model, "input": texts},
-            timeout=self.timeout,
         )
         resp.raise_for_status()
         data = sorted(resp.json()["data"], key=lambda d: d["index"])

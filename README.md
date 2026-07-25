@@ -10,8 +10,8 @@ memry mcp        # your agent now has long-term memory
 Memry gives any MCP-capable agent - Claude Code, Claude Desktop, Cursor, Windsurf,
 Codex - durable long-term memory. It distills conversations into discrete facts,
 reconciles each new fact against what it already knows, and serves the result back as
-token-budgeted context. All knowledge state is a single SQLite file on your machine: no vector
-database, no queue, no cloud account, and it works with zero API keys.
+token-budgeted context. All knowledge state is a single SQLite file on your machine: no external vector
+database or queue service, no cloud account, and it works with zero API keys.
 
 ## Why Memry
 
@@ -130,8 +130,9 @@ troubleshooting: [docs/connect-claude-ai.md](docs/connect-claude-ai.md).
 The server exposes `save_memories`, `search_memories`, `get_memory_context`,
 `list_memories`, `list_categories`, `update_memory`, `delete_memory`,
 `memory_history`, and `memory_stats`. Agents are instructed to recall context
-at the start of a task, save durable facts as they appear, and check the
-`warnings` field on saves (it reports anything distillation dropped).
+at the start of a task and save durable facts as they appear. With the default
+`infer=true`, `save_memories` acknowledges only after the exact text is stored;
+the response reports `enrichment: pending` while a managed worker distills it when an LLM is configured.
 
 ### As a Python library
 
@@ -222,8 +223,9 @@ memry eval --dataset evals/datasets/synthetic_v1.jsonl
 
 ```mermaid
 flowchart LR
-    A[conversation] --> E["episodes (immutable log)"]
-    A --> X[extraction]
+    A[conversation] --> E["episode + active pending memory"]
+    E --> ACK[durable acknowledgement]
+    E --> X[background extraction]
     X --> R{reconcile}
     R -->|new| ADD[add]
     R -->|refines| UPD[update in place]
@@ -233,23 +235,27 @@ flowchart LR
     UPD --> M
     SUP --> M
     Q[agent query] --> H[hybrid retrieval]
+    E --> H
     M --> H
     H --> C[token-budgeted context]
 ```
 
-1. **Episodes first.** Every message is stored verbatim before anything is derived from
-   it. Memories are an index; episodes are the source of truth.
-2. **Extraction.** An LLM distills discrete, self-contained facts with a type
-   (semantic / episodic / procedural), importance, categories, and entities. Without an
-   LLM key, messages are stored verbatim and everything still works.
-3. **Reconciliation.** Each fact is compared to its most similar existing memories:
+1. **Durable acknowledgement.** The MCP fast-save path commits the exact input as an
+   immutable episode and active, searchable pending memory before replying. That SQLite
+   row is also the recovery marker, so no external queue is required.
+2. **Managed enrichment.** One in-process worker drains small database batches. Each
+   payload is extracted separately so user scopes, provenance, and retries cannot mix.
+   Provider failure leaves the raw memory active and schedules a bounded-backoff retry;
+   restart recovery reads the same pending rows. Without an LLM key, they stay verbatim.
+3. **Reconciliation.** Each extracted fact is compared to similar active memories:
    duplicates are skipped, refinements rewrite in place, contradictions invalidate the
-   old memory and link it to its successor.
-4. **Retrieval.** BM25 and cosine similarity fused with reciprocal-rank fusion, then
-   boosted by recency and importance. Keyword-only when no embedder is configured.
+   old memory and link it to its successor. The pending raw memory is superseded only
+   after enrichment succeeds.
+4. **Retrieval.** BM25 and cosine similarity are fused with reciprocal-rank fusion, then
+   boosted by recency and importance. Pending raw memories are searchable immediately.
 5. **Forgetting.** Effective importance decays over time; `memry sweep` invalidates
-   memories that fall below threshold. Category filters (`memry search -c diet`) narrow
-   any query.
+   memories that fall below threshold. Tag filters (`memry search -c diet`) narrow any
+   query.
 
 ## Configuration
 
@@ -261,7 +267,7 @@ Everything works with defaults. Override via env vars, `~/.memry/config.json`, o
 | `MEMRY_AUTH_DB_PATH` | next to `MEMRY_DB_PATH` as `auth.db` | accounts and OAuth; include it in every complete server backup |
 | `MEMRY_DEFAULT_USER` | `default` | user scope when the agent doesn't pass one |
 | `MEMRY_LLM_PROVIDER` | auto | `anthropic` \| `openai` \| `ollama` \| `none` - auto-detected from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` |
-| `MEMRY_LLM_MODEL` | per provider | `claude-opus-4-8` / `gpt-5-mini` / `llama3.1` (use `claude-haiku-4-5` for cheaper extraction) |
+| `MEMRY_LLM_MODEL` | per provider | `claude-haiku-4-5` / `gpt-5-mini` / `llama3.1`; Haiku is the Anthropic default for lower save cost and enrichment latency |
 | `MEMRY_EMBEDDING_PROVIDER` | auto | `openai` \| `ollama` \| `voyage` \| `hash` \| `none` |
 | `MEMRY_API_KEY` | - | bearer token for the REST/MCP HTTP server |
 
@@ -287,6 +293,7 @@ src/memry/
   models.py            # Episode / Memory / MemoryEvent (bi-temporal, provenance)
   config.py            # env + file config, provider auto-detection
   store.py             # MemoryStore - the public API
+  enrichment.py        # managed pending-memory worker and restart recovery
   retrieval.py         # hybrid search: RRF + recency + importance
   backends/            # storage contract + the production SQLite engine
   intelligence/        # extraction, reconciliation, decay, context building

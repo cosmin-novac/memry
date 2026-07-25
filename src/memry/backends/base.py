@@ -69,6 +69,12 @@ class MemoryBackend(ABC):
         (for housekeeping like tagging/backfill/re-embedding, which must not
         reset a memory's recency or decay age)."""
 
+    def list_pending_memories(
+        self, limit: int = 100, *, due_before: str | None = None
+    ) -> list[Memory]:
+        """Active verbatim memories awaiting background enrichment."""
+        return []
+
     @abstractmethod
     def invalidate_memory(
         self, memory_id: str, *, superseded_by: str | None = None

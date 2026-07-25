@@ -49,6 +49,10 @@ class LLM(ABC):
     def complete(self, system: str, user: str, *, json_schema: dict[str, Any] | None = None) -> str:
         """Run one completion and return the text output."""
 
+    def close(self) -> None:
+        """Release reusable provider connections."""
+        return None
+
 
 class NoneLLM(LLM):
     """Placeholder when no LLM is configured; callers must check ``available``."""
@@ -84,6 +88,9 @@ class AnthropicLLM(LLM):
         self.max_tokens = cfg.max_tokens
         self.effort = cfg.effort
 
+    def close(self) -> None:
+        self._client.close()
+
     def complete(self, system: str, user: str, *, json_schema: dict[str, Any] | None = None) -> str:
         kwargs: dict[str, Any] = {}
         output_config: dict[str, Any] = {}
@@ -118,6 +125,10 @@ class OpenAILLM(LLM):
         self.api_key = cfg.api_key or os.environ.get("OPENAI_API_KEY", "")
         self.timeout = cfg.timeout
         self.effort = cfg.effort
+        self._client = httpx.Client(timeout=self.timeout)
+
+    def close(self) -> None:
+        self._client.close()
 
     def complete(self, system: str, user: str, *, json_schema: dict[str, Any] | None = None) -> str:
         body: dict[str, Any] = {
@@ -137,11 +148,10 @@ class OpenAILLM(LLM):
                 "type": "json_schema",
                 "json_schema": {"name": "result", "schema": json_schema},
             }
-        resp = httpx.post(
+        resp = self._client.post(
             f"{self.base_url}/v1/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
             json=body,
-            timeout=self.timeout,
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"] or ""
@@ -154,6 +164,10 @@ class OllamaLLM(LLM):
         self.model = cfg.resolved_model()
         self.base_url = (cfg.base_url or "http://localhost:11434").rstrip("/")
         self.timeout = cfg.timeout
+        self._client = httpx.Client(timeout=self.timeout)
+
+    def close(self) -> None:
+        self._client.close()
 
     def complete(self, system: str, user: str, *, json_schema: dict[str, Any] | None = None) -> str:
         body: dict[str, Any] = {
@@ -166,7 +180,7 @@ class OllamaLLM(LLM):
         }
         if json_schema is not None:
             body["format"] = json_schema
-        resp = httpx.post(f"{self.base_url}/api/chat", json=body, timeout=self.timeout)
+        resp = self._client.post(f"{self.base_url}/api/chat", json=body)
         resp.raise_for_status()
         return resp.json()["message"]["content"] or ""
 

@@ -27,7 +27,7 @@ LLMProvider = Literal["anthropic", "openai", "ollama", "none"]
 EmbeddingProvider = Literal["openai", "ollama", "voyage", "hash", "none"]
 
 DEFAULT_LLM_MODELS: dict[str, str] = {
-    "anthropic": "claude-opus-4-8",
+    "anthropic": "claude-haiku-4-5",
     "openai": "gpt-5-mini",
     "ollama": "llama3.1",
 }

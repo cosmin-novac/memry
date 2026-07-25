@@ -121,8 +121,8 @@ class CandidateFact(BaseModel):
     # entities; resolved to typed Relation edges after entity linking.
     relations: list[dict[str, str]] = Field(default_factory=list)
     # Carried onto the stored memory. Set to {"pending_distillation": True}
-    # when extraction was requested but skipped (no LLM / LLM failure), so the
-    # memory can be distilled later.
+    # when extraction is deferred or skipped, so a managed worker or explicit
+    # distillation can process the active verbatim memory later.
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

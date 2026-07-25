@@ -71,6 +71,11 @@ from .providers.llm import LLM, build_llm
 from .retrieval import hybrid_search
 
 
+_ENRICHMENT_KEY = "_enrichment"
+_ENRICHMENT_BATCH_SIZE = 8
+_ENRICHMENT_MAX_BACKOFF_SECONDS = 300
+
+
 def _owned(record: Any, owner_prefix: str | None) -> bool:
     """Ownership gate for every id-addressed operation.
 
@@ -241,6 +246,79 @@ class MemoryStore:
                     "them explicitly: " + "; ".join(missing)
                 )
         return AddResult(episode_ids=episode_ids, actions=actions, warnings=warnings)
+
+    def add_deferred(
+        self,
+        content: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        memory_type: MemoryType = "episodic",
+        importance: float = 0.5,
+        categories: list[str] | None = None,
+    ) -> AddResult:
+        """Durably save raw text for managed background enrichment.
+
+        This path performs no provider calls. The episode and searchable pending
+        memory are committed before the caller receives the result; the pending
+        metadata is the restart-safe work marker consumed by the server worker.
+        """
+        text = content.strip()
+        if not text:
+            return AddResult()
+        queued_at = utcnow()
+        episode = Episode(
+            content=text,
+            role="user",
+            user_id=user_id,
+            agent_id=agent_id,
+            run_id=run_id,
+            metadata=metadata or {},
+            created_at=queued_at,
+        )
+        pending_metadata = dict(metadata or {})
+        pending_metadata["pending_distillation"] = True
+        pending_metadata[_ENRICHMENT_KEY] = {
+            "status": "pending",
+            "attempts": 0,
+            "queued_at": queued_at,
+        }
+        memory = Memory(
+            content=text,
+            memory_type=memory_type,
+            user_id=user_id,
+            agent_id=agent_id,
+            run_id=run_id,
+            importance=importance,
+            categories=categories or [],
+            metadata=pending_metadata,
+            source_episode_ids=[episode.id],
+            created_at=queued_at,
+            updated_at=queued_at,
+        )
+        self.backend.add_episodes([episode])
+        self.backend.insert_memory(memory)
+        self.backend.add_event(
+            MemoryEvent(
+                memory_id=memory.id,
+                event="ADD",
+                new_content=text,
+                reason="durably queued for background enrichment",
+            )
+        )
+        return AddResult(
+            episode_ids=[episode.id],
+            actions=[
+                AddAction(
+                    event="ADD",
+                    memory_id=memory.id,
+                    content=memory.content,
+                    reason="pending background enrichment",
+                )
+            ],
+        )
 
     @staticmethod
     def _pending_verbatim(messages: list[dict[str, str]]) -> list[CandidateFact]:
@@ -610,6 +688,97 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """Restore a Memry backup exactly and transactionally."""
         return self.backend.import_backup(backup, owner_prefix=owner_prefix)
+
+    @staticmethod
+    def _clear_enrichment_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value for key, value in metadata.items()
+            if key not in ("pending_distillation", _ENRICHMENT_KEY)
+        }
+
+    def process_pending_enrichments(
+        self, limit: int = _ENRICHMENT_BATCH_SIZE
+    ) -> dict[str, Any]:
+        """Process one bounded batch of durable pending memories.
+
+        Each item keeps independent provenance and retry state. Work is batched
+        at the scheduler/database level, but different user payloads are never
+        merged into one prompt because that would mix provenance and failures.
+        """
+        summary: dict[str, Any] = {
+            "claimed": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "errors": [],
+        }
+        if not self.llm.available:
+            summary["blocked"] = "no LLM configured"
+            return summary
+        now = datetime.now(timezone.utc)
+        pending = self.backend.list_pending_memories(
+            max(1, limit), due_before=now.isoformat(timespec="seconds")
+        )
+        for memory in pending:
+            current = self.backend.get_memory(memory.id)
+            if (
+                current is None
+                or current.invalid_at is not None
+                or not current.metadata.get("pending_distillation")
+            ):
+                continue
+            job = dict(current.metadata.get(_ENRICHMENT_KEY) or {})
+            attempts = int(job.get("attempts") or 0) + 1
+            job.update(
+                {
+                    "status": "processing",
+                    "attempts": attempts,
+                    "last_started_at": utcnow(),
+                }
+            )
+            job.pop("next_attempt_at", None)
+            processing_metadata = dict(current.metadata)
+            processing_metadata[_ENRICHMENT_KEY] = job
+            self.backend.update_memory(
+                current.id, metadata=processing_metadata, touch=False
+            )
+            summary["claimed"] += 1
+            try:
+                result = self.distill(current.id)
+                if result is None:
+                    continue
+                summary["succeeded"] += 1
+            except Exception as exc:
+                latest = self.backend.get_memory(current.id)
+                if (
+                    latest is not None
+                    and latest.invalid_at is None
+                    and latest.metadata.get("pending_distillation")
+                ):
+                    retry_job = dict(latest.metadata.get(_ENRICHMENT_KEY) or job)
+                    delay = min(
+                        2 ** min(attempts, 8), _ENRICHMENT_MAX_BACKOFF_SECONDS
+                    )
+                    retry_job.update(
+                        {
+                            "status": "retry",
+                            "attempts": attempts,
+                            "last_error": str(exc)[:500],
+                            "next_attempt_at": (
+                                datetime.now(timezone.utc) + timedelta(seconds=delay)
+                            ).isoformat(timespec="seconds"),
+                        }
+                    )
+                    retry_metadata = dict(latest.metadata)
+                    retry_metadata[_ENRICHMENT_KEY] = retry_job
+                    self.backend.update_memory(
+                        latest.id, metadata=retry_metadata, touch=False
+                    )
+                summary["failed"] += 1
+                summary["errors"].append(
+                    {"memory_id": current.id, "error": str(exc)[:500]}
+                )
+        return summary
+
     def distill(
         self, memory_id: str, *, owner_prefix: str | None = None
     ) -> AddResult | None:
@@ -635,9 +804,7 @@ class MemoryStore:
         )
         episode_ids = memory.source_episode_ids
         if not candidates:
-            meta = {
-                k: v for k, v in memory.metadata.items() if k != "pending_distillation"
-            }
+            meta = self._clear_enrichment_metadata(memory.metadata)
             self.backend.update_memory(memory_id, metadata=meta, touch=False)
             return AddResult(
                 episode_ids=episode_ids,
@@ -650,7 +817,13 @@ class MemoryStore:
         new_id = next(
             (a.memory_id for a in actions if a.event != "NONE" and a.memory_id), None
         )
-        self.backend.invalidate_memory(memory_id, superseded_by=new_id)
+        invalidated = self.backend.invalidate_memory(memory_id, superseded_by=new_id)
+        if invalidated is not None:
+            self.backend.update_memory(
+                memory_id,
+                metadata=self._clear_enrichment_metadata(invalidated.metadata),
+                touch=False,
+            )
         self.backend.add_event(
             MemoryEvent(
                 memory_id=memory_id,
@@ -1482,4 +1655,10 @@ class MemoryStore:
         self.backend.reset()
 
     def close(self) -> None:
-        self.backend.close()
+        try:
+            self.llm.close()
+        finally:
+            try:
+                self.embedder.close()
+            finally:
+                self.backend.close()

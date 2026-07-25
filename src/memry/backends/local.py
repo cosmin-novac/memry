@@ -72,6 +72,9 @@ CREATE TABLE IF NOT EXISTS memories (
 );
 CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(user_id, agent_id, run_id);
 CREATE INDEX IF NOT EXISTS idx_memories_invalid ON memories(invalid_at);
+CREATE INDEX IF NOT EXISTS idx_memories_pending_enrichment
+    ON memories(invalid_at, created_at)
+    WHERE json_extract(metadata, '$.pending_distillation') = 1;
 
 CREATE TABLE IF NOT EXISTS topics (
     id TEXT PRIMARY KEY,
@@ -770,6 +773,27 @@ class LocalBackend(MemoryBackend):
         if cur.rowcount == 0:
             return None
         return self.get_memory(memory_id)
+
+    def list_pending_memories(
+        self, limit: int = 100, *, due_before: str | None = None
+    ) -> list[Memory]:
+        due_clause = ""
+        params: list[Any] = []
+        if due_before is not None:
+            due_clause = (
+                "AND (json_extract(metadata, '$._enrichment.next_attempt_at') IS NULL "
+                "OR json_extract(metadata, '$._enrichment.next_attempt_at') <= ?) "
+            )
+            params.append(due_before)
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {_MEMORY_COLS} FROM memories "
+                "WHERE invalid_at IS NULL "
+                "AND json_extract(metadata, '$.pending_distillation') = 1 "
+                f"{due_clause}ORDER BY created_at LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [_row_to_memory(row) for row in rows]
 
     def set_memory_timestamp(self, memory_id: str, updated_at: str) -> None:
         with self._lock:
@@ -2029,6 +2053,15 @@ class LocalBackend(MemoryBackend):
             ).fetchone()[0]
             episodes = self._db.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
             events = self._db.execute("SELECT COUNT(*) FROM memory_events").fetchone()[0]
+            pending_enrichments = self._db.execute(
+                "SELECT COUNT(*) FROM memories WHERE invalid_at IS NULL "
+                "AND json_extract(metadata, '$.pending_distillation') = 1"
+            ).fetchone()[0]
+            retrying_enrichments = self._db.execute(
+                "SELECT COUNT(*) FROM memories WHERE invalid_at IS NULL "
+                "AND json_extract(metadata, '$.pending_distillation') = 1 "
+                "AND json_extract(metadata, '$._enrichment.status') = 'retry'"
+            ).fetchone()[0]
             by_type = dict(
                 self._db.execute(
                     "SELECT memory_type, COUNT(*) FROM memories "
@@ -2055,6 +2088,8 @@ class LocalBackend(MemoryBackend):
             "invalidated_memories": invalid,
             "episodes": episodes,
             "events": events,
+            "pending_enrichments": pending_enrichments,
+            "retrying_enrichments": retrying_enrichments,
             "memories_by_type": by_type,
             "users": users,
             "entities": entities,

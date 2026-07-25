@@ -7,6 +7,8 @@ Cursor, Windsurf, Codex, ...). ``memry mcp`` runs locally over stdio;
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from functools import partial
 from typing import Any
@@ -16,6 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .config import Config
+from .enrichment import EnrichmentWorker
 from .principal import ADMIN, Principal
 from .store import MemoryStore
 
@@ -46,10 +49,11 @@ SAVE - call save_memories:
   of new facts, or when the topic is about to change, save what is worth keeping
   before moving on. A good rhythm is "recall on a new topic, save when leaving
   one."
-- Prefer several focused calls (one topic each) over one giant multi-topic dump,
-  and ALWAYS check the response's "warnings" field: it lists input details that
-  did not survive distillation, so you can save them explicitly (or retry with
-  infer=false for must-keep-verbatim content).
+- Prefer several focused calls (one topic each) over one giant multi-topic dump.
+  With infer=true, a successful response means the exact text is durable and
+  searchable; its "enrichment" status is pending while Memry extracts and
+  reconciles facts in the background. Use infer=false for content that must
+  always remain as one verbatim memory.
 
 Never store secrets (passwords, API keys, tokens). When unsure whether a durable
 fact is worth keeping, saving it is better than losing it.
@@ -66,6 +70,13 @@ def _memory_row(m: Any, score: float | None = None) -> dict[str, Any]:
         "created_at": m.created_at,
         "updated_at": m.updated_at,
     }
+    if m.metadata.get("pending_distillation"):
+        job = m.metadata.get("_enrichment") or {"status": "pending"}
+        row["enrichment"] = {
+            key: job[key]
+            for key in ("status", "attempts", "next_attempt_at", "last_error")
+            if key in job
+        }
     if m.invalid_at:
         row["invalid_at"] = m.invalid_at
     if score is not None:
@@ -78,7 +89,25 @@ def create_server(
     *,
     host: str = "127.0.0.1",
     port: int = 8787,
+    enrichment_worker: EnrichmentWorker | None = None,
+    manage_enrichment_worker: bool = True,
 ) -> FastMCP:
+    store = store or MemoryStore()
+    enrichment_worker = enrichment_worker or EnrichmentWorker(store)
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(_: FastMCP):
+        task: asyncio.Task | None = None
+        if manage_enrichment_worker:
+            task = asyncio.create_task(enrichment_worker.run())
+        try:
+            yield {}
+        finally:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
+
     # The SDK's DNS-rebinding protection only accepts localhost-style Host
     # headers, which 421s every request arriving through a reverse proxy on a
     # public domain. That protection exists for unauthenticated localhost
@@ -88,11 +117,11 @@ def create_server(
         instructions=INSTRUCTIONS,
         host=host,
         port=port,
+        lifespan=_lifespan,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=False
         ),
     )
-    store = store or MemoryStore()
     default_user = store.config.default_user_id
 
     def _principal() -> Principal:
@@ -139,19 +168,24 @@ def create_server(
         shares a stable fact, preference, decision, correction, or plan - and
         also as a periodic checkpoint, once you have learned several new facts
         or the topic is changing, rather than only at the end of the chat. With
-        infer=true (default) the text is distilled into discrete facts and
-        reconciled against existing memories (duplicates skipped, contradictions
-        superseded). With infer=false the text is saved verbatim as one memory.
-        Prefer focused, one-topic calls over a single multi-topic dump.
+        infer=true (default) the exact text is committed first and acknowledged
+        immediately, then distilled and reconciled in the managed background
+        worker. A provider failure leaves the raw memory active for retry. With
+        infer=false the text is saved verbatim as one final memory. Prefer
+        focused, one-topic calls over a single multi-topic dump.
         """
-        result = await _threaded(
-            store.add,
-            content=content,
-            user_id=_uid(user_id),
-            agent_id=agent_id or None,
-            run_id=run_id or None,
-            infer=infer,
-        )
+        add = store.add_deferred if infer else store.add
+        kwargs: dict[str, Any] = {
+            "content": content,
+            "user_id": _uid(user_id),
+            "agent_id": agent_id or None,
+            "run_id": run_id or None,
+        }
+        if not infer:
+            kwargs["infer"] = False
+        result = await _threaded(add, **kwargs)
+        if infer and result.actions:
+            enrichment_worker.notify()
         payload: dict[str, Any] = {
             "saved": result.summary(),
             "actions": [
@@ -159,6 +193,11 @@ def create_server(
                 for a in result.actions
             ],
         }
+        if infer and result.actions:
+            payload["enrichment"] = {
+                "status": "pending",
+                "memory_ids": [a.memory_id for a in result.actions if a.memory_id],
+            }
         if result.warnings:
             payload["warnings"] = result.warnings
         return json.dumps(payload, ensure_ascii=False)
@@ -335,7 +374,10 @@ def main(config: Config | None = None) -> None:
     network authentication and mounts these same tools at ``/mcp``.
     """
     store = MemoryStore(config)
-    create_server(store).run()
+    try:
+        create_server(store).run()
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

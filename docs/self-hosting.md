@@ -166,13 +166,18 @@ For local single-machine use, prefer stdio (`memry mcp`) - no port, no auth surf
 
 | Goal | Setting |
 |---|---|
-| Best extraction quality | `ANTHROPIC_API_KEY` + `pip install "memry[anthropic]"` (default model `claude-opus-4-8`) |
-| Cheaper extraction | `MEMRY_LLM_MODEL=claude-haiku-4-5` |
+| Default Anthropic extraction | `ANTHROPIC_API_KEY` + `pip install "memry[anthropic]"` (defaults to the fast, lower-cost `claude-haiku-4-5`) |
+| Larger Anthropic model | `MEMRY_LLM_MODEL=claude-opus-4-8` (explicitly trades more latency and cost for extraction quality) |
 | OpenAI end-to-end | `OPENAI_API_KEY` (LLM `gpt-5-mini`, embeddings `text-embedding-3-small`) |
 | Fully offline | `MEMRY_LLM_PROVIDER=ollama` + `MEMRY_EMBEDDING_PROVIDER=ollama` (e.g. `llama3.1`, `nomic-embed-text`) |
 | Zero keys, zero model downloads | nothing - verbatim writes + BM25/hash retrieval |
 
 After switching embedding providers, run `memry reindex` once to re-embed the store.
+
+MCP saves with the default `infer=true` commit the exact text before replying. The
+server then enriches pending memories in its managed worker. If the provider is down,
+the raw memory stays searchable and is retried; restarting the server resumes pending rows.
+No external queue service is required.
 
 ## Maintenance
 

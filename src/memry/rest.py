@@ -54,6 +54,7 @@ from starlette.responses import (
 from starlette.routing import Mount, Route
 
 from .accounts import SESSION_TTL, AccountStore, default_auth_db_path
+from .enrichment import EnrichmentWorker
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
 from .oauth import MEMRY_SCOPE, MemryOAuthProvider
 from .principal import ADMIN, Principal
@@ -234,7 +235,7 @@ function viewCard(m){
    ${m.score!==undefined?`<span>score ${m.score.toFixed(3)}</span>`:''}
    <span>${(m.updated_at||m.created_at||'').slice(0,10)}</span>
    ${m.invalid_at?'<span style="color:var(--warn)">invalidated</span>':''}
-   ${m.metadata&&m.metadata.pending_distillation&&!m.invalid_at?`<button class="distill" onclick="distill('${m.id}')" title="Saved verbatim because extraction was skipped (no LLM or LLM error). Distill into discrete facts now.">not distilled ↻</button>`:''}</div></div>`;
+   ${m.metadata&&m.metadata.pending_distillation&&!m.invalid_at?(m.metadata._enrichment?`<span title="The exact text is saved and searchable while background enrichment runs.">${esc(m.metadata._enrichment.status||'enrichment pending')}</span>`:`<button class="distill" onclick="distill('${m.id}')" title="Saved verbatim because extraction was skipped. Distill into discrete facts now.">not distilled ↻</button>`):''}</div></div>`;
 }
 function editCard(m){
   return `<div class="mem">
@@ -1013,7 +1014,12 @@ def create_app(
     # is nothing coherent to advertise, so the endpoints simply do not exist.
     public_url = (store.config.public_url or "").rstrip("/")
     oauth = MemryOAuthProvider(accounts, public_url=public_url) if public_url else None
-    mcp = create_server(store)
+    enrichment_worker = EnrichmentWorker(store)
+    mcp = create_server(
+        store,
+        enrichment_worker=enrichment_worker,
+        manage_enrichment_worker=False,
+    )
     mcp.settings.streamable_http_path = "/"
     mcp_app = mcp.streamable_http_app()
 
@@ -1777,20 +1783,24 @@ def create_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette):
-        task: asyncio.Task | None = None
+        maintenance_task: asyncio.Task | None = None
+        enrichment_task = asyncio.create_task(enrichment_worker.run())
         # Deterministic de-duplication works without an LLM; abstraction does not.
         if store.config.dedup_entities or (
             store.config.tags.enabled and store.llm.available
         ):
-            task = asyncio.create_task(_maintenance_scheduler())
+            maintenance_task = asyncio.create_task(_maintenance_scheduler())
         try:
             async with mcp.session_manager.run():
                 yield
         finally:
-            if task is not None:
-                task.cancel()
-                with contextlib.suppress(BaseException):
-                    await task
+            for task in (enrichment_task, maintenance_task):
+                if task is not None:
+                    task.cancel()
+            for task in (enrichment_task, maintenance_task):
+                if task is not None:
+                    with contextlib.suppress(BaseException):
+                        await task
 
     routes = [
         Route("/", dashboard),

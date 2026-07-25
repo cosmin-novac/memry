@@ -20,7 +20,10 @@ Agents and applications
   `-- Python API / CLI
               |
          MemoryStore
-              |
+          |       |
+          |   managed enrichment worker
+          |   (pending rows, bounded batches)
+          |
     intelligence and retrieval
               |
        LocalBackend (SQLite)
@@ -166,7 +169,29 @@ navigation layer, not identities, topics, or authoritative claims.
 
 ## 4. Write path
 
-For `store.add(...)`:
+### Durable MCP save and managed enrichment
+
+The default `save_memories(infer=true)` path is intentionally split at the safe boundary:
+
+1. Commit the exact input as both an immutable episode and an active, searchable memory.
+2. Mark that memory `pending_distillation` in its existing SQLite metadata and return the
+   MCP acknowledgement. No LLM or embedding request runs before this response.
+3. Wake one in-process worker. It selects at most eight due pending memories per database
+   pass, but sends every memory through extraction separately. Text, user scope,
+   provenance, and failure handling are never combined across payloads.
+4. On success, reconcile the extracted facts and supersede the raw pending memory. If
+   extraction finds no facts, keep the raw memory and clear the pending marker.
+5. On provider or processing failure, keep the raw memory active, record the error, and
+   retry with exponential backoff capped at five minutes. After a process restart, the
+   worker discovers the same pending rows, including work interrupted while processing.
+
+The active pending memory is both usable knowledge and the recovery marker. This avoids a
+second queue database or broker and ensures acknowledgement never means "accepted only in
+RAM." Status is visible on MCP memory rows and in aggregate statistics.
+
+### Synchronous library and REST write
+
+`store.add(...)` and the REST write route retain the synchronous workflow:
 
 1. Store raw input as episodes before inference.
 2. With an LLM, extract small candidate memories, types, importance, topics, entities, and
@@ -270,7 +295,7 @@ it.
 | AnyIO | Yes | Moves synchronous store/provider work off MCP event-loop tasks. |
 | Starlette / ASGI | Yes for `memry serve` | REST routes, dashboard, middleware, sessions, OAuth routes, and the mounted MCP app. |
 | Uvicorn | Yes for `memry serve` | Runs the combined ASGI application. |
-| HTTPX | Yes | OpenAI, Voyage, and Ollama provider HTTP calls; also used by tests. |
+| HTTPX | Yes | Reusable OpenAI, Voyage, and Ollama HTTP clients keep connections warm across background enrichment calls; also used by tests. |
 | python-multipart | Yes for account/OAuth forms | Parses dashboard and OAuth login form bodies through Starlette. |
 | REST over HTTP with JSON | Yes for network API | Application integration and dashboard data access. |
 | MCP stdio | Optional surface | Zero-port local agent connection. |
@@ -309,8 +334,8 @@ it.
 - Complete backups must capture `memry.db` and `auth.db` together; ANN sidecars may be discarded and
   rebuilt.
 - The Mem0 adapter is comparison/import-only and is not a supported runtime persistence path.
-- There is no external IdP/SSO integration, per-key rate limiter, queue, separate vector
-  database, or distributed cache.
+- There is no external IdP/SSO integration, per-key rate limiter, external queue
+  service, separate vector database, or distributed cache.
 - Description faithfulness and end-to-end memory quality still require public evaluation;
   a clean schema and synthetic benchmarks do not establish "best in class" quality.
 - Exact inline entity highlighting is deferred because mention surfaces do not provide
@@ -326,6 +351,10 @@ it.
 | Local MCP uses `memry mcp`; remote MCP uses `/mcp` from `memry serve` | This preserves local zero-port use and one network server where configured authentication is applied. The separate unauthenticated HTTP launcher added risk without a used product case. | Yes |
 | Edited memory text is re-analyzed for entity links | Entity chips and entity filters must describe the current text, not names left behind by an older version. | Yes |
 | The UI says tags; the public backend field remains `categories`; normalized storage remains `topics`/`memory_topics` | Users get one familiar word without a breaking API/schema rename. | Yes |
+| MCP saves persist raw text before acknowledgement and enrich it in one managed worker | Agent calls return after a cheap SQLite commit instead of waiting on several provider calls, while the active pending row prevents data loss and enables restart recovery without another queue system. | Yes |
+| Background work uses bounded database batches but separate prompts per memory | Bounded draining improves throughput; separate prompts preserve each user scope, provenance, retry, and failure boundary. | Yes |
+| Anthropic defaults to claude-haiku-4-5 | Memory extraction is frequent background work, so the lower-cost, lower-latency model is the useful default; operators can explicitly select a larger model when quality justifies the extra cost. | Yes |
+| Provider HTTP clients are reused for the store lifetime | Reusing connections removes repeated connection setup from enrichment latency without adding a service or a second execution path. | Yes |
 
 Any future consequential architecture change must be added here with its product reason and
 implementation status before it is treated as decided work.
