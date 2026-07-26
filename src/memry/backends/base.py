@@ -14,7 +14,6 @@ from typing import Any
 from typing import TYPE_CHECKING
 
 from ..models import (
-    Collection,
     Entity,
     EntityMention,
     Episode,
@@ -296,21 +295,16 @@ class MemoryBackend(ABC):
         """Active relations touching any of these entities (either endpoint)."""
         return []
 
-    # -- collections + vectors (for RAPTOR-lite summaries) ----------------
+    # -- vectors ----------------------------------------------------------
     def memory_vectors(
         self, scope: Scope, *, limit: int = 5000
     ) -> list[tuple[str, "np.ndarray"]]:
-        """(memory_id, embedding) for active memories, for clustering."""
+        """(memory_id, embedding) for active memories.
+
+        Used by consolidation and tag health to compare what is stored without
+        re-embedding anything.
+        """
         return []
-
-    def record_collection(self, collection: Collection) -> None:
-        return None
-
-    def list_collections(self, scope: Scope) -> list[Collection]:
-        return []
-
-    def clear_collections(self, scope: Scope) -> int:
-        return 0
 
     def add_proposal(self, proposal: MergeProposal) -> MergeProposal:
         return proposal

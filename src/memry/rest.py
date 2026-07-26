@@ -158,7 +158,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openKnowledge();return false" title="Browse tags, entities, relations, and collections in one place.">knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a></span></h1>
+<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openKnowledge();return false" title="Browse tags, people and things, and upkeep in one place.">knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <span class="qwrap"><input id="q" placeholder="search memories…" oninput="toggleClear()">
@@ -194,11 +194,10 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <div id="list"></div>
 <div class="modal" id="knowmodal"><div class="sheet">
 <h2><button class="x" onclick="closeKnowledge()" title="close">x</button>Knowledge</h2>
-<p class="hint">Tags classify memories. People and things are stable entity hubs with aliases, a bounded description, and supporting memories. Relations and collections stay evidence-linked views.</p>
+<p class="hint">Tags classify memories. People and things are stable entity hubs with aliases, a bounded description, supporting memories, and their evidence-linked relations.</p>
 <div class="knowledge-tabs">
   <button id="ktab-topics" onclick="showKnowledge('topics')">Tags</button>
   <button id="ktab-entities" onclick="showKnowledge('entities')">People &amp; things</button>
-  <button id="ktab-collections" onclick="showKnowledge('collections')">Collections</button>
   <button id="ktab-forgotten" onclick="showKnowledge('forgotten')">Forgotten</button>
   <button id="ktab-maintenance" onclick="showKnowledge('maintenance')">Upkeep</button>
 </div>
@@ -221,7 +220,6 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
     <aside class="entity-side" id="entitydetail"></aside>
   </div>
 </section>
-<section class="kpanel" id="kpanel-collections" hidden><div id="collist"></div></section>
 <section class="kpanel" id="kpanel-forgotten" hidden>
   <p class="hint">Deleting a memory hides it from search but keeps the record, so nothing is lost by accident. This is where those land. Permanent deletion is only possible from here, and only for memories that are already forgotten.</p>
   <div id="forgottenlist"></div>
@@ -768,14 +766,14 @@ function setKnowledgeOpen(open){
 async function openKnowledge(tab='topics'){
   setKnowledgeOpen(true);
   showKnowledge(tab);
-  await Promise.all([loadTags(),loadEntities(),loadCollections()]);
+  await Promise.all([loadTags(),loadEntities()]);
 }
 function closeKnowledge(){setKnowledgeOpen(false)}
 function openTags(){return openKnowledge('topics')}
 function openEntities(){return openKnowledge('entities')}
 function showKnowledge(tab){
   knowledgeTab=tab;
-  for(const name of['topics','entities','collections','forgotten','maintenance']){
+  for(const name of['topics','entities','forgotten','maintenance']){
     document.getElementById('kpanel-'+name).hidden=name!==tab;
     document.getElementById('ktab-'+name).setAttribute('aria-pressed',name===tab);
   }
@@ -992,9 +990,6 @@ async function decideProposal(id,decision,button){
   }catch(error){alert('Could not update that merge proposal.');}
   await loadEntities();
 }
-async function loadCollections(){
-  const collections=await api('/api/v1/collections');
-  document.getElementById('collist').innerHTML=collections.length?collections.map(collection=>`<div class="detail"><h3>${esc(collection.title)}</h3><div class="description">${esc(collection.summary||'')}</div><div class="hint">${collection.memory_ids.length} memories</div><div class="alias-list">${collection.memory_ids.slice(0,50).map((id,index)=>`<button class="entity-chip" onclick='showMemory(${JSON.stringify(id)})'>memory ${index+1}</button>`).join('')}</div></div>`).join(''):'<div class="empty">No synthesized collections yet.</div>';
 }
 async function showMemory(id){
   const memory=await api('/api/v1/memories/'+encodeURIComponent(id));
@@ -1644,21 +1639,6 @@ def create_app(
                 store.tag_health, user_id=user_id)),
         })
 
-    async def collections_route(request: Request) -> Response:
-        cols = await run_in_threadpool(partial(
-            store.collections,
-            user_id=_p(request).namespace(request.query_params.get("user_id")),
-        ))
-        return JSONResponse([c.model_dump() for c in cols])
-
-    async def build_collections_route(request: Request) -> Response:
-        body = await request.json() if await request.body() else {}
-        result = await run_in_threadpool(partial(
-            store.build_collections,
-            user_id=_p(request).namespace(body.get("user_id")),
-        ))
-        return JSONResponse(result)
-
     async def suggest_merges_route(request: Request) -> Response:
         user_id = _p(request).namespace(request.query_params.get("user_id"))
         await run_in_threadpool(partial(store.merge_obvious_topics, user_id=user_id))
@@ -2146,8 +2126,6 @@ def create_app(
         Route("/api/v1/relations/backfill", guarded(backfill_relations_route), methods=["POST"]),
         Route("/api/v1/entities/backfill-types", guarded(backfill_entity_types_route), methods=["POST"]),
         Route("/api/v1/memories/repair-dates", guarded(repair_dates_route), methods=["POST"]),
-        Route("/api/v1/collections", guarded(collections_route), methods=["GET"]),
-        Route("/api/v1/collections/build", guarded(build_collections_route), methods=["POST"]),
         Route("/api/v1/export", guarded(export_memories_route), methods=["GET"]),
         Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),
         Route("/api/v1/search", guarded(search), methods=["POST"]),

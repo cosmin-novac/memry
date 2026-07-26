@@ -234,21 +234,6 @@ class MergeProposal(BaseModel):
     decided_at: str | None = None
 
 
-class Collection(BaseModel):
-    """A titled, summarized cluster of memories - the coarse navigation layer.
-
-    Built by clustering memory embeddings and having an LLM name and summarize
-    each cluster from the actual memories (not from tags), so the label is
-    grounded and specific. A memory can belong to several collections."""
-
-    id: str = Field(default_factory=new_id)
-    title: str
-    summary: str = ""
-    memory_ids: list[str] = Field(default_factory=list)
-    user_id: str | None = None
-    created_at: str = Field(default_factory=utcnow)
-
-
 class Relation(BaseModel):
     """A typed edge between two entities, grounded in the memory that stated it.
 

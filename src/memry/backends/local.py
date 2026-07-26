@@ -20,7 +20,6 @@ import numpy as np
 
 from ..config import AnnConfig
 from ..models import (
-    Collection,
     Entity,
     EntityMention,
     Episode,
@@ -212,15 +211,6 @@ CREATE TABLE IF NOT EXISTS relations (
 CREATE INDEX IF NOT EXISTS idx_relations_subject ON relations(subject);
 CREATE INDEX IF NOT EXISTS idx_relations_object ON relations(object);
 CREATE INDEX IF NOT EXISTS idx_relations_user ON relations(user_id);
-CREATE TABLE IF NOT EXISTS collections (
-    id          TEXT PRIMARY KEY,
-    title       TEXT NOT NULL,
-    summary     TEXT NOT NULL DEFAULT '',
-    memory_ids  TEXT NOT NULL,
-    user_id     TEXT,
-    created_at  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_collections_user ON collections(user_id);
 """
 
 _MEMORY_COLS = (
@@ -241,12 +231,13 @@ _BACKUP_TABLE_KEYS: dict[str, tuple[str, ...]] = {
     "entity_proposals": ("id",),
     "synthetic_tags": ("id",),
     "relations": ("id",),
-    "collections": ("id",),
 }
 _BACKUP_ORDER = tuple(_BACKUP_TABLE_KEYS)
+# Tables that older backups may carry and current Memry no longer stores.
+_RETIRED_BACKUP_TABLES = {"collections"}
 _BACKUP_USER_TABLES = {
     "episodes", "memories", "topics", "topic_relations", "entities",
-    "entity_proposals", "synthetic_tags", "relations", "collections",
+    "entity_proposals", "synthetic_tags", "relations",
 }
 _BACKUP_BYTES = "__memry_base64__"
 
@@ -1401,7 +1392,7 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [self._row_to_relation(r) for r in rows]
 
-    # -- collections + vectors ---------------------------------------------
+    # -- vectors -----------------------------------------------------------
     def memory_vectors(self, scope: Scope, *, limit: int = 5000):
         clause, params = _scope_clause(scope)
         with self._lock:
@@ -1414,385 +1405,6 @@ class LocalBackend(MemoryBackend):
         return [
             (r["id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows
         ]
-
-    def record_collection(self, collection: Collection) -> None:
-        with self._lock:
-            self._db.execute(
-                "INSERT OR REPLACE INTO collections (id, title, summary, memory_ids, "
-                "user_id, created_at) VALUES (?,?,?,?,?,?)",
-                (collection.id, collection.title, collection.summary,
-                 json.dumps(collection.memory_ids), collection.user_id,
-                 collection.created_at),
-            )
-            self._db.commit()
-
-    def list_collections(self, scope: Scope) -> list[Collection]:
-        clause, params = _scope_clause(Scope(user_id=scope.user_id))
-        with self._lock:
-            rows = self._db.execute(
-                f"SELECT * FROM collections WHERE {clause} ORDER BY created_at DESC",
-                params,
-            ).fetchall()
-        return [
-            Collection(id=r["id"], title=r["title"], summary=r["summary"],
-                       memory_ids=json.loads(r["memory_ids"]), user_id=r["user_id"],
-                       created_at=r["created_at"])
-            for r in rows
-        ]
-
-    def clear_collections(self, scope: Scope) -> int:
-        clause, params = _scope_clause(Scope(user_id=scope.user_id))
-        with self._lock:
-            cur = self._db.execute(f"DELETE FROM collections WHERE {clause}", params)
-            self._db.commit()
-        return cur.rowcount
-
-    # -- entities -----------------------------------------------------------
-    @staticmethod
-    def _row_to_entity(row: sqlite3.Row) -> Entity:
-        return Entity(
-            id=row["id"],
-            name=row["name"],
-            normalized=row["normalized"],
-            entity_type=row["entity_type"],
-            user_id=row["user_id"],
-            agent_id=row["agent_id"],
-            run_id=row["run_id"],
-            description=row["description"],
-            description_updated_at=row["description_updated_at"],
-            metadata=json.loads(row["metadata"]),
-            merged_into=row["merged_into"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-
-    @staticmethod
-    def _row_to_proposal(row: sqlite3.Row) -> MergeProposal:
-        return MergeProposal(
-            id=row["id"],
-            entity_a=row["entity_a"],
-            entity_b=row["entity_b"],
-            user_id=row["user_id"],
-            status=row["status"],
-            confidence=row["confidence"],
-            reason=row["reason"],
-            created_at=row["created_at"],
-            decided_at=row["decided_at"],
-        )
-
-    def insert_entity(self, entity: Entity) -> Entity:
-        if not entity.normalized:
-            entity.normalized = entity.name.strip().lower()
-        with self._lock:
-            self._db.execute(
-                "INSERT INTO entities (id, name, normalized, entity_type, user_id, agent_id, "
-                "run_id, description, description_updated_at, metadata, merged_into, "
-                "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    entity.id, entity.name, entity.normalized, entity.entity_type,
-                    entity.user_id, entity.agent_id, entity.run_id,
-                    entity.description, entity.description_updated_at,
-                    json.dumps(entity.metadata), entity.merged_into,
-                    entity.created_at, entity.updated_at,
-                ),
-            )
-            aliases = entity.metadata.get("aliases", [])
-            if aliases:
-                self._has_metadata_aliases = True
-            self._db.commit()
-        return entity
-
-    def get_entity(self, entity_id: str) -> Entity | None:
-        with self._lock:
-            row = self._db.execute(
-                "SELECT * FROM entities WHERE id = ?", (entity_id,)
-            ).fetchone()
-        return self._row_to_entity(row) if row else None
-
-    def find_entities(self, normalized: str, scope: Scope) -> list[Entity]:
-        clause, params = _scope_clause(scope)
-        with self._lock:
-            rows = self._db.execute(
-                f"SELECT * FROM entities WHERE normalized = ? AND merged_into IS NULL "
-                f"AND {clause} ORDER BY updated_at DESC",
-                (normalized.strip().lower(), *params),
-            ).fetchall()
-        return [self._row_to_entity(r) for r in rows]
-
-    def _entity_candidates(
-        self, normalized: list[str], scope: Scope, *, limit: int
-    ) -> list[Entity]:
-        names = sorted({value.strip().lower() for value in normalized if value.strip()})
-        if not names:
-            return []
-        placeholders = ",".join("?" * len(names))
-        scope_clause, scope_params = _scope_clause(scope, prefix="e.")
-        indexed_sql = (
-            "WITH matched(id) AS ("
-            f"SELECT id FROM entities WHERE normalized IN ({placeholders}) "
-            "UNION "
-            "SELECT entity_id FROM entity_mentions "
-            f"WHERE lower(trim(surface)) IN ({placeholders}) "
-            "UNION "
-            "SELECT merged_into FROM entities WHERE merged_into IS NOT NULL "
-            f"AND normalized IN ({placeholders})"
-            ") SELECT e.* FROM matched JOIN entities e ON e.id = matched.id "
-            "WHERE e.merged_into IS NULL "
-            f"AND {scope_clause} ORDER BY e.updated_at DESC LIMIT ?"
-        )
-        with self._lock:
-            rows = self._db.execute(
-                indexed_sql,
-                (*names, *names, *names, *scope_params, limit),
-            ).fetchall()
-            # User aliases intentionally remain metadata until measurements earn
-            # a separate table. Pay the JSON scan only when indexed identity
-            # evidence found nothing and this database actually has such aliases.
-            if not rows and self._has_metadata_aliases:
-                rows = self._db.execute(
-                    "SELECT e.* FROM entities e "
-                    "WHERE e.merged_into IS NULL "
-                    f"AND {scope_clause} AND EXISTS ("
-                    "SELECT 1 FROM json_each(e.metadata, '$.aliases') alias "
-                    f"WHERE lower(trim(CAST(alias.value AS TEXT))) IN ({placeholders})"
-                    ") ORDER BY e.updated_at DESC LIMIT ?",
-                    (*scope_params, *names, limit),
-                ).fetchall()
-        return [self._row_to_entity(row) for row in rows]
-
-    def find_entity_candidates(
-        self, normalized: str, scope: Scope, *, limit: int = 20
-    ) -> list[Entity]:
-        return self._entity_candidates([normalized], scope, limit=limit)
-
-    def find_entities_by_aliases(
-        self, normalized: list[str], scope: Scope, *, limit: int = 50
-    ) -> list[Entity]:
-        return self._entity_candidates(normalized, scope, limit=limit)
-
-    def entity_aliases(self, entity_id: str) -> list[str]:
-        entity = self.get_entity(entity_id)
-        if entity is None:
-            return []
-        with self._lock:
-            surfaces = self._db.execute(
-                "SELECT DISTINCT surface FROM entity_mentions WHERE entity_id = ?",
-                (entity_id,),
-            ).fetchall()
-            merged_names = self._db.execute(
-                "SELECT name FROM entities WHERE merged_into = ?", (entity_id,)
-            ).fetchall()
-        values: list[str] = [entity.name]
-        values.extend(row["surface"] for row in surfaces)
-        values.extend(row["name"] for row in merged_names)
-        raw_aliases = entity.metadata.get("aliases", [])
-        if isinstance(raw_aliases, str):
-            raw_aliases = [raw_aliases]
-        if isinstance(raw_aliases, list):
-            values.extend(str(alias) for alias in raw_aliases)
-        aliases: list[str] = []
-        seen: set[str] = set()
-        for value in values:
-            display = value.strip()
-            key = display.lower()
-            if display and key not in seen:
-                seen.add(key)
-                aliases.append(display)
-        return aliases
-
-    def add_entity_alias(self, entity_id: str, alias: str) -> Entity | None:
-        display = alias.strip()
-        if not display:
-            return self.get_entity(entity_id)
-        with self._lock:
-            row = self._db.execute(
-                "SELECT name, metadata FROM entities WHERE id = ?", (entity_id,)
-            ).fetchone()
-            if row is None:
-                return None
-            metadata = json.loads(row["metadata"])
-            raw_aliases = metadata.get("aliases", [])
-            if isinstance(raw_aliases, str):
-                raw_aliases = [raw_aliases]
-            aliases = [str(value).strip() for value in raw_aliases if str(value).strip()]
-            known = {row["name"].strip().lower(), *(value.lower() for value in aliases)}
-            if display.lower() not in known:
-                aliases.append(display)
-                metadata["aliases"] = aliases
-                self._db.execute(
-                    "UPDATE entities SET metadata = ?, updated_at = ?, "
-                    "description_updated_at = NULL WHERE id = ?",
-                    (json.dumps(metadata), utcnow(), entity_id),
-                )
-                self._has_metadata_aliases = True
-                self._db.commit()
-        return self.get_entity(entity_id)
-
-    def set_entity_description(
-        self, entity_id: str, description: str, generated_at: str
-    ) -> Entity | None:
-        with self._lock:
-            cur = self._db.execute(
-                "UPDATE entities SET description = ?, description_updated_at = ? "
-                "WHERE id = ? AND merged_into IS NULL",
-                (description, generated_at, entity_id),
-            )
-            self._db.commit()
-        return self.get_entity(entity_id) if cur.rowcount else None
-
-    def entity_evidence_updated_at(self, entity_id: str) -> str | None:
-        with self._lock:
-            row = self._db.execute(
-                "SELECT updated_at FROM entities WHERE id = ? AND merged_into IS NULL",
-                (entity_id,),
-            ).fetchone()
-        return row["updated_at"] if row else None
-
-    def list_entities(
-        self, scope: Scope, *, include_merged: bool = False, limit: int = 100
-    ) -> list[Entity]:
-        clause, params = _scope_clause(scope)
-        if not include_merged:
-            clause += " AND merged_into IS NULL"
-        with self._lock:
-            rows = self._db.execute(
-                f"SELECT * FROM entities WHERE {clause} ORDER BY updated_at DESC LIMIT ?",
-                (*params, limit),
-            ).fetchall()
-        return [self._row_to_entity(r) for r in rows]
-
-    def add_mention(self, mention: EntityMention) -> None:
-        with self._lock:
-            self._db.execute(
-                "INSERT INTO entity_mentions (id, entity_id, memory_id, surface, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (mention.id, mention.entity_id, mention.memory_id, mention.surface,
-                 mention.created_at),
-            )
-            self._db.execute(
-                "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
-                "WHERE id = ?",
-                (mention.created_at, mention.entity_id),
-            )
-            self._db.commit()
-
-    def entity_mentions(self, entity_id: str) -> list[EntityMention]:
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT * FROM entity_mentions WHERE entity_id = ? ORDER BY created_at",
-                (entity_id,),
-            ).fetchall()
-        return [
-            EntityMention(
-                id=r["id"], entity_id=r["entity_id"], memory_id=r["memory_id"],
-                surface=r["surface"], created_at=r["created_at"],
-            )
-            for r in rows
-        ]
-
-    def entity_memories(
-        self, entity_id: str, limit: int = 10, *, include_invalid: bool = False
-    ) -> list[Memory]:
-        active_clause = "" if include_invalid else " AND m.invalid_at IS NULL"
-        with self._lock:
-            rows = self._db.execute(
-                f"SELECT DISTINCT {', '.join('m.' + c.strip() for c in _MEMORY_COLS.split(','))} "
-                "FROM entity_mentions em JOIN memories m ON m.id = em.memory_id "
-                f"WHERE em.entity_id = ?{active_clause} "
-                "ORDER BY m.updated_at DESC LIMIT ?",
-                (entity_id, limit),
-            ).fetchall()
-        return [_row_to_memory(r) for r in rows]
-
-    def set_entity_type(self, entity_id: str, entity_type: str) -> None:
-        with self._lock:
-            self._db.execute(
-                "UPDATE entities SET entity_type = ?, updated_at = ?, "
-                "description_updated_at = NULL WHERE id = ?",
-                (entity_type, utcnow(), entity_id),
-            )
-            self._db.commit()
-
-    def entities_of_memory(self, memory_id: str) -> list[Entity]:
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT e.* FROM entity_mentions em JOIN entities e ON e.id = em.entity_id "
-                "WHERE em.memory_id = ? AND e.merged_into IS NULL",
-                (memory_id,),
-            ).fetchall()
-        # distinct by id (a memory can mention an entity under several surfaces)
-        seen, out = set(), []
-        for r in rows:
-            if r["id"] not in seen:
-                seen.add(r["id"])
-                out.append(self._row_to_entity(r))
-        return out
-
-    def touch_entity(self, entity_id: str) -> None:
-        with self._lock:
-            self._db.execute(
-                "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
-                "WHERE id = ?",
-                (utcnow(), entity_id),
-            )
-            self._db.commit()
-
-    def merge_entities(self, keep_id: str, merge_id: str) -> bool:
-        """Idempotently fold both IDs' active roots into one entity."""
-        with self._lock:
-            keep_root = self.resolve_entity_id(keep_id)
-            merge_root = self.resolve_entity_id(merge_id)
-            if keep_root is None or merge_root is None:
-                return False
-            if keep_root == merge_root:
-                return True
-            changed_at = utcnow()
-            cur = self._db.execute(
-                "UPDATE entities SET merged_into = ?, updated_at = ?, "
-                "description_updated_at = NULL "
-                "WHERE id = ? AND merged_into IS NULL",
-                (keep_root, changed_at, merge_root),
-            )
-            if cur.rowcount == 0:
-                self._db.rollback()
-                return False
-            self._db.execute(
-                "UPDATE entity_mentions SET entity_id = ? WHERE entity_id = ?",
-                (keep_root, merge_root),
-            )
-            self._db.execute(
-                "UPDATE relations SET subject = ? WHERE subject = ?",
-                (keep_root, merge_root),
-            )
-            self._db.execute(
-                "UPDATE relations SET object = ? WHERE object = ?",
-                (keep_root, merge_root),
-            )
-            self._db.execute(
-                "UPDATE relations SET invalid_at = ? "
-                "WHERE subject = object AND invalid_at IS NULL",
-                (changed_at,),
-            )
-            self._db.execute(
-                "UPDATE entity_proposals SET entity_a = ? WHERE entity_a = ?",
-                (keep_root, merge_root),
-            )
-            self._db.execute(
-                "UPDATE entity_proposals SET entity_b = ? WHERE entity_b = ?",
-                (keep_root, merge_root),
-            )
-            self._db.execute(
-                "UPDATE entity_proposals SET status = 'confirmed', decided_at = ? "
-                "WHERE entity_a = entity_b AND status = 'proposed'",
-                (changed_at,),
-            )
-            self._db.execute(
-                "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
-                "WHERE id = ?",
-                (changed_at, keep_root),
-            )
-            self._db.commit()
-        return True
 
     def add_proposal(self, proposal: MergeProposal) -> MergeProposal:
         with self._lock:
@@ -1930,7 +1542,7 @@ class LocalBackend(MemoryBackend):
                 for table in (
                     "memory_events", "memory_topics", "topic_relations",
                     "entity_mentions", "entity_proposals", "synthetic_tags",
-                    "relations", "collections",
+                    "relations",
                 ):
                     tables[table] = self._select_backup_rows(table)
             else:
@@ -1966,13 +1578,6 @@ class LocalBackend(MemoryBackend):
                 tables["synthetic_tags"] = self._backup_rows_for_users(
                     "synthetic_tags", user_ids
                 )
-                collections = self._backup_rows_for_users("collections", user_ids)
-                if scope.agent_id is not None or scope.run_id is not None:
-                    collections = [
-                        row for row in collections
-                        if set(json.loads(row["memory_ids"])) <= memory_ids
-                    ]
-                tables["collections"] = collections
 
             ordered = {table: tables.get(table, []) for table in _BACKUP_ORDER}
         return {
@@ -1994,7 +1599,12 @@ class LocalBackend(MemoryBackend):
         if backup.get("format") != "memry-backup" or backup.get("version") != 1:
             raise ValueError("unsupported Memry backup format or version")
         raw_tables = backup.get("tables")
-        if not isinstance(raw_tables, dict) or set(raw_tables) != set(_BACKUP_ORDER):
+        if not isinstance(raw_tables, dict):
+            raise ValueError("backup table set is incomplete or unknown")
+        # A backup written before a feature was retired still carries its table.
+        # Ignoring those keeps older backups restorable instead of failing them
+        # over data the current schema simply no longer has anywhere to put.
+        if set(raw_tables) - _RETIRED_BACKUP_TABLES != set(_BACKUP_ORDER):
             raise ValueError("backup table set is incomplete or unknown")
         tables: dict[str, list[dict[str, Any]]] = {}
         for table in _BACKUP_ORDER:
@@ -2042,10 +1652,6 @@ class LocalBackend(MemoryBackend):
                 raise ValueError("entity relation references data outside the backup")
             if row["memory_id"] is not None and row["memory_id"] not in memory_ids:
                 raise ValueError("entity relation evidence is outside the backup")
-        for row in tables["collections"]:
-            members = json.loads(row["memory_ids"])
-            if not isinstance(members, list) or not set(members) <= memory_ids:
-                raise ValueError("collection references memories outside the backup")
         return tables
 
     def import_backup(

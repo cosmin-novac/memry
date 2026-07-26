@@ -29,7 +29,6 @@ from .intelligence.clustering import (
     suggest_canonical_merges,
 )
 from .intelligence.consolidate import judge_group, pick_survivor, similarity_groups
-from .intelligence.summaries import cluster_vectors, summarize_cluster
 from .intelligence.context import build_context, estimate_tokens
 from .intelligence.decay import decay_sweep, effective_importance
 from .intelligence.entities import (
@@ -53,7 +52,6 @@ from .models import (
     AddAction,
     AddResult,
     CandidateFact,
-    Collection,
     ContextResult,
     Entity,
     EntityMention,
@@ -1678,46 +1676,6 @@ class MemoryStore:
                 {"tag": tag, "source_tags": members, "relations_added": relations_added}
             )
         self._stamp_tag_run(user_id)
-        return summary
-
-    def collections(self, *, user_id: str | None = None) -> list[Collection]:
-        return self.backend.list_collections(Scope(user_id=user_id))
-
-    def build_collections(
-        self, *, user_id: str | None = None, sample: int = 2000
-    ) -> dict[str, Any]:
-        """Cluster memory embeddings and summarize the largest clusters into
-        titled collections. Clustering is free; only a few clusters are sent to
-        the LLM (capped), so a run costs a small, bounded number of tokens.
-        Rebuilds from scratch each run (idempotent)."""
-        summary: dict[str, Any] = {"collections": 0}
-        if not self.llm.available:
-            summary["skipped"] = "no LLM configured"
-            return summary
-        pairs = self.backend.memory_vectors(Scope(user_id=user_id), limit=sample)
-        if len(pairs) < 4:
-            summary["skipped"] = "too few embedded memories"
-            return summary
-        ids = [p[0] for p in pairs]
-        vectors = np.stack([p[1] for p in pairs])
-        clusters = cluster_vectors(ids, vectors)
-        if not clusters:
-            summary["skipped"] = "no coherent clusters"
-            return summary
-        self.backend.clear_collections(Scope(user_id=user_id))
-        by_id = {m.id: m for m in self.get_all(user_id=user_id, limit=1_000_000)}
-        for member_ids in clusters:
-            contents = [by_id[i].content for i in member_ids if i in by_id]
-            if not contents:
-                continue
-            named = summarize_cluster(self.llm, contents)
-            if not named:
-                continue
-            self.backend.record_collection(
-                Collection(title=named["title"], summary=named.get("summary", ""),
-                           memory_ids=member_ids, user_id=user_id)
-            )
-            summary["collections"] += 1
         return summary
 
     def merge_obvious_topics(
