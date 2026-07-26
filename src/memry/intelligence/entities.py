@@ -282,6 +282,101 @@ def classify_entity_types(llm: LLM, names: list[str]) -> dict[str, str]:
     return out
 
 
+_TEMPORAL_RE = re.compile(
+    r"^(?:(?:19|20)\d{2}(?:[-/.]\d{1,2}(?:[-/.]\d{1,2})?)?"      # 2019, 2026-07-24
+    r"|(?:january|february|march|april|may|june|july|august|september|october"
+    r"|november|december|januar|februar|märz|april|mai|juni|juli|august"
+    r"|september|oktober|november|dezember)\s+(?:19|20)\d{2}"    # July 2026
+    r"|(?:19|20)\d{2}\s*[-–—]\s*(?:19|20)\d{2})$",               # 2026-2029
+    re.IGNORECASE,
+)
+_QUANTITY_UNITS = {
+    "gb", "tb", "mb", "kb", "ram", "gpu", "cpu", "ghz", "mhz", "cores",
+    "eur", "usd", "kg", "km", "mg", "ml", "kpa", "kwh", "kw", "watt", "%",
+}
+_URL_EMAIL_RE = re.compile(r"://|^www\.|^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_SALUTATIONS = (
+    "sehr geehrte", "dear sir", "dear madam", "dear sir or madam",
+    "mit freundlichen grüßen", "best regards", "kind regards",
+)
+
+
+def non_referent_reason(name: str) -> str | None:
+    """Why a name mechanically cannot be an entity, or ``None`` if it might be.
+
+    An entity is a named referent you could later ask a question about. A bare
+    date, an amount, a URL, a template placeholder or a salutation is an
+    attribute VALUE or a text fragment - real stores fill with them ("2019",
+    "$149", "192 GB", "Sehr geehrte ..."), and no accumulation of evidence will
+    ever make "2027" a thing with an identity. Only mechanically certain cases
+    belong here; anything needing judgement goes to the LLM review instead.
+    """
+    text = " ".join((name or "").split()).strip().lower()
+    if not text:
+        return "empty name"
+    if _TEMPORAL_RE.match(text):
+        return "a date or time span, not a referent"
+    if _URL_EMAIL_RE.search(text):
+        return "a URL or email address"
+    if re.fullmatch(r"[\[\](){}<>._\-\s]*|\[.*\]", text):
+        return "a placeholder or punctuation fragment"
+    if any(text.startswith(s) for s in _SALUTATIONS):
+        return "a salutation, not a referent"
+    words = text.replace("/", " ").split()
+    if words and re.match(r"^[^a-zäöüß]*\d", words[0]) and all(
+        re.fullmatch(r"[\d\W]+", w) or w in _QUANTITY_UNITS for w in words
+    ):
+        return "an amount or measurement, not a referent"
+    return None
+
+
+_REFERENT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"junk": {"type": "array", "items": {"type": "string"}}},
+    "required": ["junk"],
+    "additionalProperties": False,
+}
+
+_REFERENT_SYSTEM = """You review the entity list of a personal memory system.
+
+An entity must be a NAMED, REFERRING thing the user could later ask a question
+about: a person, organization, place, named project, product, standard, method,
+or defined domain term (tax rules, index names, technologies all qualify).
+
+List as junk ONLY names that are clearly not referents:
+- instructions or style preferences ("avoid parentheses", "casual but not
+  choppy tone", "confirm understanding before drafting")
+- descriptions of a writing task or its output ("corrected version",
+  "2-3 improved versions", "shorter answers", "grammar feedback list")
+- sentence fragments, generic role words ("note", "article", "assistant",
+  "value", "jobs"), or epithets standing in for an unnamed thing
+  ("the father of photography")
+
+Keep every real-world term, even niche ones. When unsure, keep it: deleting an
+entity loses its links, keeping a mediocre one costs nothing.
+Return JSON: {"junk": ["name", ...]}"""
+
+
+def judge_entity_referents(llm: LLM, names: list[str]) -> list[str]:
+    """One call reviews a batch of names; returns the ones judged not to be
+    entities. Names outside the input are discarded, so a model cannot condemn
+    what it was not shown."""
+    if not names or not llm.available:
+        return []
+    raw = llm.complete(
+        _REFERENT_SYSTEM,
+        "Entity names:\n" + "\n".join(f"- {n}" for n in names) + "\n\nJSON.",
+        json_schema=_REFERENT_SCHEMA,
+    )
+    data = parse_lenient_json(raw)
+    if not isinstance(data, dict):
+        return []
+    offered = {n.strip().lower(): n for n in names}
+    return [offered[j] for j in
+            (str(x).strip().lower() for x in data.get("junk", []))
+            if j in offered]
+
+
 def resolve_mentions(
     *,
     backend: MemoryBackend,

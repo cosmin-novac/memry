@@ -1693,6 +1693,38 @@ class LocalBackend(MemoryBackend):
             )
             self._db.commit()
 
+    def delete_entity(self, entity_id: str) -> bool:
+        """Remove an entity and everything that points at it. Memories stay.
+
+        Entities are a derived index over the memories, so deleting one loses
+        no evidence: at worst a later re-extraction recreates it. Used to clear
+        records that should never have been entities at all.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            self._db.execute(
+                "DELETE FROM entity_mentions WHERE entity_id = ?", (entity_id,)
+            )
+            self._db.execute(
+                "DELETE FROM relations WHERE subject = ? OR object = ?",
+                (entity_id, entity_id),
+            )
+            self._db.execute(
+                "DELETE FROM entity_proposals WHERE entity_a = ? OR entity_b = ?",
+                (entity_id, entity_id),
+            )
+            # tombstones redirecting here would dangle; they carry nothing
+            self._db.execute(
+                "DELETE FROM entities WHERE merged_into = ?", (entity_id,)
+            )
+            self._db.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+            self._db.commit()
+        return True
+
     def merge_entities(self, keep_id: str, merge_id: str) -> bool:
         """Idempotently fold both IDs' active roots into one entity."""
         with self._lock:

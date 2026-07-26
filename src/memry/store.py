@@ -33,6 +33,8 @@ from .intelligence.context import build_context, estimate_tokens
 from .intelligence.decay import decay_sweep, effective_importance
 from .intelligence.entities import (
     classify_entity_types,
+    judge_entity_referents,
+    non_referent_reason,
     propose_same_name_duplicates,
     resolve_mentions,
     resolve_open_proposals,
@@ -1564,6 +1566,50 @@ class MemoryStore:
         self.backend.set_proposal_status(proposal_id, "rejected")
         return True
 
+    def entity_junk(
+        self, *, user_id: str | None = None, judge: bool = False
+    ) -> dict[str, Any]:
+        """Entities that should never have been entities.
+
+        Two tiers, matching how certain we can be:
+        - ``mechanical``: bare dates, amounts, URLs, salutations, placeholders.
+          Decidable without a model; the maintenance pass removes these itself.
+        - ``judged`` (only when ``judge=True``, costs one LLM call per ~60
+          names): style instructions, task descriptions and fragments that only
+          a reader can tell apart from real niche terms like a tax rule or an
+          index name. Never removed automatically - the user confirms.
+        """
+        entities = self.entities(user_id=user_id, limit=100_000)
+        mechanical = []
+        candidates = []
+        for entity in entities:
+            reason = non_referent_reason(entity.name)
+            if reason:
+                mechanical.append({"id": entity.id, "name": entity.name,
+                                   "reason": reason})
+            elif (entity.entity_type or "concept") in ("concept", "other", "event"):
+                candidates.append(entity)
+        judged: list[dict[str, Any]] = []
+        if judge and self.llm.available and candidates:
+            by_name = {e.name: e for e in candidates}
+            names = list(by_name)
+            for start in range(0, len(names), 60):
+                for name in judge_entity_referents(self.llm, names[start:start + 60]):
+                    judged.append({"id": by_name[name].id, "name": name,
+                                   "reason": "not a referent (AI review)"})
+        return {"mechanical": mechanical, "judged": judged,
+                "reviewable": len(candidates)}
+
+    def remove_entities(
+        self, entity_ids: list[str], *, owner_prefix: str | None = None
+    ) -> int:
+        """Delete the listed entities outright. Their memories are untouched."""
+        removed = 0
+        for entity_id in entity_ids:
+            if _owned(self.backend.get_entity(entity_id), owner_prefix):
+                removed += int(self.backend.delete_entity(entity_id))
+        return removed
+
     def merge_entities(
         self, keep_id: str, merge_id: str, *, owner_prefix: str | None = None
     ) -> bool:
@@ -1597,6 +1643,11 @@ class MemoryStore:
         )
         outcome["proposed"] = proposed
         outcome["purged"] = self.backend.purge_orphan_entities(scope)
+        # Mechanical non-referents ("2019", "$149", a URL) are removed without
+        # review: no accumulation of evidence will ever make one a thing with an
+        # identity. Judgement cases stay for the user in Knowledge > Upkeep.
+        junk = self.entity_junk(user_id=user_id)["mechanical"]
+        outcome["junk_removed"] = self.remove_entities([j["id"] for j in junk])
         return outcome
 
     # ------------------------------------------------------------------

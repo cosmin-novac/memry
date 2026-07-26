@@ -373,6 +373,7 @@ def test_maintenance_auto_confirms_obvious_full_name_pair(verbatim_store):
         "kept": 0,
         "proposed": 0,
         "purged": 0,
+        "junk_removed": 0,
     }
     assert len(verbatim_store.entities(user_id="ada")) == 1
     assert backend.get_proposal(proposal.id).status == "confirmed"
@@ -493,16 +494,16 @@ def test_a_record_with_evidence_is_still_judged_not_blindly_reused(verbatim_stor
 def test_maintenance_settles_unanswerable_same_name_proposals(verbatim_store):
     backend = verbatim_store.backend
     with_facts = backend.insert_entity(
-        Entity(name="Sehr geehrte", normalized="sehr geehrte", user_id="ada")
+        Entity(name="Fundation GmbH", normalized="fundation gmbh", user_id="ada")
     )
     memory = backend.insert_memory(
-        Memory(content="Sehr geehrte is used as a salutation.", user_id="ada")
+        Memory(content="Fundation GmbH is registered in Cologne.", user_id="ada")
     )
     backend.add_mention(
-        EntityMention(entity_id=with_facts.id, memory_id=memory.id, surface="Sehr geehrte")
+        EntityMention(entity_id=with_facts.id, memory_id=memory.id, surface="Fundation GmbH")
     )
     empty = backend.insert_entity(
-        Entity(name="Sehr geehrte", normalized="sehr geehrte", user_id="ada")
+        Entity(name="Fundation GmbH", normalized="fundation gmbh", user_id="ada")
     )
     backend.add_proposal(
         MergeProposal(entity_a=with_facts.id, entity_b=empty.id, user_id="ada")
@@ -593,3 +594,72 @@ def test_entity_detail_carries_its_own_relations(verbatim_store):
     assert [r.predicate for r in verbatim_store.entity(helios.id)["relations"]] == [
         "works_on"
     ]
+
+
+# ------------------------------------------------- names that are not things
+def test_mechanical_non_referents_match_the_real_junk():
+    """Checked against the names an actual store accumulated."""
+    from memry.intelligence.entities import non_referent_reason
+
+    junk = ["2019", "2027", "2045", "2026-07-24", "July 2026", "$149",
+            "0.33%", "192 GB", "256 GB RAM", "24 GB GPU", "[date]",
+            "Sehr geehrte", "Sehr geehrte salutations",
+            "https://forms.gle/37VX5yLXdZGFqWY26", "billing@example.com"]
+    for name in junk:
+        assert non_referent_reason(name), f"should be flagged: {name!r}"
+
+    real = ["Abgeltungssteuer", "RAG", "MSCI World", "Bitcoin", "GmbH",
+            "FZulG", "HRB 110232", "World Cup 2026", "Next.js", "SG Ready",
+            "Marcus Vandenberg", "2013 master's degree", "6000i dual-split"]
+    for name in real:
+        assert non_referent_reason(name) is None, f"wrongly flagged: {name!r}"
+
+
+def test_self_heal_removes_mechanical_junk_but_not_real_concepts(verbatim_store):
+    backend = verbatim_store.backend
+    memory = backend.insert_memory(
+        Memory(content="Tax rules changed in 2027.", user_id="ada")
+    )
+    junk = backend.insert_entity(Entity(name="2027", normalized="2027",
+                                        entity_type="other", user_id="ada"))
+    keep = backend.insert_entity(Entity(name="Abgeltungssteuer",
+                                        normalized="abgeltungssteuer",
+                                        entity_type="concept", user_id="ada"))
+    for entity in (junk, keep):
+        backend.add_mention(EntityMention(entity_id=entity.id,
+                                          memory_id=memory.id, surface=entity.name))
+
+    result = verbatim_store.resolve_entities(user_id="ada")
+    assert result["junk_removed"] == 1
+    names = {e.name for e in verbatim_store.entities(user_id="ada")}
+    assert names == {"Abgeltungssteuer"}
+    # the memory the junk entity pointed at is untouched
+    assert backend.get_memory(memory.id).invalid_at is None
+
+
+def test_judged_junk_is_proposed_not_removed(verbatim_store):
+    """Style instructions need a reader; the pass must only propose them."""
+    import json as _json
+    from conftest import FakeLLM
+
+    backend = verbatim_store.backend
+    memory = backend.insert_memory(Memory(content="style note", user_id="ada"))
+    for name in ("avoid parentheses", "RAG"):
+        entity = backend.insert_entity(Entity(name=name, normalized=name.lower(),
+                                              entity_type="concept", user_id="ada"))
+        backend.add_mention(EntityMention(entity_id=entity.id,
+                                          memory_id=memory.id, surface=name))
+    verbatim_store.llm = FakeLLM()
+    verbatim_store.llm.queue(_json.dumps({"junk": ["avoid parentheses", "Everest"]}))
+
+    result = verbatim_store.entity_junk(user_id="ada", judge=True)
+    judged = {j["name"] for j in result["judged"]}
+    assert judged == {"avoid parentheses"}  # 'Everest' was never offered
+    # nothing was deleted by the review itself
+    assert len(verbatim_store.entities(user_id="ada")) == 2
+
+    removed = verbatim_store.remove_entities(
+        [j["id"] for j in result["judged"]]
+    )
+    assert removed == 1
+    assert {e.name for e in verbatim_store.entities(user_id="ada")} == {"RAG"}

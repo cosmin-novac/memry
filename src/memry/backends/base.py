@@ -151,6 +151,10 @@ class MemoryBackend(ABC):
         """
         return None
 
+    def delete_entity(self, entity_id: str) -> bool:
+        """Remove an entity and its mentions/relations/proposals. Memories stay."""
+        return False
+
     def purge_orphan_entities(self, scope: Scope) -> int:
         """Delete active entities that nothing references. Returns the count.
 

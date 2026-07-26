@@ -140,6 +140,8 @@ button.toggle.active{border-color:var(--accent);color:var(--accent)}
 .mem .del,.mem .edit{float:right;border:none;background:none;color:var(--dim)}.mem .del:hover{color:var(--warn)}.mem .edit:hover{color:var(--accent)}
 .tag{border:1px solid var(--line);border-radius:999px;padding:0 .5rem}
 button.tagfilter{background:none;color:inherit;font:inherit;cursor:pointer}
+.about-list p{margin:.55rem 0;line-height:1.45}
+.about-list b{font-weight:600}
 button.tagfilter:hover{border-color:var(--accent);color:var(--accent)}
 .meta button.distill{border:1px solid var(--warn);border-radius:999px;padding:0 .5rem;background:none;color:var(--warn);font-size:inherit}
 .meta button.distill:hover{background:var(--warn);color:var(--bg)}
@@ -158,7 +160,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openKnowledge();return false" title="Browse tags, people and things, and upkeep in one place.">knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a></span></h1>
+<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openKnowledge();return false" title="Browse tags, people and things, and upkeep in one place.">knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a> · <a href="#" onclick="openAbout();return false" title="What Memry does with what you tell it, in plain words.">about</a></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <span class="qwrap"><input id="q" placeholder="search memories…" oninput="toggleClear()">
@@ -192,6 +194,23 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <div class="gx-ctrl"><button id="fsBtn" title="Fullscreen" aria-label="Fullscreen">⤢</button></div>
 <div class="gx-read" id="mapread"></div><div class="gx-stat" id="mapstat"></div></div>
 <div id="list"></div>
+<div class="modal" id="aboutmodal"><div class="sheet" style="width:min(96vw,46rem)">
+<h2><button class="x" onclick="closeAbout()" title="close">x</button>What Memry does</h2>
+<p class="hint">Plainly, one thing at a time.</p>
+<div class="about-list">
+<p><b>It keeps what you tell it.</b> Every message you save is stored exactly as written, permanently. That raw copy is never edited - everything below is built on top of it and can always be rebuilt from it.</p>
+<p><b>It breaks messages into single facts.</b> A long note becomes separate memories like "Prefers invoices in EUR" or "Started the new medication on March 3". One fact per memory, so each can be found, corrected, or forgotten on its own.</p>
+<p><b>It checks new facts against old ones.</b> If something is already known it is skipped; if it adds detail the memory is updated; if it contradicts, the old memory is retired and the new one takes its place. The retired one is kept, marked as no longer true.</p>
+<p><b>It tags every memory.</b> Tags are subjects like <i>liver health</i> or <i>2026 taxes</i> - deliberately specific, because "health" would lump things you would never ask about together. Click any tag to see everything under it.</p>
+<p><b>It recognizes people and things.</b> Names that come up - a person, a company, a project - become entries with everything known about them collected in one place. Look under Knowledge &gt; People and things.</p>
+<p><b>It remembers how things relate.</b> "Ada works on Helios", "Helios runs on Postgres" - stored as connections between things. That is how a question about Ada can find an answer that never mentions her.</p>
+<p><b>Search combines three approaches.</b> Meaning (finds "liver results" from "blood test"), exact words (finds codes and names), and those connections between things. Newer and more important memories rank a little higher.</p>
+<p><b>Memories fade, rules stick.</b> A dated event slowly loses rank as it ages; a standing instruction like "always answer briefly" keeps its weight. Nothing fades away silently into deletion.</p>
+<p><b>It cleans up after itself.</b> On a schedule it merges duplicate people and things, removes names that were never really things (a bare date, an amount), and flags tags that drifted apart. Anything beyond the obvious asks you first - see Knowledge &gt; Upkeep.</p>
+<p><b>Deleting is a two-step door.</b> Deleting a memory hides it from search but keeps the record under Knowledge &gt; Forgotten. Only there can you delete one permanently.</p>
+<p><b>Everything leaves a trail.</b> Every change to every memory is recorded - what changed, when, why. Export downloads the whole store, losslessly, any time.</p>
+</div>
+</div></div>
 <div class="modal" id="knowmodal"><div class="sheet">
 <h2><button class="x" onclick="closeKnowledge()" title="close">x</button>Knowledge</h2>
 <p class="hint">Tags classify memories. People and things are stable entity hubs with aliases, a bounded description, supporting memories, and their evidence-linked relations.</p>
@@ -232,6 +251,9 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <h2 style="font-size:.95rem;margin-top:1.1rem">Tag health</h2>
   <p class="hint">A tag that has quietly split in two caps what any search can find under it, because filtering drops the rest of the evidence before ranking starts.</p>
   <div id="taghealth"></div>
+  <h2 style="font-size:.95rem;margin-top:1.1rem">Entity health</h2>
+  <p class="hint">Some extracted names are not really things - bare dates, amounts, style instructions. Obvious cases are removed automatically by the self-healing pass; the rest can be reviewed here. Removing an entity never touches the memories behind it.</p>
+  <div id="entityjunk"></div>
   <h2 style="font-size:.95rem;margin-top:1.1rem">Consolidate duplicate memories</h2>
   <p class="hint">Finds memories that record the same fact more than once and merges them into one that keeps every detail. The originals are kept and linked, never deleted.</p>
   <div class="tagbar">
@@ -772,6 +794,8 @@ async function openKnowledge(tab='topics'){
   await Promise.all([loadTags(),loadEntities()]);
 }
 function closeKnowledge(){setKnowledgeOpen(false)}
+function openAbout(){document.getElementById('aboutmodal').classList.add('on')}
+function closeAbout(){document.getElementById('aboutmodal').classList.remove('on')}
 function openTags(){return openKnowledge('topics')}
 function openEntities(){return openKnowledge('entities')}
 function showKnowledge(tab){
@@ -818,6 +842,7 @@ async function loadUpkeep(){
       <div class="hint">${esc(p.detail)}${every}${last}</div></span></div>`;
   }).join('')+`<div class="hint" style="margin-top:.6rem">Embeddings: <code>${esc(info.embedding_model)}</code></div>`;
   renderTagHealth(info.tag_health||{});
+  renderEntityJunk(info.entity_junk||{});
 }
 // Fragmentation caps recall silently: filtering to a tag that has split its
 // subject drops the memories the question needed. Show it rather than wait for
@@ -846,6 +871,58 @@ async function healSplit(variants,canonical){
   await api('/api/v1/tags/edit',{method:'POST',
     body:JSON.stringify({op:'merge',tags:drop,to:canonical})});
   await Promise.all([loadTags(),loadUpkeep()]);
+}
+// Obvious non-entities (dates, amounts, URLs) are cleaned automatically; the
+// judgement cases (style instructions vs. real niche terms) need a reader, so
+// the AI proposes and the user confirms with checkboxes.
+function renderEntityJunk(junk){
+  const el=document.getElementById('entityjunk');
+  if(!el)return;
+  const mech=junk.mechanical||[];
+  const parts=[];
+  if(mech.length){
+    parts.push(`<div class="hint">${mech.length} obvious non-entit${mech.length===1?'y':'ies'} found - these are removed by the next self-healing run, or now:</div>`
+      +mech.map(j=>`<div class="tagrow"><span class="name"><b>${esc(j.name)}</b>
+        <div class="hint">${esc(j.reason)}</div></span></div>`).join('')
+      +`<div class="bar"><button onclick="removeMechanicalJunk()">Remove ${mech.length} now</button></div>`);
+  }else{
+    parts.push('<div class="empty">No obvious non-entities.</div>');
+  }
+  parts.push(`<div class="bar"><button onclick="reviewEntities(this)"
+    title="one AI call proposes which concept-type names are not really entities; nothing is removed until you confirm">
+    Review ${junk.reviewable||0} concept names with AI</button></div>
+    <div id="entityreview"></div>`);
+  el.innerHTML=parts.join('');
+  window._mechJunk=mech.map(j=>j.id);
+}
+async function removeMechanicalJunk(){
+  const ids=window._mechJunk||[];
+  if(!ids.length)return;
+  await api('/api/v1/entities/remove',{method:'POST',body:JSON.stringify({ids})});
+  await Promise.all([loadUpkeep(),loadEntities()]);
+}
+async function reviewEntities(button){
+  button.disabled=true;button.textContent='Reviewing...';
+  const res=await api('/api/v1/maintenance/entity-review',{method:'POST',body:'{}'});
+  const judged=res.judged||[];
+  const el=document.getElementById('entityreview');
+  if(!judged.length){
+    el.innerHTML='<div class="empty">The review found nothing to remove.</div>';
+    button.textContent='Review again';button.disabled=false;return;
+  }
+  el.innerHTML=`<div class="hint">${judged.length} name${judged.length===1?'':'s'} judged not to be entities. Untick any you want to keep.</div>`
+    +judged.map(j=>`<div class="tagrow">
+      <input type="checkbox" class="junkpick" checked value="${esc(j.id)}">
+      <span class="name"><b>${esc(j.name)}</b></span></div>`).join('')
+    +`<div class="bar"><button onclick="removeReviewedJunk()">Remove selected</button></div>`;
+  button.textContent='Review again';button.disabled=false;
+}
+async function removeReviewedJunk(){
+  const ids=[...document.querySelectorAll('.junkpick:checked')].map(c=>c.value);
+  if(!ids.length)return;
+  if(!confirm(`Remove ${ids.length} entit${ids.length===1?'y':'ies'}? Their memories are untouched.`))return;
+  await api('/api/v1/entities/remove',{method:'POST',body:JSON.stringify({ids})});
+  await Promise.all([loadUpkeep(),loadEntities()]);
 }
 let consolidationPreview=null;
 async function previewConsolidation(){
@@ -1684,6 +1761,30 @@ def create_app(
         ))
         return JSONResponse(result)
 
+    async def entity_review_route(request: Request) -> Response:
+        """AI review of concept-type entity names: which are not referents.
+
+        A separate POST because it spends LLM tokens; the mechanical tier ships
+        free with the maintenance status.
+        """
+        body = await request.json() if await request.body() else {}
+        result = await run_in_threadpool(partial(
+            store.entity_junk,
+            user_id=_p(request).namespace(body.get("user_id")),
+            judge=True,
+        ))
+        return JSONResponse(result)
+
+    async def remove_entities_route(request: Request) -> Response:
+        body = await request.json()
+        ids = [str(i) for i in body.get("ids", []) if i]
+        if not ids:
+            return JSONResponse({"error": "ids required"}, status_code=400)
+        removed = await run_in_threadpool(partial(
+            store.remove_entities, ids, owner_prefix=_p(request).prefix,
+        ))
+        return JSONResponse({"removed": removed})
+
     async def maintenance_status_route(request: Request) -> Response:
         """What the automatic passes are, when they last ran, and their settings.
 
@@ -1697,8 +1798,11 @@ def create_app(
             "passes": [
                 {
                     "key": "dedup_entities",
-                    "label": "Entity de-duplication",
-                    "detail": "Merges duplicate people and things once evidence is clear.",
+                    "label": "Entity self-healing",
+                    "detail": "Merges duplicate people and things once evidence "
+                              "is clear, drops entities nothing references, and "
+                              "removes names that cannot be entities at all - "
+                              "bare dates, amounts, URLs, salutations.",
                     "automatic": store.config.dedup_entities,
                     "interval_days": store.config.dedup_interval_days,
                     "needs_llm": False,
@@ -1727,6 +1831,8 @@ def create_app(
             "embedding_model": store.embedder.model_id,
             "tag_health": await run_in_threadpool(partial(
                 store.tag_health, user_id=user_id)),
+            "entity_junk": await run_in_threadpool(partial(
+                store.entity_junk, user_id=user_id)),
         })
 
     async def suggest_merges_route(request: Request) -> Response:
@@ -2212,6 +2318,8 @@ def create_app(
         Route("/api/v1/tags/suggest-merges", guarded(suggest_merges_route), methods=["GET"]),
         Route("/api/v1/maintenance", guarded(maintenance_status_route), methods=["GET"]),
         Route("/api/v1/maintenance/consolidate", guarded(consolidate_route), methods=["POST"]),
+        Route("/api/v1/maintenance/entity-review", guarded(entity_review_route), methods=["POST"]),
+        Route("/api/v1/entities/remove", guarded(remove_entities_route), methods=["POST"]),
         Route("/api/v1/relations", guarded(relations_route), methods=["GET"]),
         Route("/api/v1/relations/backfill", guarded(backfill_relations_route), methods=["POST"]),
         Route("/api/v1/entities/backfill-types", guarded(backfill_entity_types_route), methods=["POST"]),

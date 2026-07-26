@@ -27,7 +27,7 @@ from .models import (
 )
 from .store import MemoryStore
 
-__version__ = "0.2.23"
+__version__ = "0.2.24"
 
 __all__ = [
     "MemoryStore",
