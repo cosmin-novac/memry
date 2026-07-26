@@ -1046,7 +1046,6 @@ async function decideProposal(id,decision,button){
   }catch(error){alert('Could not update that merge proposal.');}
   await loadEntities();
 }
-}
 async function showMemory(id){
   const memory=await api('/api/v1/memories/'+encodeURIComponent(id));
   closeKnowledge();activeCat=null;haveMore=false;render([memory]);
