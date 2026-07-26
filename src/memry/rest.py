@@ -106,6 +106,11 @@ html.knowledge-open,body.knowledge-open{overflow:hidden}
 input:focus,textarea:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
 button{cursor:pointer}button.primary{background:var(--accent);color:#04211c;border-color:transparent;font-weight:600}
 button.toggle[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+/* A filter left on behind a collapsed panel would silently narrow every result,
+   so the button carries a dot whenever one is active. */
+button.toggle.active{border-color:var(--accent);color:var(--accent)}
+#filterbtn svg{width:.85em;height:.85em;vertical-align:-.08em}
+#filterdot{color:var(--accent);font-size:1.1em;line-height:0}
 .knowledge-tabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.9rem 0}
 .knowledge-tabs button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
 .kpanel[hidden]{display:none}.entity-link,.entity-chip{border:1px solid var(--line);background:none;color:var(--accent);border-radius:999px;padding:.05rem .45rem;font-size:.78rem}
@@ -142,10 +147,11 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <span class="qwrap"><input id="q" placeholder="search memories…" oninput="toggleClear()">
     <button id="qclear" type="button" title="clear search and show all" onclick="clearSearch()">✕</button></span>
   <button class="primary" onclick="search()">Search</button>
+  <button class="toggle" id="filterbtn" onclick="togglePanel('filters')" title="filter by date, tag, or person/thing" aria-label="Filters"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1 2.5A.5.5 0 0 1 1.5 2h13a.5.5 0 0 1 .38.82L10 8.7V13a.5.5 0 0 1-.72.45l-3-1.5A.5.5 0 0 1 6 11.5V8.7L1.12 2.82A.5.5 0 0 1 1 2.5Z"/></svg><span id="filterdot" hidden>•</span></button>
   <button class="toggle" id="addbtn" onclick="togglePanel('add')">+ Add</button>
   <button class="toggle" id="mapbtn" onclick="togglePanel('map')">Map</button>
 </div>
-<div class="search-filters" aria-label="Search filters">
+<div class="search-filters" id="filterpanel" aria-label="Search filters" hidden>
   <label>Date<input id="filter-date" type="date" onchange="toggleClear()"></label>
   <label>Tag<select id="filter-topic" onchange="toggleClear()"><option value="">Any tag</option></select></label>
   <label>Person or thing<select id="filter-entity" onchange="toggleClear()"><option value="">Any person or thing</option></select></label>
@@ -223,11 +229,17 @@ async function api(path, opts={}){
 }
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 // Add form is opt-in, map is opt-out; the choice sticks per browser.
-const panels={add:localStorage.getItem('memry_show_add')==='1',map:localStorage.getItem('memry_show_map')!=='0'};
+const panels={add:localStorage.getItem('memry_show_add')==='1',
+              map:localStorage.getItem('memry_show_map')!=='0',
+              filters:localStorage.getItem('memry_show_filters')==='1'};
 function syncPanels(){
   document.getElementById('addpanel').hidden=!panels.add;
   document.getElementById('addbtn').setAttribute('aria-pressed',panels.add);
   document.getElementById('mapbtn').setAttribute('aria-pressed',panels.map);
+  // Filters are collapsed by default; an active one is still shown as a dot on
+  // the button, so a filter can never be silently applied behind a closed panel.
+  document.getElementById('filterpanel').hidden=!panels.filters;
+  document.getElementById('filterbtn').setAttribute('aria-pressed',panels.filters);
   drawMap(current);
 }
 function togglePanel(name){
@@ -646,6 +658,9 @@ function filterByTag(tag){
     select.add(new Option(value,value));
   }
   select.value=select.value===value?'':value;  // clicking the active tag clears it
+  // Reveal the panel, so a filter set from a chip is visible and clearable
+  // rather than applied behind a collapsed row.
+  if(select.value&&!panels.filters)togglePanel('filters');
   toggleClear();
   activeCat=null;
   search();
@@ -690,8 +705,11 @@ async function search(){
 }
 function toggleClear(){
   const filters=searchFilters();
+  const anyFilter=!!(filters.date||filters.topic||filters.entity);
   document.getElementById('qclear').style.display =
-    document.getElementById('q').value||filters.date||filters.topic||filters.entity ? 'block' : 'none';
+    document.getElementById('q').value||anyFilter ? 'block' : 'none';
+  document.getElementById('filterdot').hidden=!anyFilter;
+  document.getElementById('filterbtn').classList.toggle('active',anyFilter);
 }
 function clearSearch(){
   document.getElementById('q').value='';
