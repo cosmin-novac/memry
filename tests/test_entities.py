@@ -371,6 +371,7 @@ def test_maintenance_auto_confirms_obvious_full_name_pair(verbatim_store):
         "confirmed": 1,
         "rejected": 0,
         "kept": 0,
+        "proposed": 0,
         "purged": 0,
     }
     assert len(verbatim_store.entities(user_id="ada")) == 1
@@ -531,3 +532,33 @@ def test_orphan_entities_are_purged_but_referenced_ones_survive(verbatim_store):
     assert orphan.id not in ids
     # idempotent: nothing left to purge
     assert verbatim_store.resolve_entities(user_id="ada")["purged"] == 0
+
+
+def test_preexisting_duplicates_get_a_proposal_so_they_can_be_reconsidered(verbatim_store):
+    """Duplicates that predate a fix have nothing scheduled to look at them.
+
+    Proposals are only created at write time, so two same-named entities that
+    already exist would otherwise sit in the graph for good, with no open
+    proposal and therefore no path to resolution.
+    """
+    backend = verbatim_store.backend
+    scope = Scope(user_id="ada")
+    first = backend.insert_entity(
+        Entity(name="AI Flow", normalized="ai flow", user_id="ada")
+    )
+    second = backend.insert_entity(
+        Entity(name="AI Flow", normalized="ai flow", user_id="ada")
+    )
+    for entity, text in ((first, "AI Flow ships weekly."),
+                         (second, "AI Flow uses Postgres.")):
+        memory = backend.insert_memory(Memory(content=text, user_id="ada"))
+        backend.add_mention(
+            EntityMention(entity_id=entity.id, memory_id=memory.id, surface="AI Flow")
+        )
+    assert backend.list_proposals(scope, status="proposed") == []
+
+    result = verbatim_store.resolve_entities(user_id="ada")
+    assert result["proposed"] == 1
+    # both carry evidence, so with no LLM it stays for judgement rather than
+    # being merged blind - but it is now visible and will be reconsidered
+    assert result["confirmed"] + result["kept"] == 1

@@ -34,6 +34,7 @@ from .intelligence.context import build_context, estimate_tokens
 from .intelligence.decay import decay_sweep, effective_importance
 from .intelligence.entities import (
     classify_entity_types,
+    propose_same_name_duplicates,
     resolve_mentions,
     resolve_open_proposals,
     synthesize_entity_description,
@@ -1507,9 +1508,14 @@ class MemoryStore:
         accumulate forever: a real store reached 206 such rows out of 519.
         """
         scope = Scope(user_id=user_id)
+        # Surface same-name duplicates first: proposals are otherwise only made
+        # at write time, so anything already duplicated has nothing scheduled to
+        # look at it again and would sit there for good.
+        proposed = propose_same_name_duplicates(backend=self.backend, scope=scope)
         outcome = resolve_open_proposals(
             backend=self.backend, llm=self.llm, scope=scope
         )
+        outcome["proposed"] = proposed
         outcome["purged"] = self.backend.purge_orphan_entities(scope)
         return outcome
 

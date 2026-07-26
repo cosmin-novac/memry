@@ -372,6 +372,42 @@ def resolve_mentions(
     return resolved
 
 
+def propose_same_name_duplicates(
+    *, backend: MemoryBackend, scope: Scope, limit: int = 50
+) -> int:
+    """Raise proposals for active entities that share a normalized name.
+
+    Proposals are otherwise only ever created at write time, so duplicates that
+    predate a fix - or whose judgement once came back "different" - sit in the
+    graph forever with nothing scheduled to look at them again. This gives
+    maintenance a way to reconsider them as evidence accumulates.
+    """
+    groups: dict[str, list[Entity]] = {}
+    for entity in backend.list_entities(scope, limit=10_000):
+        if entity.merged_into is None:
+            groups.setdefault(entity.normalized or entity.name.lower(), []).append(entity)
+    created = 0
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        anchor = members[0]
+        for other in members[1:]:
+            if created >= limit:
+                return created
+            if backend.find_proposal(anchor.id, other.id) is None:
+                backend.add_proposal(
+                    MergeProposal(
+                        entity_a=anchor.id,
+                        entity_b=other.id,
+                        user_id=scope.user_id,
+                        confidence=0.5,
+                        reason="same name, not yet compared",
+                    )
+                )
+                created += 1
+    return created
+
+
 def resolve_open_proposals(
     *,
     backend: MemoryBackend,
