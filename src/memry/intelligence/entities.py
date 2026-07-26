@@ -155,6 +155,33 @@ def _context_words(value: str, name_words: tuple[str, ...]) -> set[str]:
     }
 
 
+def _same_name_and_no_evidence(
+    existing: Entity,
+    existing_facts: list[str],
+    other_name: str,
+    other_type: str | None = None,
+) -> bool:
+    """Exact name match against an entity that carries no evidence at all.
+
+    Such a record has no identity to differ from: there are no facts, no
+    description, nothing that could belong to a *different* thing of the same
+    name. Forking a second entity there is strictly worse than reusing it - it
+    fragments the graph and emits a merge proposal that nobody can adjudicate,
+    because the question it asks ("are these the same?") has no evidence on
+    either side. Real stores fill up with exactly that: 4x "sehr geehrte",
+    3x "the father of photography", 206 of 519 entities with zero mentions.
+
+    The usual worry, two different people sharing a common name, needs the
+    existing record to actually say something about the first person. Once this
+    reuse attaches evidence, later mentions go through the normal judged path.
+    """
+    if existing.normalized != (other_name or "").strip().lower():
+        return False
+    if existing.entity_type and other_type and existing.entity_type != other_type:
+        return False
+    return not existing_facts and not (existing.description or "").strip()
+
+
 def _obvious_same_entity(
     existing: Entity,
     existing_facts: list[str],
@@ -283,6 +310,14 @@ def resolve_mentions(
         proposals: list[tuple[Entity, dict[str, Any]]] = []
         for candidate in candidates:
             facts = [m.content for m in backend.entity_memories(candidate.id, limit=5)]
+            # An identically-named record with no evidence at all cannot be a
+            # different thing. Reuse it before spending an LLM call on a
+            # question that has nothing to answer with.
+            if _same_name_and_no_evidence(
+                candidate, facts, surface, types.get(normalized)
+            ):
+                target = candidate
+                break
             judgment = _judge(llm, candidate, facts, memory_content, surface)
             high_conflict = (
                 judgment["verdict"] == "different"
@@ -369,6 +404,21 @@ def resolve_open_proposals(
             continue
         facts_a = [m.content for m in backend.entity_memories(entity_a.id, limit=8)]
         facts_b = [m.content for m in backend.entity_memories(entity_b.id, limit=8)]
+        # Same name, and one side carries no evidence: nothing distinguishes
+        # them and no reviewer could. Settle it instead of asking again forever.
+        if auto_confirm and (
+            _same_name_and_no_evidence(entity_a, facts_a, entity_b.name,
+                                       entity_b.entity_type)
+            or _same_name_and_no_evidence(entity_b, facts_b, entity_a.name,
+                                          entity_a.entity_type)
+        ):
+            # Keep the record that actually has evidence attached to it.
+            keep, drop = ((entity_a, entity_b) if facts_a or not facts_b
+                          else (entity_b, entity_a))
+            if backend.merge_entities(keep.id, drop.id):
+                backend.set_proposal_status(proposal.id, "confirmed")
+                outcome["confirmed"] += 1
+                continue
         judgment = _judge(
             llm,
             entity_a,

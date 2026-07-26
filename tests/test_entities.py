@@ -371,6 +371,7 @@ def test_maintenance_auto_confirms_obvious_full_name_pair(verbatim_store):
         "confirmed": 1,
         "rejected": 0,
         "kept": 0,
+        "purged": 0,
     }
     assert len(verbatim_store.entities(user_id="ada")) == 1
     assert backend.get_proposal(proposal.id).status == "confirmed"
@@ -431,3 +432,102 @@ def test_memory_edit_analysis_failure_keeps_text_and_links(store):
 
     assert backend.get_memory(memory.id).content == "Marcus is a good student."
     assert [linked.id for linked in backend.entities_of_memory(memory.id)] == [entity.id]
+
+
+# ------------------------------------------- empty records cannot disagree
+from memry.intelligence.entities import resolve_mentions  # noqa: E402
+from memry.models import (  # noqa: E402
+    Entity, EntityMention, Memory, MergeProposal, Scope,
+)
+from memry.providers.llm import NoneLLM  # noqa: E402
+
+
+def test_same_name_with_no_evidence_reuses_instead_of_forking(verbatim_store):
+    """An identically-named record with no facts has no identity to differ from.
+
+    Forking there produced the duplicate pile a real store accumulated: 4x
+    "sehr geehrte", 3x "the father of photography", and 206 of 519 entities
+    with zero mentions, each dragging along an unanswerable merge proposal.
+    """
+    backend = verbatim_store.backend
+    empty = backend.insert_entity(
+        Entity(name="Fundation GmbH", normalized="fundation gmbh", user_id="ada")
+    )
+    memory = backend.insert_memory(
+        Memory(content="Fundation GmbH has VAT ID DE123.", user_id="ada")
+    )
+    resolved = resolve_mentions(
+        backend=backend, llm=NoneLLM(), scope=Scope(user_id="ada"),
+        memory_id=memory.id, memory_content=memory.content,
+        surfaces=["Fundation GmbH"],
+    )
+    assert resolved["fundation gmbh"].id == empty.id
+    assert len(verbatim_store.entities(user_id="ada")) == 1
+    assert backend.list_proposals(Scope(user_id="ada"), status="proposed") == []
+
+
+def test_a_record_with_evidence_is_still_judged_not_blindly_reused(verbatim_store):
+    """The protection only applies to empty records; evidence still decides."""
+    backend = verbatim_store.backend
+    known = backend.insert_entity(
+        Entity(name="Jonas", normalized="jonas", user_id="ada")
+    )
+    first = backend.insert_memory(
+        Memory(content="Jonas is the plumber from Bremen.", user_id="ada")
+    )
+    backend.add_mention(
+        EntityMention(entity_id=known.id, memory_id=first.id, surface="Jonas")
+    )
+    second = backend.insert_memory(
+        Memory(content="Jonas is my nephew, born 2019.", user_id="ada")
+    )
+    resolve_mentions(
+        backend=backend, llm=NoneLLM(), scope=Scope(user_id="ada"),
+        memory_id=second.id, memory_content=second.content, surfaces=["Jonas"],
+    )
+    # single common name + real conflicting evidence -> kept separate
+    assert len(verbatim_store.entities(user_id="ada")) == 2
+
+
+def test_maintenance_settles_unanswerable_same_name_proposals(verbatim_store):
+    backend = verbatim_store.backend
+    with_facts = backend.insert_entity(
+        Entity(name="Sehr geehrte", normalized="sehr geehrte", user_id="ada")
+    )
+    memory = backend.insert_memory(
+        Memory(content="Sehr geehrte is used as a salutation.", user_id="ada")
+    )
+    backend.add_mention(
+        EntityMention(entity_id=with_facts.id, memory_id=memory.id, surface="Sehr geehrte")
+    )
+    empty = backend.insert_entity(
+        Entity(name="Sehr geehrte", normalized="sehr geehrte", user_id="ada")
+    )
+    backend.add_proposal(
+        MergeProposal(entity_a=with_facts.id, entity_b=empty.id, user_id="ada")
+    )
+    result = verbatim_store.resolve_entities(user_id="ada")
+    assert result["confirmed"] == 1 and result["kept"] == 0
+    remaining = verbatim_store.entities(user_id="ada")
+    assert [e.id for e in remaining] == [with_facts.id]  # the evidenced one survives
+
+
+def test_orphan_entities_are_purged_but_referenced_ones_survive(verbatim_store):
+    backend = verbatim_store.backend
+    orphan = backend.insert_entity(
+        Entity(name="bracketed placeholders", normalized="bracketed placeholders",
+               user_id="ada")
+    )
+    kept = backend.insert_entity(
+        Entity(name="Helios", normalized="helios", user_id="ada")
+    )
+    memory = backend.insert_memory(Memory(content="Helios ships Friday.", user_id="ada"))
+    backend.add_mention(
+        EntityMention(entity_id=kept.id, memory_id=memory.id, surface="Helios")
+    )
+    assert verbatim_store.resolve_entities(user_id="ada")["purged"] == 1
+    ids = {e.id for e in verbatim_store.entities(user_id="ada")}
+    assert ids == {kept.id}
+    assert orphan.id not in ids
+    # idempotent: nothing left to purge
+    assert verbatim_store.resolve_entities(user_id="ada")["purged"] == 0

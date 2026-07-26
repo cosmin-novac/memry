@@ -85,7 +85,16 @@ Extract:
 - preferences, opinions, goals, constraints
 - decisions made and commitments/plans (convert relative dates to absolute)
 - important entities, each with a type: person, organization, project, product,
-  place, event, concept, or other (use "other" only when none fit)
+  place, event, concept, or other (use "other" only when none fit).
+  An entity is a NAMED, REFERRING thing you could later ask a question about:
+  a person, a company, a place, a named project, product, or event.
+  It is NOT: a salutation or greeting ("Sehr geehrte", "Dear Sir"), a template
+  placeholder ("[date]", "bracketed placeholders"), a style or tone descriptor
+  ("casual variant", "casual but not choppy tone"), a generic role word
+  ("user", "article", "adverbs"), a sentence fragment, or a description of the
+  task you were asked to do ("corrected full version", "2-3 improved versions").
+  If it has no name of its own, leave it out. An empty entity list is fine and
+  is much better than a wrong one.
 - procedural learnings (how the user wants things done)
 
 Do NOT extract:

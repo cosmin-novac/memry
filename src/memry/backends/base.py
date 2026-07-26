@@ -152,6 +152,14 @@ class MemoryBackend(ABC):
         """
         return None
 
+    def purge_orphan_entities(self, scope: Scope) -> int:
+        """Delete active entities that nothing references. Returns the count.
+
+        An entity with no mentions, no relations and no merge history is not
+        evidence of anything; it is a record of an extraction that went nowhere.
+        """
+        return 0
+
     def topic_memory_ids(self, scope: Scope) -> list[tuple[str, str]] | None:
         """``(topic_normalized, memory_id)`` for direct links on active memories.
 

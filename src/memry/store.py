@@ -1500,10 +1500,18 @@ class MemoryStore:
 
     def resolve_entities(self, *, user_id: str | None = None) -> dict[str, int]:
         """Re-judge open proposals with accumulated evidence; auto-confirm only
-        clear, high-confidence matches. Everything ambiguous stays proposed."""
-        return resolve_open_proposals(
-            backend=self.backend, llm=self.llm, scope=Scope(user_id=user_id)
+        clear, high-confidence matches. Everything ambiguous stays proposed.
+
+        Then drop entities nothing references. Extraction inevitably produces
+        some records that never attach to anything, and without this they
+        accumulate forever: a real store reached 206 such rows out of 519.
+        """
+        scope = Scope(user_id=user_id)
+        outcome = resolve_open_proposals(
+            backend=self.backend, llm=self.llm, scope=scope
         )
+        outcome["purged"] = self.backend.purge_orphan_entities(scope)
+        return outcome
 
     # ------------------------------------------------------------------
     # tag abstraction

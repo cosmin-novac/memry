@@ -1059,6 +1059,34 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [{"category": row["category"], "count": row["count"]} for row in rows]
 
+    def purge_orphan_entities(self, scope: Scope) -> int:
+        clause, params = _scope_clause(scope, prefix="e.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT e.id FROM entities e "
+                f"WHERE e.merged_into IS NULL AND {clause} "
+                # nothing mentions it ...
+                "AND NOT EXISTS (SELECT 1 FROM entity_mentions m WHERE m.entity_id = e.id) "
+                # ... it is on no typed edge ...
+                "AND NOT EXISTS (SELECT 1 FROM relations r "
+                "                WHERE r.subject = e.id OR r.object = e.id) "
+                # ... and nothing was ever merged into it, so no id redirects here
+                "AND NOT EXISTS (SELECT 1 FROM entities o WHERE o.merged_into = e.id)",
+                params,
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            if not ids:
+                return 0
+            marks = ",".join("?" * len(ids))
+            self._db.execute(
+                f"DELETE FROM entity_proposals WHERE entity_a IN ({marks}) "
+                f"OR entity_b IN ({marks})",
+                (*ids, *ids),
+            )
+            self._db.execute(f"DELETE FROM entities WHERE id IN ({marks})", ids)
+            self._db.commit()
+        return len(ids)
+
     def topic_memory_ids(self, scope: Scope) -> list[tuple[str, str]]:
         topic_clause, topic_params = _scope_clause(scope, prefix="t.")
         memory_clause, memory_params = _scope_clause(scope, prefix="m.")

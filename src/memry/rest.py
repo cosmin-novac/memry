@@ -89,7 +89,17 @@ input,button,textarea,select{font:inherit;color:inherit;background:var(--panel);
 html.knowledge-open,body.knowledge-open{overflow:hidden}
 .modal{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.55);display:none;align-items:flex-start;justify-content:center;padding:4rem 1rem;overflow:auto;overscroll-behavior:contain}
 .modal.on{display:flex}
-.modal .sheet{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(96vw,44rem);padding:1.2rem 1.3rem}
+.modal .sheet{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(96vw,74rem);padding:1.2rem 1.3rem}
+/* Entities: the selected one gets its own column beside the list, so choosing
+   an entity does not push its detail below the merge proposals. Below the
+   breakpoint it stacks and moves to the TOP, where a selection belongs. */
+.entity-split{display:grid;grid-template-columns:1fr;gap:1.1rem;align-items:start}
+@media(min-width:62rem){.entity-split{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)}}
+.entity-side{min-width:0}
+.entity-side:empty{display:none}
+@media(max-width:62rem){.entity-side{order:-1}}
+@media(min-width:62rem){.entity-side{position:sticky;top:.25rem;max-height:78vh;overflow:auto}}
+.entity-side .detail{border:1px solid var(--line);border-radius:10px;padding:.75rem .85rem}
 .modal h2{margin:.1rem 0 .2rem;font-size:1.05rem}.modal h2 .x{float:right;cursor:pointer;color:var(--dim);border:none;background:none;font-size:1rem}
 .modal .hint{color:var(--dim);font-size:.8rem;margin:0 0 .9rem}
 .tagrow{display:flex;align-items:center;gap:.5rem;padding:.32rem .1rem;border-bottom:1px solid var(--line)}
@@ -188,11 +198,15 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <div id="tagsuggest"></div><div id="taglist"></div>
 </section>
 <section class="kpanel" id="kpanel-entities" hidden>
-  <div class="tagbar"><span class="sel" id="entcount"></span>
-    <button onclick="backfillTypes()" title="classify entities that have no type yet">Backfill types</button></div>
-  <div id="entlist"></div>
-  <h2 style="font-size:.95rem;margin-top:1.1rem">Merge proposals</h2><div id="proplist"></div>
-  <div id="entitydetail"></div>
+  <div class="entity-split">
+    <div class="entity-main">
+      <div class="tagbar"><span class="sel" id="entcount"></span>
+        <button onclick="backfillTypes()" title="classify entities that have no type yet">Backfill types</button></div>
+      <div id="entlist"></div>
+      <h2 style="font-size:.95rem;margin-top:1.1rem">Merge proposals</h2><div id="proplist"></div>
+    </div>
+    <aside class="entity-side" id="entitydetail"></aside>
+  </div>
 </section>
 <section class="kpanel" id="kpanel-relations" hidden><div id="rellist"></div></section>
 <section class="kpanel" id="kpanel-collections" hidden><div id="collist"></div></section>
@@ -896,13 +910,14 @@ async function openEntity(id){
   const box=document.getElementById('entitydetail');box.innerHTML='<div class="hint">loading entity...</div>';
   const detail=await api('/api/v1/entities/'+encodeURIComponent(id));
   const entity=detail.entity,aliases=detail.aliases||[];
-  box.innerHTML=`<div class="detail"><h3>${esc(entity.name)} ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
+  box.innerHTML=`<div class="detail"><h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button>${esc(entity.name)} ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
     <div class="description">${esc(entity.description||'No active evidence to summarize yet.')}</div>
     <div class="alias-list">${aliases.map(alias=>`<span>${esc(alias)}</span>`).join('')}</div>
     <div class="bar"><input id="aliasinput" placeholder="add an alias"><button onclick='addAlias(${JSON.stringify(id)})'>Add alias</button></div>
     <div class="hint">${detail.memories.length} active supporting memor${detail.memories.length===1?'y':'ies'}</div>
     ${detail.memories.map(memory=>`<div class="tagrow"><span class="name">${esc(memory.content)}</span><button class="act" onclick='showMemory(${JSON.stringify(memory.id)})'>open</button></div>`).join('')||'<div class="empty">No active supporting memories.</div>'}</div>`;
 }
+function closeEntity(){document.getElementById('entitydetail').innerHTML=''}
 async function addAlias(id){
   const input=document.getElementById('aliasinput'),alias=input.value.trim();if(!alias)return;
   await api('/api/v1/entities/'+encodeURIComponent(id)+'/aliases',{method:'POST',body:JSON.stringify({alias})});
