@@ -158,3 +158,36 @@ def test_small_stores_are_unaffected(store):
         store.add(f"note about {name}", user_id="ada", infer=False, categories=[name])
     vocab = store._tag_vocabulary(Scope(user_id="ada"), text="anything", limit=120)
     assert sorted(vocab) == ["2026 taxes", "liver health", "weekly gym"]
+
+
+def test_label_conjunction_blocks_topically_close_but_distinct_tags():
+    """Different tags about one life sit close in vector space.
+
+    Measured on a real 149-memory store: centroid similarity alone at 0.80
+    proposed merging `career` with `preference` while still missing the true
+    split. Requiring the LABELS to also mean the same thing fired on exactly
+    tech/technical and nothing else.
+    """
+    centroids = {
+        "career": _unit(1.0, 0.10, 0.0),
+        "preference": _unit(0.98, 0.20, 0.0),   # same life, same region
+        "tech": _unit(0.0, 1.0, 0.05),
+        "technical": _unit(0.0, 0.99, 0.14),
+    }
+    counts = {t: 5 for t in centroids}
+    labels = {
+        "career": _unit(1.0, 0.0),
+        "preference": _unit(0.0, 1.0),          # labels mean different things
+        "tech": _unit(0.7, 0.7),
+        "technical": _unit(0.68, 0.73),         # labels mean the same thing
+    }
+    pairs = semantic_duplicate_tags(centroids, counts, {}, labels=labels)
+    assert [p["variants"] for p in pairs] == [["tech", "technical"]]
+
+
+def test_without_labels_the_strict_centroid_threshold_still_applies():
+    centroids = {"a": _unit(1.0, 0.0), "b": _unit(0.97, 0.24)}  # ~0.97 cosine
+    counts = {"a": 4, "b": 4}
+    assert semantic_duplicate_tags(centroids, counts, {}) != []
+    far = {"a": _unit(1.0, 0.0), "b": _unit(0.87, 0.49)}        # ~0.87 cosine
+    assert semantic_duplicate_tags(far, counts, {}) == []

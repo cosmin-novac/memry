@@ -201,23 +201,37 @@ def semantic_duplicate_tags(
     counts: dict[str, int],
     cooccurrence: dict[tuple[str, str], int],
     *,
+    labels: dict[str, Any] | None = None,
     threshold: float = 0.93,
+    label_threshold: float = 0.62,
+    paired_centroid_threshold: float = 0.75,
     max_pairs: int = 20,
 ) -> list[dict[str, Any]]:
     """Find tags that split one subject, using the vectors already stored.
 
     ``obvious_canonical_merges`` catches spelling and plural variants. It cannot
-    catch "liver bloods" beside "liver lab results", which is the split that
-    actually costs recall: a fragmented tag excludes the memories a question
-    needs, and no ranking can recover them once the filter has dropped them.
+    catch "tech" beside "technical", which is the split that actually costs
+    recall: a fragmented tag excludes the memories a question needs, and no
+    ranking can recover them once the filter has dropped them.
 
-    Two signals must agree, because either alone is wrong:
+    Signals, and why each is required:
 
-    - the member memories occupy nearly the same region of embedding space;
-    - the two tags rarely appear together on a memory. Complementary tags
-      ("kitchen remodel" / "bathroom remodel") sit close in vector space but are
-      genuinely distinct, and a user who applies both to one memory is telling
-      us they mean different things.
+    - **member centroids** (always): the two tags' memories occupy the same
+      region of embedding space. Alone this is not enough. Measured on a real
+      149-memory store, one centroid threshold either reported nothing (0.93)
+      or proposed wrong merges like career+preference (0.80) while still
+      missing the real split - personal stores are topically dense, so
+      *different* tags about one life also sit close together.
+    - **label similarity** (when ``labels`` is given): the tag names themselves
+      mean the same thing. The conjunction was surgical on the same store:
+      exactly the one true split (tech/technical, centroid 0.994) and nothing
+      else. With labels available, the centroid requirement relaxes to
+      ``paired_centroid_threshold``; without them, the strict ``threshold``
+      applies alone.
+    - **low co-occurrence** (always): complementary tags ("kitchen remodel" /
+      "bathroom remodel") sit close in vector space but are genuinely distinct,
+      and a user who applies both to one memory is telling us they mean
+      different things.
 
     Returns ranked ``{"canonical", "variants", "similarity"}`` proposals. The
     caller decides whether to apply them; nothing here mutates the store.
@@ -227,17 +241,30 @@ def semantic_duplicate_tags(
     names = [t for t in centroids if counts.get(t, 0) >= 2]
     if len(names) < 2:
         return []
-    matrix = np.array([centroids[t] for t in names], dtype=float)
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    matrix = matrix / np.where(norms == 0, 1.0, norms)
-    sim = matrix @ matrix.T
+
+    def unit_rows(vectors: list[Any]) -> "np.ndarray":
+        matrix = np.array(vectors, dtype=float)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        return matrix / np.where(norms == 0, 1.0, norms)
+
+    sim = unit_rows([centroids[t] for t in names])
+    sim = sim @ sim.T
+    label_sim = None
+    if labels and all(t in labels for t in names):
+        lab = unit_rows([labels[t] for t in names])
+        label_sim = lab @ lab.T
 
     pairs: list[dict[str, Any]] = []
     for i, a in enumerate(names):
         for j in range(i + 1, len(names)):
             b = names[j]
             score = float(sim[i, j])
-            if score < threshold:
+            if label_sim is not None:
+                if score < paired_centroid_threshold:
+                    continue
+                if float(label_sim[i, j]) < label_threshold:
+                    continue
+            elif score < threshold:
                 continue
             together = cooccurrence.get((a, b), 0) + cooccurrence.get((b, a), 0)
             smaller = min(counts[a], counts[b])

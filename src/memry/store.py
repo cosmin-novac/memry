@@ -1775,8 +1775,22 @@ class MemoryStore:
             for tag, ids in members.items()
             if len(ids) >= 2
         }
+        # Embedding the tag names lets the detector require that the LABELS mean
+        # the same thing, not just that the member memories sit close together.
+        # On a real store, centroid similarity alone either found nothing or
+        # proposed wrong merges; the conjunction found exactly the true split.
+        # Only a semantic embedder can make that judgement - the hash embedder
+        # scores "tech"/"technical" at 0.14, so with it the conjunction would
+        # simply disable the detector. Zero-key mode keeps centroids alone.
+        labels: dict[str, Any] | None = None
+        if self.embedder.dimensions and centroids and self.embedder.name != "hash":
+            names = sorted(centroids)
+            try:
+                labels = dict(zip(names, self.embedder.embed(names)))
+            except Exception:
+                labels = None
         return semantic_duplicate_tags(
-            centroids, counts, cooccurrence, threshold=threshold
+            centroids, counts, cooccurrence, labels=labels, threshold=threshold
         )
 
     def tag_health(self, *, user_id: str | None = None) -> dict[str, Any]:
