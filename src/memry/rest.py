@@ -82,7 +82,14 @@ input,button,textarea,select{font:inherit;color:inherit;background:var(--panel);
 .qwrap input{flex:1;padding-right:1.9rem}
 #qclear{position:absolute;right:.3rem;top:50%;transform:translateY(-50%);border:none;background:none;color:var(--dim);padding:.2rem .4rem;font-size:.9rem;line-height:1;display:none}
 #qclear:hover{color:var(--accent)}
-.search-filters{display:grid;grid-template-columns:minmax(10rem,1fr) minmax(10rem,1fr) minmax(12rem,1.4fr);gap:.5rem;margin:-.45rem 0 1rem}
+.search-filters{display:grid;grid-template-columns:minmax(12rem,1fr) minmax(10rem,1fr) minmax(12rem,1.4fr);gap:.5rem;margin:-.45rem 0 1rem}
+/* `display:grid` above beats the UA rule behind the `hidden` attribute, so the
+   panel has to be hidden explicitly or it is never actually collapsed. */
+.search-filters[hidden]{display:none}
+.search-filters .range{display:flex;gap:.35rem;align-items:center}
+.search-filters .range input{min-width:0}
+.search-filters select[multiple]{height:5.2rem;padding:.15rem}
+.search-filters .picked{color:var(--accent)}
 .search-filters label{display:flex;flex-direction:column;gap:.2rem;color:var(--dim);font-size:.72rem}
 .search-filters input,.search-filters select{width:100%;min-width:0;color:var(--text)}
 @media(max-width:650px){.search-filters{grid-template-columns:1fr}}
@@ -162,9 +169,15 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <button class="toggle" id="mapbtn" onclick="togglePanel('map')">Map</button>
 </div>
 <div class="search-filters" id="filterpanel" aria-label="Search filters" hidden>
-  <label>Date<input id="filter-date" type="date" onchange="toggleClear()"></label>
-  <label>Tag<select id="filter-topic" onchange="toggleClear()"><option value="">Any tag</option></select></label>
-  <label>Person or thing<select id="filter-entity" onchange="toggleClear()"><option value="">Any person or thing</option></select></label>
+  <label>Date range<span class="range">
+    <input id="filter-date" type="date" title="from" onchange="toggleClear()">
+    <span class="cnt">to</span>
+    <input id="filter-date-to" type="date" title="to" onchange="toggleClear()">
+  </span></label>
+  <label>Tags <span class="picked" id="topiccount"></span>
+    <select id="filter-topic" multiple size="4" title="ctrl/cmd-click for several" onchange="toggleClear()"></select></label>
+  <label>People or things <span class="picked" id="entitycount"></span>
+    <select id="filter-entity" multiple size="4" title="ctrl/cmd-click for several" onchange="toggleClear()"></select></label>
 </div>
 <input type="file" id="importfile" accept=".json,.jsonl,.txt,application/json" hidden onchange="importMemories(this.files[0]);this.value=''">
 <div id="addpanel" hidden>
@@ -186,6 +199,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <button id="ktab-topics" onclick="showKnowledge('topics')">Tags</button>
   <button id="ktab-entities" onclick="showKnowledge('entities')">People &amp; things</button>
   <button id="ktab-collections" onclick="showKnowledge('collections')">Collections</button>
+  <button id="ktab-forgotten" onclick="showKnowledge('forgotten')">Forgotten</button>
   <button id="ktab-maintenance" onclick="showKnowledge('maintenance')">Upkeep</button>
 </div>
 <section class="kpanel" id="kpanel-topics">
@@ -208,6 +222,10 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   </div>
 </section>
 <section class="kpanel" id="kpanel-collections" hidden><div id="collist"></div></section>
+<section class="kpanel" id="kpanel-forgotten" hidden>
+  <p class="hint">Deleting a memory hides it from search but keeps the record, so nothing is lost by accident. This is where those land. Permanent deletion is only possible from here, and only for memories that are already forgotten.</p>
+  <div id="forgottenlist"></div>
+</section>
 <section class="kpanel" id="kpanel-maintenance" hidden>
   <p class="hint">Everything Memry does to your memories on its own, and what it has done. Nothing here changes anything until you confirm it.</p>
   <div id="upkeeplist"></div>
@@ -666,37 +684,42 @@ const PAGE=100; let offset=0;
 function filterByTag(tag){
   const select=document.getElementById('filter-topic');
   const value=String(tag).toLowerCase();
-  if(![...select.options].some(o=>o.value===value)){
-    select.add(new Option(value,value));
-  }
-  select.value=select.value===value?'':value;  // clicking the active tag clears it
+  let option=[...select.options].find(o=>o.value===value);
+  if(!option){option=new Option(value,value);select.add(option)}
+  option.selected=!option.selected;  // clicking an active tag removes it again
   // Reveal the panel, so a filter set from a chip is visible and clearable
   // rather than applied behind a collapsed row.
-  if(select.value&&!panels.filters)togglePanel('filters');
+  if(option.selected&&!panels.filters)togglePanel('filters');
   toggleClear();
   activeCat=null;
   search();
 }
+const picked=id=>[...document.getElementById(id).selectedOptions]
+  .map(o=>o.value).filter(Boolean);
 function searchFilters(){
   return {
-    date:document.getElementById('filter-date').value,
-    topic:document.getElementById('filter-topic').value,
-    entity:document.getElementById('filter-entity').value
+    since:document.getElementById('filter-date').value,
+    until:document.getElementById('filter-date-to').value,
+    topics:picked('filter-topic'),
+    entities:picked('filter-entity')
   };
 }
+function anyFilter(f){return !!(f.since||f.until||f.topics.length||f.entities.length)}
 async function loadSearchFilters(){
   const topicSelect=document.getElementById('filter-topic');
   const entitySelect=document.getElementById('filter-entity');
-  const selectedTopic=topicSelect.value,selectedEntity=entitySelect.value;
+  // multi-select: keep every current choice across a reload, not just one
+  const keepTopics=new Set(picked('filter-topic'));
+  const keepEntities=new Set(picked('filter-entity'));
   const [topics,entities]=await Promise.all([
     api('/api/v1/categories'),api('/api/v1/entities?limit=10000')]);
-  topicSelect.innerHTML='<option value="">Any tag</option>'+topics
+  topicSelect.innerHTML=topics
     .sort((a,b)=>a.category.localeCompare(b.category))
-    .map(topic=>`<option value="${esc(topic.category)}">${esc(topic.category)} (${topic.count})</option>`).join('');
-  entitySelect.innerHTML='<option value="">Any person or thing</option>'+entities
+    .map(topic=>`<option value="${esc(topic.category)}"${keepTopics.has(topic.category)?' selected':''}>${esc(topic.category)} (${topic.count})</option>`).join('');
+  entitySelect.innerHTML=entities
     .sort((a,b)=>a.name.localeCompare(b.name))
-    .map(entity=>`<option value="${esc(entity.id)}">${esc(entity.name)}${entity.entity_type?' · '+esc(entity.entity_type):''}</option>`).join('');
-  topicSelect.value=selectedTopic;entitySelect.value=selectedEntity;
+    .map(entity=>`<option value="${esc(entity.id)}"${keepEntities.has(entity.id)?' selected':''}>${esc(entity.name)}${entity.entity_type?' · '+esc(entity.entity_type):''}</option>`).join('');
+  toggleClear();
 }
 async function loadAll(more){
   if(!more){offset=0;current=[];searchActive=false}
@@ -705,29 +728,33 @@ async function loadAll(more){
   render(current.concat(items));
 }
 async function search(){
-  const q=document.getElementById('q').value.trim(),filters=searchFilters();
-  if(!q&&!filters.date&&!filters.topic&&!filters.entity)return loadAll();
+  const q=document.getElementById('q').value.trim(),f=searchFilters();
+  if(!q&&!anyFilter(f))return loadAll();
   const body={query:q,limit:100};
-  if(filters.date){body.since=filters.date;body.until=filters.date}
-  if(filters.topic)body.categories=[filters.topic];
-  if(filters.entity)body.entity_id=filters.entity;
+  // an open-ended range is still a range: one bound is enough
+  if(f.since)body.since=f.since;
+  if(f.until)body.until=f.until;
+  if(f.topics.length)body.categories=f.topics;
+  if(f.entities.length)body.entity_id=f.entities;
   const rs=await api('/api/v1/search',{method:'POST',body:JSON.stringify(body)});
   haveMore=false;searchActive=true;
   render(rs.map(r=>({...r.memory,score:r.score})));
 }
 function toggleClear(){
-  const filters=searchFilters();
-  const anyFilter=!!(filters.date||filters.topic||filters.entity);
+  const f=searchFilters(),on=anyFilter(f);
   document.getElementById('qclear').style.display =
-    document.getElementById('q').value||anyFilter ? 'block' : 'none';
-  document.getElementById('filterdot').hidden=!anyFilter;
-  document.getElementById('filterbtn').classList.toggle('active',anyFilter);
+    document.getElementById('q').value||on ? 'block' : 'none';
+  document.getElementById('filterdot').hidden=!on;
+  document.getElementById('filterbtn').classList.toggle('active',on);
+  const label=n=>n?`(${n})`:'';
+  document.getElementById('topiccount').textContent=label(f.topics.length);
+  document.getElementById('entitycount').textContent=label(f.entities.length);
 }
 function clearSearch(){
   document.getElementById('q').value='';
-  document.getElementById('filter-date').value='';
-  document.getElementById('filter-topic').value='';
-  document.getElementById('filter-entity').value='';
+  for(const id of['filter-date','filter-date-to'])document.getElementById(id).value='';
+  for(const id of['filter-topic','filter-entity'])
+    [...document.getElementById(id).options].forEach(o=>o.selected=false);
   activeCat=null;toggleClear();loadAll();
 }
 
@@ -748,11 +775,32 @@ function openTags(){return openKnowledge('topics')}
 function openEntities(){return openKnowledge('entities')}
 function showKnowledge(tab){
   knowledgeTab=tab;
-  for(const name of['topics','entities','collections','maintenance']){
+  for(const name of['topics','entities','collections','forgotten','maintenance']){
     document.getElementById('kpanel-'+name).hidden=name!==tab;
     document.getElementById('ktab-'+name).setAttribute('aria-pressed',name===tab);
   }
   if(tab==='maintenance')loadUpkeep();
+  if(tab==='forgotten')loadForgotten();
+}
+
+// -- forgotten: deleted, but still recoverable until purged -----------------
+async function loadForgotten(){
+  const rows=await api('/api/v1/memories/forgotten');
+  const el=document.getElementById('forgottenlist');
+  if(!rows.length){el.innerHTML='<div class="empty">Nothing forgotten.</div>';return}
+  el.innerHTML=rows.map(row=>`<div class="tagrow"><span class="name">
+    ${esc(row.memory.content)}
+    <div class="hint">forgotten ${esc((row.forgotten_at||'').slice(0,10))}
+      by ${esc(row.actor||'system')}${row.reason?' · '+esc(row.reason):''}</div></span>
+    <button class="act del" title="delete permanently - this cannot be undone"
+      onclick='purgeMemory(${JSON.stringify(row.memory.id)})'>delete for good</button></div>`).join('');
+}
+async function purgeMemory(id){
+  if(!confirm('Permanently delete this memory? This cannot be undone.'))return;
+  const result=await api('/api/v1/memories/'+encodeURIComponent(id)+'/purge',
+    {method:'POST',body:'{}'});
+  if(result.error){alert(result.error);return}
+  await Promise.all([loadForgotten(),loadStats()]);
 }
 
 // -- upkeep: what runs on its own, and consolidation under review -----------
@@ -1343,14 +1391,28 @@ def create_app(
 
     def _resolve_entity_filter(
         request: Request, value: Any
-    ) -> tuple[str | None, Response | None]:
+    ) -> tuple[str | list[str] | None, Response | None]:
+        """Resolve one entity filter or several, checking ownership on each.
+
+        A list must not weaken the check: every id is verified, so a caller
+        cannot smuggle another account's entity in beside one of their own.
+        """
         if not value:
             return None, None
-        entity_id = store.backend.resolve_entity_id(str(value))
-        entity = store.backend.get_entity(entity_id) if entity_id else None
-        if entity is None or not _p(request).owns(entity.user_id):
-            return None, JSONResponse({"error": "entity not found"}, status_code=404)
-        return entity.id, None
+        many = isinstance(value, (list, tuple))
+        raw = [str(v) for v in value if v] if many else [str(value)]
+        if not raw:
+            return None, None
+        resolved: list[str] = []
+        for candidate in raw:
+            entity_id = store.backend.resolve_entity_id(candidate)
+            entity = store.backend.get_entity(entity_id) if entity_id else None
+            if entity is None or not _p(request).owns(entity.user_id):
+                return None, JSONResponse(
+                    {"error": "entity not found"}, status_code=404
+                )
+            resolved.append(entity.id)
+        return (resolved if many else resolved[0]), None
 
     def _memory_payload(memory) -> dict[str, Any]:
         data = memory.model_dump()
@@ -1441,6 +1503,41 @@ def create_app(
             request.path_params["memory_id"], hard=hard, owner_prefix=_p(request).prefix
         )
         return JSONResponse({"deleted": True, "hard": hard})
+
+    async def forgotten_memories(request: Request) -> Response:
+        rows = await run_in_threadpool(partial(
+            store.forgotten,
+            user_id=_p(request).namespace(request.query_params.get("user_id")),
+            limit=int(request.query_params.get("limit", 200)),
+        ))
+        return JSONResponse([
+            {
+                "memory": _memory_payload(row["memory"]),
+                "forgotten_at": row["forgotten_at"],
+                "actor": row["actor"],
+                "reason": row["reason"],
+            }
+            for row in rows
+        ])
+
+    async def purge_memory(request: Request) -> Response:
+        """Permanently delete a memory that was already forgotten.
+
+        Separate from DELETE on purpose: that one is reversible in the sense
+        that the record survives and stays inspectable, this one is not.
+        """
+        _, error = _memory_or_error(request)
+        if error:
+            return error
+        try:
+            purged = await run_in_threadpool(partial(
+                store.purge,
+                request.path_params["memory_id"],
+                owner_prefix=_p(request).prefix,
+            ))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse({"purged": purged})
 
     async def memory_history(request: Request) -> Response:
         _, error = _memory_or_error(request)
@@ -2030,6 +2127,9 @@ def create_app(
         Route("/logout", logout, methods=["GET", "POST"]),
         Route("/api/v1/memories", guarded(list_memories), methods=["GET"]),
         Route("/api/v1/memories", guarded(create_memory), methods=["POST"]),
+        # before /{memory_id}, or "forgotten" is read as an id and 404s
+        Route("/api/v1/memories/forgotten", guarded(forgotten_memories), methods=["GET"]),
+        Route("/api/v1/memories/{memory_id}/purge", guarded(purge_memory), methods=["POST"]),
         Route("/api/v1/memories/{memory_id}", guarded(get_memory), methods=["GET"]),
         Route("/api/v1/memories/{memory_id}", guarded(patch_memory), methods=["PATCH"]),
         Route("/api/v1/memories/{memory_id}", guarded(delete_memory), methods=["DELETE"]),

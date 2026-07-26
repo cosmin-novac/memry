@@ -865,15 +865,15 @@ class MemoryStore:
         limit: int = 10,
         include_invalid: bool = False,
         categories: list[str] | None = None,
-        entity_id: str | None = None,
+        entity_id: str | list[str] | None = None,
         since: str | None = None,
         until: str | None = None,
         relational: bool = True,
     ) -> list[SearchResult]:
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         if entity_id:
-            entity_id = self.backend.resolve_entity_id(entity_id)
-            if entity_id is None:
+            entity_id = self._resolve_entity_filter(entity_id)
+            if not entity_id:
                 return []
         # No query text = browse by tag/date rather than rank by relevance.
         if not (query or "").strip():
@@ -1016,6 +1016,19 @@ class MemoryStore:
             return "", []
         return header + "\n".join(lines), list(dict.fromkeys(memory_ids))
 
+    def _resolve_entity_filter(
+        self, entity_id: str | list[str]
+    ) -> str | list[str] | None:
+        """Follow merge history for one entity filter, or several.
+
+        A merged entity keeps its old id as a redirect, so a filter saved before
+        a merge must still land on the surviving record.
+        """
+        if isinstance(entity_id, str):
+            return self.backend.resolve_entity_id(entity_id)
+        resolved = [self.backend.resolve_entity_id(e) for e in entity_id if e]
+        return [e for e in resolved if e] or None
+
     def get(self, memory_id: str, *, owner_prefix: str | None = None) -> Memory | None:
         memory = self.backend.get_memory(memory_id)
         return memory if _owned(memory, owner_prefix) else None
@@ -1115,14 +1128,14 @@ class MemoryStore:
         limit: int = 100,
         offset: int = 0,
         categories: list[str] | None = None,
-        entity_id: str | None = None,
+        entity_id: str | list[str] | None = None,
         since: str | None = None,
         until: str | None = None,
     ) -> list[Memory]:
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         if entity_id:
-            entity_id = self.backend.resolve_entity_id(entity_id)
-            if entity_id is None:
+            entity_id = self._resolve_entity_filter(entity_id)
+            if not entity_id:
                 return []
         if not (since or until):
             return self.backend.list_memories(
@@ -1233,6 +1246,62 @@ class MemoryStore:
                 )
             )
         return ok
+
+    def forgotten(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Memories that were removed, with why and by whom.
+
+        Removed, not replaced: a memory that was superseded (reconciled away,
+        consolidated, distilled) has ``superseded_by`` pointing at whatever took
+        its place and is part of that memory's history, not something the user
+        threw out. Only records with nothing standing in for them belong here.
+        """
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        out: list[dict[str, Any]] = []
+        for memory in self.backend.list_memories(
+            scope, include_invalid=True, limit=1_000_000
+        ):
+            if memory.invalid_at is None or memory.superseded_by:
+                continue
+            removal = next(
+                (
+                    event
+                    for event in reversed(self.backend.history(memory.id))
+                    if event.event == "DELETE"
+                ),
+                None,
+            )
+            out.append({
+                "memory": memory,
+                "forgotten_at": memory.invalid_at,
+                "actor": removal.actor if removal else "system",
+                "reason": removal.reason if removal else None,
+            })
+            if len(out) >= limit:
+                break
+        out.sort(key=lambda row: row["forgotten_at"] or "", reverse=True)
+        return out
+
+    def purge(self, memory_id: str, *, owner_prefix: str | None = None) -> bool:
+        """Delete a forgotten memory for good. Refuses anything still active.
+
+        Permanent deletion is the one operation with no audit trail left to
+        inspect afterwards, so it is deliberately a second step: a memory has to
+        have been forgotten first. That makes an accidental irreversible delete
+        take two decisions instead of one bad click.
+        """
+        memory = self.backend.get_memory(memory_id)
+        if not _owned(memory, owner_prefix):
+            return False
+        if memory.invalid_at is None:
+            raise ValueError("only a forgotten memory can be permanently deleted")
+        return self.backend.delete_memory(memory_id)
 
     def delete_all(
         self,

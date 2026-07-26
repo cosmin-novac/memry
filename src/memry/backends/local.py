@@ -283,13 +283,23 @@ def _category_clause(categories: list[str] | None, memory_id: str) -> tuple[str,
     )
 
 
-def _entity_clause(entity_id: str | None, memory_id: str) -> tuple[str, list[Any]]:
-    if not entity_id:
+def _entity_clause(
+    entity_id: str | list[str] | None, memory_id: str
+) -> tuple[str, list[Any]]:
+    """Filter to memories mentioning the entity, or ANY of several.
+
+    OR semantics, matching ``_category_clause``: picking two people means
+    "either of them", which is what selecting two rows in a list implies.
+    """
+    ids = [entity_id] if isinstance(entity_id, str) else list(entity_id or [])
+    ids = [e for e in ids if e]
+    if not ids:
         return "1=1", []
+    placeholders = ",".join("?" * len(ids))
     return (
         "EXISTS (SELECT 1 FROM entity_mentions em "
-        f"WHERE em.memory_id = {memory_id} AND em.entity_id = ?)",
-        [entity_id],
+        f"WHERE em.memory_id = {memory_id} AND em.entity_id IN ({placeholders}))",
+        ids,
     )
 
 

@@ -324,3 +324,65 @@ def test_maintenance_reports_tag_health(client):
     assert health["untagged"] == 0
     assert {row["tag"] for row in health["largest_tags"]} == {
         "liver lab results", "liver bloods"}
+
+
+# ------------------------------------------------- forgotten memories
+def test_deleted_memories_land_in_forgotten_and_purge_needs_two_steps(client):
+    """Delete is reversible-ish (the record survives); purge is not.
+
+    Permanent deletion is therefore gated on the memory already being
+    forgotten, so an irreversible delete takes two decisions rather than one.
+    """
+    keep = client.post("/api/v1/memories", json={
+        "content": "keep me", "user_id": "u", "infer": False,
+    }).json()["actions"][0]["memory_id"]
+    gone = client.post("/api/v1/memories", json={
+        "content": "delete me", "user_id": "u", "infer": False,
+    }).json()["actions"][0]["memory_id"]
+
+    # an active memory cannot be purged
+    assert client.post(f"/api/v1/memories/{gone}/purge").status_code == 409
+
+    client.delete(f"/api/v1/memories/{gone}")
+    rows = client.get("/api/v1/memories/forgotten?user_id=u").json()
+    assert [r["memory"]["content"] for r in rows] == ["delete me"]
+    assert rows[0]["actor"] == "user"
+    assert rows[0]["reason"]
+
+    assert client.post(f"/api/v1/memories/{gone}/purge").json() == {"purged": True}
+    assert client.get("/api/v1/memories/forgotten?user_id=u").json() == []
+    assert [m["id"] for m in client.get("/api/v1/memories?user_id=u").json()] == [keep]
+
+
+def test_superseded_memories_are_not_treated_as_forgotten():
+    """A replaced memory belongs to its successor's history, not to deletions.
+
+    Reconciliation, consolidation and distillation all invalidate the old row
+    but set superseded_by. Only records with nothing standing in for them are
+    forgotten.
+    """
+    store = make_store()
+    with TestClient(create_app(store)) as client:
+        old_id = client.post("/api/v1/memories", json={
+            "content": "old version", "user_id": "u", "infer": False,
+        }).json()["actions"][0]["memory_id"]
+        new_id = client.post("/api/v1/memories", json={
+            "content": "new version", "user_id": "u", "infer": False,
+        }).json()["actions"][0]["memory_id"]
+        # exactly what reconcile.py does when a fact contradicts an older one
+        store.backend.invalidate_memory(old_id, superseded_by=new_id)
+
+        assert client.get("/api/v1/memories/forgotten?user_id=u").json() == []
+        # and a plain delete of the survivor does show up
+        client.delete(f"/api/v1/memories/{new_id}")
+        rows = client.get("/api/v1/memories/forgotten?user_id=u").json()
+        assert [r["memory"]["id"] for r in rows] == [new_id]
+
+
+def test_forgotten_is_namespaced(client):
+    a = client.post("/api/v1/memories", json={
+        "content": "ada secret", "user_id": "ada", "infer": False,
+    }).json()["actions"][0]["memory_id"]
+    client.delete(f"/api/v1/memories/{a}")
+    assert client.get("/api/v1/memories/forgotten?user_id=bob").json() == []
+    assert len(client.get("/api/v1/memories/forgotten?user_id=ada").json()) == 1
