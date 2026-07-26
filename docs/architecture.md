@@ -76,7 +76,7 @@ SQLite-only decision reverses that unsupported architecture choice explicitly.
 
 Mem0 runtime selection was removed on 2026-07-24. Its reduced adapter cannot preserve
 Memry episodes, invalidation history, normalized topics, entity links, relations,
-descriptions, or collections. Offering it as a runtime setting therefore made the same
+or descriptions. Offering it as a runtime setting therefore made the same
 product silently behave differently and lose features depending on one environment
 variable. No user or deployment depended on that mode.
 
@@ -90,7 +90,7 @@ those limits are visible and intentional.
 |---|---|---|
 | Public surfaces | Python API, CLI, REST, dashboard, MCP | They call `MemoryStore`; they do not implement memory behavior independently. |
 | `MemoryStore` | Ownership checks, write/read workflows, knowledge operations | It is the product facade and the main invariant boundary. |
-| Intelligence | Extraction, reconciliation, entity resolution, relation extraction, topic abstraction, descriptions, decay, collections | Derived outputs remain rebuildable from evidence. |
+| Intelligence | Extraction, reconciliation, entity resolution, relation extraction, topic abstraction, descriptions, decay, consolidation | Derived outputs remain rebuildable from evidence. |
 | Retrieval | FTS5/BM25, vectors, reciprocal-rank fusion, recency/importance, entity graph expansion | Invalidated evidence is excluded by default and work is bounded. |
 | Providers | LLM and embedding integrations | External providers are optional; zero-key fallbacks remain functional. |
 | Production persistence | `LocalBackend` | SQLite is the sole production source of truth. |
@@ -161,14 +161,13 @@ opened or selected for context, costs nothing on the normal write path, and is r
 when mentions, linked memory content, invalidation, deletion, type, alias, or merge state
 changes. Active linked memories remain the evidence returned with the hub.
 
-### Relations and collections
+### Relations
 
 Entity relations are typed subject-predicate-object edges with an optional evidence memory.
 Invalidating or deleting that evidence also invalidates or removes the relation. Search
 traverses a bounded relation neighborhood only when the query resolves to a known entity.
-
-Collections are generated titles and summaries over groups of memory IDs. They are a
-navigation layer, not identities, topics, or authoritative claims.
+They are shown under the entity they describe, which is also where they are used from: an
+edge only means something next to the thing it connects.
 
 ## 4. Write path
 

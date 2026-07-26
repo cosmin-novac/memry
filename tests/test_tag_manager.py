@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
+from conftest import FakeLLM
 from starlette.testclient import TestClient
 
 from memry.config import Config
@@ -85,3 +88,38 @@ def test_rest_tag_edit_endpoint():
         assert r.json()["memories_changed"] == 1
 
         assert client.post("/api/v1/tags/edit", json={"op": "bogus"}).status_code == 400
+
+
+@pytest.fixture
+def seeded():
+    s = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(96))
+    for content, cats in [("a", ["finance", "budget"]), ("b", ["financial"]),
+                          ("c", ["projects"]), ("d", ["project"]), ("e", ["running"])]:
+        s.add(content, user_id="u", infer=False, categories=cats)
+    yield s
+    s.close()
+
+
+def test_suggest_merges_keeps_only_real_variant_groups(seeded):
+    seeded.llm = FakeLLM()
+    seeded.llm.queue(json.dumps({"groups": [
+        {"canonical": "finance", "variants": ["finance", "financial"]},
+        {"canonical": "project", "variants": ["project", "projects"]},
+        {"canonical": "x", "variants": ["ghost"]},            # not real -> dropped
+        {"canonical": "running", "variants": ["running"]},    # size 1 -> dropped
+    ]}))
+    groups = seeded.suggest_tag_merges(user_id="u")
+    # project/projects was already collapsed deterministically during ingestion.
+    assert groups == [
+        {"canonical": "finance", "variants": ["finance", "financial"]},
+    ]
+
+
+def test_suggest_merges_no_llm_is_empty():
+    s = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    s.add("a", user_id="u", infer=False, categories=["x", "y"])
+    assert s.suggest_tag_merges(user_id="u") == []
+    s.close()
+
+
+# ---------------------------------------------------------------- collections

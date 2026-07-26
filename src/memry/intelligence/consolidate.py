@@ -23,8 +23,11 @@ destroy information:
   detail from all of them. Without an LLM only exact textual duplicates
   collapse, because guessing here would silently lose information.
 
-Nothing is deleted. The survivor absorbs the merged content, and the others are
+Nothing is deleted. The merged text becomes a NEW memory and every original is
 invalidated with ``superseded_by`` pointing at it, so history still resolves.
+Rewriting one of the originals in place would leave an arbitrary member wearing
+the merged text along with its own creation date and history; a fresh record
+says plainly that this came from consolidating several.
 """
 
 from __future__ import annotations
@@ -113,11 +116,12 @@ def similarity_groups(
     return [g for g in grouped.values() if 2 <= len(g) <= max_group]
 
 
-def pick_survivor(memories: list[Memory]) -> Memory:
-    """The record that keeps the merged content.
+def representative(memories: list[Memory]) -> Memory:
+    """The member whose wording best stands for the group.
 
-    Highest importance first, then the most detailed text, then the oldest, so
-    the surviving row is the one other references are most likely to mean.
+    Used when every member says the same thing textually, so there is nothing
+    for a model to merge and one of them can supply the text directly. Highest
+    importance first, then the most detailed, then the oldest.
     """
     return sorted(
         memories,

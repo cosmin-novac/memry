@@ -386,3 +386,39 @@ def test_forgotten_is_namespaced(client):
     client.delete(f"/api/v1/memories/{a}")
     assert client.get("/api/v1/memories/forgotten?user_id=bob").json() == []
     assert len(client.get("/api/v1/memories/forgotten?user_id=ada").json()) == 1
+
+
+# ------------------------------------------------- deferred writes
+def test_deferred_save_returns_before_any_provider_call():
+    """Saving should not make the user wait on extraction.
+
+    Extraction is several provider round-trips. The deferred path commits the
+    text (searchable straight away) and leaves enrichment to the worker, so the
+    UI can unlock immediately.
+    """
+    from conftest import FakeLLM
+
+    store = MemoryStore(Config(db_path=":memory:"), llm=FakeLLM(), embedder=HashEmbedder(64))
+    with TestClient(create_app(store)) as client:
+        created = client.post("/api/v1/memories", json={
+            "content": "Ada moved to Berlin", "user_id": "u", "defer": True,
+        })
+        assert created.status_code == 202
+        assert store.llm.calls == []  # nothing was asked of the provider
+
+        stored = client.get("/api/v1/memories?user_id=u").json()
+        assert [m["content"] for m in stored] == ["Ada moved to Berlin"]
+        assert stored[0]["metadata"]["pending_distillation"] is True
+        # and it is findable while enrichment is still outstanding
+        found = client.post("/api/v1/search", json={"query": "Berlin", "user_id": "u"}).json()
+        assert [r["memory"]["content"] for r in found] == ["Ada moved to Berlin"]
+
+
+def test_defer_is_ignored_without_an_llm():
+    """With no provider there is nothing to defer, so take the normal path."""
+    store = make_store()  # NoneLLM
+    with TestClient(create_app(store)) as client:
+        created = client.post("/api/v1/memories", json={
+            "content": "plain note", "user_id": "u", "defer": True,
+        })
+        assert created.status_code == 201

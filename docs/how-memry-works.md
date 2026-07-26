@@ -8,7 +8,7 @@ roadmap.
 
 ## The objects
 
-Memry keeps six kinds of things. Only the first two are core; the rest are
+Memry keeps five kinds of things. Only the first two are core; the rest are
 indexes and organization layered on top.
 
 | Object | What it is | Where it lives | Created by |
@@ -18,7 +18,6 @@ indexes and organization layered on top.
 | **Entity** | A stable referent hub with aliases, a derived description, and linked evidence. | `entities` + `entity_mentions` | entity linking on save; description on first use |
 | **Relation** | A typed edge between two entities (`Ada -works_on-> Helios`). | `relations` table | relation extraction on save |
 | **Topic** | A scoped classification and filter, with optional parent/child hierarchy. | `topics` + `memory_topics` + `topic_relations` | extraction, user, or abstraction |
-| **Collection** | A titled, summarized cluster of memories. Navigation only. | `collections` table | `build_collections` (on demand) |
 
 Two important properties of a **Memory**:
 
@@ -122,8 +121,8 @@ Entities are **extracted, disambiguated, and typed.**
   batched, so a whole namespace is a handful of calls, and only untyped entities
   are touched.
 - See them under **Knowledge -> People and things**, grouped by type with aliases,
-  descriptions, active evidence, and merge controls. Relations have their own Knowledge
-  tab. The same data is available through **`GET /api/v1/entities`** and
+  descriptions, active evidence, merge controls, and the entity's own relations.
+  The same data is available through **`GET /api/v1/entities`** and
   `/api/v1/relations`.
 
 ## Topics: indexed classification, not identity
@@ -146,12 +145,9 @@ people.
   geometric over the stored vectors; the merge itself is judged by an LLM and written to
   preserve every detail. Originals are superseded, never deleted. Review it under
   Knowledge > Upkeep before applying.
-- Collections remain separate generated maps over memory clusters.
 ## How the layers fit together
 
 ```
-        collections            ← coarse navigation (titled clusters, on demand)
-            │
    entities ── relations       ← the retrieval backbone: specific, typed, graph
             │
         memories               ← the atoms: distilled, bi-temporal facts
@@ -166,7 +162,7 @@ people.
   bag of facts into a graph you can traverse, which is the only thing that makes
   multi-hop questions answerable.
 - **Topics** cut across memories as indexed filters; hierarchy provides abstraction without copying labels.
-- **Collections** and synthetic topic parents are optional maps on top, not places
+- Synthetic topic parents are an optional map on top, not places
   facts live.
 
 ## Keeping it manageable
@@ -183,7 +179,6 @@ people.
   are free).
 - Use **Knowledge → Topics** and conservative "Suggest merges" to keep the
   classification vocabulary clean; prefer specific topics.
-- Run **`memry build-collections`** on demand when you want a fresh map; it never
   runs on a schedule, so it spends no tokens unasked.
 - Nothing the system does destroys data: forgetting is invalidation, and every
   mutation is in `memory_events`.
@@ -197,8 +192,8 @@ people.
 | Hybrid retrieval (vector + BM25 + recency/importance) | real |
 | Entity extraction + conservative disambiguation + merge proposals | real |
 | Typed relations + relational retrieval (+ PPR fallback) | real |
-| Normalized topics, hierarchy expansion, canonicalization, collections | real (abstraction/collections opt-in) |
+| Normalized topics, hierarchy expansion, canonicalization | real (abstraction opt-in) |
 | Entity types (person/project/place/…) + typing backfill | real |
 | Memory-type-driven decay (episodic fades, procedural persists) | real |
-| Unified Knowledge dashboard for topics, entity hubs, relations, and collections | real |
+| Unified Knowledge dashboard for tags, entity hubs with their relations, forgotten memories, and upkeep | real |
 | Memory-type effect on *ranking* (not just decay) | not yet |

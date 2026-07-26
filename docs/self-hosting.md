@@ -196,9 +196,9 @@ are invalidated (auditable, recoverable), never destroyed.
 
 ## Managing topics and entities
 
-The dashboard's **Knowledge** area contains Topics, People and things, Relations, and
-Collections. Topics show memory counts and can be renamed, combined, or deleted under the
-current user filter. The same topic operations remain available at
+The dashboard's **Knowledge** area contains Tags, People and things, Forgotten, and Upkeep.
+Tags show memory counts, can be filtered by name, and can be renamed, combined, or deleted
+under the current user filter. The same topic operations remain available at
 `POST /api/v1/tags/edit` for API compatibility.
 
 An optional, off-by-default LLM pass proposes higher-level parents for browsing, such as
@@ -211,7 +211,7 @@ memory. Synthetic parents remain visible through `/api/v1/categories` and
 `GET /api/v1/tags/synthetic`.
 
 People and things open as entity hubs with aliases, a bounded description, and active
-supporting memories. Relations can open their evidence memory, and collections link to their
+supporting memories. Relations are listed under the entity they describe and can open their
 members.
 
 ## Searching by tag and date

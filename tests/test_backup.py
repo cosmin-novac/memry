@@ -8,7 +8,6 @@ import pytest
 
 from memry.config import Config
 from memry.models import (
-    Collection,
     Entity,
     EntityMention,
     MergeProposal,
@@ -72,10 +71,6 @@ def populated_store() -> MemoryStore:
     store.backend.add_topic_relation(TopicRelation(
         broader_topic_id=topics[0].id, narrower_topic_id=topics[1].id,
         user_id="ada", provenance="manual",
-    ))
-    store.backend.record_collection(Collection(
-        title="Memory research", summary="Current research work.",
-        memory_ids=[first, second], user_id="ada",
     ))
     return store
 

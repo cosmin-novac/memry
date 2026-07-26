@@ -96,7 +96,7 @@ input,button,textarea,select{font:inherit;color:inherit;background:var(--panel);
 html.knowledge-open,body.knowledge-open{overflow:hidden}
 .modal{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.55);display:none;align-items:flex-start;justify-content:center;padding:4rem 1rem;overflow:auto;overscroll-behavior:contain}
 .modal.on{display:flex}
-.modal .sheet{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(96vw,74rem);padding:1.2rem 1.3rem}
+.modal .sheet{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(97vw,96rem);padding:1.2rem 1.3rem}
 /* Entities: the selected one gets its own column beside the list, so choosing
    an entity does not push its detail below the merge proposals. Below the
    breakpoint it stacks and moves to the TOP, where a selection belongs. */
@@ -206,6 +206,8 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
     <span class="sel" id="tagsel">none selected</span>
     <button onclick="suggestMerges()" title="let the LLM propose duplicate or variant tags to merge">Suggest merges</button>
     <button onclick="mergeTags()" title="combine the checked tags into one">Combine selected...</button>
+    <input id="tagsearch" type="search" placeholder="filter tags..." oninput="renderTags()"
+           title="show only tags whose name contains this" style="flex:1;min-width:7rem">
   </div>
   <div id="tagsuggest"></div><div id="taglist"></div>
 </section>
@@ -299,6 +301,7 @@ function viewCard(m){
    ${m.score!==undefined?`<span>score ${m.score.toFixed(3)}</span>`:''}
    <span>${(m.updated_at||m.created_at||'').slice(0,10)}</span>
    ${m.invalid_at?'<span style="color:var(--warn)">invalidated</span>':''}
+   ${m.saving?'<span class="cnt" title="the edit is saved; entity links are being refreshed">saving...</span>':''}
    ${m.metadata&&m.metadata.pending_distillation&&!m.invalid_at?(m.metadata._enrichment?`<span title="The exact text is saved and searchable while background enrichment runs.">${esc(m.metadata._enrichment.status||'enrichment pending')}</span>`:`<button class="distill" onclick="distill('${m.id}')" title="Saved verbatim because extraction was skipped. Distill into discrete facts now.">not distilled ↻</button>`):''}</div></div>`;
 }
 function editCard(m){
@@ -757,7 +760,7 @@ function clearSearch(){
 }
 
 // -- unified knowledge area -------------------------------------------------
-let knowledgeTab='topics',knowledgeNames={};
+let knowledgeTab='topics',knowledgeNames={},allTags=[];
 function setKnowledgeOpen(open){
   document.getElementById('knowmodal').classList.toggle('on',open);
   document.documentElement.classList.toggle('knowledge-open',open);
@@ -858,18 +861,34 @@ async function previewConsolidation(){
     el.innerHTML=`<div class="empty">Scanned ${res.scanned} memories. Nothing to merge.</div>`;
     return;
   }
-  el.innerHTML=merges.map(g=>`<div class="tagrow"><span class="name">
-    <b>${esc(g.merged_content)}</b>
-    <div class="hint">replaces ${g.memory_ids.length}: ${g.contents.map(c=>esc(c)).join(' · ')}</div>
-    <div class="hint">${esc(g.reason)}</div></span></div>`).join('');
+  // each proposal is ticked individually: accepting one is not accepting all
+  el.innerHTML=`<div class="hint">${merges.length} group${merges.length===1?'':'s'} found. Tick the ones to merge.</div>`
+   +merges.map(g=>`<div class="tagrow">
+    <input type="checkbox" class="congroup" checked
+           value="${esc(JSON.stringify(g.memory_ids))}" onchange="updateConsolidationCount()">
+    <span class="name">
+      <b>${esc(g.merged_content)}</b>
+      <div class="hint">replaces ${g.memory_ids.length}: ${g.contents.map(c=>esc(c)).join(' · ')}</div>
+      <div class="hint">${esc(g.reason)}</div></span></div>`).join('');
+  updateConsolidationCount();
+}
+function chosenGroups(){
+  return [...document.querySelectorAll('.congroup:checked')].map(c=>JSON.parse(c.value));
+}
+function updateConsolidationCount(){
+  const n=chosenGroups().length,button=document.getElementById('conapply');
+  button.disabled=!n;
+  button.textContent=n?`Merge ${n} selected`:'Merge selected';
 }
 async function applyConsolidation(){
-  const merges=document.querySelectorAll('#conresult .tagrow').length;
-  if(!confirm(`Merge ${merges} group(s)? The originals are kept and linked, not deleted.`))return;
+  const only=chosenGroups();
+  if(!only.length)return;
+  const count=only.reduce((n,g)=>n+g.length,0);
+  if(!confirm(`Merge ${only.length} group(s)? ${count} memories become ${only.length} new one(s); the originals are forgotten and stay listed under Forgotten.`))return;
   const res=await api('/api/v1/maintenance/consolidate',
-    {method:'POST',body:JSON.stringify({threshold:consolidationPreview,apply:true})});
+    {method:'POST',body:JSON.stringify({threshold:consolidationPreview,apply:true,only})});
   document.getElementById('conresult').innerHTML=
-    `<div class="empty">Merged ${res.merged} group(s); ${res.superseded} memories superseded.</div>`;
+    `<div class="empty">Merged ${res.merged} group(s); ${res.superseded} memories forgotten.</div>`;
   document.getElementById('conapply').disabled=true;
   load();
 }
@@ -879,11 +898,22 @@ function updateSel(){
   document.getElementById('tagsel').textContent=n?`${n} selected`:'none selected';
 }
 async function loadTags(){
-  const topics=await api('/api/v1/categories');
-  topics.sort((a,b)=>a.category.localeCompare(b.category));
+  allTags=(await api('/api/v1/categories'))
+    .sort((a,b)=>a.category.localeCompare(b.category));
+  renderTags();
+}
+// Filtering redraws from the cached list: a store with hundreds of tags is
+// unusable as one long scroll, and refetching on every keystroke is wasteful.
+function renderTags(){
   const el=document.getElementById('taglist');
-  if(!topics.length){el.innerHTML='<div class="empty">No tags yet.</div>';return}
-  el.innerHTML=topics.map(topic=>`<div class="tagrow">
+  const needle=(document.getElementById('tagsearch')?.value||'').trim().toLowerCase();
+  if(!allTags.length){el.innerHTML='<div class="empty">No tags yet.</div>';return}
+  const shown=needle?allTags.filter(t=>t.category.toLowerCase().includes(needle)):allTags;
+  if(!shown.length){
+    el.innerHTML=`<div class="empty">No tag matches "${esc(needle)}".</div>`;return;
+  }
+  el.innerHTML=(needle?`<div class="hint">${shown.length} of ${allTags.length} tags</div>`:'')
+   +shown.map(topic=>`<div class="tagrow">
     <input type="checkbox" value="${esc(topic.category)}" onchange="updateSel()">
     <span class="name"><b>${esc(topic.category)}</b> <span class="cnt">${topic.count}</span>
       ${topic.synthetic?'<span class="syn">synthetic parent</span>':''}</span>
@@ -935,9 +965,8 @@ async function loadEntities(){
   document.getElementById('entcount').textContent=active.length+' entities, '+relations.length+' relations';
   const byType={};
   active.forEach(entity=>(byType[entity.entity_type||'untyped']??=[]).push(entity));
-  document.getElementById('entlist').innerHTML=Object.keys(byType).sort().map(type=>`<div class="tagrow">
-    <span class="syn entity-type">${esc(type)}</span><span class="name">${byType[type].sort((a,b)=>a.name.localeCompare(b.name)).map(entity=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(entity.id)})'>${esc(entity.name)}</button>`).join(', ')}</span>
-    <span class="cnt">${byType[type].length}</span></div>`).join('')||'<div class="empty">No entities yet.</div>';
+  entityGroups=byType;
+  renderEntityGroups();
   document.getElementById('proplist').innerHTML=proposals.length?proposals.map(proposal=>`<div class="tagrow"><span class="name">
     <b>${esc(knowledgeNames[proposal.entity_a]||proposal.entity_a)}</b> and <b>${esc(knowledgeNames[proposal.entity_b]||proposal.entity_b)}</b>
     <span class="cnt">${esc(proposal.reason||'identity is uncertain')}</span></span>
@@ -976,6 +1005,33 @@ function relationsBlock(id,detail){
   return `<div class="hint">${rels.length} relation${rels.length===1?'':'s'}</div>${rows}`;
 }
 function closeEntity(){document.getElementById('entitydetail').innerHTML=''}
+// A type like "concept" can hold hundreds of entities. Listing them all turns
+// the tab into one long scroll, so each type is capped until asked to expand.
+const ENTITY_ROW_CAP=12;
+let entityGroups={},entityExpanded=new Set();
+function toggleEntityType(type){
+  entityExpanded.has(type)?entityExpanded.delete(type):entityExpanded.add(type);
+  renderEntityGroups();
+}
+function renderEntityGroups(){
+  const el=document.getElementById('entlist');
+  const types=Object.keys(entityGroups).sort();
+  if(!types.length){el.innerHTML='<div class="empty">No entities yet.</div>';return}
+  el.innerHTML=types.map(type=>{
+    const all=entityGroups[type].slice().sort((a,b)=>a.name.localeCompare(b.name));
+    const open=entityExpanded.has(type);
+    const shown=open?all:all.slice(0,ENTITY_ROW_CAP);
+    const hidden=all.length-shown.length;
+    const links=shown.map(e=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(e.id)})'>${esc(e.name)}</button>`).join(', ');
+    let more='';
+    if(hidden>0)more=` <button class="act" onclick='toggleEntityType(${JSON.stringify(type)})'>show ${hidden} more</button>`;
+    else if(open&&all.length>ENTITY_ROW_CAP)more=` <button class="act" onclick='toggleEntityType(${JSON.stringify(type)})'>show less</button>`;
+    return `<div class="tagrow">
+      <span class="syn entity-type">${esc(type)}</span>
+      <span class="name">${links}${more}</span>
+      <span class="cnt">${all.length}</span></div>`;
+  }).join('');
+}
 async function addAlias(id){
   const input=document.getElementById('aliasinput'),alias=input.value.trim();if(!alias)return;
   await api('/api/v1/entities/'+encodeURIComponent(id)+'/aliases',{method:'POST',body:JSON.stringify({alias})});
@@ -1003,10 +1059,12 @@ async function backfillTypes(){
 async function add(infer){
   const t=document.getElementById('newmem').value.trim(); if(!t)return;
   const cs=document.getElementById('newcats').value.split(',').map(s=>s.trim()).filter(Boolean);
-  const res=await api('/api/v1/memories',{method:'POST',
-    body:JSON.stringify({content:t,infer,categories:cs.length?cs:undefined})});
-  if(res.warnings&&res.warnings.length)alert(res.warnings.join('\\n'));
+  // Clear the form first: the text is durably stored before the response comes
+  // back, so making the user watch extraction finish buys them nothing.
   document.getElementById('newmem').value=''; document.getElementById('newcats').value='';
+  const res=await api('/api/v1/memories',{method:'POST',
+    body:JSON.stringify({content:t,infer,defer:infer,categories:cs.length?cs:undefined})});
+  if(res.warnings&&res.warnings.length)alert(res.warnings.join('\\n'));
   loadAll(); loadStats();
 }
 async function distill(id){
@@ -1022,10 +1080,23 @@ function cancelEdit(){editingId=null;render(current)}
 async function saveEdit(id){
   const content=document.getElementById('edit-note').value.trim(); if(!content)return;
   const cats=document.getElementById('edit-cats').value.split(',').map(s=>s.trim()).filter(Boolean);
-  const updated=await api('/api/v1/memories/'+id,{method:'PATCH',body:JSON.stringify({content,categories:cats})});
-  if(updated.error){alert(updated.error);return}
+  // Editing text re-runs entity analysis, which is several provider calls. Show
+  // the saved row at once and let that finish behind it; if it fails, say so and
+  // put the editor back rather than pretending the edit landed.
+  const before=current.find(m=>m.id===id);
   editingId=null;
-  current=current.map(m=>m.id===id?{...m,...updated}:m);
+  current=current.map(m=>m.id===id?{...m,content,categories:cats,saving:true}:m);
+  render(current);
+  try{
+    const updated=await api('/api/v1/memories/'+id,{method:'PATCH',
+      body:JSON.stringify({content,categories:cats})});
+    if(updated.error)throw new Error(updated.error);
+    current=current.map(m=>m.id===id?{...m,...updated,saving:false}:m);
+  }catch(error){
+    alert('Could not save that edit: '+error.message);
+    current=current.map(m=>m.id===id?before:m);
+    editingId=id;
+  }
   render(current);
 }
 async function exportMemories(){
@@ -1452,14 +1523,32 @@ def create_app(
         # Store calls that hit LLM/embedding providers run in the threadpool:
         # blocking the event loop would stall every other request for the
         # duration of a provider round-trip.
+        user_id = _p(request).namespace(body.get("user_id")) or default_user
+        infer = bool(body.get("infer", True))
+        # `defer` returns as soon as the text is durably stored and lets the
+        # enrichment worker extract, reconcile and link afterwards. Extraction
+        # is several provider round-trips, so a caller that waits for it sits
+        # there for seconds to save one note. The text is searchable either way.
+        if infer and bool(body.get("defer")) and store.llm.available:
+            result = await run_in_threadpool(partial(
+                store.add_deferred,
+                content if isinstance(content, str) else json.dumps(content),
+                user_id=user_id,
+                agent_id=body.get("agent_id"),
+                run_id=body.get("run_id"),
+                metadata=body.get("metadata"),
+                importance=float(body.get("importance", 0.5)),
+                categories=body.get("categories"),
+            ))
+            return JSONResponse(result.model_dump(), status_code=202)
         result = await run_in_threadpool(partial(
             store.add,
             content,
-            user_id=_p(request).namespace(body.get("user_id")) or default_user,
+            user_id=user_id,
             agent_id=body.get("agent_id"),
             run_id=body.get("run_id"),
             metadata=body.get("metadata"),
-            infer=bool(body.get("infer", True)),
+            infer=infer,
             memory_type=body.get("memory_type", "semantic"),
             importance=float(body.get("importance", 0.5)),
             categories=body.get("categories"),
@@ -1591,6 +1680,8 @@ def create_app(
             user_id=_p(request).namespace(body.get("user_id")),
             threshold=float(body.get("threshold") or 0.90),
             apply=bool(body.get("apply")),
+            # the dashboard sends back only the groups the user ticked
+            only=body.get("only") or None,
         ))
         return JSONResponse(result)
 

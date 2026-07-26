@@ -28,7 +28,7 @@ from .intelligence.clustering import (
     semantic_duplicate_tags,
     suggest_canonical_merges,
 )
-from .intelligence.consolidate import judge_group, pick_survivor, similarity_groups
+from .intelligence.consolidate import judge_group, representative, similarity_groups
 from .intelligence.context import build_context, estimate_tokens
 from .intelligence.decay import decay_sweep, effective_importance
 from .intelligence.entities import (
@@ -1705,17 +1705,25 @@ class MemoryStore:
         threshold: float = 0.90,
         max_groups: int = 25,
         apply: bool = True,
+        only: list[list[str]] | None = None,
     ) -> dict[str, Any]:
         """Merge memories that record the same fact more than once.
 
         ``apply=False`` returns exactly what would happen without touching
         anything, which is what the dashboard shows before the user confirms.
+        ``only`` restricts the run to the listed groups, so a user can accept
+        some proposals from a preview and leave the rest alone.
 
-        The survivor absorbs the merged text plus the union of the group's tags
-        and entities; the rest are invalidated with ``superseded_by`` pointing at
-        it. Nothing is destroyed, so the audit trail and time-travel still work.
+        The merged text becomes a NEW memory carrying the union of the group's
+        tags, entities and provenance, and every original is invalidated with
+        ``superseded_by`` pointing at it. Rewriting one of the originals in
+        place would have made an arbitrary member masquerade as the merge, with
+        its own creation date and history; a distinct record says plainly that
+        this text came from consolidating several. Nothing is destroyed, so the
+        audit trail and time-travel still resolve.
         """
         scope = Scope(user_id=user_id)
+        wanted = {frozenset(group) for group in only} if only else None
         vectors = self.backend.memory_vectors(scope, limit=1_000_000)
         summary: dict[str, Any] = {
             "scanned": len(vectors), "groups": [], "merged": 0, "superseded": 0,
@@ -1728,6 +1736,8 @@ class MemoryStore:
         # LLM budget before a long tail of borderline pairs
         groups.sort(key=len, reverse=True)
         for member_ids in groups[:max_groups]:
+            if wanted is not None and frozenset(member_ids) not in wanted:
+                continue
             memories = [m for m in (self.backend.get_memory(i) for i in member_ids)
                         if m is not None and m.invalid_at is None]
             if len(memories) < 2:
@@ -1735,7 +1745,7 @@ class MemoryStore:
             normalized = {_normalized_content(m.content) for m in memories}
             if len(normalized) == 1:
                 verdict = {"same_fact": True,
-                           "content": pick_survivor(memories).content,
+                           "content": representative(memories).content,
                            "reason": "identical text"}
             elif self.llm.available:
                 verdict = judge_group(self.llm, memories)
@@ -1753,40 +1763,42 @@ class MemoryStore:
             if not verdict["same_fact"] or not apply:
                 continue
 
-            survivor = pick_survivor(memories)
-            others = [m for m in memories if m.id != survivor.id]
-            categories = list(dict.fromkeys(
-                [c for m in memories for c in (m.categories or [])]))
-            entities = list(dict.fromkeys(
-                [e for m in memories for e in (m.entities or [])]))
-            episodes = list(dict.fromkeys(
-                [e for m in memories for e in (m.source_episode_ids or [])]))
             content = verdict["content"]
-            embedding = self.embedder.embed([content])[0] if self.embedder.dimensions else None
-            self.backend.update_memory(
-                survivor.id,
+            oldest = min(memories, key=lambda m: m.created_at)
+            merged = Memory(
                 content=content,
-                embedding=embedding,
-                embedding_model=self.embedder.model_id if embedding else None,
-                categories=categories,
-                entities=entities,
+                memory_type=oldest.memory_type,
+                user_id=user_id,
                 importance=max(m.importance for m in memories),
-                source_episode_ids=episodes,
+                categories=list(dict.fromkeys(
+                    [c for m in memories for c in (m.categories or [])])),
+                entities=list(dict.fromkeys(
+                    [e for m in memories for e in (m.entities or [])])),
+                # keep the earliest creation date: the fact is as old as the
+                # first time it was recorded, not as old as the merge
+                created_at=oldest.created_at,
+                source_episode_ids=list(dict.fromkeys(
+                    [e for m in memories for e in (m.source_episode_ids or [])])),
+                metadata={"consolidated_from": [m.id for m in memories]},
             )
+            embedding = (
+                self.embedder.embed([content])[0] if self.embedder.dimensions else None
+            )
+            stored = self.backend.insert_memory(merged, embedding=embedding)
             self.backend.add_event(MemoryEvent(
-                memory_id=survivor.id, event="UPDATE",
-                old_content=survivor.content, new_content=content,
+                memory_id=stored.id, event="ADD", new_content=content,
                 reason=f"consolidated {len(memories)} duplicate memories",
             ))
-            for memory in others:
-                self.backend.invalidate_memory(memory.id, superseded_by=survivor.id)
+            # every original is forgotten, including the one it reads most like
+            for memory in memories:
+                self.backend.invalidate_memory(memory.id, superseded_by=stored.id)
                 self.backend.add_event(MemoryEvent(
                     memory_id=memory.id, event="SUPERSEDE",
                     old_content=memory.content, new_content=content,
-                    reason=f"consolidated into {survivor.id}",
+                    reason=f"consolidated into {stored.id}",
                 ))
                 summary["superseded"] += 1
-            entry["survivor"] = survivor.id
+            entry["survivor"] = stored.id
             summary["merged"] += 1
         return summary
 

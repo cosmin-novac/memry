@@ -20,7 +20,7 @@ import pytest
 from conftest import FakeLLM
 
 from memry.config import Config
-from memry.intelligence.consolidate import pick_survivor, similarity_groups
+from memry.intelligence.consolidate import representative, similarity_groups
 from memry.models import Memory
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
@@ -76,14 +76,14 @@ def test_oversized_groups_are_left_alone():
     assert similarity_groups(vectors, threshold=0.5, max_group=6) == []
 
 
-def test_survivor_is_the_most_important_then_most_detailed():
+def test_representative_is_the_most_important_then_most_detailed():
     memories = [
         Memory(content="short", importance=0.5, created_at="2026-01-01T00:00:00+00:00"),
         Memory(content="a much longer and more detailed record",
                importance=0.95, created_at="2026-02-01T00:00:00+00:00"),
         Memory(content="brief", importance=0.95, created_at="2026-01-01T00:00:00+00:00"),
     ]
-    assert pick_survivor(memories).content == "a much longer and more detailed record"
+    assert representative(memories).content == "a much longer and more detailed record"
 
 
 # ---------------------------------------------------------------- store flow
@@ -96,11 +96,15 @@ def test_identity_family_consolidates_into_one(store):
     result = store.consolidate_memories(user_id="ada", threshold=0.25)
 
     assert result["merged"] == 1
-    assert result["superseded"] == 2
+    assert result["superseded"] == 3  # every original is forgotten
     active = store.get_all(user_id="ada", limit=50)
     assert [m.content for m in active] == [merged]
     assert active[0].importance == 0.95
     assert active[0].categories == ["identity"]
+    # a genuinely new record, not one of the originals wearing the merged text
+    assert active[0].id not in {m.id for m in store.get_all(
+        user_id="ada", limit=50, include_invalid=True) if m.invalid_at}
+    assert active[0].metadata["consolidated_from"]
 
 
 def test_superseded_memories_are_kept_and_linked(store):
@@ -108,11 +112,13 @@ def test_superseded_memories_are_kept_and_linked(store):
     store.llm.queue(_verdict(True, "User is Marcus Vandenberg (goes by Marc).", "same"))
     store.consolidate_memories(user_id="ada", threshold=0.25)
 
-    survivor = store.get_all(user_id="ada", limit=50)[0]
+    merged_memory = store.get_all(user_id="ada", limit=50)[0]
     everything = store.get_all(user_id="ada", limit=50, include_invalid=True)
     dropped = [m for m in everything if m.invalid_at is not None]
-    assert len(dropped) == 2
-    assert {m.superseded_by for m in dropped} == {survivor.id}
+    assert len(dropped) == 3
+    assert {m.superseded_by for m in dropped} == {merged_memory.id}
+    # the merged record inherits the earliest creation date of the family
+    assert merged_memory.created_at == min(m.created_at for m in dropped)
 
 
 def test_different_facts_are_not_merged(store):
@@ -178,3 +184,26 @@ def test_consolidation_is_namespaced(store):
     store.llm.queue(_verdict(True, "User is Marcus Vandenberg (goes by Marc).", "same"))
     store.consolidate_memories(user_id="ada", threshold=0.25)
     assert len(store.get_all(user_id="bob", limit=50)) == 1
+
+
+def test_only_applies_the_chosen_groups(store):
+    """Accepting one proposal is not accepting all of them."""
+    store.import_verbatim([
+        {"content": "User is Marcus Vandenberg", "user_id": "ada"},
+        {"content": "User is  Marcus Vandenberg.", "user_id": "ada"},
+        {"content": "Meeting with Jonas on Tuesday", "user_id": "ada"},
+        {"content": "Meeting with Jonas  on Tuesday.", "user_id": "ada"},
+    ], dedup=False)
+
+    preview = store.consolidate_memories(user_id="ada", threshold=0.9, apply=False)
+    groups = [g for g in preview["groups"] if g["same_fact"]]
+    assert len(groups) == 2
+
+    result = store.consolidate_memories(
+        user_id="ada", threshold=0.9, only=[groups[0]["memory_ids"]]
+    )
+    assert result["merged"] == 1
+    # the group that was not ticked is untouched, both members still active
+    active = {m.id for m in store.get_all(user_id="ada", limit=50)}
+    assert set(groups[1]["memory_ids"]) <= active
+    assert not set(groups[0]["memory_ids"]) & active
