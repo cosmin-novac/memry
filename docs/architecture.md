@@ -118,8 +118,8 @@ preserve old claims instead of pretending that the latest claim erased history.
 
 ### Tags (backend names: categories and topics)
 
-The product and dashboard call deterministic classification labels such as `health` or
-`finance` **tags**. The existing Python/REST field remains `categories`. Internally, the
+The product and dashboard call deterministic classification labels such as `liver health`
+or `2026 taxes` **tags**. The existing Python/REST field remains `categories`. Internally, the
 normalized `topics` table plus the indexed `memory_topics` join provides canonicalization,
 hierarchy, counts, and filtering. The memory's JSON `categories` list is the public projection
 returned with each memory. Both are updated together deliberately; they are not competing
@@ -128,7 +128,10 @@ knowledge concepts and no rename or data migration is planned.
 Mechanical separator and singular/plural duplicates are merged deterministically once two
 real stored labels map to the same form. Semantic synonym merges remain reviewable.
 Synthetic umbrella topics are hierarchy edges, for example `health` broader than
-`running`. The parent label is not copied onto every child memory. Filters expand the
+`liver health`. They are a browsing aid, not a retrieval mechanism, and the pass never
+consumes its own output: abstraction reads a direct-tag histogram, so a generated parent
+can never become a member of a broader one and decay the useful level a run at a time.
+The parent label is not copied onto every child memory. Filters expand the
 hierarchy in SQLite at query time, so taxonomy changes do not rewrite the memory corpus.
 Topic hierarchy edges are separate from real-world entity relations.
 

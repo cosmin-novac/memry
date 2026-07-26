@@ -145,6 +145,56 @@ def test_abstract_tags_records_run_and_is_idempotent_on_reruns(seeded):
     assert sorted(run_mem.categories) == tags_before  # no duplicate 'health'
 
 
+# ------------------------------------------------- no recursive abstraction
+def test_synthetic_parents_are_not_offered_back_to_abstraction(seeded):
+    """A parent must never become a member of a broader parent.
+
+    ``topic_counts`` rolls descendants up, so a synthetic parent carries a
+    memory count and looks exactly like an ordinary tag. Feeding that histogram
+    back in lets run two cluster 'liver health' and 'weekly gym' into 'health',
+    losing the useful level one run at a time.
+    """
+    store = seeded
+    store.llm.queue(json.dumps({"clusters": [
+        {"tag": "liver health", "members": ["running", "diet"]},
+        {"tag": "weekly gym", "members": ["sleep", "doctor"]},
+    ]}))
+    store.abstract_tags(user_id="ada")
+
+    # the parents exist and are reachable by filter ...
+    assert {t.tag for t in store.synthetic_tags(user_id="ada")} == {
+        "liver health", "weekly gym",
+    }
+    rolled = {row["category"] for row in store.categories(user_id="ada")}
+    assert {"liver health", "weekly gym"} <= rolled
+
+    # ... but abstraction's own input never lists them
+    direct = {row["category"] for row in store.direct_categories(user_id="ada")}
+    assert not ({"liver health", "weekly gym"} & direct)
+
+    # and even if a model names one anyway, it is rejected as a member
+    store.llm.queue(json.dumps({"clusters": [
+        {"tag": "health", "members": ["liver health", "weekly gym"]},
+    ]}))
+    result = store.abstract_tags(user_id="ada")
+    assert result["applied"] == []
+    assert "health" not in {t.tag for t in store.synthetic_tags(user_id="ada")}
+
+
+def test_propose_rejects_synthetic_members():
+    llm = FakeLLM()
+    llm.queue(json.dumps({"clusters": [
+        {"tag": "health", "members": ["liver health", "weekly gym", "diet"]},
+    ]}))
+    tags = [{"category": c, "count": 3}
+            for c in ["liver health", "weekly gym", "diet"]]
+    out = propose_synthetic_tags(
+        llm, tags, existing_synthetic=["liver health", "weekly gym"],
+        max_new=5, min_cluster=2,
+    )
+    assert out == []  # only 'diet' survives filtering, below min_cluster
+
+
 # ---------------------------------------------------------------- scheduler due
 def test_tag_run_due():
     now = _dt("2026-07-24T00:00:00+00:00")

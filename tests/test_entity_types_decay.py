@@ -40,17 +40,17 @@ def test_legacy_string_entities_still_parse():
 
 def test_backfill_entity_types_is_batched_and_gated():
     s = MemoryStore(Config(db_path=":memory:"), llm=FakeLLM(), embedder=HashEmbedder(64))
-    s.backend.insert_entity(Entity(name="Cosmin", normalized="cosmin", user_id="u"))
+    s.backend.insert_entity(Entity(name="Marcus", normalized="marcus", user_id="u"))
     s.backend.insert_entity(Entity(name="Vienna", normalized="vienna", user_id="u"))
     s.backend.insert_entity(Entity(name="Rust", normalized="rust", entity_type="product",
                                    user_id="u"))  # already typed -> ignored
-    s.llm.queue(json.dumps({"types": [{"name": "Cosmin", "type": "person"},
+    s.llm.queue(json.dumps({"types": [{"name": "Marcus", "type": "person"},
                                       {"name": "Vienna", "type": "place"}]}))
     res = s.backfill_entity_types(user_id="u")
     assert res["typed"] == 2
     assert len(s.llm.calls) == 1  # one batched call for both untyped entities
     got = {e.name: e.entity_type for e in s.backend.list_entities(Scope(user_id="u"))}
-    assert got == {"Cosmin": "person", "Vienna": "place", "Rust": "product"}
+    assert got == {"Marcus": "person", "Vienna": "place", "Rust": "product"}
     # rerun: nothing untyped -> no call
     before = len(s.llm.calls)
     s.backfill_entity_types(user_id="u")

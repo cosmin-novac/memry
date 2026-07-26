@@ -196,6 +196,65 @@ def suggest_canonical_merges(
     return out
 
 
+def semantic_duplicate_tags(
+    centroids: dict[str, Any],
+    counts: dict[str, int],
+    cooccurrence: dict[tuple[str, str], int],
+    *,
+    threshold: float = 0.93,
+    max_pairs: int = 20,
+) -> list[dict[str, Any]]:
+    """Find tags that split one subject, using the vectors already stored.
+
+    ``obvious_canonical_merges`` catches spelling and plural variants. It cannot
+    catch "liver bloods" beside "liver lab results", which is the split that
+    actually costs recall: a fragmented tag excludes the memories a question
+    needs, and no ranking can recover them once the filter has dropped them.
+
+    Two signals must agree, because either alone is wrong:
+
+    - the member memories occupy nearly the same region of embedding space;
+    - the two tags rarely appear together on a memory. Complementary tags
+      ("kitchen remodel" / "bathroom remodel") sit close in vector space but are
+      genuinely distinct, and a user who applies both to one memory is telling
+      us they mean different things.
+
+    Returns ranked ``{"canonical", "variants", "similarity"}`` proposals. The
+    caller decides whether to apply them; nothing here mutates the store.
+    """
+    import numpy as np
+
+    names = [t for t in centroids if counts.get(t, 0) >= 2]
+    if len(names) < 2:
+        return []
+    matrix = np.array([centroids[t] for t in names], dtype=float)
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    matrix = matrix / np.where(norms == 0, 1.0, norms)
+    sim = matrix @ matrix.T
+
+    pairs: list[dict[str, Any]] = []
+    for i, a in enumerate(names):
+        for j in range(i + 1, len(names)):
+            b = names[j]
+            score = float(sim[i, j])
+            if score < threshold:
+                continue
+            together = cooccurrence.get((a, b), 0) + cooccurrence.get((b, a), 0)
+            smaller = min(counts[a], counts[b])
+            # Applied to the same memories = deliberate distinction, not a split.
+            if smaller and together / smaller > 0.25:
+                continue
+            # The better-established label wins, ties broken for stability.
+            canonical, variant = (a, b) if (counts[a], b) > (counts[b], a) else (b, a)
+            pairs.append({
+                "canonical": canonical,
+                "variants": sorted([canonical, variant]),
+                "similarity": round(score, 4),
+            })
+    pairs.sort(key=lambda p: -p["similarity"])
+    return pairs[:max_pairs]
+
+
 def propose_synthetic_tags(
     llm: LLM,
     tags: list[dict[str, Any]],
@@ -244,11 +303,13 @@ def _validate(
         tag = str(cluster.get("tag", "")).strip().lower()
         if not tag or tag in known or tag in already or tag in seen_tags:
             continue  # must be a genuinely new label
-        # members must be real existing tags, and not the synthetic tag itself
+        # Members must be real existing tags, never the synthetic tag itself and
+        # never another system-generated parent: abstracting an abstraction is
+        # how "liver health" and "weekly gym" decay back into "health".
         members = []
         for m in cluster.get("members", []):
             m = str(m).strip().lower()
-            if m in known and m != tag and m not in members:
+            if m in known and m != tag and m not in already and m not in members:
                 members.append(m)
         if len(members) < min_cluster:
             continue

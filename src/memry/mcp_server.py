@@ -222,6 +222,14 @@ def create_server(
         restrict to categories (comma-separated), an exact entity ID, and/or a
         date window with since/until (YYYY-MM-DD, e.g. since="2026-01-01"). Pass
         an empty query with just categories or a date to browse rather than rank.
+
+        PASS categories WHENEVER YOU KNOW THE SUBJECT. You are holding the
+        conversation, so you know what it is about even when the user's words do
+        not say so. Scoping to the right topic measurably beats an unfiltered
+        search, and it helps most exactly where the query is vaguest ("what's
+        left to do?", "where did I land on this?") - those carry no topic as
+        text, so an unfiltered search has nothing to work with, while you do.
+        Use the specific topic ("liver health"), not a broad area ("health").
         """
         category_list = [c.strip() for c in categories.split(",") if c.strip()] or None
         results = await _threaded(

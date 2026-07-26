@@ -33,12 +33,12 @@ def test_env_overrides(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMRY_DB_PATH", str(tmp_path / "x.db"))
     monkeypatch.setenv("MEMRY_LLM_PROVIDER", "ollama")
     monkeypatch.setenv("MEMRY_LLM_MODEL", "qwen3")
-    monkeypatch.setenv("MEMRY_DEFAULT_USER", "cosmin")
+    monkeypatch.setenv("MEMRY_DEFAULT_USER", "marcus")
     cfg = Config.load()
     assert cfg.db_path == str(tmp_path / "x.db")
     assert cfg.llm.provider == "ollama"
     assert cfg.llm.resolved_model() == "qwen3"
-    assert cfg.default_user_id == "cosmin"
+    assert cfg.default_user_id == "marcus"
 
 
 def test_file_config_env_wins(monkeypatch, tmp_path):
@@ -64,6 +64,38 @@ def test_provider_autodetect_openai(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     cfg = Config.load()
     assert cfg.llm.provider == "openai"
+    assert cfg.embedding.provider == "openai"
+
+
+def test_both_keys_pick_one_provider_for_everything(monkeypatch):
+    """Two keys must not mean two vendors.
+
+    Anthropic has no embeddings API, so preferring it for the LLM whenever its
+    key exists would split the deployment: Anthropic for extraction, OpenAI for
+    vectors. OpenAI serves both, so it wins when present.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    cfg = Config.load()
+    assert cfg.llm.provider == "openai"
+    assert cfg.embedding.provider == "openai"
+    assert cfg.llm.resolved_model() == "gpt-5-mini"
+
+
+def test_anthropic_still_wins_when_it_is_the_only_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("VOYAGE_API_KEY", "pa-test")
+    cfg = Config.load()
+    assert cfg.llm.provider == "anthropic"
+    assert cfg.embedding.provider == "voyage"  # the only embeddings option here
+
+
+def test_anthropic_can_still_be_pinned_alongside_openai(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("MEMRY_LLM_PROVIDER", "anthropic")
+    cfg = Config.load()
+    assert cfg.llm.provider == "anthropic"
     assert cfg.embedding.provider == "openai"
 
 

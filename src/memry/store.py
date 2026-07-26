@@ -25,8 +25,10 @@ from .config import Config
 from .intelligence.clustering import (
     obvious_canonical_merges,
     propose_synthetic_tags,
+    semantic_duplicate_tags,
     suggest_canonical_merges,
 )
+from .intelligence.consolidate import judge_group, pick_survivor, similarity_groups
 from .intelligence.summaries import cluster_vectors, summarize_cluster
 from .intelligence.context import build_context, estimate_tokens
 from .intelligence.decay import decay_sweep, effective_importance
@@ -38,6 +40,7 @@ from .intelligence.entities import (
 )
 from .intelligence.graph_retrieval import detect_query_entities, relational_memory_ids
 from .intelligence.extraction import (
+    VOCABULARY_LIMIT,
     extract_facts,
     extract_relations,
     verbatim_candidates,
@@ -74,6 +77,11 @@ from .retrieval import hybrid_search
 _ENRICHMENT_KEY = "_enrichment"
 _ENRICHMENT_BATCH_SIZE = 8
 _ENRICHMENT_MAX_BACKOFF_SECONDS = 300
+
+
+def _normalized_content(text: str) -> str:
+    """Casefolded, punctuation-free text, for spotting identical restatements."""
+    return " ".join(re.findall(r"[^\W_]+", (text or "").casefold()))
 
 
 def _owned(record: Any, owner_prefix: str | None) -> bool:
@@ -217,7 +225,16 @@ class MemoryStore:
             ]
         elif self.llm.available:
             try:
-                candidates = extract_facts(self.llm, messages)
+                candidates = extract_facts(
+                    self.llm,
+                    messages,
+                    vocabulary=self._tag_vocabulary(
+                        scope,
+                        text="\n".join(
+                            str(m.get("content") or "") for m in messages
+                        ),
+                    ),
+                )
             except Exception as exc:
                 # Provider outage / exhausted credits must not lose the save:
                 # degrade to verbatim, tell the caller, and flag the memories
@@ -896,18 +913,35 @@ class MemoryStore:
         include_invalid: bool,
     ) -> list[SearchResult]:
         """RRF-fuse hybrid results (ranked by relevance) with relational
-        candidates (ranked by graph distance). Hybrid keeps direct answers on
-        top; the relational list injects the hop-reachable ones."""
+        candidates (ranked by graph distance).
+
+        The graph boost is what makes multi-hop work: the answer to "what tool
+        does Ada use?" is usually present but buried, and lifting it is the
+        whole point. The same lift is also the cost, because on an ordinary
+        query a buried graph neighbour can leapfrog the correct answer:
+        ``1/(k+relrank)`` added to ``1/(k+hybridrank)`` can exceed the score of
+        hybrid's own top hit.
+
+        Measured on a 456-memory store with a dense entity graph, the two
+        effects share one mechanism and no weighting or injection cap separates
+        them. Reserving the strongest hybrid results does: graph distance
+        competes for the rest of the page but can never evict a top direct
+        answer. That keeps multi-hop hit@10 at 0.917 (against 0.417 for hybrid
+        alone) while ordinary recall@10 returns to 0.649 from 0.474.
+        """
         k = 60
         rescue = 10  # only rescue memories hybrid buried (rank >= this) or missed
+        protect = max(0, self.config.retrieval.relational_protect_top)
+        pinned = [r for r in hybrid_results[:protect]]
+        pinned_ids = {r.memory.id for r in pinned}
         hybrid_rank = {r.memory.id: rank for rank, r in enumerate(hybrid_results)}
         score: dict[str, float] = {}
         for rank, r in enumerate(hybrid_results):
             score[r.memory.id] = 1.0 / (k + rank)
         for rank, mid in enumerate(rel_ids):
             hr = hybrid_rank.get(mid)
-            # A memory hybrid already surfaced needs no graph boost; adding it
-            # would let a well-ranked neighbor outrank the true direct answer.
+            # A memory hybrid already ranked highly needs no graph boost; adding
+            # it would let a well-ranked neighbor outrank the true direct answer.
             # Only the buried/absent (the multi-hop answers) get rescued.
             if hr is None or hr >= rescue:
                 score[mid] = score.get(mid, 0.0) + 1.0 / (k + rank)
@@ -917,7 +951,8 @@ class MemoryStore:
                 memory = self.backend.get_memory(mid)
                 if memory is not None and (include_invalid or memory.invalid_at is None):
                     have[mid] = SearchResult(memory=memory, score=0.0)
-        ranked = sorted(have.values(), key=lambda r: -score.get(r.memory.id, 0.0))
+        fused = sorted(have.values(), key=lambda r: -score.get(r.memory.id, 0.0))
+        ranked = pinned + [r for r in fused if r.memory.id not in pinned_ids]
         for r in ranked:
             r.signals = {**r.signals, "fused": round(score.get(r.memory.id, 0.0), 5)}
         return ranked
@@ -1008,6 +1043,66 @@ class MemoryStore:
             {"category": c, "count": n}
             for c, n in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
         ]
+
+    def _tag_vocabulary(
+        self, scope: Scope, text: str = "", limit: int = VOCABULARY_LIMIT
+    ) -> list[str]:
+        """Direct tags offered back to extraction, so tagging stays convergent.
+
+        Parents are deliberately excluded: offering ``health`` back would invite
+        extraction to tag straight at the level that retrieval does worst with.
+
+        Selection is by relevance first, then by frequency. Sending only the
+        most-used tags works until a store passes the budget, at which point the
+        long tail stops being offered - and an unoffered tag is precisely the one
+        that gets a near-synonym coined for it next time its subject comes up.
+        A conversation about liver results must see ``liver lab results`` even
+        when it is the 300th most common tag.
+        """
+        try:
+            counts = self.backend.direct_topic_counts(scope)
+        except Exception:
+            return []
+        if not counts:
+            return []
+        names = [str(row["category"]) for row in counts if row.get("category")]
+        if len(names) <= limit or not text.strip() or not self.embedder.dimensions:
+            return names[:limit]
+
+        # Half the budget goes to what this conversation is actually about, the
+        # rest stays frequency-ranked so common tags are always on offer.
+        relevant_budget = limit // 2
+        try:
+            vectors = self.embedder.embed([text[:4000], *names])
+        except Exception:
+            return names[:limit]
+        query = np.asarray(vectors[0], dtype=float)
+        matrix = np.asarray(vectors[1:], dtype=float)
+        norms = np.linalg.norm(matrix, axis=1)
+        query_norm = np.linalg.norm(query) or 1.0
+        similarity = (matrix @ query) / (np.where(norms == 0, 1.0, norms) * query_norm)
+        nearest = [names[i] for i in np.argsort(-similarity)[:relevant_budget]]
+        chosen = list(dict.fromkeys(nearest))
+        for name in names:  # top up with the most-used, skipping duplicates
+            if len(chosen) >= limit:
+                break
+            if name not in chosen:
+                chosen.append(name)
+        return chosen
+
+    def direct_categories(
+        self, *, user_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Histogram over tags attached straight to memories, no parent rollup.
+
+        ``categories()`` rolls descendants up into their parents, which is what
+        the Knowledge UI and parent filtering want. Abstraction wants the
+        opposite: if a system-generated parent appears in its own input, the
+        next run happily clusters ``liver health`` and ``weekly gym`` into
+        ``health`` and the useful level decays one run at a time.
+        """
+        direct = self.backend.direct_topic_counts(Scope(user_id=user_id))
+        return direct if direct is not None else self.categories(user_id=user_id)
 
     def get_all(
         self,
@@ -1428,7 +1523,7 @@ class MemoryStore:
         if not self.llm.available:
             summary["skipped"] = "no LLM configured"
             return summary
-        histogram = self.categories(user_id=user_id)
+        histogram = self.direct_categories(user_id=user_id)
         if len(histogram) < cfg.min_tags:
             summary["skipped"] = f"only {len(histogram)} tags (< {cfg.min_tags})"
             self._stamp_tag_run(user_id)
@@ -1549,9 +1644,186 @@ class MemoryStore:
             changed += result or 0
         return {"groups_merged": len(groups), "memories_changed": changed}
 
+    def consolidate_memories(
+        self,
+        *,
+        user_id: str | None = None,
+        threshold: float = 0.90,
+        max_groups: int = 25,
+        apply: bool = True,
+    ) -> dict[str, Any]:
+        """Merge memories that record the same fact more than once.
+
+        ``apply=False`` returns exactly what would happen without touching
+        anything, which is what the dashboard shows before the user confirms.
+
+        The survivor absorbs the merged text plus the union of the group's tags
+        and entities; the rest are invalidated with ``superseded_by`` pointing at
+        it. Nothing is destroyed, so the audit trail and time-travel still work.
+        """
+        scope = Scope(user_id=user_id)
+        vectors = self.backend.memory_vectors(scope, limit=1_000_000)
+        summary: dict[str, Any] = {
+            "scanned": len(vectors), "groups": [], "merged": 0, "superseded": 0,
+        }
+        groups = similarity_groups(vectors, threshold=threshold)
+        if not groups:
+            return summary
+
+        # densest first: the most obviously redundant families are worth the
+        # LLM budget before a long tail of borderline pairs
+        groups.sort(key=len, reverse=True)
+        for member_ids in groups[:max_groups]:
+            memories = [m for m in (self.backend.get_memory(i) for i in member_ids)
+                        if m is not None and m.invalid_at is None]
+            if len(memories) < 2:
+                continue
+            normalized = {_normalized_content(m.content) for m in memories}
+            if len(normalized) == 1:
+                verdict = {"same_fact": True,
+                           "content": pick_survivor(memories).content,
+                           "reason": "identical text"}
+            elif self.llm.available:
+                verdict = judge_group(self.llm, memories)
+            else:
+                continue  # never merge on similarity alone
+
+            entry = {
+                "memory_ids": [m.id for m in memories],
+                "contents": [m.content for m in memories],
+                "same_fact": bool(verdict["same_fact"]),
+                "reason": verdict["reason"],
+                "merged_content": verdict["content"],
+            }
+            summary["groups"].append(entry)
+            if not verdict["same_fact"] or not apply:
+                continue
+
+            survivor = pick_survivor(memories)
+            others = [m for m in memories if m.id != survivor.id]
+            categories = list(dict.fromkeys(
+                [c for m in memories for c in (m.categories or [])]))
+            entities = list(dict.fromkeys(
+                [e for m in memories for e in (m.entities or [])]))
+            episodes = list(dict.fromkeys(
+                [e for m in memories for e in (m.source_episode_ids or [])]))
+            content = verdict["content"]
+            embedding = self.embedder.embed([content])[0] if self.embedder.dimensions else None
+            self.backend.update_memory(
+                survivor.id,
+                content=content,
+                embedding=embedding,
+                embedding_model=self.embedder.model_id if embedding else None,
+                categories=categories,
+                entities=entities,
+                importance=max(m.importance for m in memories),
+                source_episode_ids=episodes,
+            )
+            self.backend.add_event(MemoryEvent(
+                memory_id=survivor.id, event="UPDATE",
+                old_content=survivor.content, new_content=content,
+                reason=f"consolidated {len(memories)} duplicate memories",
+            ))
+            for memory in others:
+                self.backend.invalidate_memory(memory.id, superseded_by=survivor.id)
+                self.backend.add_event(MemoryEvent(
+                    memory_id=memory.id, event="SUPERSEDE",
+                    old_content=memory.content, new_content=content,
+                    reason=f"consolidated into {survivor.id}",
+                ))
+                summary["superseded"] += 1
+            entry["survivor"] = survivor.id
+            summary["merged"] += 1
+        return summary
+
+    def semantic_tag_duplicates(
+        self, *, user_id: str | None = None, threshold: float = 0.93
+    ) -> list[dict[str, Any]]:
+        """Tags that have split one subject, judged by the stored vectors.
+
+        Needs no LLM and no new storage: a tag's centroid is the mean of its
+        members' existing embeddings. This is the drift that matters over a long
+        life - a fragmented tag silently caps recall, because filtering to it
+        excludes memories the question needed.
+        """
+        scope = Scope(user_id=user_id)
+        links = self.backend.topic_memory_ids(scope)
+        if not links:
+            return []
+        vectors = dict(self.backend.memory_vectors(scope, limit=1_000_000))
+        if not vectors:
+            return []
+
+        members: dict[str, list[str]] = {}
+        for tag, memory_id in links:
+            if memory_id in vectors:
+                members.setdefault(tag, []).append(memory_id)
+        counts = {tag: len(ids) for tag, ids in members.items()}
+
+        by_memory: dict[str, list[str]] = {}
+        for tag, memory_id in links:
+            by_memory.setdefault(memory_id, []).append(tag)
+        cooccurrence: dict[tuple[str, str], int] = {}
+        for tags in by_memory.values():
+            unique = sorted(set(tags))
+            for i, a in enumerate(unique):
+                for b in unique[i + 1:]:
+                    cooccurrence[(a, b)] = cooccurrence.get((a, b), 0) + 1
+
+        centroids = {
+            tag: np.mean([vectors[m] for m in ids], axis=0)
+            for tag, ids in members.items()
+            if len(ids) >= 2
+        }
+        return semantic_duplicate_tags(
+            centroids, counts, cooccurrence, threshold=threshold
+        )
+
+    def tag_health(self, *, user_id: str | None = None) -> dict[str, Any]:
+        """Cheap, deterministic signals on how well the tag vocabulary is holding.
+
+        Fragmentation is the failure mode that costs recall silently: filtering
+        to a tag that has split its subject drops the memories the question
+        needed, before ranking ever runs. Nothing surfaces that today unless
+        somebody presses "suggest merges", so a store can drift for months.
+
+        No LLM, no writes. Everything here comes from counts already indexed and
+        vectors already stored.
+        """
+        scope = Scope(user_id=user_id)
+        counts = self.backend.direct_topic_counts(scope) or []
+        total = len(self.get_all(user_id=user_id, limit=1_000_000))
+        tagged = len({mid for _, mid in (self.backend.topic_memory_ids(scope) or [])})
+        singles = sum(1 for row in counts if row.get("count") == 1)
+        splits = self.semantic_tag_duplicates(user_id=user_id)
+        return {
+            "memories": total,
+            "untagged": max(0, total - tagged),
+            "tags": len(counts),
+            "single_use_tags": singles,
+            "single_use_share": round(singles / len(counts), 3) if counts else 0.0,
+            "suspected_splits": len(splits),
+            "splits": splits[:10],
+            "largest_tags": [
+                {"tag": row["category"], "count": row["count"]} for row in counts[:5]
+            ],
+        }
+
     def suggest_tag_merges(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
-        """Suggest exact synonyms after deterministic duplicate detection."""
-        return suggest_canonical_merges(self.llm, self.categories(user_id=user_id))
+        """Suggest duplicate tags: spelling variants, then synonyms, then splits.
+
+        Three detectors, cheapest first, each catching what the previous cannot:
+        deterministic inflection, an LLM synonym pass, and vector-centroid
+        overlap for the near-synonyms that share no words ("liver bloods" beside
+        "liver lab results").
+        """
+        proposals = suggest_canonical_merges(self.llm, self.categories(user_id=user_id))
+        seen = {v for group in proposals for v in group["variants"]}
+        for pair in self.semantic_tag_duplicates(user_id=user_id):
+            if not seen.intersection(pair["variants"]):
+                proposals.append(pair)
+                seen.update(pair["variants"])
+        return proposals
 
     # -- manual tag curation -----------------------------------------------
     def rename_tag(self, tag: str, to: str, *, user_id: str | None = None) -> int:

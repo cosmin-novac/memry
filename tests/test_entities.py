@@ -161,11 +161,11 @@ def test_entity_memories_exclude_invalid_by_default(verbatim_store):
 
     backend = verbatim_store.backend
     entity = backend.insert_entity(
-        Entity(name="Cosmin", user_id="ada", updated_at="2020-01-01T00:00:00+00:00")
+        Entity(name="Marcus", user_id="ada", updated_at="2020-01-01T00:00:00+00:00")
     )
-    memory = backend.insert_memory(Memory(content="Cosmin is a good student", user_id="ada"))
+    memory = backend.insert_memory(Memory(content="Marcus is a good student", user_id="ada"))
     backend.add_mention(
-        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Cosmin")
+        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Marcus")
     )
 
     assert [m.id for m in backend.entity_memories(entity.id)] == [memory.id]
@@ -181,11 +181,11 @@ def test_hard_delete_removes_mentions_and_touches_entity(verbatim_store):
 
     backend = verbatim_store.backend
     entity = backend.insert_entity(
-        Entity(name="Cosmin", user_id="ada", updated_at="2020-01-01T00:00:00+00:00")
+        Entity(name="Marcus", user_id="ada", updated_at="2020-01-01T00:00:00+00:00")
     )
-    memory = backend.insert_memory(Memory(content="Cosmin studies physics", user_id="ada"))
+    memory = backend.insert_memory(Memory(content="Marcus studies physics", user_id="ada"))
     backend.add_mention(
-        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Cosmin")
+        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Marcus")
     )
 
     assert backend.delete_memory(memory.id)
@@ -199,7 +199,7 @@ def test_merge_touches_surviving_entity(verbatim_store):
 
     backend = verbatim_store.backend
     keep = backend.insert_entity(
-        Entity(name="Cosmin", user_id="ada", updated_at="2020-01-01T00:00:00+00:00")
+        Entity(name="Marcus", user_id="ada", updated_at="2020-01-01T00:00:00+00:00")
     )
     merge = backend.insert_entity(Entity(name="Cozmin", user_id="ada"))
 
@@ -210,7 +210,7 @@ def test_aliases_are_derived_and_user_aliases_are_indexed(verbatim_store):
     from memry.models import Entity, EntityMention, Memory, Scope
 
     backend = verbatim_store.backend
-    entity = backend.insert_entity(Entity(name="Cosmin Popescu", user_id="ada"))
+    entity = backend.insert_entity(Entity(name="Marcus Popescu", user_id="ada"))
     memory = backend.insert_memory(
         Memory(content="C. Popescu teaches physics", user_id="ada")
     )
@@ -220,7 +220,7 @@ def test_aliases_are_derived_and_user_aliases_are_indexed(verbatim_store):
     assert verbatim_store.add_entity_alias(entity.id, "Costi") is not None
 
     aliases = backend.entity_aliases(entity.id)
-    assert aliases == ["Cosmin Popescu", "C. Popescu", "Costi"]
+    assert aliases == ["Marcus Popescu", "C. Popescu", "Costi"]
     assert [candidate.id for candidate in backend.find_entity_candidates(
         "costi", Scope(user_id="ada")
     )] == [entity.id]
@@ -233,16 +233,16 @@ def test_entity_description_is_lazy_bounded_and_active_only(verbatim_store):
     from memry.models import Entity, EntityMention, Memory
 
     backend = verbatim_store.backend
-    entity = backend.insert_entity(Entity(name="Cosmin", entity_type="person", user_id="ada"))
+    entity = backend.insert_entity(Entity(name="Marcus", entity_type="person", user_id="ada"))
     active = backend.insert_memory(
-        Memory(content="Cosmin is a strong physics student.", user_id="ada")
+        Memory(content="Marcus is a strong physics student.", user_id="ada")
     )
     obsolete = backend.insert_memory(
-        Memory(content="Cosmin studies chemistry.", user_id="ada")
+        Memory(content="Marcus studies chemistry.", user_id="ada")
     )
     for memory in (active, obsolete):
         backend.add_mention(
-            EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Cosmin")
+            EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Marcus")
         )
 
     first = verbatim_store.entity(entity.id)
@@ -263,17 +263,17 @@ def test_entity_description_is_in_reconstructed_context(verbatim_store):
     from memry.models import Entity, EntityMention, Memory
 
     backend = verbatim_store.backend
-    entity = backend.insert_entity(Entity(name="Cosmin", user_id="ada"))
+    entity = backend.insert_entity(Entity(name="Marcus", user_id="ada"))
     memory = backend.insert_memory(
-        Memory(content="Cosmin is a good student.", user_id="ada")
+        Memory(content="Marcus is a good student.", user_id="ada")
     )
     backend.add_mention(
-        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Cosmin")
+        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Marcus")
     )
 
-    context = verbatim_store.reconstruct_context("What do we know about Cosmin?", user_id="ada")
+    context = verbatim_store.reconstruct_context("What do we know about Marcus?", user_id="ada")
     assert "## Known entities" in context.text
-    assert "Cosmin is a good student" in context.text
+    assert "Marcus is a good student" in context.text
     assert memory.id in context.memory_ids
 
 def test_full_name_with_overlapping_context_reuses_entity_without_llm(verbatim_store):
@@ -283,7 +283,7 @@ def test_full_name_with_overlapping_context_reuses_entity_without_llm(verbatim_s
     backend = verbatim_store.backend
     scope = Scope(user_id="ada")
     first = backend.insert_memory(
-        Memory(content="Cosmin Novac invests in Bitcoin.", user_id="ada")
+        Memory(content="Marcus Vandenberg invests in Bitcoin.", user_id="ada")
     )
     resolve_mentions(
         backend=backend,
@@ -291,11 +291,11 @@ def test_full_name_with_overlapping_context_reuses_entity_without_llm(verbatim_s
         scope=scope,
         memory_id=first.id,
         memory_content=first.content,
-        surfaces=["Cosmin Novac"],
-        types={"cosmin novac": "person"},
+        surfaces=["Marcus Vandenberg"],
+        types={"marcus vandenberg": "person"},
     )
     second = backend.insert_memory(
-        Memory(content="Cosmin Novac increased his Bitcoin investment.", user_id="ada")
+        Memory(content="Marcus Vandenberg increased his Bitcoin investment.", user_id="ada")
     )
     resolve_mentions(
         backend=backend,
@@ -303,8 +303,8 @@ def test_full_name_with_overlapping_context_reuses_entity_without_llm(verbatim_s
         scope=scope,
         memory_id=second.id,
         memory_content=second.content,
-        surfaces=["Cosmin Novac"],
-        types={"cosmin novac": "person"},
+        surfaces=["Marcus Vandenberg"],
+        types={"marcus vandenberg": "person"},
     )
 
     entities = verbatim_store.entities(user_id="ada")
@@ -323,8 +323,8 @@ def test_same_full_name_without_shared_context_stays_separate(verbatim_store):
     backend = verbatim_store.backend
     scope = Scope(user_id="ada")
     for content in (
-        "Cosmin Novac performs electronic music on stage.",
-        "Cosmin Novac sold a Dacia car in Germany.",
+        "Marcus Vandenberg performs electronic music on stage.",
+        "Marcus Vandenberg sold a Dacia car in Germany.",
     ):
         memory = backend.insert_memory(Memory(content=content, user_id="ada"))
         resolve_mentions(
@@ -333,8 +333,8 @@ def test_same_full_name_without_shared_context_stays_separate(verbatim_store):
             scope=scope,
             memory_id=memory.id,
             memory_content=memory.content,
-            surfaces=["Cosmin Novac"],
-            types={"cosmin novac": "person"},
+            surfaces=["Marcus Vandenberg"],
+            types={"marcus vandenberg": "person"},
         )
 
     assert len(verbatim_store.entities(user_id="ada")) == 2
@@ -346,16 +346,16 @@ def test_maintenance_auto_confirms_obvious_full_name_pair(verbatim_store):
 
     backend = verbatim_store.backend
     first = backend.insert_entity(
-        Entity(name="Cosmin Novac", entity_type="person", user_id="ada")
+        Entity(name="Marcus Vandenberg", entity_type="person", user_id="ada")
     )
     second = backend.insert_entity(
-        Entity(name="Cosmin Novac", entity_type="person", user_id="ada")
+        Entity(name="Marcus Vandenberg", entity_type="person", user_id="ada")
     )
     first_memory = backend.insert_memory(
-        Memory(content="Cosmin Novac holds Bitcoin.", user_id="ada")
+        Memory(content="Marcus Vandenberg holds Bitcoin.", user_id="ada")
     )
     second_memory = backend.insert_memory(
-        Memory(content="Cosmin Novac tracks his Bitcoin investment.", user_id="ada")
+        Memory(content="Marcus Vandenberg tracks his Bitcoin investment.", user_id="ada")
     )
     backend.add_mention(
         EntityMention(entity_id=first.id, memory_id=first_memory.id, surface=first.name)
@@ -380,8 +380,8 @@ def test_confirm_merge_follows_already_merged_endpoint(verbatim_store):
     from memry.models import Entity, MergeProposal
 
     backend = verbatim_store.backend
-    keep = backend.insert_entity(Entity(name="Cosmin Novac", user_id="ada"))
-    old = backend.insert_entity(Entity(name="Cosmin N.", user_id="ada"))
+    keep = backend.insert_entity(Entity(name="Marcus Vandenberg", user_id="ada"))
+    old = backend.insert_entity(Entity(name="Marcus N.", user_id="ada"))
     assert backend.merge_entities(keep.id, old.id)
     legacy = backend.add_proposal(
         MergeProposal(entity_a=keep.id, entity_b=old.id, user_id="ada")
@@ -396,12 +396,12 @@ def test_memory_edit_reanalyzes_and_replaces_entity_links(store, fake_llm):
     from memry.models import Entity, EntityMention, Memory
 
     backend = store.backend
-    old_entity = backend.insert_entity(Entity(name="Cosmin", user_id="ada"))
+    old_entity = backend.insert_entity(Entity(name="Marcus", user_id="ada"))
     memory = backend.insert_memory(
-        Memory(content="Cosmin is a good student.", entities=["Cosmin"], user_id="ada")
+        Memory(content="Marcus is a good student.", entities=["Marcus"], user_id="ada")
     )
     backend.add_mention(
-        EntityMention(entity_id=old_entity.id, memory_id=memory.id, surface="Cosmin")
+        EntityMention(entity_id=old_entity.id, memory_id=memory.id, surface="Marcus")
     )
     fake_llm.queue(
         facts_response(fact("Ada is a good student.", entities=["Ada"]))
@@ -418,16 +418,16 @@ def test_memory_edit_analysis_failure_keeps_text_and_links(store):
     from memry.models import Entity, EntityMention, Memory
 
     backend = store.backend
-    entity = backend.insert_entity(Entity(name="Cosmin", user_id="ada"))
+    entity = backend.insert_entity(Entity(name="Marcus", user_id="ada"))
     memory = backend.insert_memory(
-        Memory(content="Cosmin is a good student.", entities=["Cosmin"], user_id="ada")
+        Memory(content="Marcus is a good student.", entities=["Marcus"], user_id="ada")
     )
     backend.add_mention(
-        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Cosmin")
+        EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Marcus")
     )
 
     with pytest.raises(ValueError, match="entity re-analysis failed"):
         store.update(memory.id, content="Ada is a good student.")
 
-    assert backend.get_memory(memory.id).content == "Cosmin is a good student."
+    assert backend.get_memory(memory.id).content == "Marcus is a good student."
     assert [linked.id for linked in backend.entities_of_memory(memory.id)] == [entity.id]

@@ -201,8 +201,10 @@ Collections. Topics show memory counts and can be renamed, combined, or deleted 
 current user filter. The same topic operations remain available at
 `POST /api/v1/tags/edit` for API compatibility.
 
-An optional, off-by-default LLM pass proposes higher-level parents such as `health` over
-`running` and `sleep` (`MEMRY_TAG_ABSTRACTION=on`,
+An optional, off-by-default LLM pass proposes higher-level parents for browsing, such as
+`health` over `liver health` and `weekly gym`. Leave it off unless you want that navigation
+view: retrieval measures best when a filter names the specific level, and a broad parent
+adds candidates without adding coverage (`MEMRY_TAG_ABSTRACTION=on`,
 `MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7`, or `memry abstract-tags`). Memry stores hierarchy
 edges and expands a parent filter at query time; it does not copy the parent label onto each
 memory. Synthetic parents remain visible through `/api/v1/categories` and

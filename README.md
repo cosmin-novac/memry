@@ -39,11 +39,14 @@ first-and-last name with overlapping context merges automatically; a shared shor
 full name without supporting context stays separate with a reviewable merge proposal.
 Prior merges are followed, so an older proposal cannot leave a broken merge target.
 
-**Topics organize themselves.** Mechanical variants such as `food`/`foods` merge without
-review. With an LLM, Memry can also propose exact synonyms and cluster accumulated topics
-into higher-level parents (a synthetic `health` over `running`/`diet`/`sleep`). It stores
-parents as hierarchy edges instead of copying `health` onto every memory, and expands parent
-filters at query time. Search and list by topic or by date window, not just relevance.
+**Topics organize themselves.** Extraction tags each memory at the level a later
+conversation would ask about (`liver health`, `weekly gym`, `2026 taxes`), reusing the
+vocabulary already in your store rather than coining a synonym every session. Mechanical
+variants such as `food`/`foods` merge without review, and Memry also spots tags that have
+quietly split one subject. An optional, off-by-default pass groups tags under broader
+parents for browsing, stored as hierarchy edges rather than copied onto every memory;
+it is off because retrieval measures best at the specific level, not the broad one.
+Search and list by topic or by date window, not just relevance.
 
 **It stays simple as one shared service.** SQLite is the sole production store. One Memry
 server can serve many agents, devices, and tenant namespaces without an external database.
@@ -266,7 +269,7 @@ Everything works with defaults. Override via env vars, `~/.memry/config.json`, o
 | `MEMRY_DB_PATH` | `~/.memry/memry.db` | knowledge SQLite file; back it up with `auth.db` when accounts are enabled |
 | `MEMRY_AUTH_DB_PATH` | next to `MEMRY_DB_PATH` as `auth.db` | accounts and OAuth; include it in every complete server backup |
 | `MEMRY_DEFAULT_USER` | `default` | user scope when the agent doesn't pass one |
-| `MEMRY_LLM_PROVIDER` | auto | `anthropic` \| `openai` \| `ollama` \| `none` - auto-detected from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` |
+| `MEMRY_LLM_PROVIDER` | auto | `anthropic` \| `openai` \| `ollama` \| `none` - auto-detected from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. With both keys set, OpenAI wins so the LLM and the embeddings stay on one provider (Anthropic has no embeddings API); pin this to override |
 | `MEMRY_LLM_MODEL` | per provider | `claude-haiku-4-5` / `gpt-5-mini` / `llama3.1`; Haiku is the Anthropic default for lower save cost and enrichment latency |
 | `MEMRY_EMBEDDING_PROVIDER` | auto | `openai` \| `ollama` \| `voyage` \| `hash` \| `none` |
 | `MEMRY_API_KEY` | - | bearer token for the REST/MCP HTTP server |

@@ -93,6 +93,17 @@ class HashEmbedder(Embedder):
         return vec
 
 
+# Native output width per OpenAI model. The v3 models are Matryoshka-trained,
+# so a shorter vector requested via the API's ``dimensions`` parameter keeps
+# most of the quality: 3-large truncated to 1536 outscores 3-small at identical
+# storage and index cost. Anything not listed falls back to 1536.
+_OPENAI_NATIVE_DIMENSIONS: dict[str, int] = {
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+    "text-embedding-ada-002": 1536,
+}
+
+
 class OpenAIEmbedder(Embedder):
     name = "openai"
 
@@ -100,11 +111,28 @@ class OpenAIEmbedder(Embedder):
         import os
 
         self._model = cfg.resolved_model()
-        self.dimensions = cfg.dimensions or 1536
+        # A configured width must reach the API, not just the ANN index: the
+        # sidecar is built with ``ndim=embedder.dimensions``, so a mismatch
+        # between the requested and returned width corrupts the index.
+        self._requested = cfg.dimensions
+        self.dimensions = cfg.dimensions or _OPENAI_NATIVE_DIMENSIONS.get(
+            self._model, 1536
+        )
         self.base_url = (cfg.base_url or "https://api.openai.com").rstrip("/")
         self.api_key = cfg.api_key or os.environ.get("OPENAI_API_KEY", "")
         self.timeout = cfg.timeout
         self._client = httpx.Client(timeout=self.timeout)
+
+    @property
+    def model_id(self) -> str:
+        # A requested width is part of the identity: truncated vectors are not
+        # comparable with full-width ones, so changing it must invalidate the
+        # stored embeddings exactly like changing the model does. Left off at
+        # native width, so existing databases keep their model_id and are not
+        # forced into a needless reindex.
+        if self._requested:
+            return f"{self.name}:{self._model}@{self._requested}"
+        return f"{self.name}:{self._model}"
 
     def close(self) -> None:
         self._client.close()
@@ -112,10 +140,13 @@ class OpenAIEmbedder(Embedder):
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        payload: dict[str, object] = {"model": self._model, "input": texts}
+        if self._requested:
+            payload["dimensions"] = self._requested
         resp = self._client.post(
             f"{self.base_url}/v1/embeddings",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            json={"model": self._model, "input": texts},
+            json=payload,
         )
         resp.raise_for_status()
         data = sorted(resp.json()["data"], key=lambda d: d["index"])

@@ -145,7 +145,29 @@ class MemoryBackend(ABC):
         return []
 
     def topic_counts(self, scope: Scope) -> list[dict[str, Any]] | None:
-        """Active-memory counts, or ``None`` when topics are unsupported."""
+        """Active-memory counts, or ``None`` when topics are unsupported.
+
+        Counts roll up through the hierarchy: a parent includes the memories
+        of its descendants. Correct for browsing and for parent filtering.
+        """
+        return None
+
+    def topic_memory_ids(self, scope: Scope) -> list[tuple[str, str]] | None:
+        """``(topic_normalized, memory_id)`` for direct links on active memories.
+
+        Cheap enough to group in Python, which is what tag-health checks need:
+        a tag's centroid is the mean of its members' existing vectors.
+        """
+        return None
+
+    def direct_topic_counts(self, scope: Scope) -> list[dict[str, Any]] | None:
+        """Active-memory counts for directly-attached topics only.
+
+        Abstraction must run on this, never on ``topic_counts``: a rolled-up
+        histogram lists system-generated parents as if they were ordinary tags,
+        so the next run clusters ``liver health`` and ``weekly gym`` into
+        ``health`` and the useful level is lost a run at a time.
+        """
         return None
 
     def retag_topics(

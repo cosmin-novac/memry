@@ -138,9 +138,14 @@ people.
 - Separator and conservative singular/plural duplicates such as `food`/`foods` merge
   automatically. "Suggest merges" proposes semantic synonyms for review; distinct related
   topics remain separate.
-- Synthetic abstraction creates hierarchy edges such as `health` broader than `running`.
-  The parent is not copied onto the child memories. Filtering by `health` expands through
-  the hierarchy at query time.
+- Synthetic abstraction creates hierarchy edges such as `health` broader than
+  `liver health`. The parent is not copied onto the child memories. Filtering by `health`
+  expands through the hierarchy at query time. It is off by default and meant for
+  browsing: a filter that names the specific tag retrieves better than its parent.
+- Consolidation merges memories that record the same fact more than once. Grouping is
+  geometric over the stored vectors; the merge itself is judged by an LLM and written to
+  preserve every detail. Originals are superseded, never deleted. Review it under
+  Knowledge > Upkeep before applying.
 - Collections remain separate generated maps over memory clusters.
 ## How the layers fit together
 

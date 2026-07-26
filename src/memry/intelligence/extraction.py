@@ -108,6 +108,19 @@ Rules:
   decisions, ~0.4 minor details
 - type: "semantic" (stable fact/preference), "episodic" (dated event/plan),
   "procedural" (how-to / workflow rule)
+- categories: 1-3 retrieval tags, lowercase, words separated by single spaces
+  (write "liver health", never "liver_health" or "LiverHealth"). A tag names the
+  smallest RECURRING subject a future conversation would open with. Good shapes:
+  domain + object ("liver health"), cadence + activity ("weekly gym"), artifact
+  + domain ("health documents"), project + activity ("memry deployment"),
+  bounded period + task ("2026 taxes"), event stream ("doctor appointments").
+  Two failure modes, both of which destroy retrieval:
+  * too broad - NEVER emit a bare domain like "health", "work", "personal",
+    "finance", "medical", "misc" or "other". Those collect memories that share a
+    subject area but would never be wanted in the same conversation.
+  * too narrow - NEVER put a date, a measurement, or a one-off identifier in a
+    tag ("2026-04-02 imaging", "paris sep 3-10 trip"). A tag used once is a tag
+    that can never group anything. Tag the recurring concern, not the instance.
 - relations: for each fact, list typed edges BETWEEN two of its entities as
   {{"subject", "predicate", "object"}}. Subject and object MUST be entity
   strings from this fact's "entities". The predicate is a short snake_case verb
@@ -124,13 +137,24 @@ Respond with JSON only: {{"facts": [{{"content": str, "type": str,
 Return {{"facts": []}} if nothing is worth remembering."""
 
 
+VOCABULARY_LIMIT = 120  # bounded so a large store cannot inflate every call
+
+
 def extract_facts(
     llm: LLM,
     messages: list[dict[str, str]],
     *,
     now: datetime | None = None,
+    vocabulary: list[str] | None = None,
 ) -> list[CandidateFact]:
-    """LLM extraction (phase 1). Raises if the LLM is unavailable."""
+    """LLM extraction (phase 1). Raises if the LLM is unavailable.
+
+    ``vocabulary`` is the tags this namespace already uses. Offering them is
+    what keeps tagging convergent: extraction that cannot see the existing
+    labels coins a fresh near-synonym every session ("liver bloods" beside
+    "liver lab results"), and no amount of later clustering recovers the
+    distinction it split.
+    """
     now = now or datetime.now(timezone.utc)
     transcript = "\n".join(
         f"{m.get('role', 'user')}: {m['content'].strip()}"
@@ -139,9 +163,16 @@ def extract_facts(
     )
     if not transcript:
         return []
+    known = ", ".join(sorted(vocabulary)[:VOCABULARY_LIMIT]) if vocabulary else ""
+    offer = (
+        f"\n\nTags this user already has. REUSE one verbatim whenever it fits; "
+        f"only coin a new tag when nothing here covers the subject:\n{known}"
+        if known
+        else ""
+    )
     raw = llm.complete(
         EXTRACTION_SYSTEM.format(today=now.date().isoformat()),
-        f"Conversation:\n{transcript}\n\nExtract the facts as JSON.",
+        f"Conversation:\n{transcript}{offer}\n\nExtract the facts as JSON.",
         json_schema=EXTRACTION_SCHEMA,
     )
     return _parse_facts(raw)

@@ -276,3 +276,51 @@ def test_mcp_http_url_key_auth():
             follow_redirects=False,
         )
         assert bare.status_code == 200
+
+
+# ------------------------------------------------- upkeep transparency
+def test_maintenance_status_lists_every_automatic_pass(client):
+    """Background work that rewrites memories must be inspectable."""
+    info = client.get("/api/v1/maintenance?user_id=u").json()
+    passes = {p["key"]: p for p in info["passes"]}
+    assert set(passes) == {"dedup_entities", "tag_abstraction", "consolidation"}
+    # tag abstraction is off unless configured, and needs an LLM
+    assert passes["tag_abstraction"]["automatic"] is False
+    assert passes["tag_abstraction"]["needs_llm"] is True
+    # consolidation never runs on its own
+    assert passes["consolidation"]["automatic"] is False
+    assert info["embedding_model"].startswith("hash:")
+
+
+def test_consolidate_defaults_to_a_dry_run(client):
+    client.post("/api/v1/memories",
+                json={"content": "User is Marcus Vandenberg", "user_id": "u", "infer": False})
+    client.post("/api/v1/memories",
+                json={"content": "The user's name is Marc.", "user_id": "u", "infer": False})
+    before = client.get("/api/v1/memories?user_id=u").json()
+
+    preview = client.post("/api/v1/maintenance/consolidate",
+                          json={"user_id": "u", "threshold": 0.2}).json()
+    assert preview["merged"] == 0  # dry run by default
+    after = client.get("/api/v1/memories?user_id=u").json()
+    assert len(after) == len(before)
+
+
+def test_maintenance_reports_tag_health(client):
+    """Fragmentation must be visible without anyone going looking for it."""
+    for text in ("liver enzyme panel high", "liver enzyme panel repeated",
+                 "liver enzyme panel reviewed"):
+        client.post("/api/v1/memories", json={
+            "content": text, "user_id": "u", "infer": False,
+            "categories": ["liver lab results"]})
+    for text in ("liver enzyme panel high again", "liver enzyme panel once more"):
+        client.post("/api/v1/memories", json={
+            "content": text, "user_id": "u", "infer": False,
+            "categories": ["liver bloods"]})
+
+    health = client.get("/api/v1/maintenance?user_id=u").json()["tag_health"]
+    assert health["memories"] == 5
+    assert health["tags"] == 2
+    assert health["untagged"] == 0
+    assert {row["tag"] for row in health["largest_tags"]} == {
+        "liver lab results", "liver bloods"}

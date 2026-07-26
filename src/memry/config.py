@@ -75,6 +75,11 @@ class RetrievalConfig(BaseModel):
     recency_half_life_days: float = 30.0
     candidate_multiplier: int = 3
     reconcile_similarity_limit: int = 5
+    # How many top hybrid results relational fusion may never displace. Graph
+    # distance is a much weaker relevance signal than semantic+lexical match, so
+    # without this a buried graph neighbour can outrank the correct answer. 0
+    # restores the unprotected behaviour.
+    relational_protect_top: int = 5
 
 
 class DecayConfig(BaseModel):
@@ -210,6 +215,12 @@ def _from_env() -> dict[str, Any]:
         else:
             data.setdefault(section, {})[key] = value
 
+    def _int(value: str | None) -> int | None:
+        try:
+            return int(value) if value else None
+        except ValueError:
+            return None
+
     put(None, "db_path", e("MEMRY_DB_PATH"))
     put(None, "default_user_id", e("MEMRY_DEFAULT_USER"))
     put(None, "api_key", e("MEMRY_API_KEY"))
@@ -244,6 +255,7 @@ def _from_env() -> dict[str, Any]:
     put("embedding", "model", e("MEMRY_EMBEDDING_MODEL"))
     put("embedding", "api_key", e("MEMRY_EMBEDDING_API_KEY"))
     put("embedding", "base_url", e("MEMRY_EMBEDDING_BASE_URL"))
+    put("embedding", "dimensions", _int(e("MEMRY_EMBEDDING_DIMENSIONS")))
     return data
 
 
@@ -254,15 +266,25 @@ def _autodetect_providers(
 
     A provider set explicitly (config file, env var, or override) is pinned:
     autodetection never replaces it, so e.g. MEMRY_EMBEDDING_PROVIDER=hash
-    keeps the local embedder even when OPENAI_API_KEY exists."""
+    keeps the local embedder even when OPENAI_API_KEY exists.
+
+    When several keys are present, prefer the one provider that can serve BOTH
+    the LLM and the embeddings. Anthropic has no embeddings API, so preferring
+    it for the LLM whenever its key exists silently splits a deployment across
+    two vendors: Anthropic for extraction, OpenAI for vectors. That is two bills,
+    two outage surfaces and two rate limits for no benefit. OpenAI covers both,
+    so it wins when its key is available; Anthropic remains the choice when it
+    is the only key present.
+    """
     env = os.environ
+    has_openai = bool(env.get("OPENAI_API_KEY"))
     if not llm_pinned and cfg.llm.provider == "none":
-        if env.get("ANTHROPIC_API_KEY"):
-            cfg.llm.provider = "anthropic"
-        elif env.get("OPENAI_API_KEY"):
+        if has_openai:
             cfg.llm.provider = "openai"
+        elif env.get("ANTHROPIC_API_KEY"):
+            cfg.llm.provider = "anthropic"
     if not embedding_pinned and cfg.embedding.provider == "hash":
-        if env.get("OPENAI_API_KEY"):
+        if has_openai:
             cfg.embedding.provider = "openai"
         elif env.get("VOYAGE_API_KEY"):
             cfg.embedding.provider = "voyage"

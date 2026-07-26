@@ -31,7 +31,7 @@ def make_store() -> MemoryStore:
 def populated_store() -> MemoryStore:
     store = make_store()
     first = store.add(
-        "Cosmin studies memory systems.", user_id="ada", infer=False,
+        "Marcus studies memory systems.", user_id="ada", infer=False,
         categories=["research"],
     ).actions[0].memory_id
     second = store.add(
@@ -39,30 +39,30 @@ def populated_store() -> MemoryStore:
         categories=["research", "projects"],
     ).actions[0].memory_id
     assert first and second
-    store.update(first, content="Cosmin studies long-term memory systems.")
+    store.update(first, content="Marcus studies long-term memory systems.")
     store.delete(second)  # invalidation and its audit event must survive
 
-    cosmin = store.backend.insert_entity(Entity(
-        name="Cosmin Novac", normalized="cosmin novac", entity_type="person",
+    marcus = store.backend.insert_entity(Entity(
+        name="Marcus Vandenberg", normalized="marcus vandenberg", entity_type="person",
         user_id="ada", description="Researches memory systems.",
         description_updated_at="2026-07-24T12:00:00+00:00",
-        metadata={"aliases": ["Cosmin"]},
+        metadata={"aliases": ["Marcus"]},
     ))
     helios = store.backend.insert_entity(Entity(
         name="Helios", normalized="helios", entity_type="project", user_id="ada"
     ))
     store.backend.add_mention(EntityMention(
-        entity_id=cosmin.id, memory_id=first, surface="Cosmin"
+        entity_id=marcus.id, memory_id=first, surface="Marcus"
     ))
     store.backend.add_mention(EntityMention(
         entity_id=helios.id, memory_id=second, surface="Helios"
     ))
     store.backend.add_relation(Relation(
-        subject=cosmin.id, predicate="studies", object=helios.id,
+        subject=marcus.id, predicate="studies", object=helios.id,
         user_id="ada", memory_id=first,
     ))
     store.backend.add_proposal(MergeProposal(
-        entity_a=cosmin.id, entity_b=helios.id, user_id="ada",
+        entity_a=marcus.id, entity_b=helios.id, user_id="ada",
         status="rejected", reason="different types",
     ))
     store.backend.record_synthetic_tag(SyntheticTag(

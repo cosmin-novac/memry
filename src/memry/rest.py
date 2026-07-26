@@ -117,6 +117,8 @@ button.toggle[aria-pressed="true"]{border-color:var(--accent);color:var(--accent
 .mem .meta{color:var(--dim);font-size:.78rem;margin-top:.35rem;display:flex;gap:.8rem;flex-wrap:wrap}
 .mem .del,.mem .edit{float:right;border:none;background:none;color:var(--dim)}.mem .del:hover{color:var(--warn)}.mem .edit:hover{color:var(--accent)}
 .tag{border:1px solid var(--line);border-radius:999px;padding:0 .5rem}
+button.tagfilter{background:none;color:inherit;font:inherit;cursor:pointer}
+button.tagfilter:hover{border-color:var(--accent);color:var(--accent)}
 .meta button.distill{border:1px solid var(--warn);border-radius:999px;padding:0 .5rem;background:none;color:var(--warn);font-size:inherit}
 .meta button.distill:hover{background:var(--warn);color:var(--bg)}
 textarea{width:100%;min-height:70px;margin-bottom:.4rem}
@@ -169,6 +171,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <button id="ktab-entities" onclick="showKnowledge('entities')">People &amp; things</button>
   <button id="ktab-relations" onclick="showKnowledge('relations')">Relations</button>
   <button id="ktab-collections" onclick="showKnowledge('collections')">Collections</button>
+  <button id="ktab-maintenance" onclick="showKnowledge('maintenance')">Upkeep</button>
 </div>
 <section class="kpanel" id="kpanel-topics">
   <div class="tagbar">
@@ -187,6 +190,27 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 </section>
 <section class="kpanel" id="kpanel-relations" hidden><div id="rellist"></div></section>
 <section class="kpanel" id="kpanel-collections" hidden><div id="collist"></div></section>
+<section class="kpanel" id="kpanel-maintenance" hidden>
+  <p class="hint">Everything Memry does to your memories on its own, and what it has done. Nothing here changes anything until you confirm it.</p>
+  <div id="upkeeplist"></div>
+  <h2 style="font-size:.95rem;margin-top:1.1rem">Tag health</h2>
+  <p class="hint">A tag that has quietly split in two caps what any search can find under it, because filtering drops the rest of the evidence before ranking starts.</p>
+  <div id="taghealth"></div>
+  <h2 style="font-size:.95rem;margin-top:1.1rem">Consolidate duplicate memories</h2>
+  <p class="hint">Finds memories that record the same fact more than once and merges them into one that keeps every detail. The originals are kept and linked, never deleted.</p>
+  <div class="tagbar">
+    <label>Similarity
+      <select id="conthresh">
+        <option value="0.95">very close only (0.95)</option>
+        <option value="0.90" selected>close (0.90)</option>
+        <option value="0.85">looser (0.85)</option>
+      </select>
+    </label>
+    <button onclick="previewConsolidation()" title="show what would be merged, without changing anything">Preview</button>
+    <button id="conapply" onclick="applyConsolidation()" disabled title="apply the merges shown above">Apply shown merges</button>
+  </div>
+  <div id="conresult"></div>
+</section>
 </div></div>
 </main><script>
 // Auth rides the session cookie set at /login; no key to paste anymore.
@@ -228,7 +252,7 @@ function viewCard(m){
    <button class="edit" title="edit" onclick="startEdit('${m.id}')">✎</button>
    <div>${esc(m.content)}</div>
    <div class="meta"><span class="tag">${m.memory_type||m.type||'semantic'}</span>
-   ${(m.categories||[]).map(c=>`<span class="tag">#${esc(String(c))}</span>`).join('')}
+   ${(m.categories||[]).map(c=>`<button class="tag tagfilter" title="show everything tagged #${esc(String(c))}" onclick='filterByTag(${JSON.stringify(String(c))})'>#${esc(String(c))}</button>`).join('')}
    ${(m.entity_links||[]).map(entity=>`<button class="entity-chip" onclick='openEntity(${JSON.stringify(entity.id)})'>${esc(entity.name)}</button>`).join('')}
    <span>@${esc(m.user_id||'(no user)')}</span>
    <span>imp ${(m.importance??0.5).toFixed(2)}</span>
@@ -611,6 +635,21 @@ window.addEventListener('keydown',e=>{if(e.key==='Escape'&&gMaxed)setMaxed(false
 document.addEventListener('fullscreenchange',()=>{if(G){sizeGalaxy();if(reducedMotion)galaxyFrame(performance.now())}});
 window.addEventListener('resize',()=>drawMap(current));
 const PAGE=100; let offset=0;
+// One click from a memory to everything sharing its tag. This goes through the
+// server-side filter, not a client-side hide, so hierarchy expansion applies and
+// the whole store is searched rather than the page already loaded. Tag filtering
+// is where the measured retrieval gain actually is: the user supplies the tag.
+function filterByTag(tag){
+  const select=document.getElementById('filter-topic');
+  const value=String(tag).toLowerCase();
+  if(![...select.options].some(o=>o.value===value)){
+    select.add(new Option(value,value));
+  }
+  select.value=select.value===value?'':value;  // clicking the active tag clears it
+  toggleClear();
+  activeCat=null;
+  search();
+}
 function searchFilters(){
   return {
     date:document.getElementById('filter-date').value,
@@ -679,10 +718,84 @@ function openTags(){return openKnowledge('topics')}
 function openEntities(){return openKnowledge('entities')}
 function showKnowledge(tab){
   knowledgeTab=tab;
-  for(const name of['topics','entities','relations','collections']){
+  for(const name of['topics','entities','relations','collections','maintenance']){
     document.getElementById('kpanel-'+name).hidden=name!==tab;
     document.getElementById('ktab-'+name).setAttribute('aria-pressed',name===tab);
   }
+  if(tab==='maintenance')loadUpkeep();
+}
+
+// -- upkeep: what runs on its own, and consolidation under review -----------
+async function loadUpkeep(){
+  const info=await api('/api/v1/maintenance');
+  const el=document.getElementById('upkeeplist');
+  el.innerHTML=info.passes.map(p=>{
+    const state=p.automatic?'<span class="syn">automatic</span>'
+      :(p.needs_llm&&!info.llm_available?'<span class="cnt">needs an LLM</span>'
+        :'<span class="cnt">manual</span>');
+    const every=p.automatic&&p.interval_days?` every ${p.interval_days} days`:'';
+    const last=p.last_run?` · last run ${esc(p.last_run)}`:'';
+    return `<div class="tagrow"><span class="name"><b>${esc(p.label)}</b> ${state}
+      <div class="hint">${esc(p.detail)}${every}${last}</div></span></div>`;
+  }).join('')+`<div class="hint" style="margin-top:.6rem">Embeddings: <code>${esc(info.embedding_model)}</code></div>`;
+  renderTagHealth(info.tag_health||{});
+}
+// Fragmentation caps recall silently: filtering to a tag that has split its
+// subject drops the memories the question needed. Show it rather than wait for
+// someone to go looking.
+function renderTagHealth(h){
+  const el=document.getElementById('taghealth');
+  if(!el)return;
+  const splits=(h.splits||[]);
+  const rows=splits.map(s=>{
+    const [a,b]=s.variants;
+    return `<div class="tagrow"><span class="name">
+      <b>${esc(a)}</b> and <b>${esc(b)}</b> <span class="cnt">${s.similarity}</span>
+      <div class="hint">look like one subject split in two</div></span>
+      <button onclick='healSplit(${JSON.stringify(s.variants)},${JSON.stringify(s.canonical)})'
+        title="combine these two tags">Combine into "${esc(s.canonical)}"</button></div>`;
+  }).join('');
+  el.innerHTML=`<div class="hint">
+      ${h.tags} tags over ${h.memories} memories · ${h.untagged} untagged ·
+      ${h.single_use_tags} used once (${Math.round((h.single_use_share||0)*100)}%) ·
+      ${h.suspected_splits} suspected split${h.suspected_splits===1?'':'s'}
+    </div>`+(rows||'<div class="empty">No split tags detected.</div>');
+}
+async function healSplit(variants,canonical){
+  const drop=variants.filter(v=>v!==canonical);
+  if(!confirm(`Combine ${drop.join(', ')} into "${canonical}"?`))return;
+  await api('/api/v1/tags/edit',{method:'POST',
+    body:JSON.stringify({op:'merge',tags:drop,to:canonical})});
+  await Promise.all([loadTags(),loadUpkeep()]);
+}
+let consolidationPreview=null;
+async function previewConsolidation(){
+  const el=document.getElementById('conresult');
+  el.innerHTML='<div class="empty">Looking for duplicates...</div>';
+  const threshold=parseFloat(document.getElementById('conthresh').value);
+  const res=await api('/api/v1/maintenance/consolidate',
+    {method:'POST',body:JSON.stringify({threshold,apply:false})});
+  consolidationPreview=threshold;
+  const merges=(res.groups||[]).filter(g=>g.same_fact);
+  document.getElementById('conapply').disabled=!merges.length;
+  if(!merges.length){
+    el.innerHTML=`<div class="empty">Scanned ${res.scanned} memories. Nothing to merge.</div>`;
+    return;
+  }
+  el.innerHTML=merges.map(g=>`<div class="tagrow"><span class="name">
+    <b>${esc(g.merged_content)}</b>
+    <div class="hint">replaces ${g.memory_ids.length}: ${g.contents.map(c=>esc(c)).join(' · ')}</div>
+    <div class="hint">${esc(g.reason)}</div></span></div>`).join('');
+}
+async function applyConsolidation(){
+  const merges=document.querySelectorAll('#conresult .tagrow').length;
+  if(!confirm(`Merge ${merges} group(s)? The originals are kept and linked, not deleted.`))return;
+  const res=await api('/api/v1/maintenance/consolidate',
+    {method:'POST',body:JSON.stringify({threshold:consolidationPreview,apply:true})});
+  document.getElementById('conresult').innerHTML=
+    `<div class="empty">Merged ${res.merged} group(s); ${res.superseded} memories superseded.</div>`;
+  document.getElementById('conapply').disabled=true;
+  load();
 }
 function tagSel(){return[...document.querySelectorAll('.tagrow input:checked')].map(c=>c.value)}
 function updateSel(){
@@ -1329,6 +1442,66 @@ def create_app(
         ))
         return JSONResponse(result)
 
+    async def consolidate_route(request: Request) -> Response:
+        """Preview or apply memory consolidation for the caller's namespace.
+
+        Defaults to a dry run: the dashboard shows every proposed merge, with
+        the exact text that would replace the group, before anything changes.
+        """
+        body = await request.json() if await request.body() else {}
+        result = await run_in_threadpool(partial(
+            store.consolidate_memories,
+            user_id=_p(request).namespace(body.get("user_id")),
+            threshold=float(body.get("threshold") or 0.90),
+            apply=bool(body.get("apply")),
+        ))
+        return JSONResponse(result)
+
+    async def maintenance_status_route(request: Request) -> Response:
+        """What the automatic passes are, when they last ran, and their settings.
+
+        Background work that silently rewrites a user's memory is not
+        acceptable; this is the window into it.
+        """
+        user_id = _p(request).namespace(request.query_params.get("user_id"))
+        tcfg = store.config.tags
+        return JSONResponse({
+            "namespace": user_id,
+            "passes": [
+                {
+                    "key": "dedup_entities",
+                    "label": "Entity de-duplication",
+                    "detail": "Merges duplicate people and things once evidence is clear.",
+                    "automatic": store.config.dedup_entities,
+                    "interval_days": store.config.dedup_interval_days,
+                    "needs_llm": False,
+                },
+                {
+                    "key": "tag_abstraction",
+                    "label": "Tag abstraction",
+                    "detail": "Groups tags under broader parents for browsing. "
+                              "Off by default: measured retrieval is best at the "
+                              "specific tag level, not the broad one.",
+                    "automatic": tcfg.enabled and store.llm.available,
+                    "interval_days": tcfg.interval_days,
+                    "last_run": store.last_tag_run(user_id),
+                    "needs_llm": True,
+                },
+                {
+                    "key": "consolidation",
+                    "label": "Memory consolidation",
+                    "detail": "Merges memories that record the same fact more than "
+                              "once. Manual: review each group before applying.",
+                    "automatic": False,
+                    "needs_llm": True,
+                },
+            ],
+            "llm_available": store.llm.available,
+            "embedding_model": store.embedder.model_id,
+            "tag_health": await run_in_threadpool(partial(
+                store.tag_health, user_id=user_id)),
+        })
+
     async def collections_route(request: Request) -> Response:
         cols = await run_in_threadpool(partial(
             store.collections,
@@ -1820,6 +1993,8 @@ def create_app(
         Route("/api/v1/tags/abstract", guarded(abstract_tags_route), methods=["POST"]),
         Route("/api/v1/tags/edit", guarded(edit_tags_route), methods=["POST"]),
         Route("/api/v1/tags/suggest-merges", guarded(suggest_merges_route), methods=["GET"]),
+        Route("/api/v1/maintenance", guarded(maintenance_status_route), methods=["GET"]),
+        Route("/api/v1/maintenance/consolidate", guarded(consolidate_route), methods=["POST"]),
         Route("/api/v1/relations", guarded(relations_route), methods=["GET"]),
         Route("/api/v1/relations/backfill", guarded(backfill_relations_route), methods=["POST"]),
         Route("/api/v1/entities/backfill-types", guarded(backfill_entity_types_route), methods=["POST"]),

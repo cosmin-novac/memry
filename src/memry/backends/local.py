@@ -1059,6 +1059,36 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [{"category": row["category"], "count": row["count"]} for row in rows]
 
+    def topic_memory_ids(self, scope: Scope) -> list[tuple[str, str]]:
+        topic_clause, topic_params = _scope_clause(scope, prefix="t.")
+        memory_clause, memory_params = _scope_clause(scope, prefix="m.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT t.normalized AS category, mt.memory_id AS memory_id "
+                "FROM topics t JOIN memory_topics mt ON mt.topic_id = t.id "
+                "JOIN memories m ON m.id = mt.memory_id "
+                f"WHERE m.invalid_at IS NULL AND {topic_clause} AND {memory_clause}",
+                (*topic_params, *memory_params),
+            ).fetchall()
+        return [(row["category"], row["memory_id"]) for row in rows]
+
+    def direct_topic_counts(self, scope: Scope) -> list[dict[str, Any]]:
+        """Counts for directly-attached topics only, without descendant rollup."""
+        topic_clause, topic_params = _scope_clause(scope, prefix="t.")
+        memory_clause, memory_params = _scope_clause(scope, prefix="m.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT t.normalized AS category, "
+                "COUNT(DISTINCT mt.memory_id) AS count FROM topics t "
+                "JOIN memory_topics mt ON mt.topic_id = t.id "
+                "JOIN memories m ON m.id = mt.memory_id "
+                f"WHERE m.invalid_at IS NULL AND {topic_clause} AND {memory_clause} "
+                "GROUP BY t.normalized HAVING count > 0 "
+                "ORDER BY count DESC, category",
+                (*topic_params, *memory_params),
+            ).fetchall()
+        return [{"category": row["category"], "count": row["count"]} for row in rows]
+
     def retag_topics(self, scope: Scope, remove: set[str], add: str | None) -> int:
         normalized = {item.strip().lower() for item in remove if item.strip()}
         if not normalized:

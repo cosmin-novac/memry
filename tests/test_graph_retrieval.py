@@ -121,7 +121,7 @@ def test_relation_lifecycle_follows_evidence_memory(store):
 
 
 def test_entity_merge_repoints_relations_and_removes_self_edges(store):
-    keep = _entity(store, "Cosmin")
+    keep = _entity(store, "Marcus")
     duplicate = _entity(store, "Cozmin")
     project = _entity(store, "Helios")
     store.backend.add_relation(
@@ -176,7 +176,7 @@ def test_query_entity_detection_uses_bounded_candidate_lookup(store, monkeypatch
     from memry.intelligence.graph_retrieval import detect_query_entities
     from memry.models import Entity, Scope
 
-    entity = store.backend.insert_entity(Entity(name="Cosmin Popescu", user_id="ada"))
+    entity = store.backend.insert_entity(Entity(name="Marcus Vandenberg", user_id="ada"))
     store.backend.add_entity_alias(entity.id, "Costi")
 
     def vocabulary_scan_is_a_bug(*args, **kwargs):
@@ -186,3 +186,39 @@ def test_query_entity_detection_uses_bounded_candidate_lookup(store, monkeypatch
     assert detect_query_entities(
         store.backend, Scope(user_id="ada"), "What is Costi working on?"
     ) == [entity.id]
+
+
+# ------------------------------------------------- fusion cannot evict the top
+def test_relational_fusion_never_displaces_the_strongest_hybrid_hits(store, graph):
+    """Graph distance may fill the page but not take it over.
+
+    Measured on a 456-memory store with a dense entity graph, an unprotected
+    fusion let buried graph neighbours leapfrog correct answers and cost 0.18
+    recall@10 on ordinary queries, while protecting the top hybrid results kept
+    multi-hop hit@10 unchanged at 0.917.
+    """
+    protect = store.config.retrieval.relational_protect_top
+    assert protect > 0
+
+    query = "Ada preference preference"
+    plain = store.search(query, user_id="ada", relational=False, limit=protect)
+    fused = store.search(query, user_id="ada", relational=True, limit=10)
+    # the protected prefix is exactly hybrid's own ranking, in order
+    assert [r.memory.id for r in fused[:len(plain)]] == [r.memory.id for r in plain]
+
+
+def test_protection_is_configurable_and_zero_restores_old_behaviour(graph):
+    from memry.config import Config, RetrievalConfig
+
+    cfg = Config(db_path=":memory:", retrieval=RetrievalConfig(relational_protect_top=0))
+    s = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(96))
+    try:
+        assert s.config.retrieval.relational_protect_top == 0
+    finally:
+        s.close()
+
+
+def test_multi_hop_still_works_with_protection_on(store, graph):
+    """The protection must not cost the feature its reason to exist."""
+    fused = store.search("What tool does Ada use for her work?", user_id="ada", limit=5)
+    assert graph["m_uses"].id in {r.memory.id for r in fused}

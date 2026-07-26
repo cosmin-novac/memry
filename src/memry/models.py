@@ -273,8 +273,9 @@ class SyntheticTag(BaseModel):
 
     Recorded so the system remembers which tags it invented (vs. tags that came
     from the user/extraction), can avoid re-proposing them, and can show or undo
-    them later. The tag itself is also written onto each clustered memory's
-    ``categories`` like any other tag."""
+    them later. The label is NOT copied onto member memories: it exists only as
+    a ``TopicRelation`` edge, and query-time hierarchy expansion makes a filter
+    on the parent reach the memories tagged with its children."""
 
     id: str = Field(default_factory=new_id)
     tag: str
