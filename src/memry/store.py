@@ -1411,11 +1411,24 @@ class MemoryStore:
             entity = self._refresh_entity_description(entity_id)
             if entity is None:
                 return None
+        # Relations belong to the entity being looked at, not to a list of every
+        # edge in the store: an edge only means something next to the thing it
+        # connects. These are also what relational retrieval traverses, so
+        # seeing them here is seeing why a search reached what it reached.
+        relations = self.backend.relations_of([entity_id])
+        endpoints = {r.subject for r in relations} | {r.object for r in relations}
+        names = {
+            other.id: other.name
+            for other in (self.backend.get_entity(e) for e in endpoints)
+            if other is not None
+        }
         return {
             "entity": entity,
             "aliases": self.backend.entity_aliases(entity_id),
             "mentions": self.backend.entity_mentions(entity_id),
             "memories": self.backend.entity_memories(entity_id, limit=20),
+            "relations": relations,
+            "relation_names": names,
         }
 
     def add_entity_alias(

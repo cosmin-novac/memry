@@ -185,7 +185,6 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <div class="knowledge-tabs">
   <button id="ktab-topics" onclick="showKnowledge('topics')">Tags</button>
   <button id="ktab-entities" onclick="showKnowledge('entities')">People &amp; things</button>
-  <button id="ktab-relations" onclick="showKnowledge('relations')">Relations</button>
   <button id="ktab-collections" onclick="showKnowledge('collections')">Collections</button>
   <button id="ktab-maintenance" onclick="showKnowledge('maintenance')">Upkeep</button>
 </div>
@@ -208,7 +207,6 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
     <aside class="entity-side" id="entitydetail"></aside>
   </div>
 </section>
-<section class="kpanel" id="kpanel-relations" hidden><div id="rellist"></div></section>
 <section class="kpanel" id="kpanel-collections" hidden><div id="collist"></div></section>
 <section class="kpanel" id="kpanel-maintenance" hidden>
   <p class="hint">Everything Memry does to your memories on its own, and what it has done. Nothing here changes anything until you confirm it.</p>
@@ -750,7 +748,7 @@ function openTags(){return openKnowledge('topics')}
 function openEntities(){return openKnowledge('entities')}
 function showKnowledge(tab){
   knowledgeTab=tab;
-  for(const name of['topics','entities','relations','collections','maintenance']){
+  for(const name of['topics','entities','collections','maintenance']){
     document.getElementById('kpanel-'+name).hidden=name!==tab;
     document.getElementById('ktab-'+name).setAttribute('aria-pressed',name===tab);
   }
@@ -894,11 +892,6 @@ async function loadEntities(){
   document.getElementById('entlist').innerHTML=Object.keys(byType).sort().map(type=>`<div class="tagrow">
     <span class="syn entity-type">${esc(type)}</span><span class="name">${byType[type].sort((a,b)=>a.name.localeCompare(b.name)).map(entity=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(entity.id)})'>${esc(entity.name)}</button>`).join(', ')}</span>
     <span class="cnt">${byType[type].length}</span></div>`).join('')||'<div class="empty">No entities yet.</div>';
-  document.getElementById('rellist').innerHTML=relations.length?relations.map(relation=>`<div class="tagrow"><span class="name">
-    <button class="entity-link" onclick='openEntity(${JSON.stringify(relation.subject)})'>${esc(knowledgeNames[relation.subject]||'?')}</button>
-    <span class="cnt">${esc(relation.predicate)}</span>
-    <button class="entity-link" onclick='openEntity(${JSON.stringify(relation.object)})'>${esc(knowledgeNames[relation.object]||'?')}</button>
-    </span>${relation.memory_id?`<button class="act" onclick='showMemory(${JSON.stringify(relation.memory_id)})'>evidence</button>`:''}</div>`).join(''):'<div class="empty">No evidence-grounded relations yet.</div>';
   document.getElementById('proplist').innerHTML=proposals.length?proposals.map(proposal=>`<div class="tagrow"><span class="name">
     <b>${esc(knowledgeNames[proposal.entity_a]||proposal.entity_a)}</b> and <b>${esc(knowledgeNames[proposal.entity_b]||proposal.entity_b)}</b>
     <span class="cnt">${esc(proposal.reason||'identity is uncertain')}</span></span>
@@ -914,8 +907,27 @@ async function openEntity(id){
     <div class="description">${esc(entity.description||'No active evidence to summarize yet.')}</div>
     <div class="alias-list">${aliases.map(alias=>`<span>${esc(alias)}</span>`).join('')}</div>
     <div class="bar"><input id="aliasinput" placeholder="add an alias"><button onclick='addAlias(${JSON.stringify(id)})'>Add alias</button></div>
+    ${relationsBlock(id,detail)}
     <div class="hint">${detail.memories.length} active supporting memor${detail.memories.length===1?'y':'ies'}</div>
     ${detail.memories.map(memory=>`<div class="tagrow"><span class="name">${esc(memory.content)}</span><button class="act" onclick='showMemory(${JSON.stringify(memory.id)})'>open</button></div>`).join('')||'<div class="empty">No active supporting memories.</div>'}</div>`;
+}
+// Relations read as "this entity -> predicate -> that one", so they belong next
+// to the entity they describe. A flat list of every edge in the store had no
+// subject to be about. These are also the edges relational search traverses, so
+// this doubles as the explanation for why a search reached a given memory.
+function relationsBlock(id,detail){
+  const rels=detail.relations||[],names=detail.relation_names||{};
+  if(!rels.length)return '<div class="hint">No relations recorded yet.</div>';
+  const name=eid=>esc(names[eid]||'?');
+  const rows=rels.map(r=>{
+    const outgoing=r.subject===id;
+    const other=outgoing?r.object:r.subject;
+    return `<div class="tagrow"><span class="name">
+      <span class="cnt">${outgoing?'':'&larr; '}${esc(r.predicate)}${outgoing?' &rarr;':''}</span>
+      <button class="entity-link" onclick='openEntity(${JSON.stringify(other)})'>${name(other)}</button>
+      </span>${r.memory_id?`<button class="act" onclick='showMemory(${JSON.stringify(r.memory_id)})'>evidence</button>`:''}</div>`;
+  }).join('');
+  return `<div class="hint">${rels.length} relation${rels.length===1?'':'s'}</div>${rows}`;
 }
 function closeEntity(){document.getElementById('entitydetail').innerHTML=''}
 async function addAlias(id){
@@ -1767,6 +1779,8 @@ def create_app(
                 "aliases": detail["aliases"],
                 "mentions": [mention.model_dump() for mention in detail["mentions"]],
                 "memories": [_memory_payload(memory) for memory in detail["memories"]],
+                "relations": [r.model_dump() for r in detail.get("relations", [])],
+                "relation_names": detail.get("relation_names", {}),
             }
         )
 

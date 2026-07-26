@@ -562,3 +562,34 @@ def test_preexisting_duplicates_get_a_proposal_so_they_can_be_reconsidered(verba
     # both carry evidence, so with no LLM it stays for judgement rather than
     # being merged blind - but it is now visible and will be reconsidered
     assert result["confirmed"] + result["kept"] == 1
+
+
+def test_entity_detail_carries_its_own_relations(verbatim_store):
+    """Relations are shown under the entity they describe, not as a flat list.
+
+    An edge only means something next to the thing it connects, and these are
+    the same edges relational retrieval traverses.
+    """
+    from memry.models import Relation
+
+    backend = verbatim_store.backend
+    ada = backend.insert_entity(Entity(name="Ada", normalized="ada", user_id="ada"))
+    helios = backend.insert_entity(
+        Entity(name="Helios", normalized="helios", user_id="ada")
+    )
+    memory = backend.insert_memory(
+        Memory(content="Ada works on Helios.", user_id="ada")
+    )
+    backend.add_relation(Relation(subject=ada.id, predicate="works_on",
+                                  object=helios.id, user_id="ada",
+                                  memory_id=memory.id))
+
+    detail = verbatim_store.entity(ada.id)
+    assert [r.predicate for r in detail["relations"]] == ["works_on"]
+    # both endpoints are named, so the UI never has to render a bare id
+    assert detail["relation_names"][helios.id] == "Helios"
+    assert detail["relation_names"][ada.id] == "Ada"
+    # and the edge is reachable from the other side too
+    assert [r.predicate for r in verbatim_store.entity(helios.id)["relations"]] == [
+        "works_on"
+    ]
