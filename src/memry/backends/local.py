@@ -801,6 +801,43 @@ class LocalBackend(MemoryBackend):
             )
             self._db.commit()
 
+    def revalidate_memory(self, memory_id: str) -> Memory | None:
+        """Undo an invalidation: the memory is believed true again.
+
+        Mirrors ``invalidate_memory`` exactly - the vector rejoins the ANN
+        index and relations whose evidence this memory is come back with it.
+        """
+        from ..models import utcnow
+
+        with self._lock:
+            row = self._db.execute(
+                "SELECT embedding, embedding_model FROM memories "
+                "WHERE id = ? AND invalid_at IS NOT NULL",
+                (memory_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            changed_at = utcnow()
+            self._db.execute(
+                "UPDATE memories SET invalid_at = NULL, superseded_by = NULL, "
+                "updated_at = ? WHERE id = ?",
+                (changed_at, memory_id),
+            )
+            if row["embedding"] is not None and row["embedding_model"]:
+                embedding = np.frombuffer(row["embedding"], dtype=np.float32)
+                self._ann_add(memory_id, embedding.tolist(), row["embedding_model"])
+            self._db.execute(
+                "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
+                "WHERE id IN (SELECT entity_id FROM entity_mentions WHERE memory_id = ?)",
+                (changed_at, memory_id),
+            )
+            self._db.execute(
+                "UPDATE relations SET invalid_at = NULL WHERE memory_id = ?",
+                (memory_id,),
+            )
+            self._db.commit()
+        return self.get_memory(memory_id)
+
     def invalidate_memory(
         self, memory_id: str, *, superseded_by: str | None = None
     ) -> Memory | None:

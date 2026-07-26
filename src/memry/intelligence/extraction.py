@@ -16,9 +16,15 @@ from typing import Any
 from ..models import MEMORY_TYPES, CandidateFact
 from ..providers.llm import LLM
 
+# `document` and `code` were added after reviewing what a real store dumped into
+# "other": contracts, invoices and registration numbers on one side, files,
+# symbols and tables on the other. Both are common enough to be worth naming,
+# and a named type keeps a document from being merged with a person who happens
+# to share its name. Types are deliberately few - each extra one is another way
+# for the model to mis-sort, and the type does not affect search ranking.
 ENTITY_TYPES: tuple[str, ...] = (
     "person", "organization", "project", "product", "place", "event",
-    "concept", "other",
+    "document", "code", "concept", "other",
 )
 
 EXTRACTION_SCHEMA: dict[str, Any] = {
@@ -85,7 +91,9 @@ Extract:
 - preferences, opinions, goals, constraints
 - decisions made and commitments/plans (convert relative dates to absolute)
 - important entities, each with a type: person, organization, project, product,
-  place, event, concept, or other (use "other" only when none fit).
+  place, event, document (a contract, invoice, certificate, form, report or
+  reference number), code (a file, function, table, endpoint or config key),
+  concept, or other (use "other" only when none fit).
   An entity is a NAMED, REFERRING thing you could later ask a question about:
   a person, a company, a place, a named project, product, or event.
   It is NOT: a salutation or greeting ("Sehr geehrte", "Dear Sir"), a template

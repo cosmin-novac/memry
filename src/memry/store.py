@@ -1288,6 +1288,37 @@ class MemoryStore:
         out.sort(key=lambda row: row["forgotten_at"] or "", reverse=True)
         return out
 
+    def unforget(self, memory_id: str, *, owner_prefix: str | None = None) -> bool:
+        """Bring a forgotten memory back into active use.
+
+        Only for memories in the forgotten list: restoring one that was
+        superseded would resurrect a duplicate right next to its replacement,
+        so those stay part of their successor's history.
+        """
+        memory = self.backend.get_memory(memory_id)
+        if not _owned(memory, owner_prefix):
+            return False
+        if memory.invalid_at is None:
+            return False  # nothing to undo
+        if memory.superseded_by:
+            raise ValueError(
+                "this memory was replaced by another; restore is only for "
+                "deleted or decayed memories"
+            )
+        restored = self.backend.revalidate_memory(memory_id)
+        if restored is None:
+            return False
+        self.backend.add_event(
+            MemoryEvent(
+                memory_id=memory_id,
+                event="ADD",
+                new_content=memory.content,
+                reason="unforgotten by the user",
+                actor="user",
+            )
+        )
+        return True
+
     def purge(self, memory_id: str, *, owner_prefix: str | None = None) -> bool:
         """Delete a forgotten memory for good. Refuses anything still active.
 
@@ -2004,6 +2035,31 @@ class MemoryStore:
             self.backend.delete_synthetic_tag(scope, tag)
         return changed
 
+    # -- maintenance switches ----------------------------------------------
+    # The scheduler's passes were config-only, which meant turning one off was
+    # an env-var edit and a restart. A runtime override lives in the meta table
+    # so the dashboard toggle survives restarts; config stays the default when
+    # no override was ever set.
+    _MAINTENANCE_KEYS = ("dedup_entities", "tag_abstraction")
+
+    def maintenance_enabled(self, key: str) -> bool:
+        override = self.backend.get_meta(f"maintenance:{key}:enabled")
+        if override is not None:
+            return override == "true"
+        if key == "dedup_entities":
+            return self.config.dedup_entities
+        if key == "tag_abstraction":
+            return self.config.tags.enabled and self.llm.available
+        return False
+
+    def set_maintenance_enabled(self, key: str, enabled: bool) -> bool:
+        if key not in self._MAINTENANCE_KEYS:
+            return False
+        self.backend.set_meta(
+            f"maintenance:{key}:enabled", "true" if enabled else "false"
+        )
+        return True
+
     def _stamp_tag_run(self, user_id: str | None) -> None:
         self.backend.set_meta(_tag_run_key(user_id), utcnow())
 
@@ -2049,6 +2105,10 @@ class MemoryStore:
                 "llm": f"{self.llm.name}"
                 + (f":{getattr(self.llm, 'model', '')}" if getattr(self.llm, "model", "") else ""),
                 "embedder": self.embedder.model_id,
+                # "invalidated" lumps together deleted memories and old versions
+                # of updated ones. Only the first kind is recoverable, and only
+                # that kind is what the Forgotten tab lists, so report it apart.
+                "forgotten_memories": len(self.forgotten(limit=1_000_000)),
                 "generated_at": utcnow(),
             }
         )

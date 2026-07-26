@@ -80,6 +80,10 @@ class MemoryBackend(ABC):
     ) -> Memory | None:
         """Temporal soft-delete: mark the memory as no longer valid."""
 
+    def revalidate_memory(self, memory_id: str) -> "Memory | None":
+        """Undo an invalidation: the memory is believed true again."""
+        return None
+
     @abstractmethod
     def delete_memory(self, memory_id: str) -> bool:
         """Hard delete (rarely what you want; prefer invalidate)."""

@@ -140,8 +140,17 @@ button.toggle.active{border-color:var(--accent);color:var(--accent)}
 .mem .del,.mem .edit{float:right;border:none;background:none;color:var(--dim)}.mem .del:hover{color:var(--warn)}.mem .edit:hover{color:var(--accent)}
 .tag{border:1px solid var(--line);border-radius:999px;padding:0 .5rem}
 button.tagfilter{background:none;color:inherit;font:inherit;cursor:pointer}
-.about-list p{margin:.55rem 0;line-height:1.45}
-.about-list b{font-weight:600}
+.about-tabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.9rem 0}
+.about-tabs button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+.apanel .step{padding:.7rem 0;border-bottom:1px solid var(--line)}
+.apanel .step:last-child{border-bottom:none}
+.apanel .step h3{margin:0 0 .25rem;font-size:.95rem;font-weight:600}
+.apanel .step p{margin:0;line-height:1.5;color:var(--dim)}
+.glossary{margin:.2rem 0;display:grid;grid-template-columns:1fr;gap:0}
+@media(min-width:44rem){.glossary{grid-template-columns:11rem 1fr;column-gap:1rem}}
+.glossary dt{font-weight:600;padding:.45rem 0 0}
+.glossary dd{margin:0;padding:.45rem 0;color:var(--dim);line-height:1.5;border-bottom:1px solid var(--line)}
+@media(max-width:44rem){.glossary dd{padding-top:.1rem}}
 button.tagfilter:hover{border-color:var(--accent);color:var(--accent)}
 .meta button.distill{border:1px solid var(--warn);border-radius:999px;padding:0 .5rem;background:none;color:var(--warn);font-size:inherit}
 .meta button.distill:hover{background:var(--warn);color:var(--bg)}
@@ -194,22 +203,73 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <div class="gx-ctrl"><button id="fsBtn" title="Fullscreen" aria-label="Fullscreen">⤢</button></div>
 <div class="gx-read" id="mapread"></div><div class="gx-stat" id="mapstat"></div></div>
 <div id="list"></div>
-<div class="modal" id="aboutmodal"><div class="sheet" style="width:min(96vw,46rem)">
-<h2><button class="x" onclick="closeAbout()" title="close">x</button>What Memry does</h2>
-<p class="hint">Plainly, one thing at a time.</p>
-<div class="about-list">
-<p><b>It keeps what you tell it.</b> Every message you save is stored exactly as written, permanently. That raw copy is never edited - everything below is built on top of it and can always be rebuilt from it.</p>
-<p><b>It breaks messages into single facts.</b> A long note becomes separate memories like "Prefers invoices in EUR" or "Started the new medication on March 3". One fact per memory, so each can be found, corrected, or forgotten on its own.</p>
-<p><b>It checks new facts against old ones.</b> If something is already known it is skipped; if it adds detail the memory is updated; if it contradicts, the old memory is retired and the new one takes its place. The retired one is kept, marked as no longer true.</p>
-<p><b>It tags every memory.</b> Tags are subjects like <i>liver health</i> or <i>2026 taxes</i> - deliberately specific, because "health" would lump things you would never ask about together. Click any tag to see everything under it.</p>
-<p><b>It recognizes people and things.</b> Names that come up - a person, a company, a project - become entries with everything known about them collected in one place. Look under Knowledge &gt; People and things.</p>
-<p><b>It remembers how things relate.</b> "Ada works on Helios", "Helios runs on Postgres" - stored as connections between things. That is how a question about Ada can find an answer that never mentions her.</p>
-<p><b>Search combines three approaches.</b> Meaning (finds "liver results" from "blood test"), exact words (finds codes and names), and those connections between things. Newer and more important memories rank a little higher.</p>
-<p><b>Memories fade, rules stick.</b> A dated event slowly loses rank as it ages; a standing instruction like "always answer briefly" keeps its weight. Nothing fades away silently into deletion.</p>
-<p><b>It cleans up after itself.</b> On a schedule it merges duplicate people and things, removes names that were never really things (a bare date, an amount), and flags tags that drifted apart. Anything beyond the obvious asks you first - see Knowledge &gt; Upkeep.</p>
-<p><b>Deleting is a two-step door.</b> Deleting a memory hides it from search but keeps the record under Knowledge &gt; Forgotten. Only there can you delete one permanently.</p>
-<p><b>Everything leaves a trail.</b> Every change to every memory is recorded - what changed, when, why. Export downloads the whole store, losslessly, any time.</p>
+<div class="modal" id="aboutmodal"><div class="sheet" style="width:min(96vw,54rem)">
+<h2><button class="x" onclick="closeAbout()" title="close">x</button>About Memry</h2>
+<div class="about-tabs">
+  <button id="atab-how" onclick="showAbout('how')">How it works</button>
+  <button id="atab-words" onclick="showAbout('words')">What the words mean</button>
+  <button id="atab-server" onclick="showAbout('server')">This server</button>
 </div>
+<section class="apanel" id="apanel-how">
+  <div class="step"><h3>Nothing you say is thrown away</h3>
+  <p>Every message you save is kept exactly as you wrote it, and that copy is never edited. Everything else here is worked out from it, so if a later step gets something wrong, the original is still there to redo it from.</p></div>
+
+  <div class="step"><h3>Long messages get split into single facts</h3>
+  <p>Tell it three things in one paragraph and you get three memories, not one blob. Each one can then be found, corrected or deleted on its own, without disturbing the other two.</p></div>
+
+  <div class="step"><h3>New facts are checked against what is already known</h3>
+  <p>Say the same thing twice and the second one is dropped. Add a detail and the existing memory is filled in. Contradict yourself and the old version is retired in favour of the new one - kept, but marked as no longer true, so you can see what changed and when.</p></div>
+
+  <div class="step"><h3>Every memory gets tags</h3>
+  <p>Tags are subjects, and they are deliberately narrow: <i>liver health</i> rather than <i>health</i>. A tag as broad as "health" would put your gym routine and your blood tests in the same bucket, which helps nobody. Click any tag on a memory to pull up everything filed under it.</p></div>
+
+  <div class="step"><h3>People and things get their own pages</h3>
+  <p>When a name keeps coming up - someone you work with, a company, a project - it gets an entry that gathers everything known about it in one place, with the memories that back each part. Two people with the same name stay separate until there is real reason to think they are one person.</p></div>
+
+  <div class="step"><h3>It also remembers how things connect</h3>
+  <p>"Ada works on Helios" and "Helios runs on Postgres" are stored as links, not just sentences. That is why asking what database Ada's project uses can find the answer, even though the memory that holds it never mentions Ada.</p></div>
+
+  <div class="step"><h3>Search does three things at once</h3>
+  <p>It matches on meaning, so "blood test" finds a memory about liver results. It matches on exact words, so codes, names and numbers still work. And it follows those links between things. The three sets of results are combined, with newer and more important memories nudged up.</p></div>
+
+  <div class="step"><h3>Old events sink; standing instructions do not</h3>
+  <p>A note about a meeting last spring gradually stops crowding your results. "Always answer briefly" keeps its weight, because a rule does not expire the way an appointment does. Nothing disappears on its own - it just stops coming first.</p></div>
+
+  <div class="step"><h3>It tidies up on a schedule</h3>
+  <p>Duplicate people get merged once it is clear they are the same. Names that were never really things - a bare year, an amount, a greeting - get removed. Tags that have drifted into two spellings get flagged. Anything less than obvious waits for you to confirm it, under Knowledge &gt; Upkeep, where you can also switch each of these off.</p></div>
+
+  <div class="step"><h3>Deleting takes two steps, on purpose</h3>
+  <p>Deleting a memory takes it out of search but keeps the record, in Knowledge &gt; Forgotten. From there you can put it back, or delete it for good. Only that second step is permanent.</p></div>
+
+  <div class="step"><h3>You can take everything with you</h3>
+  <p>Export downloads the whole store - memories, people, links, history, timestamps - in a form that restores exactly. Every change ever made to a memory is recorded, so you can always see what happened to it.</p></div>
+</section>
+<section class="apanel" id="apanel-words" hidden>
+  <p class="hint">The words that show up around the app, in plain terms.</p>
+  <dl class="glossary">
+    <dt>Memory</dt><dd>One fact, kept on its own. The thing everything else here is about.</dd>
+    <dt>Episode</dt><dd>The raw message you originally sent, stored word for word and never edited. Memories are worked out from episodes; if extraction ever needs redoing, this is what it is redone from. One message can produce several memories, which is why the two numbers differ.</dd>
+    <dt>Tag</dt><dd>A subject a memory is filed under, like <i>2026 taxes</i>. A memory can have a few. Clicking one filters to everything under it.</dd>
+    <dt>Entity (a "person or thing")</dt><dd>Someone or something that keeps coming up, with its own page collecting what is known about it.</dd>
+    <dt>Entity type</dt><dd>What kind of thing it is: person, organization, project, product, place, event, document, code, or concept. Used to keep unrelated things with the same name apart, and to group the list - it does not change search ranking.</dd>
+    <dt>Relation</dt><dd>A link between two entities, like "Ada works on Helios". Search follows these to reach answers that share no words with your question.</dd>
+    <dt>Invalidated</dt><dd>A memory that is no longer treated as true, but is still on file. Happens when you delete it, or when something you said later contradicted it. It stops appearing in search; it does not stop existing.</dd>
+    <dt>Superseded</dt><dd>An invalidated memory that was replaced by a specific newer one - the old version of a fact you updated. It stays attached to its replacement as history, which is why it is not listed under Forgotten.</dd>
+    <dt>Forgotten</dt><dd>An invalidated memory that nothing replaced - you deleted it, or it faded out. These are listed on their own tab, where you can restore one or delete it permanently.</dd>
+    <dt>Importance</dt><dd>How much weight a memory carries in results, from 0 to 1. Set when it is saved.</dd>
+    <dt>Decay</dt><dd>The slow drop in a memory's pull on results as it ages. Dated events fade fastest, standing rules barely at all.</dd>
+    <dt>Consolidation</dt><dd>Merging several memories that say the same thing into one that keeps every detail. The originals become forgotten, not deleted.</dd>
+    <dt>Merge proposal</dt><dd>Two entities that might be the same, waiting for you to say yes or no.</dd>
+    <dt>Synthetic tag</dt><dd>A broader tag Memry grouped others under, for browsing. Off by default, because searching under the narrower tag works better.</dd>
+    <dt>Embedding</dt><dd>A memory turned into numbers so that similar meanings sit near each other. This is what makes "blood test" find "liver results".</dd>
+    <dt>Distillation</dt><dd>Turning a raw saved message into separate facts. Usually happens moments after saving; a memory says "not distilled" if it is still waiting.</dd>
+    <dt>Namespace</dt><dd>Whose memories these are. Yours are separate from every other account's.</dd>
+  </dl>
+</section>
+<section class="apanel" id="apanel-server" hidden>
+  <p class="hint">What this particular Memry is running.</p>
+  <div id="serverinfo"></div>
+</section>
 </div></div>
 <div class="modal" id="knowmodal"><div class="sheet">
 <h2><button class="x" onclick="closeKnowledge()" title="close">x</button>Knowledge</h2>
@@ -246,7 +306,8 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <div id="forgottenlist"></div>
 </section>
 <section class="kpanel" id="kpanel-maintenance" hidden>
-  <p class="hint">Everything Memry does to your memories on its own, and what it has done. Nothing here changes anything until you confirm it.</p>
+  <h2 style="font-size:.95rem;margin-top:.2rem">Automatic passes</h2>
+  <p class="hint">What Memry does to your memories on its own. Switch any of them off, or run one right now.</p>
   <div id="upkeeplist"></div>
   <h2 style="font-size:.95rem;margin-top:1.1rem">Tag health</h2>
   <p class="hint">A tag that has quietly split in two caps what any search can find under it, because filtering drops the rest of the evidence before ranking starts.</p>
@@ -303,13 +364,24 @@ let current=[],activeCat=null,haveMore=false,editingId=null,hoverTag=null,search
 let hoverFocusTag=null,hoverFocusMix=0,hoverFadeStarted=0;
 const HOVER_FADE_MS=500;
 const cats=m=>((m.categories&&m.categories.length)?m.categories:['(untagged)']).map(c=>String(c).toLowerCase());
-function render(items){
+const moreBar=()=>haveMore
+  ? '<div class="bar" id="morebar"><button onclick="loadAll(true)">Load more</button></div>' : '';
+// `appendFrom` renders only the newly arrived tail. Rebuilding the whole list
+// on every "load more" is quadratic: reaching 10k memories a hundred at a time
+// would re-render half a million cards. Appending costs only what arrived.
+function render(items,appendFrom){
   current=items; drawMap(items);
   const shown=activeCat?items.filter(m=>cats(m).includes(activeCat)):items;
   const el=document.getElementById('list');
   if(!shown.length&&!haveMore){el.innerHTML='<div class="empty">'+(activeCat?'No memories under #'+esc(activeCat)+'.':(searchActive?'No memories match this search.':'No memories yet.'))+'</div>';return}
-  el.innerHTML=shown.map(m=>m.id===editingId?editCard(m):viewCard(m)).join('')
-   +(haveMore?'<div class="bar"><button onclick="loadAll(true)">Load more</button></div>':'');
+  const card=m=>m.id===editingId?editCard(m):viewCard(m);
+  if(appendFrom!==undefined&&appendFrom>0&&!activeCat){
+    document.getElementById('morebar')?.remove();
+    el.insertAdjacentHTML('beforeend',
+      shown.slice(appendFrom).map(card).join('')+moreBar());
+    return;
+  }
+  el.innerHTML=shown.map(card).join('')+moreBar();
 }
 function viewCard(m){
   return `<div class="mem"><button class="del" title="forget" onclick="del('${m.id}')">✕</button>
@@ -344,6 +416,15 @@ function editCard(m){
 const hashCode=s=>{let h=0;for(let i=0;i<s.length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;return Math.abs(h)};
 const mulberry=a=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
 const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
+let mapVisible=true;
+if('IntersectionObserver'in window){
+  new IntersectionObserver(entries=>{
+    mapVisible=entries.some(e=>e.isIntersecting);
+    if(mapVisible&&!gRAF&&panels.map&&G&&!reducedMotion){
+      gRAF=requestAnimationFrame(galaxyFrame);
+    }
+  },{rootMargin:'120px'}).observe(document.getElementById('mapwrap'));
+}
 let G=null,gRAF=0,gPulses=[],gMaxed=false;
 const gStars=Array.from({length:230},(_,i)=>{const r=mulberry(i*2654435761+11);const k=r();
   return{x:r(),y:r(),s:.3+r()*1.4,a:.2+r()*.7,ph:r()*6.28,sp:.3+r()*.7,hue:k>.94?36:(k>.84?176:(k>.78?252:null)),big:r()>.965};});
@@ -643,7 +724,11 @@ function galaxyFrame(now){
     }
   }
   ctx.globalAlpha=1;
-  if(!reducedMotion&&panels.map)gRAF=requestAnimationFrame(galaxyFrame);else gRAF=0;
+  // Only keep animating while the canvas is actually on screen. Scrolling a
+  // long list pushes the map out of view, and redrawing every star and dust
+  // particle at 60fps behind the viewport is what made scrolling stutter.
+  if(!reducedMotion&&panels.map&&mapVisible)gRAF=requestAnimationFrame(galaxyFrame);
+  else gRAF=0;
 }
 function hitNode(event){
   if(!G)return null;
@@ -746,9 +831,10 @@ async function loadSearchFilters(){
 }
 async function loadAll(more){
   if(!more){offset=0;current=[];searchActive=false}
+  const previous=current.length;
   const items=await api('/api/v1/memories?limit='+PAGE+'&offset='+offset);
   offset+=items.length; haveMore=items.length===PAGE;
-  render(current.concat(items));
+  render(current.concat(items),more?previous:undefined);
 }
 async function search(){
   const q=document.getElementById('q').value.trim(),f=searchFilters();
@@ -794,8 +880,34 @@ async function openKnowledge(tab='topics'){
   await Promise.all([loadTags(),loadEntities()]);
 }
 function closeKnowledge(){setKnowledgeOpen(false)}
-function openAbout(){document.getElementById('aboutmodal').classList.add('on')}
+function openAbout(){
+  document.getElementById('aboutmodal').classList.add('on');
+  showAbout('how');
+}
 function closeAbout(){document.getElementById('aboutmodal').classList.remove('on')}
+function showAbout(tab){
+  for(const name of['how','words','server']){
+    document.getElementById('apanel-'+name).hidden=name!==tab;
+    document.getElementById('atab-'+name).setAttribute('aria-pressed',name===tab);
+  }
+  if(tab==='server')renderServerInfo();
+}
+function renderServerInfo(){
+  const s=serverInfo||{};
+  const rows=[
+    ['Your memories',`${s.active_memories??0} active`
+      +(s.forgotten_memories?`, ${s.forgotten_memories} forgotten`:'')],
+    ['Raw messages stored',s.episodes],
+    ['Language model',s.llm,'Reads your messages to split them into facts and decide what is new. Without one, messages are stored whole.'],
+    ['Embeddings',s.embedder,'Turns text into numbers so search can match on meaning, not just words.'],
+    ['Storage',s.backend,'Everything lives in one file on this server.'],
+  ];
+  document.getElementById('serverinfo').innerHTML=rows
+    .filter(r=>r[1]!==undefined&&r[1]!==null&&r[1]!=='')
+    .map(([k,v,note])=>`<div class="tagrow"><span class="name"><b>${esc(k)}</b>
+      <div class="hint">${esc(String(v))}${note?' — '+esc(note):''}</div></span></div>`)
+    .join('')||'<div class="empty">No server details available.</div>';
+}
 function openTags(){return openKnowledge('topics')}
 function openEntities(){return openKnowledge('entities')}
 function showKnowledge(tab){
@@ -817,8 +929,17 @@ async function loadForgotten(){
     ${esc(row.memory.content)}
     <div class="hint">forgotten ${esc((row.forgotten_at||'').slice(0,10))}
       by ${esc(row.actor||'system')}${row.reason?' · '+esc(row.reason):''}</div></span>
+    <button class="act" title="bring this memory back into search"
+      onclick='unforgetMemory(${JSON.stringify(row.memory.id)})'>restore</button>
     <button class="act del" title="delete permanently - this cannot be undone"
       onclick='purgeMemory(${JSON.stringify(row.memory.id)})'>delete for good</button></div>`).join('');
+}
+async function unforgetMemory(id){
+  const result=await api('/api/v1/memories/'+encodeURIComponent(id)+'/unforget',
+    {method:'POST',body:'{}'});
+  if(result.error){alert(result.error);return}
+  await Promise.all([loadForgotten(),loadStats()]);
+  loadAll();
 }
 async function purgeMemory(id){
   if(!confirm('Permanently delete this memory? This cannot be undone.'))return;
@@ -833,14 +954,22 @@ async function loadUpkeep(){
   const info=await api('/api/v1/maintenance');
   const el=document.getElementById('upkeeplist');
   el.innerHTML=info.passes.map(p=>{
-    const state=p.automatic?'<span class="syn">automatic</span>'
-      :(p.needs_llm&&!info.llm_available?'<span class="cnt">needs an LLM</span>'
-        :'<span class="cnt">manual</span>');
-    const every=p.automatic&&p.interval_days?` every ${p.interval_days} days`:'';
-    const last=p.last_run?` · last run ${esc(p.last_run)}`:'';
+    const blocked=p.needs_llm&&!info.llm_available;
+    const state=blocked?'<span class="cnt">needs an LLM</span>'
+      :p.automatic?'<span class="syn">on</span>':'<span class="cnt">off</span>';
+    const every=p.automatic&&p.interval_days?` Runs every ${p.interval_days} days.`:'';
+    const last=p.last_run?` Last run ${esc(String(p.last_run).slice(0,16).replace('T',' '))}.`:'';
+    const toggle=p.toggleable&&!blocked
+      ? `<button class="act" onclick='togglePass(${JSON.stringify(p.key)},${!p.automatic})'
+           title="${p.automatic?'stop running this automatically':'run this automatically from now on'}">turn ${p.automatic?'off':'on'}</button>`
+      : '';
+    const run=p.run_url&&!blocked
+      ? `<button class="act" onclick='runPass(${JSON.stringify(p.run_url)},this)'
+           title="run this pass right now">run now</button>`
+      : '';
     return `<div class="tagrow"><span class="name"><b>${esc(p.label)}</b> ${state}
-      <div class="hint">${esc(p.detail)}${every}${last}</div></span></div>`;
-  }).join('')+`<div class="hint" style="margin-top:.6rem">Embeddings: <code>${esc(info.embedding_model)}</code></div>`;
+      <div class="hint">${esc(p.detail)}${every}${last}</div></span>${run}${toggle}</div>`;
+  }).join('');
   renderTagHealth(info.tag_health||{});
   renderEntityJunk(info.entity_junk||{});
 }
@@ -871,6 +1000,18 @@ async function healSplit(variants,canonical){
   await api('/api/v1/tags/edit',{method:'POST',
     body:JSON.stringify({op:'merge',tags:drop,to:canonical})});
   await Promise.all([loadTags(),loadUpkeep()]);
+}
+async function togglePass(key,enabled){
+  await api('/api/v1/maintenance/toggle',{method:'POST',
+    body:JSON.stringify({key,enabled})});
+  await loadUpkeep();
+}
+async function runPass(url,button){
+  const label=button.textContent;
+  button.disabled=true;button.textContent='running...';
+  try{ await api(url,{method:'POST',body:'{}'}); }
+  finally{ button.disabled=false;button.textContent=label; }
+  await Promise.all([loadUpkeep(),loadTags(),loadEntities(),loadStats()]);
 }
 // Obvious non-entities (dates, amounts, URLs) are cleaned automatically; the
 // judgement cases (style instructions vs. real niche terms) need a reader, so
@@ -1212,11 +1353,17 @@ async function importMemories(file){
   btn.textContent='import';
   loadAll();loadStats();loadSearchFilters();
 }
+let serverInfo={};
 async function loadStats(){
   const s=await api('/api/v1/stats');
-  document.getElementById('stats').textContent=
-    `${s.active_memories??'?'} active memories · ${s.invalidated_memories??0} invalidated · `+
-    `${s.episodes??0} episodes · backend ${s.backend} · llm ${s.llm} · embeddings ${s.embedder}`;
+  serverInfo=s;
+  // Only what a person reading their own memory list cares about. The model
+  // and backend names live under About, where there is room to say what they
+  // mean; here they were just noise, and half of them read "undefined".
+  const forgotten=s.forgotten_memories??s.invalidated_memories??0;
+  const bits=[`${s.active_memories??'?'} memories`];
+  if(forgotten)bits.push(`${forgotten} forgotten`);
+  document.getElementById('stats').textContent=bits.join(' · ');
 }
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 syncPanels(); loadStats(); loadSearchFilters(); loadAll();
@@ -1680,6 +1827,20 @@ def create_app(
             for row in rows
         ])
 
+    async def unforget_memory(request: Request) -> Response:
+        _, error = _memory_or_error(request)
+        if error:
+            return error
+        try:
+            restored = await run_in_threadpool(partial(
+                store.unforget,
+                request.path_params["memory_id"],
+                owner_prefix=_p(request).prefix,
+            ))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse({"restored": restored})
+
     async def purge_memory(request: Request) -> Response:
         """Permanently delete a memory that was already forgotten.
 
@@ -1761,6 +1922,21 @@ def create_app(
         ))
         return JSONResponse(result)
 
+    async def maintenance_toggle_route(request: Request) -> Response:
+        """Switch an automatic pass on or off, effective from the next cycle.
+
+        Persisted in the store's meta table, so a dashboard toggle survives
+        restarts instead of silently reverting to the env-var default.
+        """
+        body = await request.json()
+        key = str(body.get("key", ""))
+        ok = await run_in_threadpool(partial(
+            store.set_maintenance_enabled, key, bool(body.get("enabled"))
+        ))
+        if not ok:
+            return JSONResponse({"error": "unknown pass"}, status_code=400)
+        return JSONResponse({"key": key, "enabled": store.maintenance_enabled(key)})
+
     async def entity_review_route(request: Request) -> Response:
         """AI review of concept-type entity names: which are not referents.
 
@@ -1803,9 +1979,11 @@ def create_app(
                               "is clear, drops entities nothing references, and "
                               "removes names that cannot be entities at all - "
                               "bare dates, amounts, URLs, salutations.",
-                    "automatic": store.config.dedup_entities,
+                    "automatic": store.maintenance_enabled("dedup_entities"),
                     "interval_days": store.config.dedup_interval_days,
                     "needs_llm": False,
+                    "toggleable": True,
+                    "run_url": "/api/v1/entities/resolve",
                 },
                 {
                     "key": "tag_abstraction",
@@ -1813,10 +1991,12 @@ def create_app(
                     "detail": "Groups tags under broader parents for browsing. "
                               "Off by default: measured retrieval is best at the "
                               "specific tag level, not the broad one.",
-                    "automatic": tcfg.enabled and store.llm.available,
+                    "automatic": store.maintenance_enabled("tag_abstraction"),
                     "interval_days": tcfg.interval_days,
                     "last_run": store.last_tag_run(user_id),
                     "needs_llm": True,
+                    "toggleable": True,
+                    "run_url": "/api/v1/tags/abstract",
                 },
                 {
                     "key": "consolidation",
@@ -2020,11 +2200,19 @@ def create_app(
                 m for m in everything
                 if principal.owns(m.user_id)
             ]
+            # Server-wide facts (which models are configured) are not another
+            # account's data, and the About panel needs them; omitting them was
+            # what rendered "llm undefined" in the dashboard.
             data = {
                 "backend": data.get("backend"),
                 "tenant": principal.name,
                 "active_memories": sum(1 for m in mine if m.invalid_at is None),
                 "invalidated_memories": sum(1 for m in mine if m.invalid_at is not None),
+                "forgotten_memories": sum(
+                    1 for m in mine if m.invalid_at is not None and not m.superseded_by
+                ),
+                "llm": data.get("llm"),
+                "embedder": data.get("embedder"),
             }
         return JSONResponse(json.loads(json.dumps(data, default=str)))
 
@@ -2257,14 +2445,14 @@ def create_app(
                     if processed >= max_per_cycle:
                         break
                     did = False
-                    if store.config.dedup_entities and _tag_run_due(
+                    if store.maintenance_enabled("dedup_entities") and _tag_run_due(
                         store.backend.get_meta(dedup_key(uid)), dedup_interval, now
                     ):
                         await run_in_threadpool(store.merge_obvious_topics, user_id=uid)
                         await run_in_threadpool(store.resolve_entities, user_id=uid)
                         store.backend.set_meta(dedup_key(uid), stamp)
                         did = True
-                    if tcfg.enabled and store.llm.available and _tag_run_due(
+                    if store.maintenance_enabled("tag_abstraction") and _tag_run_due(
                         store.last_tag_run(uid), tag_interval, now
                     ):
                         await run_in_threadpool(store.abstract_tags, user_id=uid)
@@ -2278,11 +2466,9 @@ def create_app(
     async def lifespan(app: Starlette):
         maintenance_task: asyncio.Task | None = None
         enrichment_task = asyncio.create_task(enrichment_worker.run())
-        # Deterministic de-duplication works without an LLM; abstraction does not.
-        if store.config.dedup_entities or (
-            store.config.tags.enabled and store.llm.available
-        ):
-            maintenance_task = asyncio.create_task(_maintenance_scheduler())
+        # Always started: each cycle consults the runtime switches, so a pass
+        # toggled on from the dashboard begins running without a restart.
+        maintenance_task = asyncio.create_task(_maintenance_scheduler())
         try:
             async with mcp.session_manager.run():
                 yield
@@ -2306,6 +2492,7 @@ def create_app(
         # before /{memory_id}, or "forgotten" is read as an id and 404s
         Route("/api/v1/memories/forgotten", guarded(forgotten_memories), methods=["GET"]),
         Route("/api/v1/memories/{memory_id}/purge", guarded(purge_memory), methods=["POST"]),
+        Route("/api/v1/memories/{memory_id}/unforget", guarded(unforget_memory), methods=["POST"]),
         Route("/api/v1/memories/{memory_id}", guarded(get_memory), methods=["GET"]),
         Route("/api/v1/memories/{memory_id}", guarded(patch_memory), methods=["PATCH"]),
         Route("/api/v1/memories/{memory_id}", guarded(delete_memory), methods=["DELETE"]),
@@ -2318,6 +2505,7 @@ def create_app(
         Route("/api/v1/tags/suggest-merges", guarded(suggest_merges_route), methods=["GET"]),
         Route("/api/v1/maintenance", guarded(maintenance_status_route), methods=["GET"]),
         Route("/api/v1/maintenance/consolidate", guarded(consolidate_route), methods=["POST"]),
+        Route("/api/v1/maintenance/toggle", guarded(maintenance_toggle_route), methods=["POST"]),
         Route("/api/v1/maintenance/entity-review", guarded(entity_review_route), methods=["POST"]),
         Route("/api/v1/entities/remove", guarded(remove_entities_route), methods=["POST"]),
         Route("/api/v1/relations", guarded(relations_route), methods=["GET"]),

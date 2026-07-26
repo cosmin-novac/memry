@@ -422,3 +422,61 @@ def test_defer_is_ignored_without_an_llm():
             "content": "plain note", "user_id": "u", "defer": True,
         })
         assert created.status_code == 201
+
+
+def test_forgotten_memory_can_be_restored(client):
+    """Deleting is reversible until purged; that is the point of the bin."""
+    mid = client.post("/api/v1/memories", json={
+        "content": "Ada moved to Berlin", "user_id": "u", "infer": False,
+    }).json()["actions"][0]["memory_id"]
+    client.delete(f"/api/v1/memories/{mid}")
+    assert client.get("/api/v1/memories?user_id=u").json() == []
+
+    assert client.post(f"/api/v1/memories/{mid}/unforget").json() == {"restored": True}
+    active = client.get("/api/v1/memories?user_id=u").json()
+    assert [m["id"] for m in active] == [mid]
+    assert client.get("/api/v1/memories/forgotten?user_id=u").json() == []
+    # and it is searchable again, so the vector went back into the index
+    found = client.post("/api/v1/search", json={"query": "Berlin", "user_id": "u"}).json()
+    assert [r["memory"]["id"] for r in found] == [mid]
+
+
+def test_superseded_memories_cannot_be_restored():
+    """Restoring one would put a duplicate back beside its replacement."""
+    store = make_store()
+    with TestClient(create_app(store)) as client:
+        old_id = client.post("/api/v1/memories", json={
+            "content": "old", "user_id": "u", "infer": False,
+        }).json()["actions"][0]["memory_id"]
+        new_id = client.post("/api/v1/memories", json={
+            "content": "new", "user_id": "u", "infer": False,
+        }).json()["actions"][0]["memory_id"]
+        store.backend.invalidate_memory(old_id, superseded_by=new_id)
+
+        response = client.post(f"/api/v1/memories/{old_id}/unforget")
+        assert response.status_code == 409
+        assert "replaced" in response.json()["error"]
+
+
+def test_maintenance_passes_can_be_switched_off_and_on(client):
+    def automatic(key):
+        passes = client.get("/api/v1/maintenance?user_id=u").json()["passes"]
+        return next(p for p in passes if p["key"] == key)["automatic"]
+
+    assert automatic("dedup_entities") is True
+    client.post("/api/v1/maintenance/toggle",
+                json={"key": "dedup_entities", "enabled": False})
+    assert automatic("dedup_entities") is False
+    client.post("/api/v1/maintenance/toggle",
+                json={"key": "dedup_entities", "enabled": True})
+    assert automatic("dedup_entities") is True
+
+    assert client.post("/api/v1/maintenance/toggle",
+                       json={"key": "nonsense", "enabled": True}).status_code == 400
+
+
+def test_scoped_stats_include_the_model_names(client):
+    """The dashboard rendered 'llm undefined' because these were omitted."""
+    stats = client.get("/api/v1/stats").json()
+    for field in ("llm", "embedder", "backend", "forgotten_memories"):
+        assert field in stats, field

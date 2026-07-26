@@ -137,9 +137,35 @@ Topic hierarchy edges are separate from real-world entity relations.
 
 ### Entities
 
-An entity is a stable identity hub for a person, organization, project, product, place,
-event, concept, or other referent. `EntityMention` is the authoritative link from a memory
-to an entity and keeps the observed surface text.
+An entity is a stable identity hub for a referent. `EntityMention` is the authoritative
+link from a memory to an entity and keeps the observed surface text.
+
+#### Entity types and what they actually do
+
+The set is `person`, `organization`, `project`, `product`, `place`, `event`, `document`,
+`code`, `concept`, `other`. `document` and `code` were added after auditing what a real
+store had dumped into `other`: on one side contracts, invoices, certificates and
+registration numbers (`HRB 110232`, `TÜV Kaufvertrag`), on the other files, symbols,
+tables and config keys (`lib/sync.ts`, `canUserSync`, `BILDY_AWS_S3_BUCKET`). Both are
+large, coherent groups in ordinary use.
+
+**The type does not affect search ranking.** Nothing in retrieval reads it: hybrid scoring
+uses vectors, BM25, recency and importance; relational expansion follows typed *relations*
+between entities, which are a different thing from the entity's own type. An `entity_id`
+filter selects specific entities, never a type. Three things do use it:
+
+1. **Disambiguation guardrail.** A known type conflict blocks an automatic merge, so a
+   `document` never silently absorbs a `person` that happens to share its name. Absent or
+   equal types leave the decision to the evidence.
+2. **Browsing.** Knowledge > People and things groups by type, capped per group.
+3. **Cleanup triage.** Only `concept`, `other` and `event` entities are offered to the
+   non-referent review, because those are where extraction puts style instructions and
+   task descriptions. A `person` is never proposed for removal.
+
+The set is kept deliberately small. Every additional type is another way for extraction to
+mis-sort, and the benefit is confined to those three uses, none of which is retrieval
+quality. A new type should be added only when a real store shows a large group of entities
+that the existing types describe badly, which is the standard `document` and `code` met.
 
 Names and aliases discover identity candidates. Candidate lookup uses indexed canonical
 names, observed mention surfaces, and merged names. Optional user aliases stored in entity

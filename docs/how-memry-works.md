@@ -111,8 +111,11 @@ single query, only how importance decays with age.
 Entities are **extracted, disambiguated, and typed.**
 
 - On save, the extractor lists each entity in a fact with a `type` (person,
-  organization, project, product, place, event, concept, other), so typing costs
-  no extra call. `resolve_mentions` reuses an existing entity when the model is
+  organization, project, product, place, event, document, code, concept,
+  other), so typing costs no extra call. The type keeps unrelated same-named
+  things apart during disambiguation and groups the Knowledge list; it does
+  **not** influence search ranking (see architecture.md, "Entity types and what
+  they actually do"). `resolve_mentions` reuses an existing entity when the model is
   confident or when an exact multi-part name has meaningful contextual overlap.
   A shared short name or full name without supporting context stays separate and
   creates a **merge proposal** that can be confirmed or rejected.

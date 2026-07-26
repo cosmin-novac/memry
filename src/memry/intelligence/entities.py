@@ -254,8 +254,15 @@ _TYPE_SCHEMA = {
 }
 
 _TYPE_SYSTEM = """Classify each entity name into one type: person, organization,
-project, product, place, event, concept, or other. Use "other" only when none
-fit. JSON only: {"types": [{"name": str, "type": str}]}."""
+project, product, place, event, document, code, concept, or other.
+
+- document: a contract, invoice, certificate, form, report, or the reference
+  number that identifies one ("HRB 110232", "TÜV Kaufvertrag")
+- code: a file, function, table, endpoint, or config key ("lib/sync.ts",
+  "canUserSync", "BILDY_AWS_S3_BUCKET")
+
+Use "other" only when none fit.
+JSON only: {"types": [{"name": str, "type": str}]}."""
 
 
 def classify_entity_types(llm: LLM, names: list[str]) -> dict[str, str]:
