@@ -199,4 +199,4 @@ people.
 | Entity types (person/project/place/…) + typing backfill | real |
 | Memory-type-driven decay (episodic fades, procedural persists) | real |
 | Unified Knowledge dashboard for tags, entity hubs with their relations, forgotten memories, and upkeep | real |
-| Memory-type effect on *ranking* (not just decay) | not yet |
+| Memory-type effect on *ranking* (in addition to decay) | not yet |

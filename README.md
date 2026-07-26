@@ -46,7 +46,7 @@ variants such as `food`/`foods` merge without review, and Memry also spots tags 
 quietly split one subject. An optional, off-by-default pass groups tags under broader
 parents for browsing, stored as hierarchy edges rather than copied onto every memory;
 it is off because retrieval measures best at the specific level, not the broad one.
-Search and list by topic or by date window, not just relevance.
+Search and list by topic or by date window.
 
 **It stays simple as one shared service.** SQLite is the sole production store. One Memry
 server can serve many agents, devices, and tenant namespaces without an external database.

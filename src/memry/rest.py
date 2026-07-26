@@ -207,7 +207,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <h2><button class="x" onclick="closeAbout()" title="close">x</button>About Memry</h2>
 <div class="about-tabs">
   <button id="atab-how" onclick="showAbout('how')">How it works</button>
-  <button id="atab-words" onclick="showAbout('words')">What the words mean</button>
+  <button id="atab-words" onclick="showAbout('words')">Glossary</button>
   <button id="atab-server" onclick="showAbout('server')">This server</button>
 </div>
 <section class="apanel" id="apanel-how">
@@ -227,7 +227,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <p>When a name keeps coming up - someone you work with, a company, a project - it gets an entry that gathers everything known about it in one place, with the memories that back each part. Two people with the same name stay separate until there is real reason to think they are one person.</p></div>
 
   <div class="step"><h3>It also remembers how things connect</h3>
-  <p>"Ada works on Helios" and "Helios runs on Postgres" are stored as links, not just sentences. That is why asking what database Ada's project uses can find the answer, even though the memory that holds it never mentions Ada.</p></div>
+  <p>"Ada works on Helios" and "Helios runs on Postgres" are stored as links rather than sentences. That is why asking what database Ada's project uses can find the answer, even though the memory that holds it never mentions Ada.</p></div>
 
   <div class="step"><h3>Search does three things at once</h3>
   <p>It matches on meaning, so "blood test" finds a memory about liver results. It matches on exact words, so codes, names and numbers still work. And it follows those links between things. The three sets of results are combined, with newer and more important memories nudged up.</p></div>
@@ -899,7 +899,7 @@ function renderServerInfo(){
       +(s.forgotten_memories?`, ${s.forgotten_memories} forgotten`:'')],
     ['Raw messages stored',s.episodes],
     ['Language model',s.llm,'Reads your messages to split them into facts and decide what is new. Without one, messages are stored whole.'],
-    ['Embeddings',s.embedder,'Turns text into numbers so search can match on meaning, not just words.'],
+    ['Embeddings',s.embedder,'Turns text into numbers so search can match on meaning.'],
     ['Storage',s.backend,'Everything lives in one file on this server.'],
   ];
   document.getElementById('serverinfo').innerHTML=rows
