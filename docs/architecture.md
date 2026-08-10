@@ -204,14 +204,17 @@ The default `save_memories(infer=true)` path is intentionally split at the safe 
 1. Commit the exact input as both an immutable episode and an active, searchable memory.
 2. Mark that memory `pending_distillation` in its existing SQLite metadata and return the
    MCP acknowledgement. No LLM or embedding request runs before this response.
-3. Wake one in-process worker. It selects at most eight due pending memories per database
-   pass, but sends every memory through extraction separately. Text, user scope,
-   provenance, and failure handling are never combined across payloads.
-4. On success, reconcile the extracted facts and supersede the raw pending memory. If
-   extraction finds no facts, keep the raw memory and clear the pending marker.
-5. On provider or processing failure, keep the raw memory active, record the error, and
-   retry with exponential backoff capped at five minutes. After a process restart, the
-   worker discovers the same pending rows, including work interrupted while processing.
+3. Wake one in-process worker. It waits until a pending ingestion group has been quiet for
+   two minutes. Saves with the same user/agent/run scope and optional semantic `context`
+   label are then sent through one extraction pass, capped at eight raw records per pass.
+   Optional client `tags` are prompt hints, not grouping identifiers.
+4. The extractor sees the whole related input while still producing small atomic facts.
+   Every derived fact keeps the source episode IDs of the group. On success, reconcile the
+   facts and supersede the raw pending memories. If extraction finds no facts, keep the raw
+   memories and clear their pending markers.
+5. On provider or processing failure, keep every raw memory active, record the error on
+   each record, and retry with exponential backoff capped at five minutes. After a process
+   restart, the worker discovers the same pending rows, including interrupted work.
 
 The active pending memory is both usable knowledge and the recovery marker. This avoids a
 second queue database or broker and ensures acknowledgement never means "accepted only in

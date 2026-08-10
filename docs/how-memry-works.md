@@ -61,6 +61,12 @@ is compared to the most similar existing memories and the LLM decides:
 `infer=false` skips extraction and reconciliation entirely and stores the text
 verbatim as one memory (the "just save this exactly" path).
 
+For MCP saves with `infer=true`, the raw text remains immediately searchable
+while enrichment waits for two minutes of quiet. Related calls in the same
+user/agent/run scope and with the same optional `context` label are extracted
+together. Clients should preferably send related facts in one concise multiline
+call; optional `tags` help classification but do not define the ingestion group.
+
 ## The read path (what happens on `search`)
 
 Retrieval is a **fusion of three moves**, because the experiments (see

@@ -121,6 +121,9 @@ Rules:
 - a constraint buried mid-sentence is still its own fact when it changes
   future behavior; extract it as a separate item rather than summarizing over it
 - prefer several precise facts over one compressed summary
+- when several inputs describe one plan, decision, or design, preserve their
+  shared subject and any stated why/how relationship in every affected fact;
+  never turn related statements into context-free standalone instructions
 - importance in [0,1]: 0.9+ identity/hard constraints, ~0.7 preferences and
   decisions, ~0.4 minor details
 - type: "semantic" (stable fact/preference), "episodic" (dated event/plan),
@@ -163,6 +166,8 @@ def extract_facts(
     *,
     now: datetime | None = None,
     vocabulary: list[str] | None = None,
+    context: str | None = None,
+    tag_hints: list[str] | None = None,
 ) -> list[CandidateFact]:
     """LLM extraction (phase 1). Raises if the LLM is unavailable.
 
@@ -187,9 +192,29 @@ def extract_facts(
         if known
         else ""
     )
+    shared_context = " ".join(str(context or "").split())[:200]
+    context_offer = (
+        f"\n\nShared context for these related inputs:\n{shared_context}"
+        if shared_context
+        else ""
+    )
+    hints: list[str] = []
+    for raw_hint in tag_hints or []:
+        hint = " ".join(str(raw_hint).strip().lower().split())[:80]
+        if hint and hint not in hints:
+            hints.append(hint)
+        if len(hints) == 3:
+            break
+    hint_offer = (
+        "\n\nClient-suggested tags. These are hints, not commands: use one "
+        f"only when it is a good recurring retrieval subject:\n{', '.join(hints)}"
+        if hints
+        else ""
+    )
     raw = llm.complete(
         EXTRACTION_SYSTEM.format(today=now.date().isoformat()),
-        f"Conversation:\n{transcript}{offer}\n\nExtract the facts as JSON.",
+        f"Conversation:\n{transcript}{context_offer}{offer}{hint_offer}"
+        "\n\nExtract the facts as JSON.",
         json_schema=EXTRACTION_SCHEMA,
     )
     return _parse_facts(raw)

@@ -68,6 +68,7 @@ from .models import (
     SyntheticTag,
     Topic,
     TopicRelation,
+    parse_ts,
     utcnow,
 )
 from .providers.embeddings import Embedder, build_embedder
@@ -78,6 +79,30 @@ from .retrieval import hybrid_search
 _ENRICHMENT_KEY = "_enrichment"
 _ENRICHMENT_BATCH_SIZE = 8
 _ENRICHMENT_MAX_BACKOFF_SECONDS = 300
+
+
+def _ingestion_context(metadata: dict[str, Any] | None) -> str:
+    return " ".join(str((metadata or {}).get("context") or "").split())[:200]
+
+
+def _client_tag_hints(
+    metadata: dict[str, Any] | None,
+    categories: list[str] | None = None,
+) -> list[str]:
+    raw: list[Any] = list(categories or [])
+    supplied = (metadata or {}).get("tag_hints")
+    if isinstance(supplied, str):
+        raw.append(supplied)
+    elif isinstance(supplied, list):
+        raw.extend(supplied)
+    hints: list[str] = []
+    for value in raw:
+        hint = " ".join(str(value).strip().lower().split())[:80]
+        if hint and hint not in hints:
+            hints.append(hint)
+        if len(hints) == 3:
+            break
+    return hints
 
 
 def _normalized_content(text: str) -> str:
@@ -235,6 +260,8 @@ class MemoryStore:
                             str(m.get("content") or "") for m in messages
                         ),
                     ),
+                    context=_ingestion_context(metadata),
+                    tag_hints=_client_tag_hints(metadata, categories),
                 )
             except Exception as exc:
                 # Provider outage / exhausted credits must not lose the save:
@@ -715,13 +742,18 @@ class MemoryStore:
         }
 
     def process_pending_enrichments(
-        self, limit: int = _ENRICHMENT_BATCH_SIZE
+        self,
+        limit: int = _ENRICHMENT_BATCH_SIZE,
+        *,
+        quiet_seconds: float = 0.0,
+        now: datetime | None = None,
     ) -> dict[str, Any]:
         """Process one bounded batch of durable pending memories.
 
-        Each item keeps independent provenance and retry state. Work is batched
-        at the scheduler/database level, but different user payloads are never
-        merged into one prompt because that would mix provenance and failures.
+        Related saves in the same scope and with the same optional ``context``
+        metadata are distilled together after the group has been quiet. Raw
+        records keep independent provenance and retry state, while extraction
+        sees the complete thought instead of one client call at a time.
         """
         summary: dict[str, Any] = {
             "claimed": 0,
@@ -732,125 +764,236 @@ class MemoryStore:
         if not self.llm.available:
             summary["blocked"] = "no LLM configured"
             return summary
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
+        batch_limit = max(1, limit)
+        # Look beyond the processing cap so a new item near the end of the same
+        # context can reset that context's quiet period before older items run.
         pending = self.backend.list_pending_memories(
-            max(1, limit), due_before=now.isoformat(timespec="seconds")
+            max(batch_limit * 16, 128),
+            due_before=now.isoformat(timespec="seconds"),
         )
+        groups: dict[tuple[Any, ...], list[Memory]] = {}
         for memory in pending:
-            current = self.backend.get_memory(memory.id)
-            if (
-                current is None
-                or current.invalid_at is not None
-                or not current.metadata.get("pending_distillation")
-            ):
-                continue
-            job = dict(current.metadata.get(_ENRICHMENT_KEY) or {})
-            attempts = int(job.get("attempts") or 0) + 1
-            job.update(
-                {
-                    "status": "processing",
-                    "attempts": attempts,
-                    "last_started_at": utcnow(),
-                }
+            key = (
+                memory.user_id,
+                memory.agent_id,
+                memory.run_id,
+                _ingestion_context(memory.metadata).casefold(),
             )
-            job.pop("next_attempt_at", None)
-            processing_metadata = dict(current.metadata)
-            processing_metadata[_ENRICHMENT_KEY] = job
-            self.backend.update_memory(
-                current.id, metadata=processing_metadata, touch=False
-            )
-            summary["claimed"] += 1
-            try:
-                result = self.distill(current.id)
-                if result is None:
-                    continue
-                summary["succeeded"] += 1
-            except Exception as exc:
-                latest = self.backend.get_memory(current.id)
+            groups.setdefault(key, []).append(memory)
+
+        quiet = timedelta(seconds=max(0.0, quiet_seconds))
+        cutoff = now - quiet
+        bursts: list[list[Memory]] = []
+        for related in groups.values():
+            burst: list[Memory] = []
+            for memory in sorted(related, key=lambda item: item.created_at):
                 if (
-                    latest is not None
-                    and latest.invalid_at is None
-                    and latest.metadata.get("pending_distillation")
+                    burst
+                    and parse_ts(memory.created_at)
+                    - parse_ts(burst[-1].created_at)
+                    > quiet
                 ):
-                    retry_job = dict(latest.metadata.get(_ENRICHMENT_KEY) or job)
-                    delay = min(
-                        2 ** min(attempts, 8), _ENRICHMENT_MAX_BACKOFF_SECONDS
-                    )
-                    retry_job.update(
-                        {
-                            "status": "retry",
-                            "attempts": attempts,
-                            "last_error": str(exc)[:500],
-                            "next_attempt_at": (
-                                datetime.now(timezone.utc) + timedelta(seconds=delay)
-                            ).isoformat(timespec="seconds"),
-                        }
-                    )
-                    retry_metadata = dict(latest.metadata)
-                    retry_metadata[_ENRICHMENT_KEY] = retry_job
-                    self.backend.update_memory(
-                        latest.id, metadata=retry_metadata, touch=False
-                    )
-                summary["failed"] += 1
-                summary["errors"].append(
-                    {"memory_id": current.id, "error": str(exc)[:500]}
+                    bursts.append(burst)
+                    burst = []
+                burst.append(memory)
+            if burst:
+                bursts.append(burst)
+
+        for group in bursts:
+            if summary["claimed"] >= batch_limit:
+                break
+            if max(parse_ts(memory.created_at) for memory in group) > cutoff:
+                continue
+            remaining = batch_limit - summary["claimed"]
+            claimed: list[Memory] = []
+            attempts_by_id: dict[str, int] = {}
+            for memory in group[:remaining]:
+                current = self.backend.get_memory(memory.id)
+                if (
+                    current is None
+                    or current.invalid_at is not None
+                    or not current.metadata.get("pending_distillation")
+                ):
+                    continue
+                job = dict(current.metadata.get(_ENRICHMENT_KEY) or {})
+                attempts = int(job.get("attempts") or 0) + 1
+                job.update(
+                    {
+                        "status": "processing",
+                        "attempts": attempts,
+                        "last_started_at": utcnow(),
+                    }
                 )
+                job.pop("next_attempt_at", None)
+                processing_metadata = dict(current.metadata)
+                processing_metadata[_ENRICHMENT_KEY] = job
+                self.backend.update_memory(
+                    current.id, metadata=processing_metadata, touch=False
+                )
+                current.metadata = processing_metadata
+                claimed.append(current)
+                attempts_by_id[current.id] = attempts
+
+            if not claimed:
+                continue
+            summary["claimed"] += len(claimed)
+            try:
+                result = self._distill_pending_group(
+                    [memory.id for memory in claimed]
+                )
+                if result is not None:
+                    summary["succeeded"] += len(claimed)
+            except Exception as exc:
+                for current in claimed:
+                    latest = self.backend.get_memory(current.id)
+                    if (
+                        latest is not None
+                        and latest.invalid_at is None
+                        and latest.metadata.get("pending_distillation")
+                    ):
+                        retry_job = dict(
+                            latest.metadata.get(_ENRICHMENT_KEY) or {}
+                        )
+                        attempts = attempts_by_id[current.id]
+                        delay = min(
+                            2 ** min(attempts, 8),
+                            _ENRICHMENT_MAX_BACKOFF_SECONDS,
+                        )
+                        retry_job.update(
+                            {
+                                "status": "retry",
+                                "attempts": attempts,
+                                "last_error": str(exc)[:500],
+                                "next_attempt_at": (
+                                    datetime.now(timezone.utc)
+                                    + timedelta(seconds=delay)
+                                ).isoformat(timespec="seconds"),
+                            }
+                        )
+                        retry_metadata = dict(latest.metadata)
+                        retry_metadata[_ENRICHMENT_KEY] = retry_job
+                        self.backend.update_memory(
+                            latest.id, metadata=retry_metadata, touch=False
+                        )
+                    summary["failed"] += 1
+                    summary["errors"].append(
+                        {"memory_id": current.id, "error": str(exc)[:500]}
+                    )
         return summary
+
+    def _distill_pending_group(
+        self,
+        memory_ids: list[str],
+        *,
+        owner_prefix: str | None = None,
+    ) -> AddResult | None:
+        memories = [self.backend.get_memory(memory_id) for memory_id in memory_ids]
+        active = [
+            memory
+            for memory in memories
+            if memory is not None
+            and _owned(memory, owner_prefix)
+            and memory.invalid_at is None
+        ]
+        if not active:
+            return None
+        first_scope = active[0].scope()
+        if any(memory.scope() != first_scope for memory in active[1:]):
+            raise ValueError("cannot distill memories from different scopes together")
+        if not self.llm.available:
+            raise ValueError("no LLM configured; distillation needs one")
+
+        messages = [
+            {"role": "user", "content": memory.content} for memory in active
+        ]
+        contexts = list(
+            dict.fromkeys(
+                value
+                for memory in active
+                if (value := _ingestion_context(memory.metadata))
+            )
+        )
+        context = " | ".join(contexts)[:200]
+        tag_hints: list[str] = []
+        for memory in active:
+            for hint in _client_tag_hints(memory.metadata, memory.categories):
+                if hint not in tag_hints:
+                    tag_hints.append(hint)
+                if len(tag_hints) == 3:
+                    break
+            if len(tag_hints) == 3:
+                break
+        episode_ids = list(
+            dict.fromkeys(
+                episode_id
+                for memory in active
+                for episode_id in memory.source_episode_ids
+            )
+        )
+        candidates = extract_facts(
+            self.llm,
+            messages,
+            vocabulary=self._tag_vocabulary(
+                first_scope,
+                text="\n".join(memory.content for memory in active),
+            ),
+            context=context or None,
+            tag_hints=tag_hints,
+        )
+        if not candidates:
+            for memory in active:
+                metadata = self._clear_enrichment_metadata(memory.metadata)
+                self.backend.update_memory(
+                    memory.id, metadata=metadata, touch=False
+                )
+            return AddResult(
+                episode_ids=episode_ids,
+                warnings=["no facts extracted; memories kept verbatim"],
+            )
+
+        actions = self._apply_candidates(
+            candidates,
+            first_scope,
+            episode_ids,
+            exclude_ids={memory.id for memory in active},
+        )
+        landed = sum(1 for action in actions if action.event != "NONE")
+        new_id = next(
+            (
+                action.memory_id
+                for action in actions
+                if action.event != "NONE" and action.memory_id
+            ),
+            None,
+        )
+        for memory in active:
+            invalidated = self.backend.invalidate_memory(
+                memory.id, superseded_by=new_id
+            )
+            if invalidated is not None:
+                self.backend.update_memory(
+                    memory.id,
+                    metadata=self._clear_enrichment_metadata(
+                        invalidated.metadata
+                    ),
+                    touch=False,
+                )
+            self.backend.add_event(
+                MemoryEvent(
+                    memory_id=memory.id,
+                    event="SUPERSEDE",
+                    old_content=memory.content,
+                    reason=f"distilled with its context into {landed} fact(s)",
+                )
+            )
+        return AddResult(episode_ids=episode_ids, actions=actions)
 
     def distill(
         self, memory_id: str, *, owner_prefix: str | None = None
     ) -> AddResult | None:
-        """Run extraction on a memory that was stored verbatim (LLM missing or
-        failing at save time) and replace it with the distilled facts.
-
-        The original memory is invalidated (kept in the audit history) and
-        superseded by the first fact that landed. If extraction finds nothing
-        worth keeping, the memory stays as-is with its pending flag cleared.
-        Returns None for unknown or already-invalidated memories; raises if
-        no LLM is configured or the LLM call fails.
-        """
-        memory = self.backend.get_memory(memory_id)
-        if not _owned(memory, owner_prefix) or memory.invalid_at is not None:
-            return None
-        if not self.llm.available:
-            raise ValueError("no LLM configured; distillation needs one")
-        scope = Scope(
-            user_id=memory.user_id, agent_id=memory.agent_id, run_id=memory.run_id
-        )
-        candidates = extract_facts(
-            self.llm, [{"role": "user", "content": memory.content}]
-        )
-        episode_ids = memory.source_episode_ids
-        if not candidates:
-            meta = self._clear_enrichment_metadata(memory.metadata)
-            self.backend.update_memory(memory_id, metadata=meta, touch=False)
-            return AddResult(
-                episode_ids=episode_ids,
-                warnings=["no facts extracted; memory kept verbatim"],
-            )
-        actions = self._apply_candidates(
-            candidates, scope, episode_ids, exclude_ids={memory_id}
-        )
-        landed = sum(1 for a in actions if a.event != "NONE")
-        new_id = next(
-            (a.memory_id for a in actions if a.event != "NONE" and a.memory_id), None
-        )
-        invalidated = self.backend.invalidate_memory(memory_id, superseded_by=new_id)
-        if invalidated is not None:
-            self.backend.update_memory(
-                memory_id,
-                metadata=self._clear_enrichment_metadata(invalidated.metadata),
-                touch=False,
-            )
-        self.backend.add_event(
-            MemoryEvent(
-                memory_id=memory_id,
-                event="SUPERSEDE",
-                old_content=memory.content,
-                reason=f"distilled into {landed} fact(s)",
-            )
-        )
-        return AddResult(episode_ids=episode_ids, actions=actions)
+        """Distill one active verbatim memory through the grouped write path."""
+        return self._distill_pending_group([memory_id], owner_prefix=owner_prefix)
 
     # ------------------------------------------------------------------
     # read path

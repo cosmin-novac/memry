@@ -45,15 +45,20 @@ of the subject:
 SAVE - call save_memories:
 - whenever the user states a stable fact, preference, decision, correction, or
   plan - capture it in their own words;
-- as a running checkpoint, not just at the end: once you have learned a handful
-  of new facts, or when the topic is about to change, save what is worth keeping
-  before moving on. A good rhythm is "recall on a new topic, save when leaving
-  one."
-- Prefer several focused calls (one topic each) over one giant multi-topic dump.
-  With infer=true, a successful response means the exact text is durable and
-  searchable; its "enrichment" status is pending while Memry extracts and
-  reconciles facts in the background. Use infer=false for content that must
-  always remain as one verbatim memory.
+- as a running checkpoint when the topic is about to change, rather than only
+  at the end of the chat;
+- batch related facts into ONE call as concise multiline content. Do not call
+  once per sentence: Memry extracts the atomic facts itself while seeing their
+  shared context. Keep unrelated topics in separate calls;
+- if related facts must arrive in separate calls, reuse the same short semantic
+  context label and run_id. Memry waits for two minutes of quiet, then extracts
+  that group together;
+- add up to three tags only when they are useful recurring retrieval subjects.
+  Tags are hints; context is the temporary ingestion grouping.
+
+With infer=true, a successful response means the exact text is durable and
+searchable while enrichment is pending. Use infer=false only for content that
+must always remain as one verbatim memory.
 
 Never store secrets (passwords, API keys, tokens). When unsure whether a durable
 fact is worth keeping, saving it is better than losing it.
@@ -162,24 +167,49 @@ def create_server(
         user_id: str = "",
         agent_id: str = "",
         run_id: str = "",
+        context: str = "",
+        tags: list[str] | None = None,
         infer: bool = True,
     ) -> str:
-        """Store information in long-term memory. Call this whenever the user
-        shares a stable fact, preference, decision, correction, or plan - and
-        also as a periodic checkpoint, once you have learned several new facts
-        or the topic is changing, rather than only at the end of the chat. With
-        infer=true (default) the exact text is committed first and acknowledged
-        immediately, then distilled and reconciled in the managed background
-        worker. A provider failure leaves the raw memory active for retry. With
-        infer=false the text is saved verbatim as one final memory. Prefer
-        focused, one-topic calls over a single multi-topic dump.
+        """Store information in long-term memory. Batch related facts into one
+        concise multiline content value so Memry can extract atomic facts with
+        their shared context; do not call once per sentence. If related facts
+        must be sent across several calls, reuse the same semantic context label
+        and run_id. Enrichment starts after that group has been quiet for two
+        minutes. Optional tags are up to three suggested recurring retrieval
+        subjects, not grouping identifiers.
+
+        infer=true commits the exact text immediately and distills it in the
+        managed background worker. A provider failure leaves the raw memory
+        active for retry. infer=false keeps the content as one verbatim memory.
+
+        Args:
+            content: One durable fact or a concise multiline bundle of related facts.
+            context: Short shared subject reused across related calls.
+            tags: Up to three suggested recurring retrieval subjects.
+            run_id: Stable client run identifier; reuse it for related calls.
         """
         add = store.add_deferred if infer else store.add
+        shared_context = " ".join(context.split())[:200]
+        tag_hints: list[str] = []
+        for raw_tag in tags or []:
+            tag = " ".join(str(raw_tag).strip().lower().split())[:80]
+            if tag and tag not in tag_hints:
+                tag_hints.append(tag)
+            if len(tag_hints) == 3:
+                break
+        metadata: dict[str, Any] = {}
+        if shared_context:
+            metadata["context"] = shared_context
+        if tag_hints:
+            metadata["tag_hints"] = tag_hints
         kwargs: dict[str, Any] = {
             "content": content,
             "user_id": _uid(user_id),
             "agent_id": agent_id or None,
             "run_id": run_id or None,
+            "metadata": metadata or None,
+            "categories": tag_hints or None,
         }
         if not infer:
             kwargs["infer"] = False
@@ -196,6 +226,7 @@ def create_server(
         if infer and result.actions:
             payload["enrichment"] = {
                 "status": "pending",
+                "quiet_period_seconds": int(enrichment_worker.quiet_seconds),
                 "memory_ids": [a.memory_id for a in result.actions if a.memory_id],
             }
         if result.warnings:

@@ -14,6 +14,8 @@ from .store import MemoryStore
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_ENRICHMENT_QUIET_SECONDS = 120.0
+
 
 class EnrichmentWorker:
     """Drain restart-safe pending memories in bounded database batches."""
@@ -24,10 +26,12 @@ class EnrichmentWorker:
         *,
         batch_size: int = 8,
         poll_seconds: float = 2.0,
+        quiet_seconds: float = DEFAULT_ENRICHMENT_QUIET_SECONDS,
     ) -> None:
         self.store = store
         self.batch_size = max(1, batch_size)
         self.poll_seconds = max(0.05, poll_seconds)
+        self.quiet_seconds = max(0.0, quiet_seconds)
         self._wake = asyncio.Event()
 
     def notify(self) -> None:
@@ -45,6 +49,7 @@ class EnrichmentWorker:
                     partial(
                         self.store.process_pending_enrichments,
                         limit=self.batch_size,
+                        quiet_seconds=self.quiet_seconds,
                     )
                 )
             except Exception:

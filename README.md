@@ -133,9 +133,13 @@ troubleshooting: [docs/connect-claude-ai.md](docs/connect-claude-ai.md).
 The server exposes `save_memories`, `search_memories`, `get_memory_context`,
 `list_memories`, `list_categories`, `update_memory`, `delete_memory`,
 `memory_history`, and `memory_stats`. Agents are instructed to recall context
-at the start of a task and save durable facts as they appear. With the default
-`infer=true`, `save_memories` acknowledges only after the exact text is stored;
-the response reports `enrichment: pending` while a managed worker distills it when an LLM is configured.
+at the start of a task and to batch related durable facts into one concise
+multiline `save_memories` call. If related facts arrive in separate calls, the
+client can repeat a semantic `context` label and `run_id`; up to three optional
+`tags` are treated as classification hints. With the default `infer=true`, the
+exact text is acknowledged immediately and remains searchable. The managed
+worker waits for two minutes of quiet, then distills each related group when an
+LLM is configured.
 
 ### As a Python library
 
