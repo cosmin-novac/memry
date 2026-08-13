@@ -183,6 +183,7 @@ large stores; selecting a planet reveals its complete visible neighborhood and f
 detail list through the server. Selecting an entity also surfaces its summary, aliases, and
 rename control, with explicit controls to merge a duplicate or remove a mistaken entity without
 deleting memories. When a mistaken entity occurs in multiple memories, its name is retained as a tag.
+Opening Knowledge temporarily unloads the map and restores it on close to avoid holding both views in memory.
 ![Memry dashboard: galaxy tag map and memory list](docs/assets/dashboard.png)
 
 With Docker: `docker compose up -d --build` (see [docker-compose.yml](docker-compose.yml)).

@@ -146,6 +146,61 @@ check(redraws===1,'checkbox redraws map immediately');"""
     )
     assert result.returncode == 0, result.stderr
 
+def test_knowledge_modal_releases_and_restores_the_map():
+    source = "\n".join(_scripts(_dashboard_html()))
+    modal_source = source[
+        source.index("let knowledgeTab=") : source.index("function openAbout(){")
+    ]
+    contract = r"""
+const classList=()=>({
+  values:new Set(),
+  toggle(name,on){on?this.values.add(name):this.values.delete(name)},
+  contains(name){return this.values.has(name)}
+});
+const nodes={
+  knowmodal:{classList:classList()},
+  mapwrap:{hidden:false},
+  mapentitydetail:{hidden:false},
+  map:{width:900,height:500}
+};
+const document={
+  getElementById:id=>nodes[id],
+  documentElement:{classList:classList()},
+  body:{classList:classList()}
+};
+const panels={map:true};
+let G={heavy:true},mapData={heavy:true},gPulses=[1],hoverMapKey='entity:x',gRAF=7;
+let cancelled=0,loads=0,draws=0;
+const cancelAnimationFrame=()=>cancelled++;
+const loadMapData=()=>loads++;
+const drawMap=()=>draws++;
+function check(condition,message){if(!condition)throw new Error(message)}
+""" + modal_source + r"""
+setKnowledgeOpen(true);
+check(knowledgeMapSuspended,'map should be suspended');
+check(G===null&&mapData===null&&gPulses.length===0,'heavy map state released');
+check(gRAF===0&&cancelled===1,'animation cancelled');
+check(nodes.map.width===1&&nodes.map.height===1,'canvas buffer released');
+check(nodes.mapwrap.hidden&&nodes.mapentitydetail.hidden,'map UI hidden');
+setKnowledgeOpen(true);
+check(knowledgeMapWasOpen,'opening twice must retain restore state');
+setKnowledgeOpen(false);
+check(!knowledgeMapSuspended&&loads===1,'open map restored once');
+panels.map=false;G={closed:true};mapData={closed:true};
+setKnowledgeOpen(true);setKnowledgeOpen(false);
+check(G.closed&&mapData.closed&&loads===1,'closed map stays closed');
+"""
+    result = subprocess.run(
+        ["node", "-"], input=contract, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert "if(knowledgeMapSuspended){mapData=null;return}" in source
+    assert (
+        "const visible=panels.map&&!knowledgeMapSuspended&&mapData&&mapData.memories"
+        in source
+    )
+
+
 def test_selected_map_entity_shows_identity_and_cleanup_actions():
     html = _dashboard_html()
     source = "\n".join(_scripts(html))

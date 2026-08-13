@@ -546,7 +546,9 @@ function setMapEntityTypes(mode){
   renderMapEntityTypes();drawMap();
 }
 async function loadMapData(){
+  if(knowledgeMapSuspended){mapData=null;return}
   const data=await api('/api/v1/map');
+  if(knowledgeMapSuspended){mapData=null;return}
   mapData=data;
   if(mapEntityTypes===null)initializeMapEntityTypes();
   if(activeMapKey){
@@ -629,7 +631,7 @@ function displayedGalaxyEdges(graph,selected,hovered){
 }
 function drawMap(){
   const wrap=document.getElementById('mapwrap'),empty=document.getElementById('mapempty');
-  const visible=panels.map&&mapData&&mapData.memories;
+  const visible=panels.map&&!knowledgeMapSuspended&&mapData&&mapData.memories;
   wrap.hidden=!visible;syncMapEntityDetailVisibility();
   if(!visible){G=null;empty.hidden=true;if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return}
   G=buildGalaxy(mapData);sizeGalaxy();syncMapModeButtons();
@@ -933,7 +935,7 @@ function hitNode(event){
 let mapEntityDetailRequest=0;
 function syncMapEntityDetailVisibility(){
   const panel=document.getElementById('mapentitydetail');
-  panel.hidden=!(panels.map&&mapMode==='entities'&&panel.dataset.entityId
+  panel.hidden=!(panels.map&&!knowledgeMapSuspended&&mapMode==='entities'&&panel.dataset.entityId
     &&activeMapKey==='entity:'+panel.dataset.entityId);
 }
 function clearMapEntityDetail(){
@@ -1172,10 +1174,29 @@ function clearSearch(){
 
 // -- unified knowledge area -------------------------------------------------
 let knowledgeTab='topics',knowledgeNames={},allTags=[];
+let knowledgeMapSuspended=false,knowledgeMapWasOpen=false;
+function suspendMapForKnowledge(){
+  knowledgeMapWasOpen=panels.map;knowledgeMapSuspended=knowledgeMapWasOpen;
+  if(!knowledgeMapSuspended)return;
+  if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}
+  G=null;mapData=null;gPulses=[];hoverMapKey=null;
+  document.getElementById('mapwrap').hidden=true;
+  document.getElementById('mapentitydetail').hidden=true;
+  const canvas=document.getElementById('map');canvas.width=1;canvas.height=1;
+}
+function resumeMapAfterKnowledge(){
+  if(!knowledgeMapSuspended)return;
+  const restore=knowledgeMapWasOpen&&panels.map;
+  knowledgeMapSuspended=false;knowledgeMapWasOpen=false;
+  if(restore)loadMapData();else drawMap();
+}
 function setKnowledgeOpen(open){
-  document.getElementById('knowmodal').classList.toggle('on',open);
+  const modal=document.getElementById('knowmodal'),wasOpen=modal.classList.contains('on');
+  if(open&&!wasOpen)suspendMapForKnowledge();
+  modal.classList.toggle('on',open);
   document.documentElement.classList.toggle('knowledge-open',open);
   document.body.classList.toggle('knowledge-open',open);
+  if(!open&&wasOpen)resumeMapAfterKnowledge();
 }
 async function openKnowledge(tab='topics'){
   setKnowledgeOpen(true);
