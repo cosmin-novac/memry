@@ -68,8 +68,8 @@ _DASHBOARD = """<!doctype html>
 <title>Memry dashboard</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50' fill='none' stroke='%2314b8a6' stroke-width='7' stroke-linecap='round'/%3E%3Ccircle cx='47' cy='10.5' r='4.5' fill='%2314b8a6'/%3E%3Ccircle cx='56' cy='20' r='3.2' fill='%2314b8a6' opacity='.85'/%3E%3Ccircle cx='57.5' cy='30' r='2.2' fill='%2314b8a6' opacity='.7'/%3E%3C/svg%3E">
 <style>
-:root{--bg:#0b0e14;--panel:#141a24;--line:#232c3b;--text:#dbe4f0;--dim:#8494ab;--accent:#5eead4;--warn:#f0a35e;font-size:15px}
-@media (prefers-color-scheme: light){:root{--bg:#f5f7fa;--panel:#ffffff;--line:#dde4ee;--text:#1a2333;--dim:#5c6b82;--accent:#0d9488;--warn:#b45309}}
+:root{--bg:#0b0e14;--panel:#141a24;--line:#232c3b;--text:#dbe4f0;--dim:#8494ab;--accent:#5eead4;--warn:#f0a35e;--semantic:#5eead4;--procedural:#60a5fa;--episodic:#fbbf24;--working:#c084fc;font-size:15px}
+@media (prefers-color-scheme: light){:root{--bg:#f5f7fa;--panel:#ffffff;--line:#dde4ee;--text:#1a2333;--dim:#5c6b82;--accent:#0d9488;--warn:#b45309;--semantic:#0d9488;--procedural:#2563eb;--episodic:#b45309;--working:#7c3aed}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,Segoe UI,sans-serif}
 main{max-width:900px;margin:0 auto;padding:2rem 1rem}
 h1{font-size:1.3rem;margin:.2rem 0 1rem}h1 span{color:var(--accent)}
@@ -142,6 +142,13 @@ button.toggle.active{border-color:var(--accent);color:var(--accent)}
 .mem .meta{color:var(--dim);font-size:.78rem;margin-top:.35rem;display:flex;gap:.8rem;flex-wrap:wrap}
 .mem .del,.mem .edit{float:right;border:none;background:none;color:var(--dim)}.mem .del:hover{color:var(--warn)}.mem .edit:hover{color:var(--accent)}
 .tag{border:1px solid var(--line);border-radius:999px;padding:0 .5rem}
+.memory-type{display:inline-flex;align-items:center;gap:.3rem;border-color:currentColor;font-weight:600}
+.memory-type.semantic{color:var(--semantic)}.memory-type.procedural{color:var(--procedural)}
+.memory-type.episodic{color:var(--episodic)}.memory-type.working{color:var(--working)}
+.type-symbol{display:inline-block;width:.48rem;height:.48rem;background:currentColor;flex:none}
+.memory-type.semantic .type-symbol{border-radius:50%}
+.memory-type.episodic .type-symbol{width:0;height:0;background:none;border-left:.28rem solid transparent;border-right:.28rem solid transparent;border-bottom:.5rem solid currentColor}
+.memory-type.working .type-symbol{background:none;border:1px solid currentColor;transform:rotate(45deg)}
 button.tagfilter{background:none;color:inherit;font:inherit;cursor:pointer}
 .about-tabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.9rem 0}
 .about-tabs button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
@@ -167,8 +174,8 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-ctrl{position:absolute;top:.6rem;right:.6rem;display:flex;gap:.4rem;align-items:flex-start;z-index:3}
 .gx-ctrl button,.gx-types summary{background:color-mix(in srgb,var(--panel) 68%,transparent);border:1px solid var(--line);color:var(--dim);border-radius:7px;padding:.3rem .5rem;font-size:.72rem;cursor:pointer;backdrop-filter:blur(5px);line-height:1;list-style:none}
 .gx-ctrl button:hover,.gx-types summary:hover{color:var(--accent);border-color:var(--accent)}
-.gx-ctrl button[aria-pressed="true"],.gx-types[open] summary{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
-.gx-types{position:relative}.gx-types[hidden]{display:none}.gx-types summary::-webkit-details-marker{display:none}
+.gx-ctrl button[aria-pressed="true"],.gx-types summary[aria-pressed="true"],.gx-types[open] summary{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
+.gx-types{position:relative}.gx-types summary::-webkit-details-marker{display:none}
 .gx-type-menu{position:absolute;right:0;top:1.9rem;width:15rem;max-height:min(25rem,70vh);overflow:auto;background:color-mix(in srgb,var(--panel) 96%,transparent);border:1px solid var(--line);border-radius:9px;padding:.55rem;box-shadow:0 .7rem 2rem rgba(0,0,0,.28);backdrop-filter:blur(8px)}
 .gx-type-option{display:flex;align-items:center;gap:.45rem;padding:.22rem .1rem;color:var(--text);font-size:.75rem;white-space:nowrap}.gx-type-option input{width:auto;margin:0}.gx-type-option .cnt{margin-left:auto}
 .gx-type-actions{display:flex;gap:.35rem;margin-top:.45rem;padding-top:.45rem;border-top:1px solid var(--line)}
@@ -178,8 +185,8 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
 .gx-legend{position:absolute;right:.7rem;bottom:1.35rem;z-index:3;display:flex;gap:.45rem .7rem;align-items:center;justify-content:flex-end;flex-wrap:wrap;max-width:calc(100% - 1.4rem);color:var(--dim);font-size:.66rem;pointer-events:none;opacity:.8}
 .gx-legend span{display:inline-flex;gap:.28rem;align-items:center}.gx-shape{display:inline-block;width:.48rem;height:.48rem;background:var(--accent)}
-.gx-shape.semantic{border-radius:50%}.gx-shape.procedural{border-radius:1px}.gx-shape.episodic{width:0;height:0;background:none;border-left:.28rem solid transparent;border-right:.28rem solid transparent;border-bottom:.5rem solid var(--accent)}
-.gx-shape.working{transform:rotate(45deg);background:transparent;border:1px solid var(--accent)}
+.gx-shape.semantic{border-radius:50%;background:var(--semantic)}.gx-shape.procedural{border-radius:1px;background:var(--procedural)}.gx-shape.episodic{width:0;height:0;background:none;border-left:.28rem solid transparent;border-right:.28rem solid transparent;border-bottom:.5rem solid var(--episodic)}
+.gx-shape.working{transform:rotate(45deg);background:transparent;border:1px solid var(--working)}
 .gx-empty{position:absolute;inset:3rem 1rem 2rem;display:grid;place-items:center;color:var(--dim);font-size:.82rem;text-align:center;pointer-events:none}
 .gx-empty[hidden]{display:none}
 </style></head><body><main>
@@ -217,9 +224,8 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <div id="mapwrap" hidden><canvas id="map"></canvas>
 <div class="gx-ctrl">
   <button id="mapTagsBtn" onclick="setMapMode('tags')" title="Group every active memory by tag.">Tags</button>
-  <button id="mapEntitiesBtn" onclick="setMapMode('entities')" title="Group every active memory by person or thing.">Entities</button>
-  <details class="gx-types" id="mapEntityFilter" hidden>
-    <summary title="Choose which entity types appear on the map.">Types</summary>
+  <details class="gx-types" id="mapEntityFilter">
+    <summary id="mapEntitiesBtn" onclick="setMapMode('entities')" title="Group memories by entity and choose which entity types appear.">Entities</summary>
     <div class="gx-type-menu">
       <div id="mapEntityTypeOptions"></div>
       <div class="gx-type-actions">
@@ -420,11 +426,19 @@ function render(items,appendFrom){
   }
   el.innerHTML=items.map(card).join('')+moreBar();
 }
+function normalizedMemoryType(m){
+  const type=String(m.memory_type||m.type||'semantic').toLowerCase();
+  return ['semantic','procedural','episodic','working'].includes(type)?type:'semantic';
+}
+function memoryTypeBadge(m){
+  const type=normalizedMemoryType(m);
+  return `<span class="tag memory-type ${type}"><i class="type-symbol" aria-hidden="true"></i>${type}</span>`;
+}
 function viewCard(m){
   return `<div class="mem"><button class="del" title="forget" onclick="del('${m.id}')">✕</button>
    <button class="edit" title="edit" onclick="startEdit('${m.id}')">✎</button>
    <div>${esc(m.content)}</div>
-   <div class="meta"><span class="tag">${m.memory_type||m.type||'semantic'}</span>
+   <div class="meta">${memoryTypeBadge(m)}
    ${(m.categories||[]).map(c=>`<button class="tag tagfilter" title="show everything tagged #${esc(String(c))}" onclick='filterByTag(${JSON.stringify(String(c))})'>#${esc(String(c))}</button>`).join('')}
    ${(m.entity_links||[]).map(entity=>`<button class="entity-chip" onclick='openEntity(${JSON.stringify(entity.id)})'>${esc(entity.name)}</button>`).join('')}
    <span>@${esc(m.user_id||'(no user)')}</span>
@@ -493,7 +507,7 @@ function initializeMapEntityTypes(){
 }
 function renderMapEntityTypes(){
   const filter=document.getElementById('mapEntityFilter');
-  filter.hidden=mapMode!=='entities';
+  if(mapMode!=='entities')filter.open=false;
   if(!mapData)return;
   initializeMapEntityTypes();
   const counts={};
@@ -501,8 +515,8 @@ function renderMapEntityTypes(){
     const type=node.entity_type||'untyped';counts[type]=(counts[type]||0)+1;
   });
   document.getElementById('mapEntityTypeOptions').innerHTML=knownEntityTypes().map(type=>
-    '<label class="gx-type-option"><input type="checkbox" '+(mapEntityTypes.has(type)?'checked':'')
-      +' onchange="toggleMapEntityType('+JSON.stringify(type)+',this.checked)">'
+    '<label class="gx-type-option"><input type="checkbox" data-entity-type="'+esc(type)+'"'
+      +(mapEntityTypes.has(type)?' checked':'')+'>'
       +'<span>'+esc(type)+'</span><span class="cnt">'+counts[type]+'</span></label>'
   ).join('')||'<div class="hint">No entity types yet.</div>';
 }
@@ -512,6 +526,14 @@ function toggleMapEntityType(type,checked){
     activeMapKey=null;
   saveMapEntityTypes();drawMap();
 }
+function handleMapEntityTypeChange(event){
+  const input=event.target;
+  if(!input||!input.matches('input[data-entity-type]'))return;
+  toggleMapEntityType(input.dataset.entityType,input.checked);
+}
+document.getElementById('mapEntityTypeOptions').addEventListener(
+  'change',handleMapEntityTypeChange
+);
 function setMapEntityTypes(mode){
   const types=mode==='all'?knownEntityTypes():(mode==='none'?[]:defaultEntityTypes());
   mapEntityTypes=new Set(types);activeMapKey=null;saveMapEntityTypes();

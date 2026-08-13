@@ -65,8 +65,9 @@ def test_map_uses_complete_aggregates_entity_types_and_rendering_bounds():
     source = "\n".join(_scripts(html))
 
     assert 'id="mapTagsBtn"' in html
-    assert 'id="mapEntitiesBtn"' in html
-    assert 'id="mapEntityFilter"' in html
+    assert '<details class="gx-types" id="mapEntityFilter">' in html
+    assert '<summary id="mapEntitiesBtn"' in html
+    assert '>Types</summary>' not in html
     assert 'aria-label="Memory type shapes"' in html
     assert "api('/api/v1/map')" in source
     assert "const MAX_IDLE_EDGES=400" in source
@@ -75,17 +76,20 @@ def test_map_uses_complete_aggregates_entity_types_and_rendering_bounds():
     assert "const satelliteFocus=sel||hov" in source
     assert "const showSatellites=satelliteFocus?focusedNeighbor:n.zone!=='rim'" in source
     assert "function drawMemoryMarker(ctx,type,x,y,size)" in source
+    assert 'data-entity-type="' in source
+    assert "handleMapEntityTypeChange" in source
 
     map_source = source[
         source.index("const hashCode=") : source.index("function drawMap(){")
     ]
     contract = """
 const window={};
-const document={getElementById:()=>({setAttribute:()=>{}})};
+const document={getElementById:()=>({setAttribute:()=>{},addEventListener:()=>{}})};
 const localStorage={getItem:()=>null,setItem:()=>{}};
 const matchMedia=()=>({matches:true});
-let activeMapKey=null,hoverMapKey=null,hoverFocusTag=null;
+let activeMapKey=null,hoverMapKey=null,hoverFocusTag=null,redraws=0;
 const updateHover=()=>{};
+const drawMap=()=>{redraws++};
 const esc=value=>value;
 """ + map_source + """
 function check(condition,message){if(!condition)throw new Error(message)}
@@ -131,11 +135,47 @@ check(!defaultEntities.byKey['entity:rag-1'],'concept should default off');
 mapEntityTypes.add('concept');
 const allEntities=buildGalaxy(data);
 check(allEntities.byKey['entity:rag-1'].entityType==='concept','concept opt-in');
+handleMapEntityTypeChange({target:{
+  matches:selector=>selector==='input[data-entity-type]',
+  dataset:{entityType:'concept'},checked:false
+}});
+check(!mapEntityTypes.has('concept'),'checkbox updates selected entity types');
+check(redraws===1,'checkbox redraws map immediately');"""
+    result = subprocess.run(
+        ["node", "-"], input=contract, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+def test_memory_cards_show_colored_type_symbols():
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+
+    for memory_type in ("semantic", "procedural", "episodic", "working"):
+        assert f".memory-type.{memory_type}" in html
+        assert f"--{memory_type}:" in html
+    assert ".memory-type.episodic .type-symbol" in html
+    assert ".memory-type.working .type-symbol" in html
+    assert "${memoryTypeBadge(m)}" in source
+
+    badge_source = source[
+        source.index("function normalizedMemoryType") : source.index(
+            "function viewCard"
+        )
+    ]
+    contract = badge_source + """
+function check(condition,message){if(!condition)throw new Error(message)}
+for(const type of ['semantic','procedural','episodic','working']){
+  const badge=memoryTypeBadge({memory_type:type});
+  check(badge.includes('memory-type '+type),type+' color class');
+  check(badge.includes('type-symbol'),type+' symbol');
+}
+check(memoryTypeBadge({memory_type:'unknown'}).includes('semantic'),'safe fallback');
 """
     result = subprocess.run(
         ["node", "-"], input=contract, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
+
 
 def test_primary_dashboard_controls_have_tooltips_and_compact_add():
     html = _dashboard_html()
