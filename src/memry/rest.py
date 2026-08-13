@@ -956,25 +956,54 @@ async function showMapEntityDetail(entityId){
     const detail=await api('/api/v1/entities/'+encodeURIComponent(entityId));
     if(request!==mapEntityDetailRequest||activeMapKey!=='entity:'+entityId)return;
     const entity=detail.entity,aliases=detail.aliases||[];
-    panel.innerHTML=`<h3>${esc(entity.name)} ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
-      ${entityIdentityBlock(entity,aliases)}
+    panel.innerHTML=`<h3><span id="mapentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''} <button class="act" onclick='renameEntity(${JSON.stringify(entityId)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button></h3>
+      <div id="mapentityidentity">${entityIdentityBlock(entity,aliases)}</div>
       <div class="bar"><input id="mapaliasinput" placeholder="add an alias"><button onclick='addMapAlias(${JSON.stringify(entityId)})' title="Add another name for this entity.">Add alias</button></div>
       <div class="map-entity-actions">
         <select id="mapduplicatetarget" onchange="document.getElementById('mapduplicatebtn').disabled=!this.value" title="Choose the entity this is a duplicate of.">
           <option value="">is duplicate of...</option>${mapEntityTargetOptions(entityId)}
         </select>
-        <button id="mapduplicatebtn" disabled onclick='mergeMapEntity(${JSON.stringify(entityId)},${JSON.stringify(entity.name)})' title="Combine this entity into the selected entity; memories are preserved.">Combine</button>
-        <button class="danger" onclick='removeMapEntity(${JSON.stringify(entityId)},${JSON.stringify(entity.name)})' title="Remove this derived entity link; memories are preserved.">Not an entity</button>
+        <button id="mapduplicatebtn" disabled onclick='mergeMapEntity(${JSON.stringify(entityId)})' title="Combine this entity into the selected entity; memories are preserved.">Combine</button>
+        <button class="danger" onclick='removeMapEntity(${JSON.stringify(entityId)})' title="Remove this derived entity; if it has multiple memories, keep its name as a tag.">Not an entity</button>
       </div>`;
     syncMapEntityDetailVisibility();
   }catch(error){
     if(request===mapEntityDetailRequest){panel.innerHTML='<div class="hint">Could not load this entity.</div>'}
   }
 }
+function syncEntityIdentity(entityId,result){
+  const entity=result.entity,aliases=result.aliases||[];
+  const mapPanel=document.getElementById('mapentitydetail');
+  if(mapPanel.dataset.entityId===entityId){
+    const name=document.getElementById('mapentityname'),identity=document.getElementById('mapentityidentity');
+    if(name)name.textContent=entity.name;if(identity)identity.innerHTML=entityIdentityBlock(entity,aliases);
+  }
+  const knowledgePanel=document.getElementById('entitydetail');
+  if(knowledgePanel.dataset.entityId===entityId){
+    const name=document.getElementById('knowledgeentityname'),identity=document.getElementById('knowledgeentityidentity');
+    if(name)name.textContent=entity.name;if(identity)identity.innerHTML=entityIdentityBlock(entity,aliases);
+  }
+  const mapNode=(mapData?.entities||[]).find(node=>node.entity_id===entityId);
+  if(mapNode)mapNode.label=entity.name;
+  const graphNode=G&&G.byKey['entity:'+entityId];if(graphNode)graphNode.label=entity.name;
+  const filterOption=[...document.getElementById('filter-entity').options].find(option=>option.value===entityId);
+  if(filterOption)filterOption.textContent=entity.name;
+  knowledgeNames[entityId]=entity.name;galaxyRead();
+}
+async function renameEntity(entityId){
+  const current=(mapData?.entities||[]).find(node=>node.entity_id===entityId)?.label||knowledgeNames[entityId]||'';
+  const entered=prompt(`Rename "${current}" to:`,current);
+  const name=(entered||'').trim();if(!name||name===current)return;
+  const result=await api('/api/v1/entities/'+encodeURIComponent(entityId),{method:'PATCH',body:JSON.stringify({name})});
+  if(result.error){alert(result.error);return}
+  syncEntityIdentity(entityId,result);
+  await loadEntities();
+}
 async function addMapAlias(entityId){
   const input=document.getElementById('mapaliasinput'),alias=input.value.trim();if(!alias)return;
-  await api('/api/v1/entities/'+encodeURIComponent(entityId)+'/aliases',{method:'POST',body:JSON.stringify({alias})});
-  await Promise.all([showMapEntityDetail(entityId),loadEntities()]);
+  const result=await api('/api/v1/entities/'+encodeURIComponent(entityId)+'/aliases',{method:'POST',body:JSON.stringify({alias})});
+  input.value='';syncEntityIdentity(entityId,result);
+  await loadEntities();
 }
 async function refreshAfterMapEntityCleanup(){
   clearMapEntityDetail();activeMapKey=null;
@@ -983,16 +1012,22 @@ async function refreshAfterMapEntityCleanup(){
   await Promise.all([loadMapData(),loadSearchFilters(),loadEntities()]);
   await search();
 }
-async function mergeMapEntity(entityId,entityName){
+async function mergeMapEntity(entityId){
+  const entityName=(mapData?.entities||[]).find(node=>node.entity_id===entityId)?.label||'this entity';
   const targetId=document.getElementById('mapduplicatetarget').value;if(!targetId)return;
   const target=mapData.entities.find(node=>node.entity_id===targetId);
   if(!target||!confirm(`Combine ${entityName} into ${target.label}? Memories and aliases will be preserved.`))return;
   await api('/api/v1/entities/merge',{method:'POST',body:JSON.stringify({keep_id:targetId,merge_id:entityId})});
   await refreshAfterMapEntityCleanup();
 }
-async function removeMapEntity(entityId,entityName){
-  if(!confirm(`Mark ${entityName} as not an entity? Its memories will stay untouched.`))return;
-  await api('/api/v1/entities/remove',{method:'POST',body:JSON.stringify({ids:[entityId]})});
+async function removeMapEntity(entityId){
+  const node=(mapData?.entities||[]).find(candidate=>candidate.entity_id===entityId);
+  const entityName=node?.label||'this entity';
+  const fallback=(node?.count||0)>1
+    ?` Its name will be kept as a tag on ${node.count} memories.`
+    :' Its memories will stay untouched.';
+  if(!confirm(`Mark ${entityName} as not an entity?${fallback}`))return;
+  await api('/api/v1/entities/remove',{method:'POST',body:JSON.stringify({ids:[entityId],preserve_as_tag:true})});
   await refreshAfterMapEntityCleanup();
 }
 async function applyMapNodeFilter(node){
@@ -1465,12 +1500,12 @@ function entityIdentityBlock(entity,aliases){
 }
 async function openEntity(id){
   setKnowledgeOpen(true);showKnowledge('entities');
-  const box=document.getElementById('entitydetail');box.innerHTML='<div class="hint">loading entity...</div>';
+  const box=document.getElementById('entitydetail');box.dataset.entityId=id;box.innerHTML='<div class="hint">loading entity...</div>';
   const detail=await api('/api/v1/entities/'+encodeURIComponent(id));
   const entity=detail.entity,aliases=detail.aliases||[];
-  box.innerHTML=`<div class="detail"><h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button>${esc(entity.name)} ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
-    ${entityIdentityBlock(entity,aliases)}
-    <div class="bar"><input id="aliasinput" placeholder="add an alias"><button onclick='addAlias(${JSON.stringify(id)})'>Add alias</button></div>
+  box.innerHTML=`<div class="detail"><h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button><span id="knowledgeentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''} <button class="act" onclick='renameEntity(${JSON.stringify(id)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button></h3>
+    <div id="knowledgeentityidentity">${entityIdentityBlock(entity,aliases)}</div>
+    <div class="bar"><input id="aliasinput" placeholder="add an alias"><button onclick='addAlias(${JSON.stringify(id)})' title="Add another name for this entity.">Add alias</button></div>
     ${relationsBlock(id,detail)}
     <div class="hint">${detail.memories.length} active supporting memor${detail.memories.length===1?'y':'ies'}</div>
     ${detail.memories.map(memory=>`<div class="tagrow"><span class="name">${esc(memory.content)}</span><button class="act" onclick='showMemory(${JSON.stringify(memory.id)})'>open</button></div>`).join('')||'<div class="empty">No active supporting memories.</div>'}</div>`;
@@ -1493,7 +1528,7 @@ function relationsBlock(id,detail){
   }).join('');
   return `<div class="hint">${rels.length} relation${rels.length===1?'':'s'}</div>${rows}`;
 }
-function closeEntity(){document.getElementById('entitydetail').innerHTML=''}
+function closeEntity(){const box=document.getElementById('entitydetail');box.innerHTML='';delete box.dataset.entityId}
 // A type like "concept" can hold hundreds of entities. Listing them all turns
 // the tab into one long scroll, so each type is capped until asked to expand.
 const ENTITY_ROW_CAP=12;
@@ -1523,8 +1558,9 @@ function renderEntityGroups(){
 }
 async function addAlias(id){
   const input=document.getElementById('aliasinput'),alias=input.value.trim();if(!alias)return;
-  await api('/api/v1/entities/'+encodeURIComponent(id)+'/aliases',{method:'POST',body:JSON.stringify({alias})});
-  await Promise.all([openEntity(id),loadEntities()]);
+  const result=await api('/api/v1/entities/'+encodeURIComponent(id)+'/aliases',{method:'POST',body:JSON.stringify({alias})});
+  input.value='';syncEntityIdentity(id,result);
+  await loadEntities();
 }
 async function decideProposal(id,decision,button){
   if(button)button.disabled=true;
@@ -2239,6 +2275,18 @@ def create_app(
         ids = [str(i) for i in body.get("ids", []) if i]
         if not ids:
             return JSONResponse({"error": "ids required"}, status_code=400)
+        if body.get("preserve_as_tag") is True:
+            if len(ids) != 1:
+                return JSONResponse(
+                    {"error": "tag preservation requires exactly one entity"},
+                    status_code=400,
+                )
+            result = await run_in_threadpool(partial(
+                store.remove_entity_preserving_tag,
+                ids[0],
+                owner_prefix=_p(request).prefix,
+            ))
+            return JSONResponse(result)
         removed = await run_in_threadpool(partial(
             store.remove_entities, ids, owner_prefix=_p(request).prefix,
         ))
@@ -2547,6 +2595,25 @@ def create_app(
             }
         )
 
+    async def rename_entity_route(request: Request) -> Response:
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            return JSONResponse({"error": "name required"}, status_code=400)
+        entity = store.rename_entity(
+            request.path_params["entity_id"],
+            name,
+            owner_prefix=_p(request).prefix,
+        )
+        if entity is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(
+            {
+                "entity": entity.model_dump(),
+                "aliases": store.backend.entity_aliases(entity.id),
+            }
+        )
+
     async def merge_entities_route(request: Request) -> Response:
         """User-confirmed direct merge: fold merge_id into keep_id."""
         body = await request.json()
@@ -2843,6 +2910,7 @@ def create_app(
             guarded(add_entity_alias),
             methods=["POST"],
         ),
+        Route("/api/v1/entities/{entity_id}", guarded(rename_entity_route), methods=["PATCH"]),
         Route("/api/v1/entities/{entity_id}", guarded(get_entity), methods=["GET"]),
     ]
     if oauth is not None:

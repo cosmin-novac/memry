@@ -1781,6 +1781,51 @@ class LocalBackend(MemoryBackend):
                 self._db.commit()
         return self.get_entity(entity_id)
 
+    def rename_entity(self, entity_id: str, name: str) -> Entity | None:
+        display = name.strip()
+        if not display:
+            return None
+        with self._lock:
+            row = self._db.execute(
+                "SELECT name, metadata, merged_into FROM entities WHERE id = ?",
+                (entity_id,),
+            ).fetchone()
+            if row is None or row["merged_into"] is not None:
+                return None
+            old_name = row["name"].strip()
+            metadata = json.loads(row["metadata"])
+            raw_aliases = metadata.get("aliases", [])
+            if isinstance(raw_aliases, str):
+                raw_aliases = [raw_aliases]
+            aliases = [
+                str(value).strip()
+                for value in raw_aliases
+                if str(value).strip()
+                and str(value).strip().lower() != display.lower()
+            ]
+            known = {value.lower() for value in aliases}
+            if old_name.lower() != display.lower() and old_name.lower() not in known:
+                aliases.append(old_name)
+            if aliases:
+                metadata["aliases"] = aliases
+                self._has_metadata_aliases = True
+            else:
+                metadata.pop("aliases", None)
+            self._db.execute(
+                "UPDATE entities SET name = ?, normalized = ?, metadata = ?, "
+                "updated_at = ?, description_updated_at = NULL "
+                "WHERE id = ? AND merged_into IS NULL",
+                (
+                    display,
+                    display.lower(),
+                    json.dumps(metadata),
+                    utcnow(),
+                    entity_id,
+                ),
+            )
+            self._db.commit()
+        return self.get_entity(entity_id)
+
     def set_entity_description(
         self, entity_id: str, description: str, generated_at: str
     ) -> Entity | None:

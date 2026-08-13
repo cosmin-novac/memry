@@ -116,6 +116,17 @@ def test_entity_is_gated(verbatim_store):
     entity_id = _seed_entity(store, ACME.namespace(None), "Jonas")
     assert store.entity(entity_id, owner_prefix=GLOBEX.prefix) is None
     assert store.entity(entity_id, owner_prefix=ACME.prefix)["entity"].name == "Jonas"
+    assert store.rename_entity(
+        entity_id, "Jonas S.", owner_prefix=GLOBEX.prefix
+    ) is None
+    assert store.remove_entity_preserving_tag(
+        entity_id, owner_prefix=GLOBEX.prefix
+    ) == {"removed": 0, "tagged": 0, "tag": None}
+    renamed = store.rename_entity(
+        entity_id, "Jonas S.", owner_prefix=ACME.prefix
+    )
+    assert renamed is not None and renamed.name == "Jonas S."
+    assert "Jonas" in store.backend.entity_aliases(entity_id)
 
 
 def test_merge_entities_is_gated(verbatim_store):

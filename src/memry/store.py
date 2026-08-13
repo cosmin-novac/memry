@@ -1694,6 +1694,15 @@ class MemoryStore:
             return None
         return self.backend.add_entity_alias(entity_id, alias)
 
+    def rename_entity(
+        self, entity_id: str, name: str, *, owner_prefix: str | None = None
+    ) -> Entity | None:
+        """Rename the canonical entity while retaining its old name as an alias."""
+        entity = self.backend.get_entity(entity_id)
+        if not _owned(entity, owner_prefix) or not name.strip():
+            return None
+        return self.backend.rename_entity(entity_id, name)
+
     def merge_proposals(
         self,
         *,
@@ -1795,6 +1804,41 @@ class MemoryStore:
             if _owned(self.backend.get_entity(entity_id), owner_prefix):
                 removed += int(self.backend.delete_entity(entity_id))
         return removed
+
+    def remove_entity_preserving_tag(
+        self, entity_id: str, *, owner_prefix: str | None = None
+    ) -> dict[str, Any]:
+        """Delete one mistaken entity, retaining repeated evidence as a tag."""
+        entity = self.backend.get_entity(entity_id)
+        if not _owned(entity, owner_prefix):
+            return {"removed": 0, "tagged": 0, "tag": None}
+
+        memories = [
+            memory
+            for memory in self.backend.entity_memories(entity_id, limit=1_000_000)
+            if _owned(memory, owner_prefix)
+        ]
+        tag = entity.name.strip().lower()
+        preserve = bool(tag) and len(memories) > 1
+        tagged = 0
+        if preserve:
+            for memory in memories:
+                categories = list(memory.categories or [])
+                normalized = {str(value).strip().lower() for value in categories}
+                if tag not in normalized:
+                    categories.append(tag)
+                    if self.backend.update_memory(
+                        memory.id, categories=categories, touch=False
+                    ) is None:
+                        continue
+                tagged += 1
+
+        removed = int(self.backend.delete_entity(entity_id))
+        return {
+            "removed": removed,
+            "tagged": tagged if removed else 0,
+            "tag": tag if removed and preserve else None,
+        }
 
     def merge_entities(
         self, keep_id: str, merge_id: str, *, owner_prefix: str | None = None

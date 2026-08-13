@@ -248,6 +248,92 @@ def test_rest_user_can_merge_or_remove_derived_entities_without_losing_memory():
     assert [row["content"] for row in memories] == ["Bob owns the workshop"]
 
 
+def test_rest_not_entity_preserves_only_repeated_values_as_tags():
+    store = make_store()
+    first = store.backend.insert_memory(
+        Memory(
+            content="The workshop has a red door",
+            user_id="ada",
+            categories=["existing", "workshop"],
+        )
+    )
+    second = store.backend.insert_memory(
+        Memory(content="Meet at the workshop", user_id="ada")
+    )
+    singleton_memory = store.backend.insert_memory(
+        Memory(content="The appointment is Monday", user_id="ada")
+    )
+    repeated = store.backend.insert_entity(
+        Entity(name="Workshop", entity_type="concept", user_id="ada")
+    )
+    singleton = store.backend.insert_entity(
+        Entity(name="Monday", entity_type="concept", user_id="ada")
+    )
+    for memory, entity, surface in [
+        (first, repeated, "workshop"),
+        (second, repeated, "workshop"),
+        (singleton_memory, singleton, "Monday"),
+    ]:
+        store.backend.add_mention(
+            EntityMention(
+                entity_id=entity.id, memory_id=memory.id, surface=surface
+            )
+        )
+
+    with TestClient(create_app(store)) as scoped_client:
+        renamed = scoped_client.patch(
+            f"/api/v1/entities/{repeated.id}", json={"name": "Maker Space"}
+        )
+        blank_name = scoped_client.patch(
+            f"/api/v1/entities/{singleton.id}", json={"name": "  "}
+        )
+        multiple = scoped_client.post(
+            "/api/v1/entities/remove",
+            json={
+                "ids": [repeated.id, singleton.id],
+                "preserve_as_tag": True,
+            },
+        )
+        repeated_result = scoped_client.post(
+            "/api/v1/entities/remove",
+            json={"ids": [repeated.id], "preserve_as_tag": True},
+        )
+        singleton_result = scoped_client.post(
+            "/api/v1/entities/remove",
+            json={"ids": [singleton.id], "preserve_as_tag": True},
+        )
+        memories = scoped_client.get(
+            "/api/v1/memories", params={"user_id": "ada", "limit": 10}
+        ).json()
+
+    assert renamed.status_code == 200
+    assert renamed.json()["entity"]["name"] == "Maker Space"
+    assert {alias.lower() for alias in renamed.json()["aliases"]} == {
+        "maker space",
+        "workshop",
+    }
+    assert blank_name.status_code == 400
+    assert multiple.status_code == 400
+    assert repeated_result.json() == {
+        "removed": 1,
+        "tagged": 2,
+        "tag": "maker space",
+    }
+    assert singleton_result.json() == {
+        "removed": 1,
+        "tagged": 0,
+        "tag": None,
+    }
+    by_content = {row["content"]: row for row in memories}
+    assert by_content[first.content]["categories"] == [
+        "existing",
+        "workshop",
+        "maker space",
+    ]
+    assert by_content[second.content]["categories"] == ["maker space"]
+    assert by_content[singleton_memory.content]["categories"] == []
+
+
 def test_rest_lossless_export_and_idempotent_restore(client):
     client.post("/api/v1/memories", json={
         "content": "backup this", "user_id": "backup-user", "infer": False,

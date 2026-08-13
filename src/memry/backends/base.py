@@ -341,6 +341,9 @@ class MemoryBackend(ABC):
     def add_entity_alias(self, entity_id: str, alias: str) -> Entity | None:
         return None
 
+    def rename_entity(self, entity_id: str, name: str) -> Entity | None:
+        return None
+
     def set_entity_description(
         self, entity_id: str, description: str, generated_at: str
     ) -> Entity | None:

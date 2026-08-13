@@ -155,11 +155,25 @@ def test_selected_map_entity_shows_identity_and_cleanup_actions():
     assert source.count("${entityIdentityBlock(entity,aliases)}") == 2
     assert "function showMapEntityDetail(entityId)" in source
     assert "is duplicate of..." in source
-    assert "function mergeMapEntity(entityId,entityName)" in source
+    assert "function mergeMapEntity(entityId)" in source
     assert "api('/api/v1/entities/merge'" in source
-    assert "function removeMapEntity(entityId,entityName)" in source
+    assert "function removeMapEntity(entityId)" in source
     assert "api('/api/v1/entities/remove'" in source
+    assert "preserve_as_tag:true" in source
+    assert "Its name will be kept as a tag" in source
     assert "Its memories will stay untouched." in source
+    assert "function renameEntity(entityId)" in source
+    assert "{method:'PATCH',body:JSON.stringify({name})}" in source
+    map_alias = source.split("async function addMapAlias(entityId){", 1)[1].split(
+        "async function refreshAfterMapEntityCleanup", 1,
+    )[0]
+    knowledge_alias = source.split("async function addAlias(id){", 1)[1].split(
+        "async function decideProposal", 1,
+    )[0]
+    assert "showMapEntityDetail" not in map_alias
+    assert "openEntity" not in knowledge_alias
+    assert "syncEntityIdentity" in map_alias
+    assert "syncEntityIdentity" in knowledge_alias
 
 
 def test_memory_cards_show_colored_type_symbols():
