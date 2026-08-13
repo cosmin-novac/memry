@@ -60,6 +60,62 @@ def test_dashboard_javascript_parses(tmp_path):
         )
 
 
+def test_map_groups_memories_by_tags_or_entities_and_draws_type_shapes():
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+
+    assert 'id="mapTagsBtn"' in html
+    assert 'id="mapEntitiesBtn"' in html
+    assert 'aria-label="Memory type shapes"' in html
+    assert "function drawMemoryMarker(ctx,type,x,y,size)" in source
+
+    map_source = source[
+        source.index("const hashCode=") : source.index("function drawMap(items){")
+    ]
+    contract = """
+const window={};
+const document={getElementById:()=>({})};
+const localStorage={getItem:()=>null,setItem:()=>{}};
+const matchMedia=()=>({matches:true});
+const cats=m=>((m.categories&&m.categories.length)?m.categories:['(untagged)'])
+  .map(c=>String(c).toLowerCase());
+""" + map_source + """
+function check(condition,message){if(!condition)throw new Error(message)}
+const items=[
+  {content:'Ada works on Helios',categories:['Work'],memory_type:'semantic',
+   entity_links:[{id:'ada-1',name:'Ada',entity_type:'person'},
+                 {id:'helios-1',name:'Helios',entity_type:'project'}]},
+  {content:'Ask Ada before release',categories:['Work'],memory_type:'procedural',
+   entity_links:[{id:'ada-1',name:'Ada',entity_type:'person'}]},
+  {content:'Went hiking',categories:['Life'],memory_type:'episodic',entity_links:[]}
+];
+mapMode='tags';
+const tags=buildGalaxy(items);
+check(tags.total===3,'tag total');
+check(tags.byKey['tag:work'].count===2,'tag count');
+check(tags.byKey['tag:work'].memoryTypes.join(',')==='semantic,procedural','types');
+mapMode='entities';
+const entities=buildGalaxy(items);
+check(entities.total===2,'linked memory total');
+check(entities.byKey['entity:ada-1'].count===2,'entity count');
+check(entities.byKey['entity:helios-1'].entityType==='project','entity type');
+check(!entities.byKey['entity:undefined'],'fake entity');
+"""
+    result = subprocess.run(
+        ["node", "-"], input=contract, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+def test_primary_dashboard_controls_have_tooltips_and_compact_add():
+    html = _dashboard_html()
+
+    assert 'class="knowledge-link"' in html
+    assert 'title="Open Knowledge' in html
+    assert 'id="addbtn"' in html
+    assert 'aria-label="Add a memory">+</button>' in html
+    assert 'title="Show or hide the memory map."' in html
+
+
 def test_every_onclick_handler_is_defined(tmp_path):
     """An `onclick` naming a function that does not exist is a dead button.
 

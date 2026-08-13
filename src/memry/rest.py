@@ -76,6 +76,8 @@ h1{font-size:1.3rem;margin:.2rem 0 1rem}h1 span{color:var(--accent)}
 h1 .datalinks{float:right;font-size:.75rem;font-weight:400;color:var(--dim)}
 h1 .datalinks a{color:var(--dim);text-decoration:none;border-bottom:1px dotted var(--dim);cursor:help}
 h1 .datalinks a:hover{color:var(--accent);border-bottom-color:var(--accent)}
+h1 .datalinks .knowledge-link{display:inline-block;background:var(--accent);color:#04211c;border:1px solid transparent;border-radius:999px;padding:.22rem .55rem;font-weight:700;cursor:pointer;box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 28%,transparent)}
+h1 .datalinks .knowledge-link:hover{color:#04211c;border-color:transparent;filter:brightness(1.08)}
 .bar{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem}
 input,button,textarea,select{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem}
 .qwrap{position:relative;flex:1;min-width:12rem;display:flex}
@@ -128,6 +130,7 @@ button.toggle[aria-pressed="true"]{border-color:var(--accent);color:var(--accent
 button.toggle.active{border-color:var(--accent);color:var(--accent)}
 #filterbtn svg{width:.85em;height:.85em;vertical-align:-.08em}
 #filterdot{color:var(--accent);font-size:1.1em;line-height:0}
+#addbtn{font-size:1.15rem;font-weight:650;line-height:1;padding:.42rem .72rem}
 .knowledge-tabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.9rem 0}
 .knowledge-tabs button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
 .kpanel[hidden]{display:none}.entity-link,.entity-chip{border:1px solid var(--line);background:none;color:var(--accent);border-radius:999px;padding:.05rem .45rem;font-size:.78rem}
@@ -164,20 +167,27 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-ctrl{position:absolute;top:.6rem;right:.6rem;display:flex;gap:.4rem;z-index:3}
 .gx-ctrl button{background:color-mix(in srgb,var(--panel) 68%,transparent);border:1px solid var(--line);color:var(--dim);border-radius:7px;padding:.3rem .5rem;font-size:.72rem;cursor:pointer;backdrop-filter:blur(5px);line-height:1}
 .gx-ctrl button:hover{color:var(--accent);border-color:var(--accent)}
+.gx-ctrl button[aria-pressed="true"]{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
 .gx-read{position:absolute;top:.6rem;left:.6rem;z-index:3;font-size:.75rem;color:var(--dim);background:color-mix(in srgb,var(--panel) 60%,transparent);border:1px solid var(--line);border-radius:7px;padding:.32rem .6rem;backdrop-filter:blur(5px);max-width:62%;pointer-events:none;opacity:0;transition:opacity .15s}
 .gx-read.on{opacity:1}.gx-read b{color:var(--text)}
 .gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
+.gx-legend{position:absolute;right:.7rem;bottom:1.35rem;z-index:3;display:flex;gap:.45rem .7rem;align-items:center;justify-content:flex-end;flex-wrap:wrap;max-width:calc(100% - 1.4rem);color:var(--dim);font-size:.66rem;pointer-events:none;opacity:.8}
+.gx-legend span{display:inline-flex;gap:.28rem;align-items:center}.gx-shape{display:inline-block;width:.48rem;height:.48rem;background:var(--accent)}
+.gx-shape.semantic{border-radius:50%}.gx-shape.procedural{border-radius:1px}.gx-shape.episodic{width:0;height:0;background:none;border-left:.28rem solid transparent;border-right:.28rem solid transparent;border-bottom:.5rem solid var(--accent)}
+.gx-shape.working{transform:rotate(45deg);background:transparent;border:1px solid var(--accent)}
+.gx-empty{position:absolute;inset:3rem 1rem 2rem;display:grid;place-items:center;color:var(--dim);font-size:.82rem;text-align:center;pointer-events:none}
+.gx-empty[hidden]{display:none}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout">sign out</a> · <a href="#" onclick="openKnowledge();return false" title="Browse tags, people and things, and upkeep in one place.">knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a> · <a href="#" onclick="openAbout();return false" title="What Memry does with what you tell it, in plain words.">about</a></span></h1>
+<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout" title="Sign out of this Memry dashboard.">sign out</a> · <a class="knowledge-link" href="#" onclick="openKnowledge();return false" title="Open Knowledge to browse and maintain tags, people, things, and forgotten memories.">Knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a> · <a href="#" onclick="openAbout();return false" title="What Memry does with what you tell it, in plain words.">about</a></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <span class="qwrap"><input id="q" placeholder="search memories…" oninput="toggleClear()">
     <button id="qclear" type="button" title="clear search and show all" onclick="clearSearch()">✕</button></span>
-  <button class="primary" onclick="search()">Search</button>
-  <button class="toggle" id="filterbtn" onclick="togglePanel('filters')" title="filter by date, tag, or person/thing" aria-label="Filters"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1 2.5A.5.5 0 0 1 1.5 2h13a.5.5 0 0 1 .38.82L10 8.7V13a.5.5 0 0 1-.72.45l-3-1.5A.5.5 0 0 1 6 11.5V8.7L1.12 2.82A.5.5 0 0 1 1 2.5Z"/></svg><span id="filterdot" hidden>•</span></button>
-  <button class="toggle" id="addbtn" onclick="togglePanel('add')">+ Add</button>
-  <button class="toggle" id="mapbtn" onclick="togglePanel('map')">Map</button>
+  <button class="primary" onclick="search()" title="Search memories using the text and filters above.">Search</button>
+  <button class="toggle" id="filterbtn" onclick="togglePanel('filters')" title="Filter by date, tag, or person/thing." aria-label="Filters"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1 2.5A.5.5 0 0 1 1.5 2h13a.5.5 0 0 1 .38.82L10 8.7V13a.5.5 0 0 1-.72.45l-3-1.5A.5.5 0 0 1 6 11.5V8.7L1.12 2.82A.5.5 0 0 1 1 2.5Z"/></svg><span id="filterdot" hidden>•</span></button>
+  <button class="toggle" id="addbtn" onclick="togglePanel('add')" title="Add a memory." aria-label="Add a memory">+</button>
+  <button class="toggle" id="mapbtn" onclick="togglePanel('map')" title="Show or hide the memory map.">Map</button>
 </div>
 <div class="search-filters" id="filterpanel" aria-label="Search filters" hidden>
   <label>Date range<span class="range">
@@ -200,8 +210,17 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 </div>
 </div>
 <div id="mapwrap" hidden><canvas id="map"></canvas>
-<div class="gx-ctrl"><button id="fsBtn" title="Fullscreen" aria-label="Fullscreen">⤢</button></div>
-<div class="gx-read" id="mapread"></div><div class="gx-stat" id="mapstat"></div></div>
+<div class="gx-ctrl">
+  <button id="mapTagsBtn" onclick="setMapMode('tags')" title="Group memories by tag.">Tags</button>
+  <button id="mapEntitiesBtn" onclick="setMapMode('entities')" title="Group memories by person or thing.">Entities</button>
+  <button id="fsBtn" title="Open the map fullscreen." aria-label="Fullscreen">⤢</button>
+</div>
+<div class="gx-read" id="mapread"></div><div class="gx-stat" id="mapstat"></div>
+<div class="gx-legend" aria-label="Memory type shapes">
+  <span><i class="gx-shape semantic"></i>semantic</span><span><i class="gx-shape procedural"></i>procedural</span>
+  <span><i class="gx-shape episodic"></i>episodic</span><span><i class="gx-shape working"></i>working</span>
+</div>
+<div class="gx-empty" id="mapempty" hidden></div></div>
 <div id="list"></div>
 <div class="modal" id="aboutmodal"><div class="sheet" style="width:min(96vw,54rem)">
 <h2><button class="x" onclick="closeAbout()" title="close">x</button>About Memry</h2>
@@ -349,6 +368,7 @@ function syncPanels(){
   document.getElementById('addpanel').hidden=!panels.add;
   document.getElementById('addbtn').setAttribute('aria-pressed',panels.add);
   document.getElementById('mapbtn').setAttribute('aria-pressed',panels.map);
+  syncMapModeButtons();
   // Filters are collapsed by default; an active one is still shown as a dot on
   // the button, so a filter can never be silently applied behind a closed panel.
   document.getElementById('filterpanel').hidden=!panels.filters;
@@ -360,7 +380,7 @@ function togglePanel(name){
   localStorage.setItem('memry_show_'+name,panels[name]?'1':'0');
   syncPanels();
 }
-let current=[],activeCat=null,haveMore=false,editingId=null,hoverTag=null,searchActive=false;
+let current=[],activeMapKey=null,haveMore=false,editingId=null,hoverMapKey=null,searchActive=false;
 let hoverFocusTag=null,hoverFocusMix=0,hoverFadeStarted=0;
 const HOVER_FADE_MS=500;
 const cats=m=>((m.categories&&m.categories.length)?m.categories:['(untagged)']).map(c=>String(c).toLowerCase());
@@ -371,11 +391,14 @@ const moreBar=()=>haveMore
 // would re-render half a million cards. Appending costs only what arrived.
 function render(items,appendFrom){
   current=items; drawMap(items);
-  const shown=activeCat?items.filter(m=>cats(m).includes(activeCat)):items;
+  const shown=activeMapKey?items.filter(m=>galaxyGroups(m).some(group=>group.key===activeMapKey)):items;
   const el=document.getElementById('list');
-  if(!shown.length&&!haveMore){el.innerHTML='<div class="empty">'+(activeCat?'No memories under #'+esc(activeCat)+'.':(searchActive?'No memories match this search.':'No memories yet.'))+'</div>';return}
+  if(!shown.length&&!haveMore){
+    const active=G&&G.byKey[activeMapKey];
+    el.innerHTML='<div class="empty">'+(activeMapKey?'No memories linked to '+esc(active?active.label:'this map item')+'.':(searchActive?'No memories match this search.':'No memories yet.'))+'</div>';return;
+  }
   const card=m=>m.id===editingId?editCard(m):viewCard(m);
-  if(appendFrom!==undefined&&appendFrom>0&&!activeCat){
+  if(appendFrom!==undefined&&appendFrom>0&&!activeMapKey){
     document.getElementById('morebar')?.remove();
     el.insertAdjacentHTML('beforeend',
       shown.slice(appendFrom).map(card).join('')+moreBar());
@@ -408,14 +431,14 @@ function editCard(m){
    </div></div>`;
 }
 
-// ---- galaxy map: tags as planets in three sd-based orbital zones ----------
-// core: count >= mean+2sd (largest tags when none qualify), rim: count <=
-// max(1, mean-2sd), belt: between. Deterministic per tag (seeded angles),
-// slow counter-rotating drift, temperature palette: gold core, teal belt,
-// ice-violet rim. Links = co-occurrence (strong) or text mention (weak).
+// ---- galaxy map: memories grouped as tag or entity planets ----------------
+// Planet size reflects how many loaded memories belong to a group. The small
+// orbiting markers are those memories: circle = semantic, square = procedural,
+// triangle = episodic, diamond = working. Links connect groups that co-occur.
 const hashCode=s=>{let h=0;for(let i=0;i<s.length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;return Math.abs(h)};
 const mulberry=a=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
 const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
+let mapMode=localStorage.getItem('memry_map_mode')==='entities'?'entities':'tags';
 let mapVisible=true;
 if('IntersectionObserver'in window){
   new IntersectionObserver(entries=>{
@@ -434,63 +457,100 @@ const gTone=(n,dark)=>{const j=((n.seed%1000)/1000-0.5);
   if(n.zone==='core')return{h:36+j*16,s:dark?95:80,l:dark?66:42};
   if(n.zone==='belt')return{h:172+j*34,s:dark?75:65,l:dark?60:36};
   return{h:248+j*40,s:dark?60:50,l:dark?74:44};};
-const hsla=(c,a,dl)=>`hsla(${c.h},${c.s}%,${Math.max(4,Math.min(96,c.l+(dl||0)))}%,${a})`;
-const hexA=(hex,a)=>{const v=parseInt(hex.slice(1),16);return`rgba(${(v>>16)&255},${(v>>8)&255},${v&255},${a})`};
+const hsla=(c,a,dl)=>'hsla('+c.h+','+c.s+'%,'+Math.max(4,Math.min(96,c.l+(dl||0)))+'%,'+a+')';
+const hexA=(hex,a)=>{const v=parseInt(hex.slice(1),16);return'rgba('+((v>>16)&255)+','+((v>>8)&255)+','+(v&255)+','+a+')'};
+const memoryType=m=>{const type=String(m.memory_type||m.type||'semantic').toLowerCase();
+  return['semantic','procedural','episodic','working'].includes(type)?type:'semantic'};
+function galaxyGroups(memory){
+  if(mapMode==='entities'){
+    const unique=new Map();
+    for(const entity of memory.entity_links||[]){
+      if(!entity.id)continue;
+      unique.set('entity:'+entity.id,{key:'entity:'+entity.id,label:entity.name||entity.id,
+        kind:'entity',entityId:entity.id,entityType:entity.entity_type||'untyped'});
+    }
+    return [...unique.values()];
+  }
+  return cats(memory).map(tag=>({key:'tag:'+tag,label:tag,kind:'tag'}));
+}
+function syncMapModeButtons(){
+  document.getElementById('mapTagsBtn').setAttribute('aria-pressed',mapMode==='tags');
+  document.getElementById('mapEntitiesBtn').setAttribute('aria-pressed',mapMode==='entities');
+}
+function setMapMode(mode){
+  if(mode!=='tags'&&mode!=='entities')return;
+  mapMode=mode;localStorage.setItem('memry_map_mode',mode);
+  activeMapKey=null;updateHover(null);syncMapModeButtons();render(current);
+}
 function buildGalaxy(items){
-  const counts=new Map();
-  items.forEach(m=>cats(m).forEach(c=>counts.set(c,(counts.get(c)||0)+1)));
-  if(!counts.size)return null;
-  const vals=[...counts.values()];
+  const groups=new Map();let linkedMemories=0;
+  for(const memory of items){
+    const refs=galaxyGroups(memory);
+    if(refs.length)linkedMemories++;
+    for(const ref of refs){
+      let group=groups.get(ref.key);
+      if(!group){group={...ref,count:0,memoryTypes:[]};groups.set(ref.key,group)}
+      group.count++;group.memoryTypes.push(memoryType(memory));
+    }
+  }
+  if(!groups.size)return null;
+  const vals=[...groups.values()].map(group=>group.count);
   const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
   const sd=Math.sqrt(vals.reduce((a,c)=>a+(c-mean)**2,0)/vals.length);
   const coreMin=mean+2*sd,rimMax=Math.max(1,mean-2*sd),maxC=Math.max(...vals);
   const fb=!vals.some(c=>c>=coreMin);
-  // belt and rim planets get a size boost so the outer zones read clearly
   const ZF={core:1.0,belt:1.28,rim:1.55};
-  const nodes=[...counts.keys()].sort().map(tag=>{const count=counts.get(tag);
-    const zone=(fb?count===maxC:count>=coreMin)?'core':(count<=rimMax?'rim':'belt');
-    return{tag,count,zone,radius:Math.min(34,(9+5*Math.sqrt(count))*ZF[zone]),seed:hashCode(tag),h:0};});
-  const index=new Map(nodes.map((n,i)=>[n.tag,i]));
+  const nodes=[...groups.values()].sort((a,b)=>a.label.localeCompare(b.label)).map(group=>{
+    const zone=(fb?group.count===maxC:group.count>=coreMin)?'core':(group.count<=rimMax?'rim':'belt');
+    return{...group,zone,radius:Math.min(34,(9+5*Math.sqrt(group.count))*ZF[zone]),seed:hashCode(group.key),h:0};
+  });
+  const index=new Map(nodes.map((node,i)=>[node.key,i]));
   const edgeMap=new Map();
-  const bump=(a,b,w)=>{const k=a<b?a+':'+b:b+':'+a;edgeMap.set(k,(edgeMap.get(k)||0)+w)};
-  for(const m of items){
-    const t=cats(m);
-    for(let i=0;i<t.length;i++)for(let j=i+1;j<t.length;j++)bump(index.get(t[i]),index.get(t[j]),2);
-    const text=String(m.content||'').toLowerCase();
-    for(const n of nodes){
-      if(t.includes(n.tag)||n.tag.length<3||n.tag==='(untagged)')continue;
-      if(text.includes(n.tag))bump(index.get(t[0]),index.get(n.tag),1);
+  const bump=(a,b,w)=>{if(a===b)return;const k=a<b?a+':'+b:b+':'+a;edgeMap.set(k,(edgeMap.get(k)||0)+w)};
+  for(const memory of items){
+    const refs=galaxyGroups(memory),keys=new Set(refs.map(ref=>ref.key));
+    for(let i=0;i<refs.length;i++)for(let j=i+1;j<refs.length;j++)bump(index.get(refs[i].key),index.get(refs[j].key),2);
+    if(mapMode==='tags'&&refs.length){
+      const content=String(memory.content||'').toLowerCase();
+      for(const node of nodes){
+        if(keys.has(node.key)||node.label.length<3||node.label==='(untagged)')continue;
+        if(content.includes(node.label))bump(index.get(refs[0].key),index.get(node.key),1);
+      }
     }
   }
   const edges=[...edgeMap.entries()].map(([k,w])=>{const[a,b]=k.split(':').map(Number);return{a,b,weight:Math.min(3,w)}});
   const neigh={};
-  edges.forEach(e=>{const ta=nodes[e.a].tag,tb=nodes[e.b].tag;
-    (neigh[ta]??=new Set()).add(tb);(neigh[tb]??=new Set()).add(ta);});
+  edges.forEach(edge=>{const a=nodes[edge.a].key,b=nodes[edge.b].key;
+    (neigh[a]??=new Set()).add(b);(neigh[b]??=new Set()).add(a);});
   const BANDS={core:[0.02,0.16],belt:[0.30,0.62],rim:[0.66,0.99]};
   const PHASE={core:0,belt:0.7,rim:1.4},PACK={core:4,belt:16,rim:22},GOLDEN=2.399963229728653;
   for(const zone of['core','belt','rim']){
-    const ring=nodes.filter(n=>n.zone===zone);
-    ring.sort((a,b)=>b.count-a.count||a.tag.localeCompare(b.tag));
+    const ring=nodes.filter(node=>node.zone===zone);
+    ring.sort((a,b)=>b.count-a.count||a.label.localeCompare(b.label));
     const N=ring.length,lo=BANDS[zone][0],hi=BANDS[zone][1];
-    // planets shrink as a ring fills so a long tail of tags still fits
     const shrink=Math.max(0.4,Math.min(1,1/Math.sqrt(Math.max(1,N)/PACK[zone])));
     const dense=N>PACK[zone]*0.8;
-    ring.forEach((n,k)=>{const rnd=mulberry(n.seed);
-      n.radius*=shrink;
-      if(zone==='core'){n.rFrac=N===1?0:0.13;n.ang=PHASE.core+k*(Math.PI*2/N);}
-      // dense rings fill the annulus with a phyllotaxis (sunflower) pattern -
-      // even area density at any count, no clumps; sparse ones use an even ring
-      else if(dense){n.rFrac=lo+(hi-lo)*Math.sqrt((k+0.5)/N);n.ang=PHASE[zone]+k*GOLDEN;}
-      else{n.ang=PHASE[zone]+k*(Math.PI*2/N)+(rnd()-0.5)*0.22;n.rFrac=lo+(hi-lo)*(0.35+0.5*rnd());}});
+    ring.forEach((node,k)=>{const rnd=mulberry(node.seed);
+      node.radius*=shrink;
+      if(zone==='core'){node.rFrac=N===1?0:0.13;node.ang=PHASE.core+k*(Math.PI*2/N);}
+      else if(dense){node.rFrac=lo+(hi-lo)*Math.sqrt((k+0.5)/N);node.ang=PHASE[zone]+k*GOLDEN;}
+      else{node.ang=PHASE[zone]+k*(Math.PI*2/N)+(rnd()-0.5)*0.22;node.rFrac=lo+(hi-lo)*(0.35+0.5*rnd());}});
   }
-  return{nodes,edges,neigh,byTag:Object.fromEntries(nodes.map(n=>[n.tag,n])),fb,total:items.length};
+  return{nodes,edges,neigh,byKey:Object.fromEntries(nodes.map(node=>[node.key,node])),fb,total:linkedMemories,mode:mapMode};
 }
 function drawMap(items){
-  const wrap=document.getElementById('mapwrap');
-  G=panels.map&&items.length?buildGalaxy(items):null;
-  if(!G){wrap.hidden=true;if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return}
-  wrap.hidden=false;
-  sizeGalaxy();
+  const wrap=document.getElementById('mapwrap'),empty=document.getElementById('mapempty');
+  const visible=panels.map&&items.length;
+  wrap.hidden=!visible;
+  if(!visible){G=null;empty.hidden=true;if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return}
+  G=buildGalaxy(items);sizeGalaxy();syncMapModeButtons();
+  empty.hidden=!!G;
+  if(!G){
+    empty.textContent='No memories with linked entities in this view.';
+    const canvas=document.getElementById('map'),ctx=canvas.getContext('2d');
+    ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
+    if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return;
+  }
   galaxyRead();
   if(reducedMotion)galaxyFrame(performance.now());
   else if(!gRAF)gRAF=requestAnimationFrame(galaxyFrame);
@@ -505,20 +565,23 @@ function sizeGalaxy(){
   canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);
   canvas.style.width=width+'px';canvas.style.height=height+'px';
   canvas.getContext('2d').setTransform(dpr,0,0,dpr,0,0);
-  G.W=width;G.H=height;G.CX=width/2;G.CY=height/2;G.RX=width/2-46;G.RY=height/2-42;
+  if(G){G.W=width;G.H=height;G.CX=width/2;G.CY=height/2;G.RX=width/2-46;G.RY=height/2-42;}
 }
 // hover/filter info as a corner overlay; a faint tag/memory count sits bottom-left
 function galaxyRead(){
   const readEl=document.getElementById('mapread'),statEl=document.getElementById('mapstat');
   if(!G){readEl.classList.remove('on');return}
-  const f=activeCat?G.byTag[activeCat]:(hoverTag?G.byTag[hoverTag]:null);
-  if(f){
-    const linked=G.neigh[f.tag]?[...G.neigh[f.tag]].map(x=>'#'+x).join(', '):'none';
-    readEl.innerHTML=`<b>#${f.tag}</b> · ${f.count} memor${f.count===1?'y':'ies'} · ${f.zone}`
-      +(activeCat===f.tag?' · filtering':'');
+  const node=activeMapKey?G.byKey[activeMapKey]:(hoverMapKey?G.byKey[hoverMapKey]:null);
+  if(node){
+    const typeCounts={};node.memoryTypes.forEach(type=>typeCounts[type]=(typeCounts[type]||0)+1);
+    const types=Object.entries(typeCounts).map(([type,count])=>count+' '+type).join(', ');
+    const heading=node.kind==='tag'?'#'+node.label:node.label+' · '+node.entityType;
+    readEl.innerHTML='<b>'+esc(heading)+'</b> · '+node.count+' memor'+(node.count===1?'y':'ies')+' · '+types
+      +(activeMapKey===node.key?' · filtering':'');
     readEl.classList.add('on');
   }else readEl.classList.remove('on');
-  statEl.textContent=`${G.nodes.length} tags · ${G.total} memories`+(G.fb?' · core = largest':'');
+  const noun=G.mode==='entities'?'entities':'tags',linked=G.mode==='entities'?' linked':'';
+  statEl.textContent=G.nodes.length+' '+noun+' · '+G.total+linked+' memories'+(G.fb?' · core = largest':'');
 }
 function galaxyFrame(now){
   if(!G){gRAF=0;return}
@@ -531,12 +594,12 @@ function galaxyFrame(now){
   const DIM=rootStyle.getPropertyValue('--dim').trim()||'#8494ab';
   const WARM=rootStyle.getPropertyValue('--warn').trim()||'#f0a35e';
   const STAR=dark?'#c9d6ea':'#33415c';
-  if(hoverTag){hoverFocusTag=hoverTag;hoverFocusMix=1;hoverFadeStarted=0}
+  if(hoverMapKey){hoverFocusTag=hoverMapKey;hoverFocusMix=1;hoverFadeStarted=0}
   else if(hoverFocusTag){
     hoverFocusMix=reducedMotion||!hoverFadeStarted?0:Math.max(0,1-(now-hoverFadeStarted)/HOVER_FADE_MS);
     if(!hoverFocusMix)hoverFocusTag=null;
   }
-  const still=reducedMotion||!!hoverFocusTag||!!activeCat;
+  const still=reducedMotion||!!hoverFocusTag||!!activeMapKey;
   ctx.clearRect(0,0,W,H);
   // deep space ground
   const g0=ctx.createRadialGradient(CX,CY-H*0.05,Rm*0.12,CX,CY,Rm*1.45);
@@ -595,14 +658,14 @@ function galaxyFrame(now){
   const pts={};
   for(const n of G.nodes){
     n.ang+=still?0:0.00010*(n.zone==='core'?1:(n.zone==='belt'?-0.5:0.3));
-    pts[n.tag]={x:CX+n.rFrac*RX*Math.cos(n.ang),y:CY+n.rFrac*RY*Math.sin(n.ang)};
+    pts[n.key]={x:CX+n.rFrac*RX*Math.cos(n.ang),y:CY+n.rFrac*RY*Math.sin(n.ang)};
   }
-  const sel=activeCat?G.byTag[activeCat]:null;
-  const hov=hoverFocusTag?G.byTag[hoverFocusTag]:null;
+  const sel=activeMapKey?G.byKey[activeMapKey]:null;
+  const hov=hoverFocusTag?G.byKey[hoverFocusTag]:null;
   const hoverMix=hov?hoverFocusMix:0;
   const focusEmph=(n,f)=>{
     if(!f||n===f)return 1;
-    return(G.neigh[f.tag]&&G.neigh[f.tag].has(n.tag))?0.92:0.16;
+    return(G.neigh[f.key]&&G.neigh[f.key].has(n.key))?0.92:0.16;
   };
   const emph=n=>{
     let A=focusEmph(n,sel);
@@ -612,7 +675,7 @@ function galaxyFrame(now){
   // filaments: soft underglow + bright core line; particles on locked links
   for(const e of G.edges){
     const na=G.nodes[e.a],nb=G.nodes[e.b];
-    const p=pts[na.tag],q=pts[nb.tag];
+    const p=pts[na.key],q=pts[nb.key];
     const ca=gTone(na,dark),cb=gTone(nb,dark);
     const selTouches=!!sel&&(na===sel||nb===sel);
     let touchMix=selTouches?1:0;
@@ -661,8 +724,8 @@ function galaxyFrame(now){
   // Draw the hovered planet last so its disc and label are always in front.
   const planetOrder=hov?[...G.nodes.filter(node=>node!==hov),hov]:G.nodes;
   for(const n of planetOrder){
-    const p=pts[n.tag],x=p.x,y=p.y,A=emph(n),c=gTone(n,dark);
-    const glowTarget=Math.max(activeCat===n.tag?1:0,n===hov?hoverMix:0);
+    const p=pts[n.key],x=p.x,y=p.y,A=emph(n),c=gTone(n,dark);
+    const glowTarget=Math.max(activeMapKey===n.key?1:0,n===hov?hoverMix:0);
     n.h+=(glowTarget-n.h)*(reducedMotion?1:0.14);
     ctx.globalAlpha=A;
     if(n.h>0.03){
@@ -683,14 +746,14 @@ function galaxyFrame(now){
     ctx.shadowBlur=0;
     ctx.strokeStyle=hsla(c,0.85+0.15*n.h,dark?16:-14);ctx.lineWidth=1.2;
     ctx.beginPath();ctx.arc(x,y,n.radius,0,Math.PI*2);ctx.stroke();
-    const sats=Math.min(n.count,10);
+    const sats=Math.min(n.memoryTypes.length,10);
     for(let i=0;i<sats;i++){
       const angle=i/sats*Math.PI*2-Math.PI/2+(reducedMotion?0:t*0.00008);
-      const ds=0.9+(((n.seed>>3)+i*37)%10)/12;
-      ctx.fillStyle=hsla(c,0.8*A,10);
-      ctx.beginPath();ctx.arc(x+(n.radius+6)*Math.cos(angle),y+(n.radius+6)*Math.sin(angle),ds,0,Math.PI*2);ctx.fill();
+      const ds=1.55+(((n.seed>>3)+i*37)%10)/15;
+      ctx.fillStyle=hsla(c,0.9*A,13);
+      drawMemoryMarker(ctx,n.memoryTypes[i],x+(n.radius+7)*Math.cos(angle),y+(n.radius+7)*Math.sin(angle),ds);
     }
-    if(activeCat===n.tag){
+    if(activeMapKey===n.key){
       ctx.strokeStyle=hsla(c,0.95,18);ctx.lineWidth=1.3;
       ctx.beginPath();ctx.arc(x,y,n.radius+5,0,Math.PI*2);ctx.stroke();
     }
@@ -703,15 +766,15 @@ function galaxyFrame(now){
       ctx.fillText(n.count,x,y+0.5);
       ctx.shadowBlur=0;
     }
-    const selLinked=sel&&(n===sel||(G.neigh[sel.tag]&&G.neigh[sel.tag].has(n.tag)));
-    const hovLinked=hov&&(n===hov||(G.neigh[hov.tag]&&G.neigh[hov.tag].has(n.tag)));
+    const selLinked=sel&&(n===sel||(G.neigh[sel.key]&&G.neigh[sel.key].has(n.key)));
+    const hovLinked=hov&&(n===hov||(G.neigh[hov.key]&&G.neigh[hov.key].has(n.key)));
     const lit=n.h>0.4||selLinked||(hovLinked&&hoverMix>0.04);
     if(n.radius>=19||n.h>0.05||lit){
       ctx.globalAlpha=Math.min(1,A+0.05);
       ctx.font='500 9.5px ui-sans-serif,system-ui';
       if('letterSpacing'in ctx)ctx.letterSpacing='1.5px';
       ctx.textAlign='center';ctx.textBaseline='top';
-      const label=n.tag.length>18?n.tag.slice(0,17)+'…':n.tag;
+      const label=n.label.length>18?n.label.slice(0,17)+'…':n.label;
       const labelText=label.toUpperCase()+' · '+n.count,labelY=y+n.radius+8+3*n.h;
       ctx.fillStyle=lit?TEXT:hexA(DIM.length===7?DIM:'#8494ab',0.95);
       if(n===hov&&hoverMix>0.04){
@@ -730,49 +793,58 @@ function galaxyFrame(now){
   if(!reducedMotion&&panels.map&&mapVisible)gRAF=requestAnimationFrame(galaxyFrame);
   else gRAF=0;
 }
+function drawMemoryMarker(ctx,type,x,y,size){
+  ctx.beginPath();
+  if(type==='procedural')ctx.rect(x-size,y-size,size*2,size*2);
+  else if(type==='episodic'){
+    ctx.moveTo(x,y-size*1.25);ctx.lineTo(x+size*1.1,y+size);ctx.lineTo(x-size*1.1,y+size);ctx.closePath();
+  }else if(type==='working'){
+    ctx.moveTo(x,y-size*1.3);ctx.lineTo(x+size*1.3,y);ctx.lineTo(x,y+size*1.3);ctx.lineTo(x-size*1.3,y);ctx.closePath();
+  }else ctx.arc(x,y,size,0,Math.PI*2);
+  ctx.fill();
+}
 function hitNode(event){
   if(!G)return null;
   const rect=document.getElementById('map').getBoundingClientRect();
   const x=event.clientX-rect.left,y=event.clientY-rect.top;
   let best=null,bd=1e9;
-  for(const n of G.nodes){
-    const px=G.CX+n.rFrac*G.RX*Math.cos(n.ang),py=G.CY+n.rFrac*G.RY*Math.sin(n.ang);
+  for(const node of G.nodes){
+    const px=G.CX+node.rFrac*G.RX*Math.cos(node.ang),py=G.CY+node.rFrac*G.RY*Math.sin(node.ang);
     const d=Math.hypot(px-x,py-y);
-    if(d<Math.max(n.radius+8,14)&&d<bd){bd=d;best=n}
+    if(d<Math.max(node.radius+8,14)&&d<bd){bd=d;best=node}
   }
   return best;
 }
-document.getElementById('map').addEventListener('click',e=>{
-  const n=hitNode(e);
-  if(n){
-    activeCat=activeCat===n.tag?null:n.tag;
+document.getElementById('map').addEventListener('click',event=>{
+  const node=hitNode(event);
+  if(node){
+    activeMapKey=activeMapKey===node.key?null:node.key;
     const rootStyle=getComputedStyle(document.documentElement);
     const dark=parseInt((rootStyle.getPropertyValue('--bg').trim()||'#0b0e14').slice(5,7)||'14',16)<120;
-    gPulses.push({x:G.CX+n.rFrac*G.RX*Math.cos(n.ang),y:G.CY+n.rFrac*G.RY*Math.sin(n.ang),
-      r:n.radius,start:performance.now(),tone:gTone(n,dark)});
+    gPulses.push({x:G.CX+node.rFrac*G.RX*Math.cos(node.ang),y:G.CY+node.rFrac*G.RY*Math.sin(node.ang),
+      r:node.radius,start:performance.now(),tone:gTone(node,dark)});
     render(current);
   }
 });
-function updateHover(tag){
-  if(tag===hoverTag)return;
-  hoverTag=tag;
-  if(tag){hoverFocusTag=tag;hoverFocusMix=1;hoverFadeStarted=0}
+function updateHover(key){
+  if(key===hoverMapKey)return;
+  hoverMapKey=key;
+  if(key){hoverFocusTag=key;hoverFocusMix=1;hoverFadeStarted=0}
   else if(hoverFocusTag){
     hoverFadeStarted=performance.now();
     if(reducedMotion){hoverFocusTag=null;hoverFocusMix=0}
   }
   if(G){galaxyRead();if(reducedMotion)galaxyFrame(performance.now())}
 }
-document.getElementById('map').addEventListener('mousemove',e=>{
-  const n=hitNode(e);
-  e.target.style.cursor=n?'pointer':'default';
-  updateHover(n?n.tag:null);
+document.getElementById('map').addEventListener('mousemove',event=>{
+  const node=hitNode(event);
+  event.target.style.cursor=node?'pointer':'default';
+  updateHover(node?node.key:null);
 });
 document.getElementById('map').addEventListener('mouseleave',()=>updateHover(null));
 // Fullscreen: real API where allowed, CSS-maximize fallback otherwise.
 function setMaxed(v){gMaxed=v;document.getElementById('mapwrap').classList.toggle('maxed',v);
-  document.documentElement.style.overflow=v?'hidden':'';
-  if(G){sizeGalaxy();if(reducedMotion)galaxyFrame(performance.now())}}
+  document.documentElement.style.overflow=v?'hidden':'';drawMap(current)}
 document.getElementById('fsBtn').addEventListener('click',()=>{
   const wrap=document.getElementById('mapwrap');
   if(document.fullscreenElement){document.exitFullscreen();return}
@@ -782,7 +854,7 @@ document.getElementById('fsBtn').addEventListener('click',()=>{
   else if(!document.fullscreenElement)setMaxed(true);
 });
 window.addEventListener('keydown',e=>{if(e.key==='Escape'&&gMaxed)setMaxed(false);});
-document.addEventListener('fullscreenchange',()=>{if(G){sizeGalaxy();if(reducedMotion)galaxyFrame(performance.now())}});
+document.addEventListener('fullscreenchange',()=>drawMap(current));
 window.addEventListener('resize',()=>drawMap(current));
 const PAGE=100; let offset=0;
 // One click from a memory to everything sharing its tag. This goes through the
@@ -799,7 +871,7 @@ function filterByTag(tag){
   // rather than applied behind a collapsed row.
   if(option.selected&&!panels.filters)togglePanel('filters');
   toggleClear();
-  activeCat=null;
+  activeMapKey=null;
   search();
 }
 const picked=id=>[...document.getElementById(id).selectedOptions]
@@ -864,7 +936,7 @@ function clearSearch(){
   for(const id of['filter-date','filter-date-to'])document.getElementById(id).value='';
   for(const id of['filter-topic','filter-entity'])
     [...document.getElementById(id).options].forEach(o=>o.selected=false);
-  activeCat=null;toggleClear();loadAll();
+  activeMapKey=null;toggleClear();loadAll();
 }
 
 // -- unified knowledge area -------------------------------------------------
@@ -1142,7 +1214,7 @@ function renderTags(){
 }
 async function tagOp(body){
   const result=await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(body)});
-  await Promise.all([loadTags(),loadSearchFilters()]);activeCat=null;loadAll();return result;
+  await Promise.all([loadTags(),loadSearchFilters()]);activeMapKey=null;loadAll();return result;
 }
 async function renameTag(tag){
   const to=prompt('Rename tag "'+tag+'" to:',tag);if(!to||to.trim()===tag)return;
@@ -1266,7 +1338,7 @@ async function decideProposal(id,decision,button){
 }
 async function showMemory(id){
   const memory=await api('/api/v1/memories/'+encodeURIComponent(id));
-  closeKnowledge();activeCat=null;haveMore=false;render([memory]);
+  closeKnowledge();activeMapKey=null;haveMore=false;render([memory]);
 }
 async function backfillTypes(){
   document.getElementById('entcount').textContent='classifying...';

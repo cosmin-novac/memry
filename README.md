@@ -173,9 +173,11 @@ memry serve --host 0.0.0.0 --port 8787
 ```
 
 The dashboard shows your memories with inline editing, filtered search, lossless JSON
-backup/restore, a unified Knowledge area, and a galaxy map of your topics: heavily-used topics gravitate to
-the gold core, the working set orbits in the teal belt, and one-off topics
-drift at the violet rim. Links are co-occurrence; click a planet to filter.
+backup/restore, a unified Knowledge area, and a galaxy map that groups loaded memories by
+tag or entity. Heavily-used groups gravitate to the gold core, the working set orbits in the
+teal belt, and one-off groups drift at the violet rim. Orbit-marker shapes distinguish
+semantic, procedural, episodic, and working memories. Links are co-occurrence; click a
+planet to filter.
 
 ![Memry dashboard: galaxy tag map and memory list](docs/assets/dashboard.png)
 
