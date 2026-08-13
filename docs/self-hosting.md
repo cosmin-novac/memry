@@ -21,11 +21,20 @@ memry serve --host 0.0.0.0 --port 8787
 ## Option 2 - Docker
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
 The compose file mounts a named volume at `/data` and reads the same `MEMRY_*`
 environment variables. See [`docker-compose.yml`](../docker-compose.yml).
+
+Docker automatically reuses the package layer for source-only updates. A first build or
+a change to `requirements-docker.txt` installs all dependencies; normal code and dashboard
+updates install only Memry itself. To deliberately refresh every package:
+
+```bash
+docker compose build --no-cache memry
+docker compose up -d memry
+```
 
 ## Option 3 - VPS, one command (Docker + automatic HTTPS)
 

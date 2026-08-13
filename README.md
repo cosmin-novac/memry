@@ -183,7 +183,7 @@ large stores; selecting a planet reveals its complete visible neighborhood and f
 detail list through the server.
 ![Memry dashboard: galaxy tag map and memory list](docs/assets/dashboard.png)
 
-With Docker: `docker compose up -d` (see [docker-compose.yml](docker-compose.yml)).
+With Docker: `docker compose up -d --build` (see [docker-compose.yml](docker-compose.yml)).
 
 Or on a fresh Ubuntu/Debian VPS, one command installs Docker, Memry, and Caddy with
 automatic HTTPS ([full guide](docs/deploy-vps.md)):

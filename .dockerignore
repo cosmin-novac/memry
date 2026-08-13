@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!.dockerignore
+!requirements-docker.txt
+!pyproject.toml
+!README.md
+!LICENSE
+!src/
+!src/**

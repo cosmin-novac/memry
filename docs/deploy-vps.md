@@ -22,7 +22,8 @@ stores verbatim and retrieves with BM25 + hash embeddings.
 
 **Re-running the same command updates Memry in place.** Code in
 `/opt/memry/app` is disposable; your config (`/opt/memry/.env`) and data
-(Docker volumes) survive updates.
+(Docker volumes) survive updates. Docker reuses the dependency layer when
+`requirements-docker.txt` is unchanged, so ordinary source updates remain light.
 
 ## Walkthrough: Contabo
 
