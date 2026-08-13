@@ -71,6 +71,7 @@ def test_map_uses_complete_aggregates_entity_types_and_rendering_bounds():
     assert "api('/api/v1/map')" in source
     assert "const MAX_IDLE_EDGES=400" in source
     assert "const displayedEdges=displayedGalaxyEdges(G,sel,hov)" in source
+    assert "A+=((hovTouches?1:0.06)-A)*hoverMix" in source
     assert "const satelliteFocus=sel||hov" in source
     assert "const showSatellites=satelliteFocus?focusedNeighbor:n.zone!=='rim'" in source
     assert "function drawMemoryMarker(ctx,type,x,y,size)" in source
@@ -117,7 +118,9 @@ check(tags.total===432,'tag total');
 check(tags.byKey['tag:work'].count===2,'tag count');
 check(tags.byKey['tag:work'].typeCounts.procedural===1,'type counts');
 check(tags.idleEdges.length===400,'idle edge cap');
-check(displayedGalaxyEdges(tags,null,tags.byKey['tag:work']).length===430,'hover shows every node edge');
+const hoverEdges=displayedGalaxyEdges(tags,null,tags.byKey['tag:work']);
+check(hoverEdges.length===430,'hover shows every node edge');
+check(tags.idleEdges.every(edge=>hoverEdges.includes(edge)),'hover preserves every idle edge');
 check(displayedGalaxyEdges(tags,tags.byKey['tag:work'],null).length===430,'selection shows every node edge');
 mapMode='entities';
 mapEntityTypes=null;
@@ -139,9 +142,24 @@ def test_primary_dashboard_controls_have_tooltips_and_compact_add():
 
     assert 'class="knowledge-link"' in html
     assert 'title="Open Knowledge' in html
+    assert 'class="account-links"' in html
+    assert html.index('class="knowledge-link"') < html.index('class="account-links"')
+    assert html.index('>about</a>') < html.index('class="account-links"')
     assert 'id="addbtn"' in html
     assert 'aria-label="Add a memory">+</button>' in html
     assert 'title="Show or hide the memory map."' in html
+
+
+def test_map_click_does_not_expand_filter_panel():
+    source = "\n".join(_scripts(_dashboard_html()))
+    handler = source[
+        source.index("async function applyMapNodeFilter") : source.index(
+            "document.getElementById('map').addEventListener('click'"
+        )
+    ]
+
+    assert "togglePanel('filters')" not in handler
+    assert "await search()" in handler
 
 
 def test_every_onclick_handler_is_defined(tmp_path):

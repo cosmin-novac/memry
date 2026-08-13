@@ -184,7 +184,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-empty[hidden]{display:none}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><span title="signed-in account">@__WHOAMI__</span> · <a href="/logout" title="Sign out of this Memry dashboard.">sign out</a> · <a class="knowledge-link" href="#" onclick="openKnowledge();return false" title="Open Knowledge to browse and maintain tags, people, things, and forgotten memories.">Knowledge</a> ·<a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a> · <a href="#" onclick="openAbout();return false" title="What Memry does with what you tell it, in plain words.">about</a></span></h1>
+<span class="datalinks"><a class="knowledge-link" href="#" onclick="openKnowledge();return false" title="Open Knowledge to browse and maintain tags, people, things, and forgotten memories.">Knowledge</a> · <a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a> · <a href="#" onclick="openAbout();return false" title="What Memry does with what you tell it, in plain words.">about</a> <span class="account-links">· <span title="signed-in account">@__WHOAMI__</span> · <a href="/logout" title="Sign out of this Memry dashboard.">sign out</a></span></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <span class="qwrap"><input id="q" placeholder="search memories…" oninput="toggleClear()">
@@ -591,8 +591,13 @@ function buildGalaxy(data){
   };
 }
 function displayedGalaxyEdges(graph,selected,hovered){
-  const focus=selected||hovered;
-  return focus?(graph.edgesByNode[focus.key]||[]):graph.idleEdges;
+  if(selected)return graph.edgesByNode[selected.key]||[];
+  if(!hovered)return graph.idleEdges;
+  const displayed=[...graph.idleEdges],seen=new Set(displayed);
+  for(const edge of graph.edgesByNode[hovered.key]||[]){
+    if(!seen.has(edge)){seen.add(edge);displayed.push(edge)}
+  }
+  return displayed;
 }
 function drawMap(){
   const wrap=document.getElementById('mapwrap'),empty=document.getElementById('mapempty');
@@ -637,8 +642,9 @@ function galaxyRead(){
     readEl.classList.add('on');
   }else readEl.classList.remove('on');
   const noun=G.mode==='entities'?'entities':'tags',linked=G.mode==='entities'?' linked':'';
-  const focusedKey=activeMapKey||hoverMapKey;
-  const shownLinks=focusedKey?(G.edgesByNode[focusedKey]||[]).length:G.idleEdges.length;
+  const selectedNode=activeMapKey?G.byKey[activeMapKey]:null;
+  const hoveredNode=!selectedNode&&hoverMapKey?G.byKey[hoverMapKey]:null;
+  const shownLinks=displayedGalaxyEdges(G,selectedNode,hoveredNode).length;
   const linkNote=G.edges.length?' · '+shownLinks+'/'+G.edges.length+' links shown':'';
   statEl.textContent=G.nodes.length+' '+noun+' · '+G.total+linked+' memories'+linkNote
     +(G.fb?' · core = largest':'');
@@ -909,7 +915,7 @@ async function applyMapNodeFilter(node){
   let option=[...select.options].find(candidate=>candidate.value===value);
   if(!option){option=new Option(node.label,value);select.add(option)}
   option.selected=true;activeMapKey=node.key;
-  if(!panels.filters)togglePanel('filters');
+  // Keep the filter panel in its current state; the active dot still shows it.
   toggleClear();await search();galaxyRead();
 }
 document.getElementById('map').addEventListener('click',event=>{
