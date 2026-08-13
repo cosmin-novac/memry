@@ -473,7 +473,7 @@ const gTone=(n,dark)=>{const j=((n.seed%1000)/1000-0.5);
   return{h:248+j*40,s:dark?60:50,l:dark?74:44};};
 const hsla=(c,a,dl)=>'hsla('+c.h+','+c.s+'%,'+Math.max(4,Math.min(96,c.l+(dl||0)))+'%,'+a+')';
 const hexA=(hex,a)=>{const v=parseInt(hex.slice(1),16);return'rgba('+((v>>16)&255)+','+((v>>8)&255)+','+(v&255)+','+a+')'};
-const MAX_IDLE_EDGES=120;
+const MAX_IDLE_EDGES=400;
 let mapData=null,mapEntityTypes=null;
 function knownEntityTypes(){
   if(!mapData)return[];
@@ -590,6 +590,10 @@ function buildGalaxy(data){
     mode:mapMode,
   };
 }
+function displayedGalaxyEdges(graph,selected,hovered){
+  const focus=selected||hovered;
+  return focus?(graph.edgesByNode[focus.key]||[]):graph.idleEdges;
+}
 function drawMap(){
   const wrap=document.getElementById('mapwrap'),empty=document.getElementById('mapempty');
   const visible=panels.map&&mapData&&mapData.memories;
@@ -633,7 +637,8 @@ function galaxyRead(){
     readEl.classList.add('on');
   }else readEl.classList.remove('on');
   const noun=G.mode==='entities'?'entities':'tags',linked=G.mode==='entities'?' linked':'';
-  const shownLinks=activeMapKey?(G.edgesByNode[activeMapKey]||[]).length:G.idleEdges.length;
+  const focusedKey=activeMapKey||hoverMapKey;
+  const shownLinks=focusedKey?(G.edgesByNode[focusedKey]||[]).length:G.idleEdges.length;
   const linkNote=G.edges.length?' · '+shownLinks+'/'+G.edges.length+' links shown':'';
   statEl.textContent=G.nodes.length+' '+noun+' · '+G.total+linked+' memories'+linkNote
     +(G.fb?' · core = largest':'');
@@ -727,9 +732,9 @@ function galaxyFrame(now){
     if(hov)A+=(focusEmph(n,hov)-A)*hoverMix;
     return A;
   };
-  // At rest only the strongest links are drawn; with a selection, only links
-  // touching that node are drawn. This keeps dense entity graphs legible.
-  const displayedEdges=sel?(G.edgesByNode[sel.key]||[]):G.idleEdges;
+  // At rest only the strongest links are drawn. Hover and selection both use
+  // the complete per-node index, so focusing a node never hides its links.
+  const displayedEdges=displayedGalaxyEdges(G,sel,hov);
   for(const e of displayedEdges){
     const na=G.nodes[e.a],nb=G.nodes[e.b];
     const p=pts[na.key],q=pts[nb.key];
@@ -803,8 +808,10 @@ function galaxyFrame(now){
     ctx.shadowBlur=0;
     ctx.strokeStyle=hsla(c,0.85+0.15*n.h,dark?16:-14);ctx.lineWidth=1.2;
     ctx.beginPath();ctx.arc(x,y,n.radius,0,Math.PI*2);ctx.stroke();
-    const selectedNeighbor=sel&&(n===sel||(G.neigh[sel.key]&&G.neigh[sel.key].has(n.key)));
-    const showSatellites=sel?selectedNeighbor:n.zone!=='rim';
+    const satelliteFocus=sel||hov;
+    const focusedNeighbor=satelliteFocus&&(n===satelliteFocus
+      ||(G.neigh[satelliteFocus.key]&&G.neigh[satelliteFocus.key].has(n.key)));
+    const showSatellites=satelliteFocus?focusedNeighbor:n.zone!=='rim';
     const satelliteTypes=showSatellites?memoryMarkerTypes(n.typeCounts,Math.min(n.count,10)):[];
     for(let i=0;i<satelliteTypes.length;i++){
       const angle=i/satelliteTypes.length*Math.PI*2-Math.PI/2+(reducedMotion?0:t*0.00008);

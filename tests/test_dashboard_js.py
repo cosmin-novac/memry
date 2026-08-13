@@ -69,9 +69,10 @@ def test_map_uses_complete_aggregates_entity_types_and_rendering_bounds():
     assert 'id="mapEntityFilter"' in html
     assert 'aria-label="Memory type shapes"' in html
     assert "api('/api/v1/map')" in source
-    assert "const MAX_IDLE_EDGES=120" in source
-    assert "const displayedEdges=sel?(G.edgesByNode[sel.key]||[]):G.idleEdges" in source
-    assert "const showSatellites=sel?selectedNeighbor:n.zone!=='rim'" in source
+    assert "const MAX_IDLE_EDGES=400" in source
+    assert "const displayedEdges=displayedGalaxyEdges(G,sel,hov)" in source
+    assert "const satelliteFocus=sel||hov" in source
+    assert "const showSatellites=satelliteFocus?focusedNeighbor:n.zone!=='rim'" in source
     assert "function drawMemoryMarker(ctx,type,x,y,size)" in source
 
     map_source = source[
@@ -87,15 +88,15 @@ const updateHover=()=>{};
 const esc=value=>value;
 """ + map_source + """
 function check(condition,message){if(!condition)throw new Error(message)}
-const tagEdges=Array.from({length:130},(_,index)=>({
+const tagEdges=Array.from({length:430},(_,index)=>({
   a:'tag:work',b:'tag:t'+index,weight:1
 }));
 const data={
-  memories:132,entity_memories:2,
+  memories:432,entity_memories:2,
   tags:[
     {key:'tag:work',label:'work',kind:'tag',count:2,
      type_counts:{semantic:1,procedural:1}},
-    ...Array.from({length:130},(_,index)=>({
+    ...Array.from({length:430},(_,index)=>({
       key:'tag:t'+index,label:'t'+index,kind:'tag',count:1,
       type_counts:{episodic:1}
     }))
@@ -112,10 +113,12 @@ const data={
 mapData=data;
 mapMode='tags';
 const tags=buildGalaxy(data);
-check(tags.total===132,'tag total');
+check(tags.total===432,'tag total');
 check(tags.byKey['tag:work'].count===2,'tag count');
 check(tags.byKey['tag:work'].typeCounts.procedural===1,'type counts');
-check(tags.idleEdges.length===120,'idle edge cap');
+check(tags.idleEdges.length===400,'idle edge cap');
+check(displayedGalaxyEdges(tags,null,tags.byKey['tag:work']).length===430,'hover shows every node edge');
+check(displayedGalaxyEdges(tags,tags.byKey['tag:work'],null).length===430,'selection shows every node edge');
 mapMode='entities';
 mapEntityTypes=null;
 const defaultEntities=buildGalaxy(data);
