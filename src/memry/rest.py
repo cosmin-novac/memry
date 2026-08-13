@@ -189,6 +189,10 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-shape.working{transform:rotate(45deg);background:transparent;border:1px solid var(--working)}
 .gx-empty{position:absolute;inset:3rem 1rem 2rem;display:grid;place-items:center;color:var(--dim);font-size:.82rem;text-align:center;pointer-events:none}
 .gx-empty[hidden]{display:none}
+.map-entity-detail{margin:-.15rem 0 .8rem;padding:.75rem .85rem;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.map-entity-detail[hidden]{display:none}.map-entity-detail h3{margin:0 0 .35rem;font-size:1rem}.map-entity-actions{display:grid;grid-template-columns:minmax(10rem,1fr) auto auto;gap:.45rem;align-items:center;margin-top:.7rem;padding-top:.65rem;border-top:1px solid var(--line)}
+.map-entity-actions .danger{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
+@media(max-width:44rem){.map-entity-actions{grid-template-columns:1fr}.map-entity-actions button{width:100%}}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
 <span class="datalinks"><a class="knowledge-link" href="#" onclick="openKnowledge();return false" title="Open Knowledge to browse and maintain tags, people, things, and forgotten memories.">Knowledge</a> · <a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a> · <a href="#" onclick="openAbout();return false" title="What Memry does with what you tell it, in plain words.">about</a> <span class="account-links">· <span title="signed-in account">@__WHOAMI__</span> · <a href="/logout" title="Sign out of this Memry dashboard.">sign out</a></span></span></h1>
@@ -243,6 +247,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <span><i class="gx-shape episodic"></i>episodic</span><span><i class="gx-shape working"></i>working</span>
 </div>
 <div class="gx-empty" id="mapempty" hidden></div></div>
+<section class="map-entity-detail" id="mapentitydetail" aria-live="polite" hidden></section>
 <div id="list"></div>
 <div class="modal" id="aboutmodal"><div class="sheet" style="width:min(96vw,54rem)">
 <h2><button class="x" onclick="closeAbout()" title="close">x</button>About Memry</h2>
@@ -522,8 +527,9 @@ function renderMapEntityTypes(){
 }
 function toggleMapEntityType(type,checked){
   if(checked)mapEntityTypes.add(type);else mapEntityTypes.delete(type);
-  if(activeMapKey&&G&&G.byKey[activeMapKey]&&G.byKey[activeMapKey].entityType===type)
-    activeMapKey=null;
+  if(activeMapKey&&G&&G.byKey[activeMapKey]&&G.byKey[activeMapKey].entityType===type){
+    activeMapKey=null;clearMapEntityDetail();
+  }
   saveMapEntityTypes();drawMap();
 }
 function handleMapEntityTypeChange(event){
@@ -536,7 +542,7 @@ document.getElementById('mapEntityTypeOptions').addEventListener(
 );
 function setMapEntityTypes(mode){
   const types=mode==='all'?knownEntityTypes():(mode==='none'?[]:defaultEntityTypes());
-  mapEntityTypes=new Set(types);activeMapKey=null;saveMapEntityTypes();
+  mapEntityTypes=new Set(types);activeMapKey=null;clearMapEntityDetail();saveMapEntityTypes();
   renderMapEntityTypes();drawMap();
 }
 async function loadMapData(){
@@ -545,7 +551,7 @@ async function loadMapData(){
   if(mapEntityTypes===null)initializeMapEntityTypes();
   if(activeMapKey){
     const keys=new Set([...data.tags,...data.entities].map(node=>node.key));
-    if(!keys.has(activeMapKey))activeMapKey=null;
+    if(!keys.has(activeMapKey)){activeMapKey=null;clearMapEntityDetail()}
   }
   renderMapEntityTypes();drawMap();
 }
@@ -557,7 +563,7 @@ function syncMapModeButtons(){
 function setMapMode(mode){
   if(mode!=='tags'&&mode!=='entities')return;
   mapMode=mode;localStorage.setItem('memry_map_mode',mode);
-  activeMapKey=null;updateHover(null);syncMapModeButtons();drawMap();
+  activeMapKey=null;clearMapEntityDetail();updateHover(null);syncMapModeButtons();drawMap();
 }
 function buildGalaxy(data){
   let source=mapMode==='entities'?data.entities:data.tags;
@@ -624,7 +630,7 @@ function displayedGalaxyEdges(graph,selected,hovered){
 function drawMap(){
   const wrap=document.getElementById('mapwrap'),empty=document.getElementById('mapempty');
   const visible=panels.map&&mapData&&mapData.memories;
-  wrap.hidden=!visible;
+  wrap.hidden=!visible;syncMapEntityDetailVisibility();
   if(!visible){G=null;empty.hidden=true;if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return}
   G=buildGalaxy(mapData);sizeGalaxy();syncMapModeButtons();
   empty.hidden=!!G;
@@ -924,12 +930,77 @@ function hitNode(event){
   }
   return best;
 }
+let mapEntityDetailRequest=0;
+function syncMapEntityDetailVisibility(){
+  const panel=document.getElementById('mapentitydetail');
+  panel.hidden=!(panels.map&&mapMode==='entities'&&panel.dataset.entityId
+    &&activeMapKey==='entity:'+panel.dataset.entityId);
+}
+function clearMapEntityDetail(){
+  mapEntityDetailRequest++;
+  const panel=document.getElementById('mapentitydetail');
+  panel.hidden=true;panel.innerHTML='';delete panel.dataset.entityId;
+}
+function mapEntityTargetOptions(entityId){
+  return (mapData?.entities||[])
+    .filter(node=>node.entity_id&&node.entity_id!==entityId)
+    .sort((a,b)=>a.label.localeCompare(b.label))
+    .map(node=>`<option value="${esc(node.entity_id)}">${esc(node.label)} · ${esc(node.entity_type||'untyped')}</option>`)
+    .join('');
+}
+async function showMapEntityDetail(entityId){
+  const panel=document.getElementById('mapentitydetail'),request=++mapEntityDetailRequest;
+  panel.dataset.entityId=entityId;panel.hidden=false;
+  panel.innerHTML='<div class="hint">loading entity...</div>';
+  try{
+    const detail=await api('/api/v1/entities/'+encodeURIComponent(entityId));
+    if(request!==mapEntityDetailRequest||activeMapKey!=='entity:'+entityId)return;
+    const entity=detail.entity,aliases=detail.aliases||[];
+    panel.innerHTML=`<h3>${esc(entity.name)} ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
+      ${entityIdentityBlock(entity,aliases)}
+      <div class="bar"><input id="mapaliasinput" placeholder="add an alias"><button onclick='addMapAlias(${JSON.stringify(entityId)})' title="Add another name for this entity.">Add alias</button></div>
+      <div class="map-entity-actions">
+        <select id="mapduplicatetarget" onchange="document.getElementById('mapduplicatebtn').disabled=!this.value" title="Choose the entity this is a duplicate of.">
+          <option value="">is duplicate of...</option>${mapEntityTargetOptions(entityId)}
+        </select>
+        <button id="mapduplicatebtn" disabled onclick='mergeMapEntity(${JSON.stringify(entityId)},${JSON.stringify(entity.name)})' title="Combine this entity into the selected entity; memories are preserved.">Combine</button>
+        <button class="danger" onclick='removeMapEntity(${JSON.stringify(entityId)},${JSON.stringify(entity.name)})' title="Remove this derived entity link; memories are preserved.">Not an entity</button>
+      </div>`;
+    syncMapEntityDetailVisibility();
+  }catch(error){
+    if(request===mapEntityDetailRequest){panel.innerHTML='<div class="hint">Could not load this entity.</div>'}
+  }
+}
+async function addMapAlias(entityId){
+  const input=document.getElementById('mapaliasinput'),alias=input.value.trim();if(!alias)return;
+  await api('/api/v1/entities/'+encodeURIComponent(entityId)+'/aliases',{method:'POST',body:JSON.stringify({alias})});
+  await Promise.all([showMapEntityDetail(entityId),loadEntities()]);
+}
+async function refreshAfterMapEntityCleanup(){
+  clearMapEntityDetail();activeMapKey=null;
+  [...document.getElementById('filter-entity').options].forEach(option=>option.selected=false);
+  toggleClear();
+  await Promise.all([loadMapData(),loadSearchFilters(),loadEntities()]);
+  await search();
+}
+async function mergeMapEntity(entityId,entityName){
+  const targetId=document.getElementById('mapduplicatetarget').value;if(!targetId)return;
+  const target=mapData.entities.find(node=>node.entity_id===targetId);
+  if(!target||!confirm(`Combine ${entityName} into ${target.label}? Memories and aliases will be preserved.`))return;
+  await api('/api/v1/entities/merge',{method:'POST',body:JSON.stringify({keep_id:targetId,merge_id:entityId})});
+  await refreshAfterMapEntityCleanup();
+}
+async function removeMapEntity(entityId,entityName){
+  if(!confirm(`Mark ${entityName} as not an entity? Its memories will stay untouched.`))return;
+  await api('/api/v1/entities/remove',{method:'POST',body:JSON.stringify({ids:[entityId]})});
+  await refreshAfterMapEntityCleanup();
+}
 async function applyMapNodeFilter(node){
   const same=activeMapKey===node.key;
   for(const id of['filter-topic','filter-entity'])
     [...document.getElementById(id).options].forEach(option=>option.selected=false);
   if(same){
-    activeMapKey=null;toggleClear();await search();return;
+    activeMapKey=null;clearMapEntityDetail();toggleClear();await search();return;
   }
   const selectId=node.kind==='tag'?'filter-topic':'filter-entity';
   const value=node.kind==='tag'?node.label:node.entity_id;
@@ -937,6 +1008,8 @@ async function applyMapNodeFilter(node){
   let option=[...select.options].find(candidate=>candidate.value===value);
   if(!option){option=new Option(node.label,value);select.add(option)}
   option.selected=true;activeMapKey=node.key;
+  if(node.kind==='entity')showMapEntityDetail(node.entity_id);
+  else clearMapEntityDetail();
   // Keep the filter panel in its current state; the active dot still shows it.
   toggleClear();await search();galaxyRead();
 }
@@ -994,7 +1067,7 @@ function filterByTag(tag){
   // rather than applied behind a collapsed row.
   if(option.selected&&!panels.filters)togglePanel('filters');
   toggleClear();
-  activeMapKey=null;
+  activeMapKey=null;clearMapEntityDetail();
   search();
 }
 const picked=id=>[...document.getElementById(id).selectedOptions]
@@ -1059,7 +1132,7 @@ function clearSearch(){
   for(const id of['filter-date','filter-date-to'])document.getElementById(id).value='';
   for(const id of['filter-topic','filter-entity'])
     [...document.getElementById(id).options].forEach(o=>o.selected=false);
-  activeMapKey=null;toggleClear();loadAll();
+  activeMapKey=null;clearMapEntityDetail();toggleClear();loadAll();
 }
 
 // -- unified knowledge area -------------------------------------------------
@@ -1337,7 +1410,7 @@ function renderTags(){
 }
 async function tagOp(body){
   const result=await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(body)});
-  await Promise.all([loadTags(),loadSearchFilters(),loadMapData()]);activeMapKey=null;loadAll();return result;
+  await Promise.all([loadTags(),loadSearchFilters(),loadMapData()]);activeMapKey=null;clearMapEntityDetail();loadAll();return result;
 }
 async function renameTag(tag){
   const to=prompt('Rename tag "'+tag+'" to:',tag);if(!to||to.trim()===tag)return;
@@ -1386,14 +1459,17 @@ async function loadEntities(){
     <button class="act" onclick='decideProposal(${JSON.stringify(proposal.id)},"confirm",this)'>merge</button>
     <button class="act del" onclick='decideProposal(${JSON.stringify(proposal.id)},"reject",this)'>keep separate</button></div>`).join(''):'<div class="empty">No open merge proposals.</div>';
 }
+function entityIdentityBlock(entity,aliases){
+  return `<div class="description">${esc(entity.description||'No active evidence to summarize yet.')}</div>
+    <div class="alias-list">${aliases.map(alias=>`<span>${esc(alias)}</span>`).join('')||'<span>No aliases yet.</span>'}</div>`;
+}
 async function openEntity(id){
   setKnowledgeOpen(true);showKnowledge('entities');
   const box=document.getElementById('entitydetail');box.innerHTML='<div class="hint">loading entity...</div>';
   const detail=await api('/api/v1/entities/'+encodeURIComponent(id));
   const entity=detail.entity,aliases=detail.aliases||[];
   box.innerHTML=`<div class="detail"><h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button>${esc(entity.name)} ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
-    <div class="description">${esc(entity.description||'No active evidence to summarize yet.')}</div>
-    <div class="alias-list">${aliases.map(alias=>`<span>${esc(alias)}</span>`).join('')}</div>
+    ${entityIdentityBlock(entity,aliases)}
     <div class="bar"><input id="aliasinput" placeholder="add an alias"><button onclick='addAlias(${JSON.stringify(id)})'>Add alias</button></div>
     ${relationsBlock(id,detail)}
     <div class="hint">${detail.memories.length} active supporting memor${detail.memories.length===1?'y':'ies'}</div>
@@ -1461,7 +1537,7 @@ async function decideProposal(id,decision,button){
 }
 async function showMemory(id){
   const memory=await api('/api/v1/memories/'+encodeURIComponent(id));
-  closeKnowledge();activeMapKey=null;haveMore=false;render([memory]);
+  closeKnowledge();activeMapKey=null;clearMapEntityDetail();haveMore=false;render([memory]);
 }
 async function backfillTypes(){
   document.getElementById('entcount').textContent='classifying...';
@@ -2471,6 +2547,31 @@ def create_app(
             }
         )
 
+    async def merge_entities_route(request: Request) -> Response:
+        """User-confirmed direct merge: fold merge_id into keep_id."""
+        body = await request.json()
+        keep_id = str(body.get("keep_id", "")).strip()
+        merge_id = str(body.get("merge_id", "")).strip()
+        if not keep_id or not merge_id:
+            return JSONResponse(
+                {"error": "keep_id and merge_id required"}, status_code=400
+            )
+        if keep_id == merge_id:
+            return JSONResponse(
+                {"error": "entities must be different"}, status_code=400
+            )
+        merged = await run_in_threadpool(partial(
+            store.merge_entities,
+            keep_id,
+            merge_id,
+            owner_prefix=_p(request).prefix,
+        ))
+        if not merged:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(
+            {"merged": True, "keep_id": keep_id, "merge_id": merge_id}
+        )
+
     async def list_proposals(request: Request) -> Response:
         q = request.query_params
         proposals = store.merge_proposals(
@@ -2726,6 +2827,7 @@ def create_app(
         Route("/api/v1/context", guarded(context), methods=["POST"]),
         Route("/api/v1/stats", guarded(stats), methods=["GET"]),
         Route("/api/v1/entities", guarded(list_entities), methods=["GET"]),
+        Route("/api/v1/entities/merge", guarded(merge_entities_route), methods=["POST"]),
         Route("/api/v1/entities/proposals", guarded(list_proposals), methods=["GET"]),
         Route(
             "/api/v1/entities/proposals/{proposal_id}/confirm",

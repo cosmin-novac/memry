@@ -146,6 +146,22 @@ check(redraws===1,'checkbox redraws map immediately');"""
     )
     assert result.returncode == 0, result.stderr
 
+def test_selected_map_entity_shows_identity_and_cleanup_actions():
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+
+    assert 'id="mapentitydetail"' in html
+    assert "function entityIdentityBlock(entity,aliases)" in source
+    assert source.count("${entityIdentityBlock(entity,aliases)}") == 2
+    assert "function showMapEntityDetail(entityId)" in source
+    assert "is duplicate of..." in source
+    assert "function mergeMapEntity(entityId,entityName)" in source
+    assert "api('/api/v1/entities/merge'" in source
+    assert "function removeMapEntity(entityId,entityName)" in source
+    assert "api('/api/v1/entities/remove'" in source
+    assert "Its memories will stay untouched." in source
+
+
 def test_memory_cards_show_colored_type_symbols():
     html = _dashboard_html()
     source = "\n".join(_scripts(html))

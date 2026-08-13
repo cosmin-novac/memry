@@ -194,6 +194,60 @@ def test_rest_map_is_complete_content_free_and_not_card_paginated():
     assert "content" not in serialized
 
 
+def test_rest_user_can_merge_or_remove_derived_entities_without_losing_memory():
+    store = make_store()
+    memory = store.backend.insert_memory(
+        Memory(content="Bob owns the workshop", user_id="ada")
+    )
+    canonical = store.backend.insert_entity(
+        Entity(name="Robert", entity_type="person", user_id="ada")
+    )
+    duplicate = store.backend.insert_entity(
+        Entity(name="Bob", entity_type="person", user_id="ada")
+    )
+    store.backend.add_mention(
+        EntityMention(
+            entity_id=canonical.id, memory_id=memory.id, surface="Robert"
+        )
+    )
+    store.backend.add_mention(
+        EntityMention(
+            entity_id=duplicate.id, memory_id=memory.id, surface="Bob"
+        )
+    )
+
+    with TestClient(create_app(store)) as scoped_client:
+        merged = scoped_client.post(
+            "/api/v1/entities/merge",
+            json={"keep_id": canonical.id, "merge_id": duplicate.id},
+        )
+        same = scoped_client.post(
+            "/api/v1/entities/merge",
+            json={"keep_id": canonical.id, "merge_id": canonical.id},
+        )
+        aliases_after_merge = store.backend.entity_aliases(canonical.id)
+        mentions_after_merge = store.backend.entity_mentions(canonical.id)
+        removed = scoped_client.post(
+            "/api/v1/entities/remove", json={"ids": [canonical.id]}
+        )
+        memories = scoped_client.get(
+            "/api/v1/memories", params={"user_id": "ada"}
+        ).json()
+
+    assert merged.status_code == 200
+    assert merged.json() == {
+        "merged": True,
+        "keep_id": canonical.id,
+        "merge_id": duplicate.id,
+    }
+    assert same.status_code == 400
+    assert "Bob" in aliases_after_merge
+    assert len(mentions_after_merge) == 2
+    assert {mention.memory_id for mention in mentions_after_merge} == {memory.id}
+    assert removed.json() == {"removed": 1}
+    assert [row["content"] for row in memories] == ["Bob owns the workshop"]
+
+
 def test_rest_lossless_export_and_idempotent_restore(client):
     client.post("/api/v1/memories", json={
         "content": "backup this", "user_id": "backup-user", "infer": False,
