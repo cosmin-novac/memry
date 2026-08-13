@@ -8,6 +8,7 @@ from starlette.testclient import TestClient
 
 from memry.config import Config
 from memry.mcp_server import create_server
+from memry.models import Entity, EntityMention, Memory
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
 from memry.rest import create_app
@@ -144,6 +145,53 @@ def test_rest_categories(client):
     client.post("/api/v1/memories", json={"content": "b", "user_id": "u", "infer": False, "categories": ["work"]})
     cats = client.get("/api/v1/categories", params={"user_id": "u"}).json()
     assert cats == [{"category": "work", "count": 2}, {"category": "diet", "count": 1}]
+
+
+def test_rest_map_is_complete_content_free_and_not_card_paginated():
+    store = make_store()
+    memories = [
+        store.backend.insert_memory(
+            Memory(
+                content=f"sensitive memory {index}",
+                categories=[f"tag-{index}"],
+                user_id="ada",
+            )
+        )
+        for index in range(105)
+    ]
+    person = store.backend.insert_entity(
+        Entity(name="Ada", entity_type="person", user_id="ada")
+    )
+    concept = store.backend.insert_entity(
+        Entity(name="Retrieval", entity_type="concept", user_id="ada")
+    )
+    for entity in (person, concept):
+        store.backend.add_mention(
+            EntityMention(
+                entity_id=entity.id,
+                memory_id=memories[0].id,
+                surface=entity.name,
+            )
+        )
+
+    with TestClient(create_app(store)) as scoped_client:
+        cards = scoped_client.get(
+            "/api/v1/memories", params={"user_id": "ada", "limit": 100}
+        ).json()
+        response = scoped_client.get("/api/v1/map", params={"user_id": "ada"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(cards) == 100
+    assert data["memories"] == 105
+    assert len(data["tags"]) == 105
+    assert {node["entity_type"] for node in data["entities"]} == {
+        "person",
+        "concept",
+    }
+    serialized = response.text
+    assert "sensitive memory" not in serialized
+    assert "content" not in serialized
 
 
 def test_rest_lossless_export_and_idempotent_restore(client):

@@ -923,6 +923,166 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
 
+    def knowledge_map(self, scope: Scope) -> dict[str, Any]:
+        """Return a content-free, all-memory graph for the dashboard map.
+
+        This is intentionally independent of card pagination. SQL performs the
+        aggregation so no memory text or per-memory entity payload is sent to
+        the browser and large stores do not trigger an N+1 entity lookup.
+        """
+        memory_clause, memory_params = _scope_clause(scope, prefix="m.")
+        topic1_clause, topic1_params = _scope_clause(scope, prefix="t1.")
+        topic2_clause, topic2_params = _scope_clause(scope, prefix="t2.")
+        entity1_clause, entity1_params = _scope_clause(scope, prefix="e1.")
+        entity2_clause, entity2_params = _scope_clause(scope, prefix="e2.")
+
+        with self._lock:
+            total = self._db.execute(
+                f"SELECT COUNT(*) AS count FROM memories m "
+                f"WHERE m.invalid_at IS NULL AND {memory_clause}",
+                memory_params,
+            ).fetchone()["count"]
+            entity_memories = self._db.execute(
+                "SELECT COUNT(DISTINCT m.id) AS count FROM memories m "
+                "JOIN entity_mentions em ON em.memory_id = m.id "
+                "JOIN entities e ON e.id = em.entity_id "
+                f"WHERE m.invalid_at IS NULL AND e.merged_into IS NULL AND {memory_clause}",
+                memory_params,
+            ).fetchone()["count"]
+            tag_rows = self._db.execute(
+                "SELECT t1.normalized AS label, m.memory_type, "
+                "COUNT(DISTINCT m.id) AS count "
+                "FROM memory_topics mt "
+                "JOIN topics t1 ON t1.id = mt.topic_id "
+                "JOIN memories m ON m.id = mt.memory_id "
+                f"WHERE m.invalid_at IS NULL AND {topic1_clause} "
+                f"AND {memory_clause} "
+                "GROUP BY t1.normalized, m.memory_type "
+                "ORDER BY t1.normalized, m.memory_type",
+                (*topic1_params, *memory_params),
+            ).fetchall()
+            untagged_rows = self._db.execute(
+                "SELECT m.memory_type, COUNT(*) AS count FROM memories m "
+                f"WHERE m.invalid_at IS NULL AND {memory_clause} "
+                "AND NOT EXISTS (SELECT 1 FROM memory_topics mt "
+                "                WHERE mt.memory_id = m.id) "
+                "GROUP BY m.memory_type ORDER BY m.memory_type",
+                memory_params,
+            ).fetchall()
+            entity_rows = self._db.execute(
+                "SELECT e1.id, e1.name, "
+                "COALESCE(NULLIF(e1.entity_type, ''), 'untyped') AS entity_type, "
+                "m.memory_type, COUNT(DISTINCT m.id) AS count "
+                "FROM entity_mentions em "
+                "JOIN entities e1 ON e1.id = em.entity_id "
+                "JOIN memories m ON m.id = em.memory_id "
+                "WHERE e1.merged_into IS NULL AND m.invalid_at IS NULL "
+                f"AND {entity1_clause} AND {memory_clause} "
+                "GROUP BY e1.id, e1.name, entity_type, m.memory_type "
+                "ORDER BY e1.name, e1.id, m.memory_type",
+                (*entity1_params, *memory_params),
+            ).fetchall()
+            tag_edge_rows = self._db.execute(
+                "SELECT t1.normalized AS a, t2.normalized AS b, "
+                "COUNT(DISTINCT m.id) AS weight "
+                "FROM memory_topics mt1 "
+                "JOIN memory_topics mt2 ON mt2.memory_id = mt1.memory_id "
+                " AND mt2.topic_id > mt1.topic_id "
+                "JOIN topics t1 ON t1.id = mt1.topic_id "
+                "JOIN topics t2 ON t2.id = mt2.topic_id "
+                "JOIN memories m ON m.id = mt1.memory_id "
+                "WHERE m.invalid_at IS NULL "
+                f"AND {topic1_clause} AND {topic2_clause} AND {memory_clause} "
+                "GROUP BY t1.normalized, t2.normalized "
+                "ORDER BY weight DESC, a, b LIMIT 50000",
+                (*topic1_params, *topic2_params, *memory_params),
+            ).fetchall()
+            entity_edge_rows = self._db.execute(
+                "SELECT e1.id AS a, e2.id AS b, "
+                "COUNT(DISTINCT m.id) AS weight "
+                "FROM entity_mentions em1 "
+                "JOIN entity_mentions em2 ON em2.memory_id = em1.memory_id "
+                " AND em2.entity_id > em1.entity_id "
+                "JOIN entities e1 ON e1.id = em1.entity_id "
+                "JOIN entities e2 ON e2.id = em2.entity_id "
+                "JOIN memories m ON m.id = em1.memory_id "
+                "WHERE e1.merged_into IS NULL AND e2.merged_into IS NULL "
+                "AND m.invalid_at IS NULL "
+                f"AND {entity1_clause} AND {entity2_clause} AND {memory_clause} "
+                "GROUP BY e1.id, e2.id "
+                "ORDER BY weight DESC, a, b LIMIT 50000",
+                (*entity1_params, *entity2_params, *memory_params),
+            ).fetchall()
+
+        tags: dict[str, dict[str, Any]] = {}
+        for row in tag_rows:
+            key = f"tag:{row['label']}"
+            node = tags.setdefault(
+                key,
+                {
+                    "key": key,
+                    "label": row["label"],
+                    "kind": "tag",
+                    "count": 0,
+                    "type_counts": {},
+                },
+            )
+            node["count"] += row["count"]
+            node["type_counts"][row["memory_type"]] = row["count"]
+        if untagged_rows:
+            node = {
+                "key": "tag:(untagged)",
+                "label": "(untagged)",
+                "kind": "tag",
+                "count": 0,
+                "type_counts": {},
+            }
+            for row in untagged_rows:
+                node["count"] += row["count"]
+                node["type_counts"][row["memory_type"]] = row["count"]
+            tags[node["key"]] = node
+
+        entities: dict[str, dict[str, Any]] = {}
+        for row in entity_rows:
+            key = f"entity:{row['id']}"
+            node = entities.setdefault(
+                key,
+                {
+                    "key": key,
+                    "label": row["name"],
+                    "kind": "entity",
+                    "entity_id": row["id"],
+                    "entity_type": row["entity_type"],
+                    "count": 0,
+                    "type_counts": {},
+                },
+            )
+            node["count"] += row["count"]
+            node["type_counts"][row["memory_type"]] = row["count"]
+
+        return {
+            "memories": total,
+            "entity_memories": entity_memories,
+            "tags": list(tags.values()),
+            "tag_edges": [
+                {
+                    "a": f"tag:{row['a']}",
+                    "b": f"tag:{row['b']}",
+                    "weight": row["weight"],
+                }
+                for row in tag_edge_rows
+            ],
+            "entities": list(entities.values()),
+            "entity_edges": [
+                {
+                    "a": f"entity:{row['a']}",
+                    "b": f"entity:{row['b']}",
+                    "weight": row["weight"],
+                }
+                for row in entity_edge_rows
+            ],
+        }
+
     # -- search -----------------------------------------------------------
     def _score_rows(
         self, rows: list[sqlite3.Row], embedding: list[float], limit: int

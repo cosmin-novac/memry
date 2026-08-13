@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from memry.backends.local import LocalBackend
-from memry.models import Episode, Memory, MemoryEvent, Scope
+from memry.models import Entity, EntityMention, Episode, Memory, MemoryEvent, Scope
 from memry.providers.embeddings import HashEmbedder
 
 
@@ -19,6 +19,63 @@ def test_insert_get_list_scoping():
     assert [m.content for m in ada] == ["likes coffee"]
     everyone = b.list_memories(Scope())
     assert len(everyone) == 2
+
+
+def test_knowledge_map_aggregates_all_memories_without_content():
+    backend = make_backend()
+    first = backend.insert_memory(
+        Memory(
+            content="sensitive first memory",
+            categories=["Work", "AI"],
+            memory_type="semantic",
+            user_id="ada",
+        )
+    )
+    second = backend.insert_memory(
+        Memory(
+            content="sensitive second memory",
+            categories=["Work"],
+            memory_type="procedural",
+            user_id="ada",
+        )
+    )
+    backend.insert_memory(
+        Memory(content="other tenant secret", categories=["Private"], user_id="bob")
+    )
+    ada = backend.insert_entity(
+        Entity(name="Ada", entity_type="person", user_id="ada")
+    )
+    rag = backend.insert_entity(
+        Entity(name="RAG", entity_type="concept", user_id="ada")
+    )
+    for entity, memory in ((ada, first), (rag, first), (ada, second)):
+        backend.add_mention(
+            EntityMention(
+                entity_id=entity.id, memory_id=memory.id, surface=entity.name
+            )
+        )
+
+    data = backend.knowledge_map(Scope(user_id="ada"))
+
+    assert data["memories"] == 2
+    assert data["entity_memories"] == 2
+    assert {node["label"]: node["count"] for node in data["tags"]} == {
+        "ai": 1,
+        "work": 2,
+    }
+    entities = {node["label"]: node for node in data["entities"]}
+    assert entities["Ada"]["count"] == 2
+    assert entities["Ada"]["type_counts"] == {"semantic": 1, "procedural": 1}
+    assert entities["RAG"]["entity_type"] == "concept"
+    assert len(data["tag_edges"]) == 1
+    assert {data["tag_edges"][0]["a"], data["tag_edges"][0]["b"]} == {
+        "tag:ai", "tag:work"
+    }
+    assert data["tag_edges"][0]["weight"] == 1
+    assert data["entity_edges"][0]["weight"] == 1
+    serialized = str(data)
+    assert "sensitive" not in serialized
+    assert "other tenant" not in serialized
 
 
 def test_keyword_search_bm25():

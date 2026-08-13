@@ -107,6 +107,97 @@ class MemoryBackend(ABC):
         entity_id: str | None = None,
     ) -> list[Memory]: ...
 
+    def knowledge_map(self, scope: Scope) -> dict[str, Any]:
+        """Aggregate active knowledge for visualization without exposing content.
+
+        Runtime storage uses the SQLite override below. This bounded generic
+        implementation keeps injected comparison/test backends compatible.
+        """
+        nodes: dict[str, dict[str, Any]] = {}
+        edges: dict[str, dict[tuple[str, str], int]] = {
+            "tags": {},
+            "entities": {},
+        }
+        memories = self.list_memories(scope, limit=1_000_000)
+        entity_memory_ids: set[str] = set()
+
+        def add_node(
+            key: str,
+            label: str,
+            kind: str,
+            memory_type: str,
+            **extra: Any,
+        ) -> None:
+            node = nodes.setdefault(
+                key,
+                {
+                    "key": key,
+                    "label": label,
+                    "kind": kind,
+                    "count": 0,
+                    "type_counts": {},
+                    **extra,
+                },
+            )
+            node["count"] += 1
+            counts = node["type_counts"]
+            counts[memory_type] = counts.get(memory_type, 0) + 1
+
+        def add_edges(kind: str, keys: list[str]) -> None:
+            unique = sorted(set(keys))
+            for index, first in enumerate(unique):
+                for second in unique[index + 1 :]:
+                    pair = (first, second)
+                    edges[kind][pair] = edges[kind].get(pair, 0) + 1
+
+        for memory in memories:
+            memory_type = str(memory.memory_type or "semantic")
+            tags = sorted(
+                {
+                    str(category).strip().lower()
+                    for category in (memory.categories or [])
+                    if str(category).strip()
+                }
+            ) or ["(untagged)"]
+            tag_keys = [f"tag:{tag}" for tag in tags]
+            for tag, key in zip(tags, tag_keys):
+                add_node(key, tag, "tag", memory_type)
+            add_edges("tags", tag_keys)
+
+            entities = self.entities_of_memory(memory.id)
+            if entities:
+                entity_memory_ids.add(memory.id)
+            entity_keys = [f"entity:{entity.id}" for entity in entities]
+            for entity, key in zip(entities, entity_keys):
+                add_node(
+                    key,
+                    entity.name,
+                    "entity",
+                    memory_type,
+                    entity_id=entity.id,
+                    entity_type=entity.entity_type or "untyped",
+                )
+            add_edges("entities", entity_keys)
+
+        def edge_rows(kind: str) -> list[dict[str, Any]]:
+            return [
+                {"a": a, "b": b, "weight": weight}
+                for (a, b), weight in sorted(
+                    edges[kind].items(), key=lambda item: (-item[1], item[0])
+                )
+            ]
+
+        return {
+            "memories": len(memories),
+            "entity_memories": len(entity_memory_ids),
+            "tags": [node for node in nodes.values() if node["kind"] == "tag"],
+            "tag_edges": edge_rows("tags"),
+            "entities": [
+                node for node in nodes.values() if node["kind"] == "entity"
+            ],
+            "entity_edges": edge_rows("entities"),
+        }
+
     # -- search primitives ---------------------------------------------
     @abstractmethod
     def vector_search(

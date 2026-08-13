@@ -60,46 +60,71 @@ def test_dashboard_javascript_parses(tmp_path):
         )
 
 
-def test_map_groups_memories_by_tags_or_entities_and_draws_type_shapes():
+def test_map_uses_complete_aggregates_entity_types_and_rendering_bounds():
     html = _dashboard_html()
     source = "\n".join(_scripts(html))
 
     assert 'id="mapTagsBtn"' in html
     assert 'id="mapEntitiesBtn"' in html
+    assert 'id="mapEntityFilter"' in html
     assert 'aria-label="Memory type shapes"' in html
+    assert "api('/api/v1/map')" in source
+    assert "const MAX_IDLE_EDGES=120" in source
+    assert "const displayedEdges=sel?(G.edgesByNode[sel.key]||[]):G.idleEdges" in source
+    assert "const showSatellites=sel?selectedNeighbor:n.zone!=='rim'" in source
     assert "function drawMemoryMarker(ctx,type,x,y,size)" in source
 
     map_source = source[
-        source.index("const hashCode=") : source.index("function drawMap(items){")
+        source.index("const hashCode=") : source.index("function drawMap(){")
     ]
     contract = """
 const window={};
-const document={getElementById:()=>({})};
+const document={getElementById:()=>({setAttribute:()=>{}})};
 const localStorage={getItem:()=>null,setItem:()=>{}};
 const matchMedia=()=>({matches:true});
-const cats=m=>((m.categories&&m.categories.length)?m.categories:['(untagged)'])
-  .map(c=>String(c).toLowerCase());
+let activeMapKey=null,hoverMapKey=null,hoverFocusTag=null;
+const updateHover=()=>{};
+const esc=value=>value;
 """ + map_source + """
 function check(condition,message){if(!condition)throw new Error(message)}
-const items=[
-  {content:'Ada works on Helios',categories:['Work'],memory_type:'semantic',
-   entity_links:[{id:'ada-1',name:'Ada',entity_type:'person'},
-                 {id:'helios-1',name:'Helios',entity_type:'project'}]},
-  {content:'Ask Ada before release',categories:['Work'],memory_type:'procedural',
-   entity_links:[{id:'ada-1',name:'Ada',entity_type:'person'}]},
-  {content:'Went hiking',categories:['Life'],memory_type:'episodic',entity_links:[]}
-];
+const tagEdges=Array.from({length:130},(_,index)=>({
+  a:'tag:work',b:'tag:t'+index,weight:1
+}));
+const data={
+  memories:132,entity_memories:2,
+  tags:[
+    {key:'tag:work',label:'work',kind:'tag',count:2,
+     type_counts:{semantic:1,procedural:1}},
+    ...Array.from({length:130},(_,index)=>({
+      key:'tag:t'+index,label:'t'+index,kind:'tag',count:1,
+      type_counts:{episodic:1}
+    }))
+  ],
+  tag_edges:tagEdges,
+  entities:[
+    {key:'entity:ada-1',label:'Ada',kind:'entity',entity_id:'ada-1',
+     entity_type:'person',count:2,type_counts:{semantic:1,procedural:1}},
+    {key:'entity:rag-1',label:'RAG',kind:'entity',entity_id:'rag-1',
+     entity_type:'concept',count:1,type_counts:{semantic:1}}
+  ],
+  entity_edges:[{a:'entity:ada-1',b:'entity:rag-1',weight:1}]
+};
+mapData=data;
 mapMode='tags';
-const tags=buildGalaxy(items);
-check(tags.total===3,'tag total');
+const tags=buildGalaxy(data);
+check(tags.total===132,'tag total');
 check(tags.byKey['tag:work'].count===2,'tag count');
-check(tags.byKey['tag:work'].memoryTypes.join(',')==='semantic,procedural','types');
+check(tags.byKey['tag:work'].typeCounts.procedural===1,'type counts');
+check(tags.idleEdges.length===120,'idle edge cap');
 mapMode='entities';
-const entities=buildGalaxy(items);
-check(entities.total===2,'linked memory total');
-check(entities.byKey['entity:ada-1'].count===2,'entity count');
-check(entities.byKey['entity:helios-1'].entityType==='project','entity type');
-check(!entities.byKey['entity:undefined'],'fake entity');
+mapEntityTypes=null;
+const defaultEntities=buildGalaxy(data);
+check(defaultEntities.total===2,'linked memory total');
+check(defaultEntities.byKey['entity:ada-1'].count===2,'entity count');
+check(!defaultEntities.byKey['entity:rag-1'],'concept should default off');
+mapEntityTypes.add('concept');
+const allEntities=buildGalaxy(data);
+check(allEntities.byKey['entity:rag-1'].entityType==='concept','concept opt-in');
 """
     result = subprocess.run(
         ["node", "-"], input=contract, capture_output=True, text=True

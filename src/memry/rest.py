@@ -164,10 +164,15 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 #mapwrap:fullscreen,#mapwrap.maxed{padding:0;border:0;border-radius:0;background:var(--bg)}
 #mapwrap:fullscreen #map,#mapwrap.maxed #map{border-radius:0}
 #mapwrap.maxed{position:fixed;inset:0;z-index:99999}
-.gx-ctrl{position:absolute;top:.6rem;right:.6rem;display:flex;gap:.4rem;z-index:3}
-.gx-ctrl button{background:color-mix(in srgb,var(--panel) 68%,transparent);border:1px solid var(--line);color:var(--dim);border-radius:7px;padding:.3rem .5rem;font-size:.72rem;cursor:pointer;backdrop-filter:blur(5px);line-height:1}
-.gx-ctrl button:hover{color:var(--accent);border-color:var(--accent)}
-.gx-ctrl button[aria-pressed="true"]{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
+.gx-ctrl{position:absolute;top:.6rem;right:.6rem;display:flex;gap:.4rem;align-items:flex-start;z-index:3}
+.gx-ctrl button,.gx-types summary{background:color-mix(in srgb,var(--panel) 68%,transparent);border:1px solid var(--line);color:var(--dim);border-radius:7px;padding:.3rem .5rem;font-size:.72rem;cursor:pointer;backdrop-filter:blur(5px);line-height:1;list-style:none}
+.gx-ctrl button:hover,.gx-types summary:hover{color:var(--accent);border-color:var(--accent)}
+.gx-ctrl button[aria-pressed="true"],.gx-types[open] summary{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
+.gx-types{position:relative}.gx-types[hidden]{display:none}.gx-types summary::-webkit-details-marker{display:none}
+.gx-type-menu{position:absolute;right:0;top:1.9rem;width:15rem;max-height:min(25rem,70vh);overflow:auto;background:color-mix(in srgb,var(--panel) 96%,transparent);border:1px solid var(--line);border-radius:9px;padding:.55rem;box-shadow:0 .7rem 2rem rgba(0,0,0,.28);backdrop-filter:blur(8px)}
+.gx-type-option{display:flex;align-items:center;gap:.45rem;padding:.22rem .1rem;color:var(--text);font-size:.75rem;white-space:nowrap}.gx-type-option input{width:auto;margin:0}.gx-type-option .cnt{margin-left:auto}
+.gx-type-actions{display:flex;gap:.35rem;margin-top:.45rem;padding-top:.45rem;border-top:1px solid var(--line)}
+.gx-type-actions button{flex:1}
 .gx-read{position:absolute;top:.6rem;left:.6rem;z-index:3;font-size:.75rem;color:var(--dim);background:color-mix(in srgb,var(--panel) 60%,transparent);border:1px solid var(--line);border-radius:7px;padding:.32rem .6rem;backdrop-filter:blur(5px);max-width:62%;pointer-events:none;opacity:0;transition:opacity .15s}
 .gx-read.on{opacity:1}.gx-read b{color:var(--text)}
 .gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
@@ -211,8 +216,19 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 </div>
 <div id="mapwrap" hidden><canvas id="map"></canvas>
 <div class="gx-ctrl">
-  <button id="mapTagsBtn" onclick="setMapMode('tags')" title="Group memories by tag.">Tags</button>
-  <button id="mapEntitiesBtn" onclick="setMapMode('entities')" title="Group memories by person or thing.">Entities</button>
+  <button id="mapTagsBtn" onclick="setMapMode('tags')" title="Group every active memory by tag.">Tags</button>
+  <button id="mapEntitiesBtn" onclick="setMapMode('entities')" title="Group every active memory by person or thing.">Entities</button>
+  <details class="gx-types" id="mapEntityFilter" hidden>
+    <summary title="Choose which entity types appear on the map.">Types</summary>
+    <div class="gx-type-menu">
+      <div id="mapEntityTypeOptions"></div>
+      <div class="gx-type-actions">
+        <button type="button" onclick="setMapEntityTypes('defaults')" title="Show all entity types except concept and other.">defaults</button>
+        <button type="button" onclick="setMapEntityTypes('all')" title="Show every entity type.">all</button>
+        <button type="button" onclick="setMapEntityTypes('none')" title="Hide every entity type.">none</button>
+      </div>
+    </div>
+  </details>
   <button id="fsBtn" title="Open the map fullscreen." aria-label="Fullscreen">⤢</button>
 </div>
 <div class="gx-read" id="mapread"></div><div class="gx-stat" id="mapstat"></div>
@@ -373,7 +389,7 @@ function syncPanels(){
   // the button, so a filter can never be silently applied behind a closed panel.
   document.getElementById('filterpanel').hidden=!panels.filters;
   document.getElementById('filterbtn').setAttribute('aria-pressed',panels.filters);
-  drawMap(current);
+  drawMap();
 }
 function togglePanel(name){
   panels[name]=!panels[name];
@@ -390,21 +406,19 @@ const moreBar=()=>haveMore
 // on every "load more" is quadratic: reaching 10k memories a hundred at a time
 // would re-render half a million cards. Appending costs only what arrived.
 function render(items,appendFrom){
-  current=items; drawMap(items);
-  const shown=activeMapKey?items.filter(m=>galaxyGroups(m).some(group=>group.key===activeMapKey)):items;
+  current=items;drawMap();
   const el=document.getElementById('list');
-  if(!shown.length&&!haveMore){
-    const active=G&&G.byKey[activeMapKey];
-    el.innerHTML='<div class="empty">'+(activeMapKey?'No memories linked to '+esc(active?active.label:'this map item')+'.':(searchActive?'No memories match this search.':'No memories yet.'))+'</div>';return;
+  if(!items.length&&!haveMore){
+    el.innerHTML='<div class="empty">'+(searchActive?'No memories match this search.':'No memories yet.')+'</div>';return;
   }
   const card=m=>m.id===editingId?editCard(m):viewCard(m);
-  if(appendFrom!==undefined&&appendFrom>0&&!activeMapKey){
+  if(appendFrom!==undefined&&appendFrom>0){
     document.getElementById('morebar')?.remove();
     el.insertAdjacentHTML('beforeend',
-      shown.slice(appendFrom).map(card).join('')+moreBar());
+      items.slice(appendFrom).map(card).join('')+moreBar());
     return;
   }
-  el.innerHTML=shown.map(card).join('')+moreBar();
+  el.innerHTML=items.map(card).join('')+moreBar();
 }
 function viewCard(m){
   return `<div class="mem"><button class="del" title="forget" onclick="del('${m.id}')">✕</button>
@@ -459,69 +473,102 @@ const gTone=(n,dark)=>{const j=((n.seed%1000)/1000-0.5);
   return{h:248+j*40,s:dark?60:50,l:dark?74:44};};
 const hsla=(c,a,dl)=>'hsla('+c.h+','+c.s+'%,'+Math.max(4,Math.min(96,c.l+(dl||0)))+'%,'+a+')';
 const hexA=(hex,a)=>{const v=parseInt(hex.slice(1),16);return'rgba('+((v>>16)&255)+','+((v>>8)&255)+','+(v&255)+','+a+')'};
-const memoryType=m=>{const type=String(m.memory_type||m.type||'semantic').toLowerCase();
-  return['semantic','procedural','episodic','working'].includes(type)?type:'semantic'};
-function galaxyGroups(memory){
-  if(mapMode==='entities'){
-    const unique=new Map();
-    for(const entity of memory.entity_links||[]){
-      if(!entity.id)continue;
-      unique.set('entity:'+entity.id,{key:'entity:'+entity.id,label:entity.name||entity.id,
-        kind:'entity',entityId:entity.id,entityType:entity.entity_type||'untyped'});
-    }
-    return [...unique.values()];
+const MAX_IDLE_EDGES=120;
+let mapData=null,mapEntityTypes=null;
+function knownEntityTypes(){
+  if(!mapData)return[];
+  return [...new Set(mapData.entities.map(node=>node.entity_type||'untyped'))].sort();
+}
+function defaultEntityTypes(){
+  return knownEntityTypes().filter(type=>type!=='concept'&&type!=='other');
+}
+function saveMapEntityTypes(){
+  localStorage.setItem('memry_map_entity_types',JSON.stringify([...mapEntityTypes].sort()));
+}
+function initializeMapEntityTypes(){
+  if(mapEntityTypes!==null)return;
+  let saved=null;
+  try{saved=JSON.parse(localStorage.getItem('memry_map_entity_types')||'null')}catch(error){}
+  mapEntityTypes=new Set(Array.isArray(saved)?saved:defaultEntityTypes());
+}
+function renderMapEntityTypes(){
+  const filter=document.getElementById('mapEntityFilter');
+  filter.hidden=mapMode!=='entities';
+  if(!mapData)return;
+  initializeMapEntityTypes();
+  const counts={};
+  mapData.entities.forEach(node=>{
+    const type=node.entity_type||'untyped';counts[type]=(counts[type]||0)+1;
+  });
+  document.getElementById('mapEntityTypeOptions').innerHTML=knownEntityTypes().map(type=>
+    '<label class="gx-type-option"><input type="checkbox" '+(mapEntityTypes.has(type)?'checked':'')
+      +' onchange="toggleMapEntityType('+JSON.stringify(type)+',this.checked)">'
+      +'<span>'+esc(type)+'</span><span class="cnt">'+counts[type]+'</span></label>'
+  ).join('')||'<div class="hint">No entity types yet.</div>';
+}
+function toggleMapEntityType(type,checked){
+  if(checked)mapEntityTypes.add(type);else mapEntityTypes.delete(type);
+  if(activeMapKey&&G&&G.byKey[activeMapKey]&&G.byKey[activeMapKey].entityType===type)
+    activeMapKey=null;
+  saveMapEntityTypes();drawMap();
+}
+function setMapEntityTypes(mode){
+  const types=mode==='all'?knownEntityTypes():(mode==='none'?[]:defaultEntityTypes());
+  mapEntityTypes=new Set(types);activeMapKey=null;saveMapEntityTypes();
+  renderMapEntityTypes();drawMap();
+}
+async function loadMapData(){
+  const data=await api('/api/v1/map');
+  mapData=data;
+  if(mapEntityTypes===null)initializeMapEntityTypes();
+  if(activeMapKey){
+    const keys=new Set([...data.tags,...data.entities].map(node=>node.key));
+    if(!keys.has(activeMapKey))activeMapKey=null;
   }
-  return cats(memory).map(tag=>({key:'tag:'+tag,label:tag,kind:'tag'}));
+  renderMapEntityTypes();drawMap();
 }
 function syncMapModeButtons(){
   document.getElementById('mapTagsBtn').setAttribute('aria-pressed',mapMode==='tags');
   document.getElementById('mapEntitiesBtn').setAttribute('aria-pressed',mapMode==='entities');
+  renderMapEntityTypes();
 }
 function setMapMode(mode){
   if(mode!=='tags'&&mode!=='entities')return;
   mapMode=mode;localStorage.setItem('memry_map_mode',mode);
-  activeMapKey=null;updateHover(null);syncMapModeButtons();render(current);
+  activeMapKey=null;updateHover(null);syncMapModeButtons();drawMap();
 }
-function buildGalaxy(items){
-  const groups=new Map();let linkedMemories=0;
-  for(const memory of items){
-    const refs=galaxyGroups(memory);
-    if(refs.length)linkedMemories++;
-    for(const ref of refs){
-      let group=groups.get(ref.key);
-      if(!group){group={...ref,count:0,memoryTypes:[]};groups.set(ref.key,group)}
-      group.count++;group.memoryTypes.push(memoryType(memory));
-    }
+function buildGalaxy(data){
+  let source=mapMode==='entities'?data.entities:data.tags;
+  if(mapMode==='entities'){
+    initializeMapEntityTypes();
+    source=source.filter(node=>mapEntityTypes.has(node.entity_type||'untyped'));
   }
-  if(!groups.size)return null;
-  const vals=[...groups.values()].map(group=>group.count);
+  if(!source.length)return null;
+  const vals=source.map(node=>node.count);
   const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
   const sd=Math.sqrt(vals.reduce((a,c)=>a+(c-mean)**2,0)/vals.length);
   const coreMin=mean+2*sd,rimMax=Math.max(1,mean-2*sd),maxC=Math.max(...vals);
-  const fb=!vals.some(c=>c>=coreMin);
+  const fb=!vals.some(count=>count>=coreMin);
   const ZF={core:1.0,belt:1.28,rim:1.55};
-  const nodes=[...groups.values()].sort((a,b)=>a.label.localeCompare(b.label)).map(group=>{
-    const zone=(fb?group.count===maxC:group.count>=coreMin)?'core':(group.count<=rimMax?'rim':'belt');
-    return{...group,zone,radius:Math.min(34,(9+5*Math.sqrt(group.count))*ZF[zone]),seed:hashCode(group.key),h:0};
-  });
+  const nodes=source.map(raw=>{
+    const zone=(fb?raw.count===maxC:raw.count>=coreMin)?'core':(raw.count<=rimMax?'rim':'belt');
+    return{...raw,typeCounts:raw.type_counts||{},zone,
+      entityType:raw.entity_type||'untyped',
+      radius:Math.min(34,(9+5*Math.sqrt(raw.count))*ZF[zone]),
+      seed:hashCode(raw.key),h:0};
+  }).sort((a,b)=>a.label.localeCompare(b.label));
   const index=new Map(nodes.map((node,i)=>[node.key,i]));
-  const edgeMap=new Map();
-  const bump=(a,b,w)=>{if(a===b)return;const k=a<b?a+':'+b:b+':'+a;edgeMap.set(k,(edgeMap.get(k)||0)+w)};
-  for(const memory of items){
-    const refs=galaxyGroups(memory),keys=new Set(refs.map(ref=>ref.key));
-    for(let i=0;i<refs.length;i++)for(let j=i+1;j<refs.length;j++)bump(index.get(refs[i].key),index.get(refs[j].key),2);
-    if(mapMode==='tags'&&refs.length){
-      const content=String(memory.content||'').toLowerCase();
-      for(const node of nodes){
-        if(keys.has(node.key)||node.label.length<3||node.label==='(untagged)')continue;
-        if(content.includes(node.label))bump(index.get(refs[0].key),index.get(node.key),1);
-      }
-    }
-  }
-  const edges=[...edgeMap.entries()].map(([k,w])=>{const[a,b]=k.split(':').map(Number);return{a,b,weight:Math.min(3,w)}});
-  const neigh={};
-  edges.forEach(edge=>{const a=nodes[edge.a].key,b=nodes[edge.b].key;
-    (neigh[a]??=new Set()).add(b);(neigh[b]??=new Set()).add(a);});
+  const rawEdges=mapMode==='entities'?data.entity_edges:data.tag_edges;
+  const edges=rawEdges
+    .filter(edge=>index.has(edge.a)&&index.has(edge.b))
+    .map(edge=>({a:index.get(edge.a),b:index.get(edge.b),weight:Math.min(3,edge.weight)}))
+    .sort((a,b)=>b.weight-a.weight||a.a-b.a||a.b-b.b);
+  const neigh={},edgesByNode={};
+  edges.forEach(edge=>{
+    const a=nodes[edge.a].key,b=nodes[edge.b].key;
+    (neigh[a]??=new Set()).add(b);(neigh[b]??=new Set()).add(a);
+    (edgesByNode[a]??=[]).push(edge);(edgesByNode[b]??=[]).push(edge);
+  });
   const BANDS={core:[0.02,0.16],belt:[0.30,0.62],rim:[0.66,0.99]};
   const PHASE={core:0,belt:0.7,rim:1.4},PACK={core:4,belt:16,rim:22},GOLDEN=2.399963229728653;
   for(const zone of['core','belt','rim']){
@@ -536,17 +583,24 @@ function buildGalaxy(items){
       else if(dense){node.rFrac=lo+(hi-lo)*Math.sqrt((k+0.5)/N);node.ang=PHASE[zone]+k*GOLDEN;}
       else{node.ang=PHASE[zone]+k*(Math.PI*2/N)+(rnd()-0.5)*0.22;node.rFrac=lo+(hi-lo)*(0.35+0.5*rnd());}});
   }
-  return{nodes,edges,neigh,byKey:Object.fromEntries(nodes.map(node=>[node.key,node])),fb,total:linkedMemories,mode:mapMode};
+  return{
+    nodes,edges,neigh,edgesByNode,idleEdges:edges.slice(0,MAX_IDLE_EDGES),
+    byKey:Object.fromEntries(nodes.map(node=>[node.key,node])),fb,
+    total:mapMode==='entities'?(data.entity_memories??data.memories):data.memories,
+    mode:mapMode,
+  };
 }
-function drawMap(items){
+function drawMap(){
   const wrap=document.getElementById('mapwrap'),empty=document.getElementById('mapempty');
-  const visible=panels.map&&items.length;
+  const visible=panels.map&&mapData&&mapData.memories;
   wrap.hidden=!visible;
   if(!visible){G=null;empty.hidden=true;if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return}
-  G=buildGalaxy(items);sizeGalaxy();syncMapModeButtons();
+  G=buildGalaxy(mapData);sizeGalaxy();syncMapModeButtons();
   empty.hidden=!!G;
   if(!G){
-    empty.textContent='No memories with linked entities in this view.';
+    empty.textContent=mapMode==='entities'
+      ?'No entities match the selected types.'
+      :'No tags are available.';
     const canvas=document.getElementById('map'),ctx=canvas.getContext('2d');
     ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
     if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return;
@@ -554,8 +608,7 @@ function drawMap(items){
   galaxyRead();
   if(reducedMotion)galaxyFrame(performance.now());
   else if(!gRAF)gRAF=requestAnimationFrame(galaxyFrame);
-}
-function sizeGalaxy(){
+}function sizeGalaxy(){
   const wrap=document.getElementById('mapwrap'),canvas=document.getElementById('map');
   const big=document.fullscreenElement===wrap||gMaxed;
   let width,height;
@@ -573,15 +626,17 @@ function galaxyRead(){
   if(!G){readEl.classList.remove('on');return}
   const node=activeMapKey?G.byKey[activeMapKey]:(hoverMapKey?G.byKey[hoverMapKey]:null);
   if(node){
-    const typeCounts={};node.memoryTypes.forEach(type=>typeCounts[type]=(typeCounts[type]||0)+1);
-    const types=Object.entries(typeCounts).map(([type,count])=>count+' '+type).join(', ');
+    const types=Object.entries(node.typeCounts).map(([type,count])=>count+' '+type).join(', ');
     const heading=node.kind==='tag'?'#'+node.label:node.label+' · '+node.entityType;
-    readEl.innerHTML='<b>'+esc(heading)+'</b> · '+node.count+' memor'+(node.count===1?'y':'ies')+' · '+types
-      +(activeMapKey===node.key?' · filtering':'');
+    readEl.innerHTML='<b>'+esc(heading)+'</b> · '+node.count+' memor'+(node.count===1?'y':'ies')
+      +(types?' · '+types:'')+(activeMapKey===node.key?' · filtering':'');
     readEl.classList.add('on');
   }else readEl.classList.remove('on');
   const noun=G.mode==='entities'?'entities':'tags',linked=G.mode==='entities'?' linked':'';
-  statEl.textContent=G.nodes.length+' '+noun+' · '+G.total+linked+' memories'+(G.fb?' · core = largest':'');
+  const shownLinks=activeMapKey?(G.edgesByNode[activeMapKey]||[]).length:G.idleEdges.length;
+  const linkNote=G.edges.length?' · '+shownLinks+'/'+G.edges.length+' links shown':'';
+  statEl.textContent=G.nodes.length+' '+noun+' · '+G.total+linked+' memories'+linkNote
+    +(G.fb?' · core = largest':'');
 }
 function galaxyFrame(now){
   if(!G){gRAF=0;return}
@@ -672,8 +727,10 @@ function galaxyFrame(now){
     if(hov)A+=(focusEmph(n,hov)-A)*hoverMix;
     return A;
   };
-  // filaments: soft underglow + bright core line; particles on locked links
-  for(const e of G.edges){
+  // At rest only the strongest links are drawn; with a selection, only links
+  // touching that node are drawn. This keeps dense entity graphs legible.
+  const displayedEdges=sel?(G.edgesByNode[sel.key]||[]):G.idleEdges;
+  for(const e of displayedEdges){
     const na=G.nodes[e.a],nb=G.nodes[e.b];
     const p=pts[na.key],q=pts[nb.key];
     const ca=gTone(na,dark),cb=gTone(nb,dark);
@@ -746,12 +803,14 @@ function galaxyFrame(now){
     ctx.shadowBlur=0;
     ctx.strokeStyle=hsla(c,0.85+0.15*n.h,dark?16:-14);ctx.lineWidth=1.2;
     ctx.beginPath();ctx.arc(x,y,n.radius,0,Math.PI*2);ctx.stroke();
-    const sats=Math.min(n.memoryTypes.length,10);
-    for(let i=0;i<sats;i++){
-      const angle=i/sats*Math.PI*2-Math.PI/2+(reducedMotion?0:t*0.00008);
+    const selectedNeighbor=sel&&(n===sel||(G.neigh[sel.key]&&G.neigh[sel.key].has(n.key)));
+    const showSatellites=sel?selectedNeighbor:n.zone!=='rim';
+    const satelliteTypes=showSatellites?memoryMarkerTypes(n.typeCounts,Math.min(n.count,10)):[];
+    for(let i=0;i<satelliteTypes.length;i++){
+      const angle=i/satelliteTypes.length*Math.PI*2-Math.PI/2+(reducedMotion?0:t*0.00008);
       const ds=1.55+(((n.seed>>3)+i*37)%10)/15;
       ctx.fillStyle=hsla(c,0.9*A,13);
-      drawMemoryMarker(ctx,n.memoryTypes[i],x+(n.radius+7)*Math.cos(angle),y+(n.radius+7)*Math.sin(angle),ds);
+      drawMemoryMarker(ctx,satelliteTypes[i],x+(n.radius+7)*Math.cos(angle),y+(n.radius+7)*Math.sin(angle),ds);
     }
     if(activeMapKey===n.key){
       ctx.strokeStyle=hsla(c,0.95,18);ctx.lineWidth=1.3;
@@ -793,7 +852,22 @@ function galaxyFrame(now){
   if(!reducedMotion&&panels.map&&mapVisible)gRAF=requestAnimationFrame(galaxyFrame);
   else gRAF=0;
 }
-function drawMemoryMarker(ctx,type,x,y,size){
+function memoryMarkerTypes(typeCounts,limit){
+  const order=['semantic','procedural','episodic','working'];
+  const entries=Object.entries(typeCounts||{}).sort((a,b)=>{
+    const ai=order.indexOf(a[0]),bi=order.indexOf(b[0]);
+    return(ai<0?99:ai)-(bi<0?99:bi)||a[0].localeCompare(b[0]);
+  });
+  const total=entries.reduce((sum,entry)=>sum+entry[1],0);
+  if(!total||!limit)return[];
+  return Array.from({length:limit},(_,index)=>{
+    const target=(index+0.5)*total/limit;let cumulative=0;
+    for(const [type,count] of entries){
+      cumulative+=count;if(target<=cumulative)return type;
+    }
+    return entries[entries.length-1][0];
+  });
+}function drawMemoryMarker(ctx,type,x,y,size){
   ctx.beginPath();
   if(type==='procedural')ctx.rect(x-size,y-size,size*2,size*2);
   else if(type==='episodic'){
@@ -815,18 +889,32 @@ function hitNode(event){
   }
   return best;
 }
+async function applyMapNodeFilter(node){
+  const same=activeMapKey===node.key;
+  for(const id of['filter-topic','filter-entity'])
+    [...document.getElementById(id).options].forEach(option=>option.selected=false);
+  if(same){
+    activeMapKey=null;toggleClear();await search();return;
+  }
+  const selectId=node.kind==='tag'?'filter-topic':'filter-entity';
+  const value=node.kind==='tag'?node.label:node.entity_id;
+  const select=document.getElementById(selectId);
+  let option=[...select.options].find(candidate=>candidate.value===value);
+  if(!option){option=new Option(node.label,value);select.add(option)}
+  option.selected=true;activeMapKey=node.key;
+  if(!panels.filters)togglePanel('filters');
+  toggleClear();await search();galaxyRead();
+}
 document.getElementById('map').addEventListener('click',event=>{
   const node=hitNode(event);
   if(node){
-    activeMapKey=activeMapKey===node.key?null:node.key;
     const rootStyle=getComputedStyle(document.documentElement);
     const dark=parseInt((rootStyle.getPropertyValue('--bg').trim()||'#0b0e14').slice(5,7)||'14',16)<120;
     gPulses.push({x:G.CX+node.rFrac*G.RX*Math.cos(node.ang),y:G.CY+node.rFrac*G.RY*Math.sin(node.ang),
       r:node.radius,start:performance.now(),tone:gTone(node,dark)});
-    render(current);
+    applyMapNodeFilter(node).catch(()=>alert('Could not filter memories from the map.'));
   }
-});
-function updateHover(key){
+});function updateHover(key){
   if(key===hoverMapKey)return;
   hoverMapKey=key;
   if(key){hoverFocusTag=key;hoverFocusMix=1;hoverFadeStarted=0}
@@ -844,7 +932,7 @@ document.getElementById('map').addEventListener('mousemove',event=>{
 document.getElementById('map').addEventListener('mouseleave',()=>updateHover(null));
 // Fullscreen: real API where allowed, CSS-maximize fallback otherwise.
 function setMaxed(v){gMaxed=v;document.getElementById('mapwrap').classList.toggle('maxed',v);
-  document.documentElement.style.overflow=v?'hidden':'';drawMap(current)}
+  document.documentElement.style.overflow=v?'hidden':'';drawMap()}
 document.getElementById('fsBtn').addEventListener('click',()=>{
   const wrap=document.getElementById('mapwrap');
   if(document.fullscreenElement){document.exitFullscreen();return}
@@ -854,8 +942,8 @@ document.getElementById('fsBtn').addEventListener('click',()=>{
   else if(!document.fullscreenElement)setMaxed(true);
 });
 window.addEventListener('keydown',e=>{if(e.key==='Escape'&&gMaxed)setMaxed(false);});
-document.addEventListener('fullscreenchange',()=>drawMap(current));
-window.addEventListener('resize',()=>drawMap(current));
+document.addEventListener('fullscreenchange',()=>drawMap());
+window.addEventListener('resize',()=>drawMap());
 const PAGE=100; let offset=0;
 // One click from a memory to everything sharing its tag. This goes through the
 // server-side filter, not a client-side hide, so hierarchy expansion applies and
@@ -1010,7 +1098,7 @@ async function unforgetMemory(id){
   const result=await api('/api/v1/memories/'+encodeURIComponent(id)+'/unforget',
     {method:'POST',body:'{}'});
   if(result.error){alert(result.error);return}
-  await Promise.all([loadForgotten(),loadStats()]);
+  await Promise.all([loadForgotten(),loadStats(),loadMapData()]);
   loadAll();
 }
 async function purgeMemory(id){
@@ -1083,7 +1171,7 @@ async function runPass(url,button){
   button.disabled=true;button.textContent='running...';
   try{ await api(url,{method:'POST',body:'{}'}); }
   finally{ button.disabled=false;button.textContent=label; }
-  await Promise.all([loadUpkeep(),loadTags(),loadEntities(),loadStats()]);
+  await Promise.all([loadUpkeep(),loadTags(),loadEntities(),loadStats(),loadMapData()]);
 }
 // Obvious non-entities (dates, amounts, URLs) are cleaned automatically; the
 // judgement cases (style instructions vs. real niche terms) need a reader, so
@@ -1112,7 +1200,7 @@ async function removeMechanicalJunk(){
   const ids=window._mechJunk||[];
   if(!ids.length)return;
   await api('/api/v1/entities/remove',{method:'POST',body:JSON.stringify({ids})});
-  await Promise.all([loadUpkeep(),loadEntities()]);
+  await Promise.all([loadUpkeep(),loadEntities(),loadMapData()]);
 }
 async function reviewEntities(button){
   button.disabled=true;button.textContent='Reviewing...';
@@ -1135,7 +1223,7 @@ async function removeReviewedJunk(){
   if(!ids.length)return;
   if(!confirm(`Remove ${ids.length} entit${ids.length===1?'y':'ies'}? Their memories are untouched.`))return;
   await api('/api/v1/entities/remove',{method:'POST',body:JSON.stringify({ids})});
-  await Promise.all([loadUpkeep(),loadEntities()]);
+  await Promise.all([loadUpkeep(),loadEntities(),loadMapData()]);
 }
 let consolidationPreview=null;
 async function previewConsolidation(){
@@ -1214,7 +1302,7 @@ function renderTags(){
 }
 async function tagOp(body){
   const result=await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(body)});
-  await Promise.all([loadTags(),loadSearchFilters()]);activeMapKey=null;loadAll();return result;
+  await Promise.all([loadTags(),loadSearchFilters(),loadMapData()]);activeMapKey=null;loadAll();return result;
 }
 async function renameTag(tag){
   const to=prompt('Rename tag "'+tag+'" to:',tag);if(!to||to.trim()===tag)return;
@@ -1334,7 +1422,7 @@ async function decideProposal(id,decision,button){
     const ok=decision==='confirm'?result.confirmed:result.rejected;
     if(!ok)alert('That proposal changed while this view was open. The list has been refreshed.');
   }catch(error){alert('Could not update that merge proposal.');}
-  await loadEntities();
+  await Promise.all([loadEntities(),loadMapData()]);
 }
 async function showMemory(id){
   const memory=await api('/api/v1/memories/'+encodeURIComponent(id));
@@ -1343,7 +1431,7 @@ async function showMemory(id){
 async function backfillTypes(){
   document.getElementById('entcount').textContent='classifying...';
   await api('/api/v1/entities/backfill-types',{method:'POST',body:'{}'});
-  await loadEntities();
+  await Promise.all([loadEntities(),loadMapData()]);
 }
 async function add(infer){
   const t=document.getElementById('newmem').value.trim(); if(!t)return;
@@ -1354,16 +1442,16 @@ async function add(infer){
   const res=await api('/api/v1/memories',{method:'POST',
     body:JSON.stringify({content:t,infer,defer:infer,categories:cs.length?cs:undefined})});
   if(res.warnings&&res.warnings.length)alert(res.warnings.join('\\n'));
-  loadAll(); loadStats();
+  loadAll(); loadStats(); loadMapData();
 }
 async function distill(id){
   const r=await fetch('/api/v1/memories/'+id+'/distill',{method:'POST',headers:H});
   const data=await r.json().catch(()=>null);
   if(!r.ok){alert((data&&data.error)||('Distillation failed ('+r.status+').'));return}
   if(data.warnings&&data.warnings.length)alert(data.warnings.join('\\n'));
-  loadAll(); loadStats();
+  loadAll(); loadStats(); loadMapData();
 }
-async function del(id){await api('/api/v1/memories/'+id,{method:'DELETE'}); loadAll(); loadStats();}
+async function del(id){await api('/api/v1/memories/'+id,{method:'DELETE'}); loadAll(); loadStats(); loadMapData();}
 function startEdit(id){editingId=id;render(current)}
 function cancelEdit(){editingId=null;render(current)}
 async function saveEdit(id){
@@ -1387,6 +1475,7 @@ async function saveEdit(id){
     editingId=id;
   }
   render(current);
+  await loadMapData();
 }
 async function exportMemories(){
   const backup=await api('/api/v1/export');
@@ -1423,7 +1512,7 @@ async function importMemories(file){
     else alert('Import failed.');
   }catch{alert('Import failed.')}
   btn.textContent='import';
-  loadAll();loadStats();loadSearchFilters();
+  loadAll();loadStats();loadSearchFilters();loadMapData();
 }
 let serverInfo={};
 async function loadStats(){
@@ -1438,7 +1527,7 @@ async function loadStats(){
   document.getElementById('stats').textContent=bits.join(' · ');
 }
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
-syncPanels(); loadStats(); loadSearchFilters(); loadAll();
+syncPanels(); loadStats(); loadSearchFilters(); loadMapData(); loadAll();
 </script></body></html>"""
 
 
@@ -1959,6 +2048,17 @@ def create_app(
             if c["category"] in synthetic:
                 c["synthetic"] = True
         return JSONResponse(cats)
+
+    async def knowledge_map_route(request: Request) -> Response:
+        """All active map aggregates, without memory text or card pagination."""
+        q = request.query_params
+        data = await run_in_threadpool(partial(
+            store.knowledge_map,
+            user_id=_p(request).namespace(q.get("user_id")),
+            agent_id=q.get("agent_id"),
+            run_id=q.get("run_id"),
+        ))
+        return JSONResponse(data)
 
     async def synthetic_tags_route(request: Request) -> Response:
         tags = await run_in_threadpool(partial(
@@ -2571,6 +2671,7 @@ def create_app(
         Route("/api/v1/memories/{memory_id}/history", guarded(memory_history), methods=["GET"]),
         Route("/api/v1/memories/{memory_id}/distill", guarded(distill_memory), methods=["POST"]),
         Route("/api/v1/categories", guarded(list_categories_route), methods=["GET"]),
+        Route("/api/v1/map", guarded(knowledge_map_route), methods=["GET"]),
         Route("/api/v1/tags/synthetic", guarded(synthetic_tags_route), methods=["GET"]),
         Route("/api/v1/tags/abstract", guarded(abstract_tags_route), methods=["POST"]),
         Route("/api/v1/tags/edit", guarded(edit_tags_route), methods=["POST"]),

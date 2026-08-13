@@ -1176,6 +1176,18 @@ class MemoryStore:
         memory = self.backend.get_memory(memory_id)
         return memory if _owned(memory, owner_prefix) else None
 
+    def knowledge_map(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Content-free aggregate graph over every active memory in scope."""
+        return self.backend.knowledge_map(
+            Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        )
+
     def categories(
         self,
         *,
