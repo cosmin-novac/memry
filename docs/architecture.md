@@ -359,6 +359,32 @@ it.
 | Caddy 2 | Optional VPS deployment | TLS termination, gzip, and reverse proxying to the single Memry process. |
 | Bash and curl | Optional VPS installer | Installs and operates the bundled Docker deployment on a Linux VPS. |
 
+#### Release rule: shipped code never changes without a version bump
+
+The version lives in exactly one place, `__version__` in `src/memry/__init__.py`
+(`pyproject.toml` reads it through hatch's dynamic version, and `GET /health`
+reports it). A push to `main` whose `__version__` has no tag yet IS the release:
+CI tests, builds, publishes to PyPI and creates the GitHub release `v<version>`.
+
+`deploy/release_check.py` enforces the rule in three places, so PyPI, GitHub
+`main` and any deployment cannot drift apart silently again (as happened between
+v0.2.25 on 2026-07-26 and 2026-08-13, when mcp 2.0 broke the published wheel
+while `main` already carried the `mcp<2` fix without a bump):
+
+- CI (`publish.yml`, every push and pull request): fails when `src/memry`,
+  `pyproject.toml`, `Dockerfile` or `requirements-docker.txt` differ from the
+  tag of the version they claim to be. Docs, tests, website and deploy scripts
+  may change freely without a release.
+- Local pre-push hook: `git config core.hooksPath deploy/git-hooks` once per
+  clone runs the same check before a push leaves the machine.
+- Deployment: the VPS update script deploys only a clean tree whose HEAD is the
+  released tag that PyPI already carries, and confirms `/health` afterwards.
+
+`pypi-canary.yml` additionally installs the published package from PyPI on a
+clean runner every Monday, imports it, checks it matches the latest release and
+runs that tag's tests, so an ecosystem break (a new major of a dependency) shows
+up as a red run within a week instead of in a user's terminal.
+
 ## 8. Current limits and non-promises
 
 - One Memry process owns a production database. Multiple write replicas are unsupported.

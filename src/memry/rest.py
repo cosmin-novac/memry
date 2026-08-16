@@ -1990,7 +1990,13 @@ def create_app(
         return HTMLResponse(_DASHBOARD.replace("__WHOAMI__", html.escape(who)))
 
     async def health(request: Request) -> Response:
-        return JSONResponse({"status": "ok", "service": "memry"})
+        from . import __version__
+
+        # Version is public on purpose: it lets anyone (and the deploy script)
+        # confirm which release a server actually runs.
+        return JSONResponse(
+            {"status": "ok", "service": "memry", "version": __version__}
+        )
 
     def _memory_or_error(request: Request) -> tuple[Any, Response | None]:
         memory = store.get(

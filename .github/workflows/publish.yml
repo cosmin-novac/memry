@@ -1,12 +1,20 @@
 name: release
 
-# Push to main with a new version in pyproject.toml = a release. CI tags,
-# publishes to PyPI (trusted publishing, environment "pypi"), and creates the
-# GitHub release with generated notes. Pushes without a version bump skip all
-# of it, so day-to-day commits stay release-free.
+# Push to main with a new __version__ in src/memry/__init__.py = a release.
+# CI tags, publishes to PyPI (trusted publishing, environment "pypi"), and
+# creates the GitHub release with generated notes.
+#
+# Pushes without a version bump are allowed ONLY if nothing shipped changed
+# (docs, tests, website, deploy scripts). If src/, pyproject.toml, Dockerfile
+# or requirements-docker.txt differ from the last tag under the same version,
+# the check job FAILS: that is exactly the state where PyPI, GitHub main and
+# deployments drift apart. deploy/release_check.py holds the rule and is
+# shared with the local pre-push hook (deploy/git-hooks/pre-push).
 
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
@@ -22,24 +30,12 @@ jobs:
           fetch-depth: 0
       - id: decide
         run: |
-          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
-          INIT=$(python3 -c 'import re; print(re.search(r"__version__ = \"([^\"]+)\"", open("src/memry/__init__.py").read()).group(1))')
-          if [ "$VERSION" != "$INIT" ]; then
-            echo "::error::version mismatch: pyproject.toml=$VERSION but src/memry/__init__.py=$INIT"
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
-            echo "v$VERSION already tagged - nothing to release"
-            echo "release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "new version v$VERSION - releasing"
-            echo "release=true" >> "$GITHUB_OUTPUT"
-          fi
+          set -o pipefail
+          python3 deploy/release_check.py | tee check.out
+          grep -E '^(release|version)=' check.out >> "$GITHUB_OUTPUT"
 
   test:
     needs: check
-    if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +46,8 @@ jobs:
       - run: python -m pytest -q
 
   build:
-    needs: test
+    needs: [check, test]
+    if: github.event_name != 'pull_request' && needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memry"
-version = "0.2.25"
+dynamic = ["version"]
 description = "The open, self-hostable memory layer for AI agents. MCP-native, local-first, research-grade."
 readme = "README.md"
 license = "Apache-2.0"
@@ -43,6 +43,10 @@ memry = "memry.cli:main"
 Homepage = "https://memry.tech"
 Repository = "https://github.com/cosmin-novac/memry"
 Documentation = "https://github.com/cosmin-novac/memry/tree/main/docs"
+
+# Single source of truth for the version: src/memry/__init__.py.
+[tool.hatch.version]
+path = "src/memry/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/memry"]

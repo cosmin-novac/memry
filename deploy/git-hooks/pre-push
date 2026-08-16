@@ -1,0 +1,11 @@
+#!/bin/sh
+# Refuse to push shipped-code changes that carry an already-released version.
+# Enable once per clone:   git config core.hooksPath deploy/git-hooks
+# The same check runs in CI (publish.yml); this just fails faster and locally.
+python deploy/release_check.py --ref HEAD >/dev/null 2>&1 && exit 0
+echo
+echo "pre-push: release drift detected. Details:"
+python deploy/release_check.py --ref HEAD
+echo
+echo "Bump __version__ in src/memry/__init__.py (or fix the reported problem), then push again."
+exit 1

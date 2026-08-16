@@ -89,7 +89,11 @@ def client():
 
 
 def test_rest_health_and_dashboard(client):
-    assert client.get("/health").json()["status"] == "ok"
+    from memry import __version__
+
+    health = client.get("/health").json()
+    assert health["status"] == "ok"
+    assert health["version"] == __version__
     dashboard = client.get("/").text
     assert "memry" in dashboard
     assert "const planetOrder=hov?" in dashboard
