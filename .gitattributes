@@ -3,3 +3,4 @@
 *.yaml text eol=lf
 Caddyfile text eol=lf
 .env.example text eol=lf
+deploy/git-hooks/* text eol=lf
