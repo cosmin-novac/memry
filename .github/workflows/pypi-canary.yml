@@ -36,6 +36,11 @@ jobs:
       - name: run the test suite of that same tag against the installed wheel
         run: |
           VERSION=$(python -c "import memry; print(memry.__version__)")
-          curl -fsSL "https://codeload.github.com/${{ github.repository }}/tar.gz/refs/tags/v$VERSION" | tar xz --strip-components=1 --wildcards '*/tests' '*/pyproject.toml'
+          # tests/ plus the repo files they read (evals/datasets for the CLI eval
+          # test, pyproject.toml for pytest config); anchored so src/ never lands
+          # next to the installed wheel.
+          curl -fsSL "https://codeload.github.com/${{ github.repository }}/tar.gz/refs/tags/v$VERSION" \
+            | tar xz --strip-components=1 --no-wildcards-match-slash --wildcards \
+                'memry-*/tests' 'memry-*/evals' 'memry-*/pyproject.toml'
           python -m pip install pytest
           python -m pytest -q -p no:dash tests -x -k "not container_build and not release_check"
