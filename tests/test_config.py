@@ -52,7 +52,21 @@ def test_file_config_env_wins(monkeypatch, tmp_path):
     assert cfg.llm.provider == "openai"       # file beats defaults
 
 
+def _pretend_anthropic_sdk_installed(monkeypatch):
+    """Autodetect only picks Anthropic when the optional SDK is importable; CI
+    installs the package without that extra, so make the check succeed."""
+    import importlib.util
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a, **k: object() if name == "anthropic" else real(name, *a, **k),
+    )
+
+
 def test_provider_autodetect_anthropic(monkeypatch):
+    _pretend_anthropic_sdk_installed(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     cfg = Config.load()
     assert cfg.llm.provider == "anthropic"
@@ -83,6 +97,7 @@ def test_both_keys_pick_one_provider_for_everything(monkeypatch):
 
 
 def test_anthropic_still_wins_when_it_is_the_only_key(monkeypatch):
+    _pretend_anthropic_sdk_installed(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("VOYAGE_API_KEY", "pa-test")
     cfg = Config.load()
