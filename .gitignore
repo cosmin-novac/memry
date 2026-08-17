@@ -37,3 +37,9 @@ Thumbs.db
 *.local.txt
 .remember/
 local/
+
+# cost_measure.py scratch outputs
+evals/cost_measure*.json
+evals/cost_scaling.json
+*.usearch
+*.usearch.json
