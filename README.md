@@ -97,6 +97,10 @@ claude mcp add memry -- memry mcp
 }
 ```
 
+The Anthropic SDK is an optional extra: `pip install "memry[anthropic]"`.
+Without it an `ANTHROPIC_API_KEY` is ignored with a warning and memories are
+stored verbatim; `OPENAI_API_KEY` needs no extra.
+
 **Remote, streamable HTTP** - point any MCP client at a self-hosted server
 (see below) and share one memory across every machine:
 
@@ -196,7 +200,9 @@ curl -fsSL https://raw.githubusercontent.com/cosmin-novac/memry/main/deploy/inst
   | MEMRY_DOMAIN=memory.example.com bash
 ```
 
-Set `MEMRY_API_KEY` to require `Authorization: Bearer <key>` on the API. More in
+Set `MEMRY_API_KEY` to require `Authorization: Bearer <key>` on the API. Without a
+key (or accounts) the server only binds loopback; `MEMRY_ALLOW_OPEN=1` overrides that
+when a reverse proxy protects the port. More in
 [docs/self-hosting.md](docs/self-hosting.md). To plug a hosted Memry into
 claude.ai as a custom connector, see
 [docs/connect-claude-ai.md](docs/connect-claude-ai.md).

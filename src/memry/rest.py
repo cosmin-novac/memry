@@ -32,6 +32,8 @@ import asyncio
 import contextlib
 import html
 import json
+import logging
+import os
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any
@@ -2970,15 +2972,66 @@ def create_app(
     )
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def is_open_mode(store: MemoryStore, accounts: AccountStore) -> bool:
+    """True when every request would be treated as admin (no key, tenants or accounts)."""
+    return not store.config.api_key and not store.config.tenants and accounts.is_empty()
+
+
+def check_bind_safety(store: MemoryStore, accounts: AccountStore, host: str) -> None:
+    """Refuse to expose an unauthenticated server beyond loopback.
+
+    resolve_principal() grants ADMIN to everyone in open mode, which is fine on
+    127.0.0.1 and a public read/write memory store on 0.0.0.0. Setting
+    MEMRY_API_KEY (or creating an account) is the fix; MEMRY_ALLOW_OPEN=1 is
+    the explicit escape hatch for a port that a private network or a
+    reverse proxy really does protect.
+    """
+    if not is_open_mode(store, accounts):
+        return
+    log = logging.getLogger("memry")
+    if host in _LOOPBACK_HOSTS:
+        log.warning(
+            "no MEMRY_API_KEY, tenants or accounts configured: serving WITHOUT "
+            "authentication on %s (loopback only)", host,
+        )
+        return
+    if os.environ.get("MEMRY_ALLOW_OPEN") == "1":
+        log.warning(
+            "MEMRY_ALLOW_OPEN=1: serving WITHOUT authentication on %s. Anyone who "
+            "can reach this port can read and write every memory.", host,
+        )
+        return
+    lines = [
+        f"memry serve: refusing to bind {host} without authentication - anyone "
+        "who could reach this port would be able to read and write every memory.",
+        "Fix one of:",
+        "  - set MEMRY_API_KEY=<secret> (bearer token for REST and MCP), or",
+        "  - create an account: memry account add <name> --password ..., or",
+        "  - bind loopback only: memry serve --host 127.0.0.1, or",
+        "  - set MEMRY_ALLOW_OPEN=1 if a private network or reverse proxy really "
+        "protects this port.",
+    ]
+    raise SystemExit("\n".join(lines))
+
+
 def main(host: str = "127.0.0.1", port: int = 8787) -> None:
     import uvicorn
+
+    store = MemoryStore()
+    accounts = AccountStore(
+        store.config.auth_db_path or default_auth_db_path(store.config.db_path)
+    )
+    check_bind_safety(store, accounts, host)
 
     # Behind a TLS-terminating proxy (the bundled Caddy), uvicorn must trust
     # X-Forwarded-Proto or it builds redirects as http:// - e.g. /mcp -> /mcp/.
     # Clients drop the Authorization header on such cross-scheme redirects and
     # then see a 401. Only the proxy can reach this port, so trust any peer.
     uvicorn.run(
-        create_app(),
+        create_app(store, accounts=accounts),
         host=host,
         port=port,
         proxy_headers=True,

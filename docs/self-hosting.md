@@ -57,8 +57,10 @@ walkthrough (cloud-init, DNS, backups, uninstall): [deploy-vps.md](deploy-vps.md
    administrator. Every dashboard user signs in at `/login` with an account name and password;
    the HttpOnly session cookie remains confined to that account's memories. Programmatic and
    recovery clients keep using the operator bearer key.
-2. **Bind privately** - without a key, keep `--host 127.0.0.1` or terminate TLS + auth in a
-   reverse proxy (Caddy/Traefik/nginx).
+2. **Bind privately** - without a key, tenants or accounts every request is treated as admin, so
+   `memry serve` refuses to bind anything but loopback (`127.0.0.1`, `localhost`, `::1`) and
+   tells you why. If a private network or a reverse proxy that does its own auth
+   (Caddy/Traefik/nginx) really protects the port, set `MEMRY_ALLOW_OPEN=1` to override.
 3. **Backups** - a complete server backup must capture `memry.db` and `auth.db`
    together, including any live SQLite `-wal`/`-shm` files. A directory/volume snapshot
    does that. `memry export` is a lossless knowledge backup, but it does not include

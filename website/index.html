@@ -273,7 +273,7 @@ footer a{color:var(--dim)}
     <h2>Everything a memory layer should have. Nothing you have to operate.</h2>
     <div class="features">
       <div class="feat"><h3>MCP-native</h3>
-        <p>Eight tools over stdio or streamable HTTP. Claude Code, Claude Desktop, Cursor, Windsurf, Codex - one server, every agent, shared memory.</p></div>
+        <p>Nine tools over stdio or streamable HTTP. Claude Code, Claude Desktop, Cursor, Windsurf, Codex - one server, every agent, shared memory.</p></div>
       <div class="feat"><h3>One SQLite file</h3>
         <p>Episodes, memories, FTS5, embeddings, topics, and entities in one local store. No external database, vector service, or cloud account.</p></div>
       <div class="feat"><h3>Works with zero keys</h3>
@@ -330,7 +330,7 @@ hits = store.search(<span class="s">"where does ada live?"</span>,
                     user_id=<span class="s">"ada"</span>)
 ctx = store.reconstruct_context(
     <span class="s">"plan my commute"</span>, user_id=<span class="s">"ada"</span>,
-    token_budget=<span class="k">1200</span>)   <span class="c"># drop into any prompt</span></pre>
+    token_budget=<span class="k">1200</span>).text   <span class="c"># drop into any prompt</span></pre>
       </div>
     </div>
   </div>

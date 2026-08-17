@@ -1,3 +1,7 @@
+# Quick self-host: `cp .env.example .env`, set MEMRY_API_KEY, then
+# `docker compose up -d`. The container binds 0.0.0.0 inside the network
+# namespace and this file publishes port 8787, so a key is REQUIRED - without
+# it `memry serve` refuses to start rather than expose an open memory store.
 services:
   memry:
     build: .
@@ -6,11 +10,14 @@ services:
     volumes:
       - memry-data:/data
     environment:
-      # MEMRY_API_KEY: change-me            # enable bearer auth
-      # ANTHROPIC_API_KEY: sk-ant-...           # LLM extraction (recommended)
-      # OPENAI_API_KEY: sk-...                  # or OpenAI (LLM + embeddings)
-      # MEMRY_LLM_MODEL: claude-haiku-4-5   # cheaper extraction model
+      MEMRY_API_KEY: ${MEMRY_API_KEY:?set MEMRY_API_KEY in .env (bearer token for REST and MCP)}
       MEMRY_DB_PATH: /data/memry.db
+      # LLM extraction (optional but recommended); this image ships both SDKs.
+      # OpenAI covers extraction + embeddings; Anthropic is used when it is the
+      # only key present.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MEMRY_LLM_MODEL: ${MEMRY_LLM_MODEL:-}
     restart: unless-stopped
 
 volumes:

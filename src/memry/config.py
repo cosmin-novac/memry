@@ -14,7 +14,9 @@ and deterministic hash embeddings. Setting ``ANTHROPIC_API_KEY`` or
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -282,7 +284,19 @@ def _autodetect_providers(
         if has_openai:
             cfg.llm.provider = "openai"
         elif env.get("ANTHROPIC_API_KEY"):
-            cfg.llm.provider = "anthropic"
+            # The Anthropic SDK is an optional extra. Autodetection must never
+            # turn a working keyless install into one that fails to start, so
+            # only upgrade when the SDK is importable; otherwise say why not
+            # and stay keyless. An explicit MEMRY_LLM_PROVIDER=anthropic still
+            # raises in build_llm, because then the user asked for it.
+            if importlib.util.find_spec("anthropic") is not None:
+                cfg.llm.provider = "anthropic"
+            else:
+                logging.getLogger("memry").warning(
+                    "ANTHROPIC_API_KEY is set but the anthropic SDK is not "
+                    "installed; running without an LLM (verbatim memories). "
+                    "Install it with: pip install 'memry[anthropic]'"
+                )
     if not embedding_pinned and cfg.embedding.provider == "hash":
         if has_openai:
             cfg.embedding.provider = "openai"

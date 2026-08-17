@@ -672,3 +672,33 @@ def test_scoped_stats_include_the_model_names(client):
     stats = client.get("/api/v1/stats").json()
     for field in ("llm", "embedder", "backend", "forgotten_memories"):
         assert field in stats, field
+
+
+# ------------------------------------------------- open-mode bind guard
+def test_serve_refuses_public_bind_without_auth(monkeypatch):
+    """No key, no tenants, no accounts = every request is admin. That is fine on
+    loopback and a public read/write memory store on 0.0.0.0, so `memry serve`
+    must refuse the latter unless explicitly allowed."""
+    from memry.accounts import AccountStore
+    from memry.rest import check_bind_safety, is_open_mode
+
+    monkeypatch.delenv("MEMRY_ALLOW_OPEN", raising=False)
+    store, accounts = make_store(), AccountStore()
+    assert is_open_mode(store, accounts)
+
+    check_bind_safety(store, accounts, "127.0.0.1")  # loopback: allowed, warns
+    check_bind_safety(store, accounts, "localhost")
+    with pytest.raises(SystemExit) as exc:
+        check_bind_safety(store, accounts, "0.0.0.0")
+    assert "MEMRY_API_KEY" in str(exc.value)
+
+    monkeypatch.setenv("MEMRY_ALLOW_OPEN", "1")
+    check_bind_safety(store, accounts, "0.0.0.0")  # explicit escape hatch
+    monkeypatch.delenv("MEMRY_ALLOW_OPEN")
+
+    # any credential source closes open mode and lifts the restriction
+    assert not is_open_mode(make_store(api_key="s3cret"), AccountStore())
+    check_bind_safety(make_store(api_key="s3cret"), AccountStore(), "0.0.0.0")
+    with_account = AccountStore()
+    with_account.create("ada", password="pw")
+    check_bind_safety(store, with_account, "0.0.0.0")

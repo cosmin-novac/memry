@@ -137,3 +137,27 @@ def test_redacted_hides_secrets():
     assert dump["api_key"] == "***"
     assert dump["llm"]["api_key"] == "***"
     assert "topsecret" not in json.dumps(dump)
+
+
+def test_autodetect_anthropic_without_sdk_stays_keyless(monkeypatch, caplog):
+    """A bare `pip install memry` + ANTHROPIC_API_KEY must not crash at startup:
+    autodetection only upgrades when the optional SDK is importable."""
+    import importlib.util
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a, **k: None if name == "anthropic" else real_find_spec(name, *a, **k),
+    )
+    with caplog.at_level("WARNING", logger="memry"):
+        cfg = Config.load()
+    assert cfg.llm.provider == "none"
+    assert "memry[anthropic]" in caplog.text
+    # and the store still builds (this is the exact call that used to raise)
+    from memry.store import MemoryStore
+
+    cfg.db_path = ":memory:"
+    assert MemoryStore(cfg).llm.available is False
+
