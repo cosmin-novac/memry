@@ -1808,21 +1808,60 @@ def _tag_run_due(last_run: str | None, interval_days: float, now: datetime) -> b
     return (now - last) >= timedelta(days=max(interval_days, 0.0))
 
 
+MCP_ORIGIN_KEY = "memry.mcp_origin"
+
+
+def _looks_like_mcp(scope: dict) -> bool:
+    """Is this Streamable HTTP, or a browser asking for the dashboard?
+
+    The dashboard root is GET-only, so POST (a JSON-RPC message) and DELETE
+    (session teardown) at the root can only be MCP. A GET is MCP only when it
+    opens the server-to-client event stream, which browsers never ask for.
+    """
+    method = scope.get("method", "")
+    if method in ("POST", "DELETE"):
+        return True
+    if method != "GET":
+        return False
+    accept = ""
+    for key, value in scope.get("headers", []):
+        if key.decode("latin-1").lower() == "accept":
+            accept = value.decode("latin-1").lower()
+            break
+    return "text/event-stream" in accept and "text/html" not in accept
+
+
 class _NormalizeMcpPath:
-    """``/mcp`` and ``/mcp/`` are one endpoint.
+    """``/mcp``, ``/mcp/`` and the domain root are one endpoint.
 
     Left alone, Starlette's router answers ``/mcp`` with a 307 to ``/mcp/``.
     Clients that drop the Authorization header across a redirect (VS Code and
     other SDK MCP clients do, especially when a proxy makes it cross-scheme)
     then arrive unauthenticated and see a 401. Rewrite instead of redirect.
+
+    The root rewrite covers a second field failure. Connector UIs ask for a
+    server URL and people paste the site they already have open, without the
+    ``/mcp`` suffix. OAuth then completes - the metadata documents live at the
+    root - and the handshake that follows lands on the dashboard route, which
+    answers POST with 405. The client reports only that connecting failed
+    (ChatGPT turns it into a 424 on its own callback), with nothing in the
+    error naming the missing path. Serving the handshake from the root makes
+    the URL people actually paste work.
     """
 
     def __init__(self, app: Any) -> None:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope.get("path") == "/mcp":
-            scope = dict(scope, path="/mcp/", raw_path=b"/mcp/")
+        if scope["type"] == "http":
+            path = scope.get("path")
+            if path == "/mcp":
+                scope = dict(scope, path="/mcp/", raw_path=b"/mcp/")
+            elif path in ("", "/") and _looks_like_mcp(scope):
+                scope = dict(scope, path="/mcp/", raw_path=b"/mcp/")
+                # remembered so an unauthenticated reply can point at the
+                # metadata document for the URL the client actually configured
+                scope[MCP_ORIGIN_KEY] = "/"
         await self.app(scope, receive, send)
 
 
@@ -2810,9 +2849,12 @@ def create_app(
             # and reports the 404 instead of starting the OAuth flow.
             unauthorized_headers = {}
             if public_url:
+                # a client configured with the bare site URL treats that as the
+                # resource, so point it at the document describing that URL
+                suffix = "" if scope.get(MCP_ORIGIN_KEY) == "/" else "/mcp"
                 unauthorized_headers["WWW-Authenticate"] = (
                     'Bearer resource_metadata='
-                    f'"{public_url}/.well-known/oauth-protected-resource/mcp"'
+                    f'"{public_url}/.well-known/oauth-protected-resource{suffix}"'
                 )
             await JSONResponse(
                 {"error": "unauthorized"},
@@ -2956,12 +2998,17 @@ def create_app(
             ),
             revocation_options=RevocationOptions(enabled=True),
         )
-        routes += create_protected_resource_routes(
-            resource_url=AnyHttpUrl(f"{public_url}/mcp"),
-            authorization_servers=[AnyHttpUrl(public_url)],
-            scopes_supported=[MEMRY_SCOPE],
-            resource_name="Memry",
-        )
+        # Two documents, one per URL a client may have been given: /mcp, and
+        # the bare site URL that connector UIs invite people to paste. RFC 9728
+        # keys the document by the resource's path, and a client that asked for
+        # one URL will not read the other's document.
+        for resource in (f"{public_url}/mcp", public_url):
+            routes += create_protected_resource_routes(
+                resource_url=AnyHttpUrl(resource),
+                authorization_servers=[AnyHttpUrl(public_url)],
+                scopes_supported=[MEMRY_SCOPE],
+                resource_name="Memry",
+            )
         routes += [
             Route("/oauth/login", oauth_login_form, methods=["GET"]),
             Route("/oauth/login", oauth_login_submit, methods=["POST"]),

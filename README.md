@@ -134,6 +134,11 @@ https://memory.example.com/mcp/<MEMRY_API_KEY>
 Full walkthrough with screenshots of the flow, security notes, and
 troubleshooting: [docs/connect-claude-ai.md](docs/connect-claude-ai.md).
 
+**ChatGPT** - add Memry as a connector and sign in with OAuth (no key to
+paste). Set `MEMRY_PUBLIC_URL` first, then give ChatGPT the MCP URL
+`https://memory.example.com/mcp`; the bare origin works too. Walkthrough and
+troubleshooting: [docs/connect-chatgpt.md](docs/connect-chatgpt.md).
+
 The server exposes `save_memories`, `search_memories`, `get_memory_context`,
 `list_memories`, `list_categories`, `update_memory`, `delete_memory`,
 `memory_history`, and `memory_stats`. Agents are instructed to recall context

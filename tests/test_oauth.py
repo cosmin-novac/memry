@@ -304,3 +304,77 @@ def test_disabled_account_token_stops_working(oauth_client):
         "accept": "application/json, text/event-stream",
         "Authorization": f"Bearer {access}"})
     assert resp.status_code == 401
+
+
+# --------------------------------------------------- the bare site URL
+# Connector UIs (ChatGPT's among them) ask for a server URL and people paste
+# the site they have open, without /mcp. The metadata documents live at the
+# root, so OAuth completed and only the handshake after it failed - the
+# dashboard route answered POST with 405 and the client reported nothing more
+# useful than "there was a problem connecting".
+def test_bare_site_url_serves_the_mcp_handshake(oauth_client):
+    client, store, _ = oauth_client
+    reg = _register(client)
+    verifier, challenge = _pkce()
+    code = _authorize_and_login(client, reg, challenge)["code"][0]
+    access = client.post("/token", data={
+        "grant_type": "authorization_code", "code": code,
+        "redirect_uri": "https://client.example/callback",
+        "client_id": reg["client_id"], "client_secret": reg["client_secret"],
+        "code_verifier": verifier,
+    }).json()["access_token"]
+
+    headers = {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "Authorization": f"Bearer {access}",
+    }
+    init = client.post("/", headers=headers, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "chatgpt", "version": "0"}}})
+    assert init.status_code == 200, init.text
+    assert "memry" in init.text
+
+    # and a real tool call over the session opened at the root
+    headers["mcp-session-id"] = init.headers["mcp-session-id"]
+    client.post("/", headers=headers, json={
+        "jsonrpc": "2.0", "method": "notifications/initialized"})
+    called = client.post("/", headers=headers, json={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "save_memories",
+                   "arguments": {"content": "from the root", "infer": False}}})
+    assert called.status_code == 200, called.text
+    assert [m.content for m in store.get_all(limit=50)] == ["from the root"]
+
+
+def test_unauthorized_root_points_at_the_root_resource_metadata(oauth_client):
+    client, _, _ = oauth_client
+    resp = client.post("/", json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "t", "version": "0"}}},
+        headers={"accept": "application/json, text/event-stream"})
+    assert resp.status_code == 401
+    # a client configured with the bare URL treats that as the resource, so it
+    # must be sent to the document describing that URL, not the /mcp one
+    challenge = resp.headers.get("WWW-Authenticate", "")
+    assert challenge == (
+        'Bearer resource_metadata='
+        f'"{PUBLIC_URL}/.well-known/oauth-protected-resource"'
+    )
+    prm = client.get("/.well-known/oauth-protected-resource")
+    assert prm.status_code == 200
+    assert prm.json()["authorization_servers"] == [PUBLIC_URL + "/"]
+
+
+def test_the_root_still_belongs_to_the_dashboard(oauth_client):
+    """Only the handshake is rerouted; browsers still get the dashboard."""
+    client, _, _ = oauth_client
+    page = client.get("/", headers={"accept": "text/html,application/xhtml+xml"},
+                      follow_redirects=False)
+    assert page.status_code == 302 and page.headers["location"].endswith("/login")
+    # an SSE-capable browser page must not be mistaken for an MCP event stream
+    mixed = client.get("/", headers={"accept": "text/html, text/event-stream"},
+                       follow_redirects=False)
+    assert mixed.status_code == 302
