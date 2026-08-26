@@ -143,6 +143,16 @@ authorization server (via the `WWW-Authenticate` header on the 401), registers i
 the user through login, and receives a token scoped to that account. No key to copy by hand.
 Memry verifies the human against its own accounts, so no third-party IdP is required.
 
+The bare origin (`https://memory.example.com`, no `/mcp`) answers the MCP handshake too, and
+carries its own `/.well-known/oauth-protected-resource` document. Connector UIs ask for a
+server URL and people paste the site they have open; without this the OAuth dance completed
+and the handshake after it hit the dashboard, which answers POST with 405 - reported by the
+client as nothing more specific than "there was a problem connecting". Browsers still get the
+dashboard at the root: only MCP-shaped requests (POST, DELETE, or an event-stream GET) are
+rerouted.
+
+Connecting ChatGPT this way: [connect-chatgpt.md](connect-chatgpt.md).
+
 ## Scaling up
 
 | Situation | Setting |
