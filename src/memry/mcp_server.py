@@ -16,6 +16,7 @@ from typing import Any
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 
 from .config import Config
 from .enrichment import EnrichmentWorker
@@ -161,7 +162,13 @@ def create_server(
     async def _threaded(fn, /, **kwargs):
         return await anyio.to_thread.run_sync(partial(fn, **kwargs))
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            openWorldHint=False,
+            destructiveHint=True,
+        )
+    )
     async def save_memories(
         content: str,
         user_id: str = "",
@@ -233,7 +240,13 @@ def create_server(
             payload["warnings"] = result.warnings
         return json.dumps(payload, ensure_ascii=False)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=False,
+            destructiveHint=False,
+        )
+    )
     async def search_memories(
         query: str,
         user_id: str = "",
@@ -279,7 +292,13 @@ def create_server(
             [_memory_row(r.memory, r.score) for r in results], ensure_ascii=False
         )
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            openWorldHint=False,
+            destructiveHint=False,
+        )
+    )
     async def get_memory_context(
         query: str,
         user_id: str = "",
@@ -289,14 +308,21 @@ def create_server(
         the current subject, packed to fit the given token budget. Prefer this
         over search_memories when you just want background injected before you
         answer. Worth calling at the start of a session and whenever a new topic
-        comes up."""
+        comes up. This can refresh and persist a derived entity summary when the
+        stored summary is stale; it never changes the underlying memories."""
         ctx = await _threaded(
             store.reconstruct_context,
             query=query, user_id=_uid(user_id), token_budget=token_budget,
         )
         return ctx.text or "(no relevant memories yet)"
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=False,
+            destructiveHint=False,
+        )
+    )
     async def list_memories(
         user_id: str = "",
         limit: int = 50,
@@ -316,7 +342,13 @@ def create_server(
         )
         return json.dumps([_memory_row(m) for m in memories], ensure_ascii=False)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=False,
+            destructiveHint=False,
+        )
+    )
     async def list_categories(user_id: str = "") -> str:
         """List all memory categories (tags) with their memory counts, sorted
         by count descending. Use this to see how knowledge is organized before
@@ -331,7 +363,13 @@ def create_server(
                 c["synthetic"] = True
         return json.dumps(cats, ensure_ascii=False)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            openWorldHint=False,
+            destructiveHint=True,
+        )
+    )
     async def update_memory(memory_id: str, content: str) -> str:
         """Rewrite the content of an existing memory (e.g. after the user
         corrects a stored fact)."""
@@ -345,7 +383,13 @@ def create_server(
             return json.dumps({"error": f"memory {memory_id} not found"})
         return json.dumps(_memory_row(memory), ensure_ascii=False)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            openWorldHint=False,
+            destructiveHint=True,
+        )
+    )
     async def delete_memory(memory_id: str) -> str:
         """Forget a memory (soft delete: it is invalidated and kept in the
         audit history, not destroyed). Use when the user asks you to forget
@@ -355,7 +399,13 @@ def create_server(
         )
         return json.dumps({"deleted": ok, "memory_id": memory_id})
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=False,
+            destructiveHint=False,
+        )
+    )
     async def memory_history(memory_id: str) -> str:
         """Show the full audit trail of a memory (ADD/UPDATE/SUPERSEDE/DELETE
         events with old and new content)."""
@@ -376,7 +426,13 @@ def create_server(
             ensure_ascii=False,
         )
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=False,
+            destructiveHint=False,
+        )
+    )
     async def memory_stats() -> str:
         """Show memory store statistics (counts, backend, models in use)."""
         principal = _principal()
