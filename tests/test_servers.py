@@ -67,6 +67,35 @@ def test_mcp_tools_registered():
     } <= names
 
 
+
+def test_mcp_tool_annotations_are_explicit_and_accurate():
+    server = create_server(make_store())
+    tools = {
+        tool.name: tool
+        for tool in asyncio.run(server.list_tools())
+    }
+    expected = {
+        "save_memories": (False, False, True),
+        "search_memories": (True, False, False),
+        "get_memory_context": (False, False, False),
+        "list_memories": (True, False, False),
+        "list_categories": (True, False, False),
+        "update_memory": (False, False, True),
+        "delete_memory": (False, False, True),
+        "memory_history": (True, False, False),
+        "memory_stats": (True, False, False),
+    }
+
+    assert set(tools) == set(expected)
+    for name, hints in expected.items():
+        annotations = tools[name].annotations
+        assert annotations is not None, name
+        assert (
+            annotations.readOnlyHint,
+            annotations.openWorldHint,
+            annotations.destructiveHint,
+        ) == hints, name
+
 def test_mcp_list_categories_sorted_desc():
     store = make_store()
     server = create_server(store)
