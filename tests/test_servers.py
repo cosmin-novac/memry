@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import pytest
+from mcp.types import CallToolResult
 from starlette.testclient import TestClient
 
 from memry.config import Config
@@ -23,8 +24,11 @@ def make_store(**config_kwargs) -> MemoryStore:
 # ---------------------------------------------------------------- MCP tools
 def call_tool(server, name: str, args: dict):
     result = asyncio.run(server.call_tool(name, args))
-    # FastMCP returns a list of content blocks (or a (blocks, meta) tuple)
-    blocks = result[0] if isinstance(result, tuple) else result
+    # Structured tools retain the legacy text block for older MCP clients.
+    if isinstance(result, CallToolResult):
+        blocks = result.content
+    else:
+        blocks = result[0] if isinstance(result, tuple) else result
     return json.loads(blocks[0].text) if blocks[0].text.startswith(("{", "[")) else blocks[0].text
 
 
@@ -67,7 +71,6 @@ def test_mcp_tools_registered():
     } <= names
 
 
-
 def test_mcp_tool_annotations_are_explicit_and_accurate():
     server = create_server(make_store())
     tools = {
@@ -95,6 +98,47 @@ def test_mcp_tool_annotations_are_explicit_and_accurate():
             annotations.openWorldHint,
             annotations.destructiveHint,
         ) == hints, name
+
+
+def test_mcp_tools_publish_structured_output_schemas():
+    server = create_server(make_store())
+    tools = {
+        tool.name: tool
+        for tool in asyncio.run(server.list_tools())
+    }
+    expected_properties = {
+        "save_memories": {"saved", "actions"},
+        "search_memories": {"memories"},
+        "get_memory_context": {"context", "memory_ids", "token_estimate"},
+        "list_memories": {"memories"},
+        "list_categories": {"categories"},
+        "update_memory": {"memory", "error"},
+        "delete_memory": {"deleted", "memory_id"},
+        "memory_history": {"events"},
+        "memory_stats": {"stats"},
+    }
+
+    assert set(tools) == set(expected_properties)
+    for name, properties in expected_properties.items():
+        schema = tools[name].outputSchema
+        assert schema is not None, name
+        assert schema["type"] == "object", name
+        assert properties <= set(schema["properties"]), name
+        assert schema["properties"].get("result") is None, name
+
+
+def test_mcp_structured_output_keeps_legacy_text_payload():
+    server = create_server(make_store())
+    result = asyncio.run(server.call_tool(
+        "save_memories",
+        {"content": "Ada lives in Berlin", "infer": False},
+    ))
+
+    assert isinstance(result, CallToolResult)
+    assert result.structuredContent is not None
+    assert result.structuredContent["saved"] == {"ADD": 1}
+    assert json.loads(result.content[0].text)["saved"] == {"ADD": 1}
+
 
 def test_mcp_list_categories_sorted_desc():
     store = make_store()
