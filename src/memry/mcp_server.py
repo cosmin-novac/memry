@@ -11,15 +11,17 @@ import asyncio
 import contextlib
 import json
 from functools import partial
-from typing import Any
+from typing import Annotated, Any
 
 import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from pydantic import BaseModel, ConfigDict
 
 from .config import Config
 from .enrichment import EnrichmentWorker
+from .models import EventType, MemoryType
 from .principal import ADMIN, Principal
 from .store import MemoryStore
 
@@ -64,6 +66,137 @@ must always remain as one verbatim memory.
 Never store secrets (passwords, API keys, tokens). When unsure whether a durable
 fact is worth keeping, saving it is better than losing it.
 """
+
+
+class MemoryEnrichmentOutput(BaseModel):
+    status: str
+    attempts: int | None = None
+    next_attempt_at: str | None = None
+    last_error: str | None = None
+
+
+class MemoryRowOutput(BaseModel):
+    id: str
+    content: str
+    type: MemoryType
+    importance: float
+    categories: list[str]
+    created_at: str
+    updated_at: str
+    enrichment: MemoryEnrichmentOutput | None = None
+    invalid_at: str | None = None
+    score: float | None = None
+
+
+class SaveActionOutput(BaseModel):
+    event: EventType
+    memory_id: str | None = None
+    content: str | None = None
+
+
+class PendingEnrichmentOutput(BaseModel):
+    status: str
+    quiet_period_seconds: int
+    memory_ids: list[str]
+
+
+class SaveMemoriesOutput(BaseModel):
+    saved: dict[str, int]
+    actions: list[SaveActionOutput]
+    enrichment: PendingEnrichmentOutput | None = None
+    warnings: list[str] | None = None
+
+
+class SearchMemoriesOutput(BaseModel):
+    memories: list[MemoryRowOutput]
+
+
+class MemoryContextOutput(BaseModel):
+    context: str
+    memory_ids: list[str]
+    token_estimate: int
+
+
+class ListMemoriesOutput(BaseModel):
+    memories: list[MemoryRowOutput]
+
+
+class CategoryOutput(BaseModel):
+    category: str
+    count: int
+    synthetic: bool | None = None
+
+
+class ListCategoriesOutput(BaseModel):
+    categories: list[CategoryOutput]
+
+
+class UpdateMemoryOutput(BaseModel):
+    memory: MemoryRowOutput | None = None
+    error: str | None = None
+
+
+class DeleteMemoryOutput(BaseModel):
+    deleted: bool
+    memory_id: str
+
+
+class MemoryHistoryEventOutput(BaseModel):
+    event: EventType
+    old: str | None = None
+    new: str | None = None
+    reason: str | None = None
+    at: str
+
+
+class MemoryHistoryOutput(BaseModel):
+    events: list[MemoryHistoryEventOutput]
+
+
+class MemoryStatsData(BaseModel):
+    backend: str | None = None
+    note: str | None = None
+    tenant: str | None = None
+    db_path: str | None = None
+    active_memories: int | None = None
+    invalidated_memories: int | None = None
+    episodes: int | None = None
+    events: int | None = None
+    pending_enrichments: int | None = None
+    retrying_enrichments: int | None = None
+    memories_by_type: dict[str, int] | None = None
+    users: list[str] | None = None
+    entities: int | None = None
+    open_merge_proposals: int | None = None
+    ann: dict[str, Any] | None = None
+    llm: str | None = None
+    embedder: str | None = None
+    forgotten_memories: int | None = None
+    generated_at: str | None = None
+
+    model_config = ConfigDict(extra="allow")
+
+
+class MemoryStatsOutput(BaseModel):
+    stats: MemoryStatsData
+
+
+def _tool_result(
+    text_payload: Any,
+    structured_payload: BaseModel,
+    *,
+    plain_text: bool = False,
+) -> CallToolResult:
+    """Return structured data without changing the legacy text response."""
+    text = (
+        str(text_payload)
+        if plain_text
+        else json.dumps(text_payload, ensure_ascii=False, default=str)
+    )
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        structuredContent=structured_payload.model_dump(mode="json", exclude_none=True),
+    )
 
 
 def _memory_row(m: Any, score: float | None = None) -> dict[str, Any]:
@@ -177,7 +310,7 @@ def create_server(
         context: str = "",
         tags: list[str] | None = None,
         infer: bool = True,
-    ) -> str:
+    ) -> Annotated[CallToolResult, SaveMemoriesOutput]:
         """Store information in long-term memory. Batch related facts into one
         concise multiline content value so Memry can extract atomic facts with
         their shared context; do not call once per sentence. If related facts
@@ -238,7 +371,7 @@ def create_server(
             }
         if result.warnings:
             payload["warnings"] = result.warnings
-        return json.dumps(payload, ensure_ascii=False)
+        return _tool_result(payload, SaveMemoriesOutput.model_validate(payload))
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -257,7 +390,7 @@ def create_server(
         entity_id: str = "",
         since: str = "",
         until: str = "",
-    ) -> str:
+    ) -> Annotated[CallToolResult, SearchMemoriesOutput]:
         """Search long-term memory for what you already know. Call this at the
         start of a session AND whenever the conversation turns to a new topic,
         project, person, or decision - recall before you answer, so you don't
@@ -288,8 +421,10 @@ def create_server(
             since=since or None,
             until=until or None,
         )
-        return json.dumps(
-            [_memory_row(r.memory, r.score) for r in results], ensure_ascii=False
+        memory_rows = [_memory_row(r.memory, r.score) for r in results]
+        return _tool_result(
+            memory_rows,
+            SearchMemoriesOutput(memories=memory_rows),
         )
 
     @mcp.tool(
@@ -303,7 +438,7 @@ def create_server(
         query: str,
         user_id: str = "",
         token_budget: int = 1200,
-    ) -> str:
+    ) -> Annotated[CallToolResult, MemoryContextOutput]:
         """Get a ready-to-use context block of the most relevant memories for
         the current subject, packed to fit the given token budget. Prefer this
         over search_memories when you just want background injected before you
@@ -314,7 +449,16 @@ def create_server(
             store.reconstruct_context,
             query=query, user_id=_uid(user_id), token_budget=token_budget,
         )
-        return ctx.text or "(no relevant memories yet)"
+        text = ctx.text or "(no relevant memories yet)"
+        return _tool_result(
+            text,
+            MemoryContextOutput(
+                context=text,
+                memory_ids=ctx.memory_ids,
+                token_estimate=ctx.token_estimate,
+            ),
+            plain_text=True,
+        )
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -330,7 +474,7 @@ def create_server(
         entity_id: str = "",
         since: str = "",
         until: str = "",
-    ) -> str:
+    ) -> Annotated[CallToolResult, ListMemoriesOutput]:
         """List memories, most recently updated first. Optionally filter by tag
         (categories, comma-separated), exact entity ID, and/or a date window
         (since/until as YYYY-MM-DD) to browse what was recorded about a topic or in a period."""
@@ -340,7 +484,11 @@ def create_server(
             categories=category_list, entity_id=entity_id or None,
             since=since or None, until=until or None,
         )
-        return json.dumps([_memory_row(m) for m in memories], ensure_ascii=False)
+        memory_rows = [_memory_row(m) for m in memories]
+        return _tool_result(
+            memory_rows,
+            ListMemoriesOutput(memories=memory_rows),
+        )
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -349,7 +497,9 @@ def create_server(
             destructiveHint=False,
         )
     )
-    async def list_categories(user_id: str = "") -> str:
+    async def list_categories(
+        user_id: str = "",
+    ) -> Annotated[CallToolResult, ListCategoriesOutput]:
         """List all memory categories (tags) with their memory counts, sorted
         by count descending. Use this to see how knowledge is organized before
         drilling into a category with search_memories. Some tags are synthetic:
@@ -361,7 +511,7 @@ def create_server(
         for c in cats:
             if c["category"] in synthetic:
                 c["synthetic"] = True
-        return json.dumps(cats, ensure_ascii=False)
+        return _tool_result(cats, ListCategoriesOutput(categories=cats))
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -370,7 +520,10 @@ def create_server(
             destructiveHint=True,
         )
     )
-    async def update_memory(memory_id: str, content: str) -> str:
+    async def update_memory(
+        memory_id: str,
+        content: str,
+    ) -> Annotated[CallToolResult, UpdateMemoryOutput]:
         """Rewrite the content of an existing memory (e.g. after the user
         corrects a stored fact)."""
         memory = await _threaded(
@@ -380,8 +533,10 @@ def create_server(
             owner_prefix=_principal().prefix,
         )
         if memory is None:
-            return json.dumps({"error": f"memory {memory_id} not found"})
-        return json.dumps(_memory_row(memory), ensure_ascii=False)
+            error = {"error": f"memory {memory_id} not found"}
+            return _tool_result(error, UpdateMemoryOutput(**error))
+        memory_row = _memory_row(memory)
+        return _tool_result(memory_row, UpdateMemoryOutput(memory=memory_row))
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -390,14 +545,17 @@ def create_server(
             destructiveHint=True,
         )
     )
-    async def delete_memory(memory_id: str) -> str:
+    async def delete_memory(
+        memory_id: str,
+    ) -> Annotated[CallToolResult, DeleteMemoryOutput]:
         """Forget a memory (soft delete: it is invalidated and kept in the
         audit history, not destroyed). Use when the user asks you to forget
         something."""
         ok = await _threaded(
             store.delete, memory_id=memory_id, owner_prefix=_principal().prefix
         )
-        return json.dumps({"deleted": ok, "memory_id": memory_id})
+        payload = {"deleted": ok, "memory_id": memory_id}
+        return _tool_result(payload, DeleteMemoryOutput(**payload))
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -406,24 +564,27 @@ def create_server(
             destructiveHint=False,
         )
     )
-    async def memory_history(memory_id: str) -> str:
+    async def memory_history(
+        memory_id: str,
+    ) -> Annotated[CallToolResult, MemoryHistoryOutput]:
         """Show the full audit trail of a memory (ADD/UPDATE/SUPERSEDE/DELETE
         events with old and new content)."""
         events = await _threaded(
             store.history, memory_id=memory_id, owner_prefix=_principal().prefix
         )
-        return json.dumps(
-            [
-                {
-                    "event": e.event,
-                    "old": e.old_content,
-                    "new": e.new_content,
-                    "reason": e.reason,
-                    "at": e.created_at,
-                }
-                for e in events
-            ],
-            ensure_ascii=False,
+        event_rows = [
+            {
+                "event": e.event,
+                "old": e.old_content,
+                "new": e.new_content,
+                "reason": e.reason,
+                "at": e.created_at,
+            }
+            for e in events
+        ]
+        return _tool_result(
+            event_rows,
+            MemoryHistoryOutput(events=event_rows),
         )
 
     @mcp.tool(
@@ -433,7 +594,7 @@ def create_server(
             destructiveHint=False,
         )
     )
-    async def memory_stats() -> str:
+    async def memory_stats() -> Annotated[CallToolResult, MemoryStatsOutput]:
         """Show memory store statistics (counts, backend, models in use)."""
         principal = _principal()
         if principal.prefix is not None:
@@ -446,18 +607,16 @@ def create_server(
                 limit=100_000,
             )
             mine = [m for m in mine if principal.owns(m.user_id)]
-            return json.dumps(
-                {
-                    "tenant": principal.name,
-                    "active_memories": sum(1 for m in mine if m.invalid_at is None),
-                    "invalidated_memories": sum(
-                        1 for m in mine if m.invalid_at is not None
-                    ),
-                },
-                ensure_ascii=False,
-            )
-        stats = await _threaded(store.stats)
-        return json.dumps(stats, ensure_ascii=False, default=str)
+            stats = {
+                "tenant": principal.name,
+                "active_memories": sum(1 for m in mine if m.invalid_at is None),
+                "invalidated_memories": sum(
+                    1 for m in mine if m.invalid_at is not None
+                ),
+            }
+        else:
+            stats = await _threaded(store.stats)
+        return _tool_result(stats, MemoryStatsOutput(stats=stats))
 
     return mcp
 
