@@ -5,6 +5,7 @@ from datetime import timedelta
 import json
 import time
 
+from mcp.types import CallToolResult
 from starlette.testclient import TestClient
 
 from conftest import FakeLLM, fact, facts_response, mcp_call
@@ -28,7 +29,10 @@ def _store(db_path: str, llm: FakeLLM) -> MemoryStore:
 
 def _call_tool(server, name: str, arguments: dict) -> dict:
     result = asyncio.run(server.call_tool(name, arguments))
-    blocks = result[0] if isinstance(result, tuple) else result
+    if isinstance(result, CallToolResult):
+        blocks = result.content
+    else:
+        blocks = result[0] if isinstance(result, tuple) else result
     return json.loads(blocks[0].text)
 
 
