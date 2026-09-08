@@ -192,9 +192,8 @@ footer a{color:var(--dim)}
       <p class="eyebrow">Open source · Apache-2.0 · MCP-native</p>
       <h1>Your agent forgets everything.<br><em>Memry</em> doesn't.</h1>
       <p class="sub">The self-hostable memory layer for AI agents. One
-        <code class="inlinecode">pip install</code>, one SQLite file, plugged into
-        Claude&nbsp;Code, Cursor, or any MCP client - extraction, reconciliation,
-        and an audit trail your agents can trust.</p>
+        <code class="inlinecode">pip install</code>, one SQLite file, and shared memory
+        across Claude&nbsp;Code, Cursor, Codex, ChatGPT, or any MCP client.</p>
       <div class="cta-row">
         <a class="btn primary" href="#selfhost">Self-host in 60 seconds</a>
         <a class="btn ghost" href="https://github.com/cosmin-novac/memry">Read the source</a>
@@ -241,10 +240,10 @@ footer a{color:var(--dim)}
         <p>Claude Code: <code>claude mcp add memry -- memry mcp</code>. Claude Desktop,
         Cursor, Windsurf: add the <code>memry mcp</code> command to your MCP config.</p></div>
       <div class="stage"><span class="num">03 · UPGRADE</span>
-        <h3>Optional brain</h3>
-        <p>Works with zero keys (verbatim + keyword search). Set
-        <code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code> and extraction,
-        reconciliation, and entity resolution switch on by themselves.</p></div>
+        <h3>Add extraction</h3>
+        <p>Works with zero keys using verbatim memories, keyword search and local
+        embeddings. Add an Anthropic or OpenAI key and Memry also extracts facts,
+        reconciles changes and resolves entities.</p></div>
       <div class="stage"><span class="num">04 · USE</span>
         <h3>Just talk</h3>
         <p>Tell your agent something worth keeping, then ask about it in a fresh
@@ -259,8 +258,9 @@ footer a{color:var(--dim)}
     <p class="eyebrow">How it works</p>
     <h2>Real memory, not a vector dump.</h2>
     <p class="lede">Most "memory" is retrieval over raw chat logs. Memry keeps the raw
-      episodes <em>and</em> distills them into reconciled, contradiction-aware facts -
-      so your agent recalls what's true now, with the receipts for how it got there.</p>
+      episodes <em>and</em> distills them into reconciled, contradiction-aware facts, so
+      your agent remembers what's true now without losing the history of how it got
+      there.</p>
     <div class="pipeline">
       <div class="stage"><span class="num">01 · RECORD</span>
         <h3>Episodes first</h3>
@@ -281,7 +281,7 @@ footer a{color:var(--dim)}
 <section id="features">
   <div class="wrap">
     <p class="eyebrow">Features</p>
-    <h2>Everything a memory layer should have. Nothing you have to operate.</h2>
+    <h2>More than retrieval over old conversations.</h2>
     <div class="features">
       <div class="feat"><h3>MCP-native</h3>
         <p>Nine tools over stdio or streamable HTTP. Claude Code, Claude Desktop, Cursor, Windsurf, Codex - one server, every agent, shared memory.</p></div>
@@ -289,20 +289,20 @@ footer a{color:var(--dim)}
         <p>Episodes, memories, FTS5, embeddings, topics, and entities in one local store. No external database, vector service, or cloud account.</p></div>
       <div class="feat"><h3>Works with zero keys</h3>
         <p>BM25 keyword search plus deterministic hash embeddings out of the box. Add <code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code> and extraction upgrades itself.</p></div>
-      <div class="feat"><h3>Temporal memory</h3>
-        <p><code>valid_from</code> · <code>invalid_at</code> · <code>superseded_by</code> on every fact. "Forgotten" means invalidated and auditable - never silently destroyed.</p></div>
+      <div class="feat"><h3>Memry remembers what used to be true.</h3>
+        <p>When something changes, the old fact stays in its history and the new one takes over. Nothing silently disappears, so your agent can distinguish what's true now from what was true before.</p></div>
       <div class="feat"><h3>Provenance &amp; history</h3>
         <p>Every memory links to the exact episodes it came from, and every mutation is an event you can replay with <code>history()</code>.</p></div>
       <div class="feat"><h3>Forgetting built in</h3>
         <p>Importance decays on a half-life; a sweep soft-forgets stale trivia so ten-month-old noise stops crowding out what matters.</p></div>
-      <div class="feat"><h3>Scoped &amp; multi-agent</h3>
-        <p>user / agent / run scoping, mem0-compatible. Point several agents at one server and they share what they learn.</p></div>
+      <div class="feat"><h3>One memory across every agent</h3>
+        <p>Point Claude, ChatGPT, Cursor, Codex and other MCP clients at the same Memry server. Something learned in one is immediately available to the others.</p></div>
       <div class="feat"><h3>Pluggable everything</h3>
         <p>Anthropic, OpenAI, or Ollama for extraction; OpenAI, Voyage, Ollama, or local hashing for embeddings; SQLite for production and an optional Mem0 comparison adapter.</p></div>
       <div class="feat"><h3>Entities, disambiguated</h3>
         <p>Three ambiguous "Jonas" mentions stay three entities. Merges happen only when identity is clear, or when you confirm a recorded merge proposal.</p></div>
-      <div class="feat"><h3>One server, many agents</h3>
-        <p>Many clients share one SQLite-backed Memry service. For larger stores, <code>memry[ann]</code> adds a rebuildable HNSW candidate index.</p></div>
+      <div class="feat"><h3>Your old conversations get more valuable over time</h3>
+        <p>Raw episodes stay in the store, so when extraction improves you can rerun it over years of history and recover memories earlier versions missed.</p></div>
       <div class="feat"><h3>Multi-tenant ready</h3>
         <p>Per-tenant API keys with transparent namespacing and strict isolation, plus category filters on every search surface.</p></div>
       <div class="feat"><h3>Benchmark it yourself</h3>
@@ -389,7 +389,7 @@ ctx = store.reconstruct_context(
 <section id="compare">
   <div class="wrap">
     <p class="eyebrow">Compare</p>
-    <h2>Honest comparison, self-hosted editions.</h2>
+    <h2>How the self-hosted options compare.</h2>
     <div class="tbl-scroll">
       <table>
         <thead><tr>
