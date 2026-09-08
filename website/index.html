@@ -283,26 +283,26 @@ footer a{color:var(--dim)}
     <p class="eyebrow">Features</p>
     <h2>More than retrieval over old conversations.</h2>
     <div class="features">
-      <div class="feat"><h3>MCP-native</h3>
-        <p>Nine tools over stdio or streamable HTTP. Claude Code, Claude Desktop, Cursor, Windsurf, Codex - one server, every agent, shared memory.</p></div>
-      <div class="feat"><h3>One SQLite file</h3>
-        <p>Episodes, memories, FTS5, embeddings, topics, and entities in one local store. No external database, vector service, or cloud account.</p></div>
-      <div class="feat"><h3>Works with zero keys</h3>
-        <p>BM25 keyword search plus deterministic hash embeddings out of the box. Add <code>ANTHROPIC_API_KEY</code> or <code>OPENAI_API_KEY</code> and extraction upgrades itself.</p></div>
-      <div class="feat"><h3>Memry remembers what used to be true.</h3>
-        <p>When something changes, the old fact stays in its history and the new one takes over. Nothing silently disappears, so your agent can distinguish what's true now from what was true before.</p></div>
-      <div class="feat"><h3>Provenance &amp; history</h3>
-        <p>Every memory links to the exact episodes it came from, and every mutation is an event you can replay with <code>history()</code>.</p></div>
-      <div class="feat"><h3>Forgetting built in</h3>
-        <p>Importance decays on a half-life; a sweep soft-forgets stale trivia so ten-month-old noise stops crowding out what matters.</p></div>
       <div class="feat"><h3>One memory across every agent</h3>
         <p>Point Claude, ChatGPT, Cursor, Codex and other MCP clients at the same Memry server. Something learned in one is immediately available to the others.</p></div>
-      <div class="feat"><h3>Pluggable everything</h3>
-        <p>Anthropic, OpenAI, or Ollama for extraction; OpenAI, Voyage, Ollama, or local hashing for embeddings; SQLite for production and an optional Mem0 comparison adapter.</p></div>
-      <div class="feat"><h3>Entities, disambiguated</h3>
-        <p>Three ambiguous "Jonas" mentions stay three entities. Merges happen only when identity is clear, or when you confirm a recorded merge proposal.</p></div>
+      <div class="feat"><h3>Memry remembers what used to be true.</h3>
+        <p>When something changes, the old fact stays in its history and the new one takes over. Nothing silently disappears, so your agent can distinguish what's true now from what was true before.</p></div>
       <div class="feat"><h3>Your old conversations get more valuable over time</h3>
         <p>Raw episodes stay in the store, so when extraction improves you can rerun it over years of history and recover memories earlier versions missed.</p></div>
+      <div class="feat"><h3>One SQLite file</h3>
+        <p>Episodes, memories, embeddings, topics and entities live in one local store. No external database, vector service or cloud account.</p></div>
+      <div class="feat"><h3>Every memory has provenance.</h3>
+        <p>Every memory links back to the exact conversation it came from, and every change is preserved. You can always see where something came from and how it changed.</p></div>
+      <div class="feat"><h3>Memry keeps ambiguous people separate.</h3>
+        <p>Similar names aren't merged just because they look alike. Memry waits until there's enough evidence to know they're the same person, or until you confirm it yourself.</p></div>
+      <div class="feat"><h3>MCP-native</h3>
+        <p>Connect any MCP client over stdio or streamable HTTP. No client-specific memory integration to build or maintain.</p></div>
+      <div class="feat"><h3>Works with zero keys</h3>
+        <p>Keyword search and local hash embeddings work out of the box. Add an Anthropic or OpenAI key when you want automatic extraction and reconciliation.</p></div>
+      <div class="feat"><h3>Forgetting built in</h3>
+        <p>Old trivia gradually matters less, so stale details stop crowding out what matters without being deleted from your history.</p></div>
+      <div class="feat"><h3>Bring your own models.</h3>
+        <p>Use Anthropic, OpenAI or Ollama for extraction, and choose between hosted or local embeddings. Memry doesn't lock your memory to one model provider.</p></div>
       <div class="feat"><h3>Multi-tenant ready</h3>
         <p>Per-tenant API keys with transparent namespacing and strict isolation, plus category filters on every search surface.</p></div>
       <div class="feat"><h3>Benchmark it yourself</h3>
@@ -379,9 +379,6 @@ ctx = store.reconstruct_context(
       <div class="feat"><h3>Memry periodically cleans up the store.</h3>
         <p>If two entries clearly refer to the same person, they get merged. If a tag has drifted into two spellings, Memry flags it for review instead of guessing. Old trivia gradually matters less in ranking, so it stops getting in the way without disappearing.</p>
         <p>Anything ambiguous waits for you under <b>Knowledge &gt; Upkeep</b>, and each maintenance task can be turned off individually.</p></div>
-      <div class="feat"><h3>The original conversations never become dead data.</h3>
-        <p>Memry keeps the conversations your memories were extracted from, not just the facts it extracted at the time. As the extraction pipeline improves, you can run it over years of old conversations again and recover things an earlier version missed.</p>
-        <p>So a memory store you start building today can actually get better later, without starting over.</p></div>
     </div>
   </div>
 </section>
