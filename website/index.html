@@ -144,8 +144,6 @@ header.hero{padding:3.5rem 0 4.5rem}
   overflow:hidden;background:var(--panel);box-shadow:0 18px 50px -28px rgba(0,0,0,.55)}
 .shot img{display:block;width:100%;height:auto}
 .shot figcaption{color:var(--faint);font-size:.78rem;margin-top:.75rem;max-width:46rem}
-.subhead{font-size:1.15rem;margin:3.2rem 0 0}
-.subhead + p.lede{margin-top:.6rem}
 
 /* ---------- compare ---------- */
 .tbl-scroll{overflow-x:auto;margin-top:2.2rem;border:1px solid var(--line);border-radius:var(--radius)}
@@ -352,11 +350,10 @@ ctx = store.reconstruct_context(
 <section id="map">
   <div class="wrap">
     <p class="eyebrow">The memory map</p>
-    <h2>See everything in your store.</h2>
-    <p class="lede">You can group active memories by tag, or by the people, projects and
-      tools they mention. It’s useful for seeing the shape of the store, but also for
-      spotting things that don’t quite add up, like two separate people both called
-      Jonas.</p>
+    <h2>See what your assistants actually know about you.</h2>
+    <p class="lede">The memory map gives you a view across everything Memry has learned,
+      grouped by tags or by the people, projects and tools in your memories. You can inspect
+      any part of it and see the memories behind it.</p>
 
     <figure class="shot">
       <picture>
@@ -366,12 +363,9 @@ ctx = store.reconstruct_context(
              alt="Memry's memory map in entity mode: a force-directed graph of 18 entities and 24 linked memories. Ada Lindqvist sits at the centre with 13 memories, Project Phoenix and Northwind next to her, and tools like Snowflake, dbt, Airflow and Postgres around the edge. Two separate nodes both read Jonas.">
       </picture>
       <figcaption>Grouped by entity in a demo store. Larger nodes are mentioned by more
-        memories. There are two <b>Jonas</b> nodes because nothing in the store links the
-        partner and the colleague strongly enough to treat them as the same person.</figcaption>
+        memories.</figcaption>
     </figure>
 
-    <h3 class="subhead">Why it's built this way</h3>
-    <p class="lede">The features above are the engine. These are the reasons it exists.</p>
     <div class="features two">
       <div class="feat"><h3>Everything lives in a single SQLite file.</h3>
         <p>Memories, entities, edit history, and the conversations they came from all stay together in one place.</p>
@@ -383,12 +377,11 @@ ctx = store.reconstruct_context(
         <p>Your work, your projects, the people around you, and the things you care about all end up in there. That’s unusually personal data. It shouldn’t have to live inside whichever AI product you happen to be using today, under terms that may look different a year from now.</p>
         <p>Memry gives you somewhere independent to keep it.</p></div>
       <div class="feat"><h3>Memry periodically cleans up the store.</h3>
-        <p>If two entries clearly refer to the same person, they can be merged. If a tag has drifted into two spellings, Memry flags it for review instead of guessing. Old trivia gradually matters less in ranking, so it stops getting in the way without disappearing.</p>
+        <p>If two entries clearly refer to the same person, they get merged. If a tag has drifted into two spellings, Memry flags it for review instead of guessing. Old trivia gradually matters less in ranking, so it stops getting in the way without disappearing.</p>
         <p>Anything ambiguous waits for you under <b>Knowledge &gt; Upkeep</b>, and each maintenance task can be turned off individually.</p></div>
-      <div class="feat"><h3>Deleting a memory doesn’t immediately erase it.</h3>
-        <p>When something changes, Memry can keep both the old and new version, along with when each one was valid. A deleted memory is marked as invalid instead of being wiped, which means you can still inspect or restore it later.</p>
-        <p>The original conversations stay in the database as well. So if a better extraction pipeline comes along in two years, you can run it over the conversations you already have and rebuild better memories from the same underlying history.</p></div>
-    </div>
+      <div class="feat"><h3>The original conversations never become dead data.</h3>
+        <p>Memry keeps the conversations your memories were extracted from, not just the facts it extracted at the time. As the extraction pipeline improves, you can run it over years of old conversations again and recover things an earlier version missed.</p>
+        <p>So a memory store you start building today can actually get better later, without starting over.</p></div>
     </div>
   </div>
 </section>
