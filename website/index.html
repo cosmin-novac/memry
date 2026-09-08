@@ -128,6 +128,9 @@ header.hero{padding:3.5rem 0 4.5rem}
 .feat h3{font-size:1rem;margin-bottom:.4rem}
 .feat h3 code{color:var(--accent);font-size:.85em}
 .feat p{margin:0;color:var(--dim);font-size:.86rem}
+.feat p + p{margin-top:.75rem}
+.features.two{grid-template-columns:repeat(2,1fr)}
+@media (max-width:720px){.features.two{grid-template-columns:1fr}}
 
 /* ---------- code panes ---------- */
 .code-cols{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:2.2rem}
@@ -349,11 +352,11 @@ ctx = store.reconstruct_context(
 <section id="map">
   <div class="wrap">
     <p class="eyebrow">The memory map</p>
-    <h2>See what your agents actually know.</h2>
-    <p class="lede">Memry comes with a web dashboard, and the map is part of it. It draws
-      every active memory as a graph. You can group that graph by tag, or by the people,
-      projects and tools the memories mention. This is how you spot that your agent
-      has been keeping two separate people called Jonas.</p>
+    <h2>See everything in your store.</h2>
+    <p class="lede">You can group active memories by tag, or by the people, projects and
+      tools they mention. It’s useful for seeing the shape of the store, but also for
+      spotting things that don’t quite add up, like two separate people both called
+      Jonas.</p>
 
     <figure class="shot">
       <picture>
@@ -362,24 +365,29 @@ ctx = store.reconstruct_context(
              loading="lazy" decoding="async"
              alt="Memry's memory map in entity mode: a force-directed graph of 18 entities and 24 linked memories. Ada Lindqvist sits at the centre with 13 memories, Project Phoenix and Northwind next to her, and tools like Snowflake, dbt, Airflow and Postgres around the edge. Two separate nodes both read Jonas.">
       </picture>
-      <figcaption>Grouped by entity, on a demo store. A bigger node means more memories
-        mention it. There are two <b>Jonas</b> nodes because nothing in the store proved the
-        partner and the colleague are the same person.</figcaption>
+      <figcaption>Grouped by entity in a demo store. Larger nodes are mentioned by more
+        memories. There are two <b>Jonas</b> nodes because nothing in the store links the
+        partner and the colleague strongly enough to treat them as the same person.</figcaption>
     </figure>
 
     <h3 class="subhead">Why it's built this way</h3>
     <p class="lede">The features above are the engine. These are the reasons it exists.</p>
-    <div class="features">
-      <div class="feat"><h3>It's one file, and it's yours</h3>
-        <p>Everything Memry knows sits in one SQLite file. Keep it on your laptop, or on a VPS you rent. There's no account to create. Nothing phones home. Want it gone? Delete the file.</p></div>
-      <div class="feat"><h3>Every agent reads the same memory</h3>
-        <p>Claude, ChatGPT, Cursor, Codex, Claude Code. Point them all at one Memry and they share what they learn. Tell Claude Code about your deploy setup this morning and ChatGPT knows it this afternoon. Changing model doesn't cost you your history.</p></div>
-      <div class="feat"><h3>Agents are going to watch everything you do</h3>
-        <p>That's where this is heading. Assistants sitting alongside you all day, learning how you work and who you spend your time with. The memory that comes out of that is the most personal thing you will ever generate. It shouldn't live inside a product whose terms can change next quarter. Memry is where you keep it instead.</p></div>
-      <div class="feat"><h3>It cleans up after itself</h3>
-        <p>Two entries for the same person get merged once it's clear they're the same. A tag that drifted into two spellings gets flagged. Old trivia loses weight and stops coming back in recall. That runs on a schedule while you're doing something else. Borderline calls wait for you, and every job has an off switch.</p></div>
-      <div class="feat"><h3>Nothing gets thrown away</h3>
-        <p>Every fact records when it became true and when it stopped. Forgetting marks a memory invalid rather than erasing it, so you can read it later or put it back. Your raw conversations are kept too. When extraction improves, it can be re-run over everything you ever said, and memories from years back improve with it.</p></div>
+    <div class="features two">
+      <div class="feat"><h3>Everything lives in a single SQLite file.</h3>
+        <p>Memories, entities, edit history, and the conversations they came from all stay together in one place.</p>
+        <p>Run it on your laptop or a VPS. There’s no Memry account to create, and the only data that leaves the machine is whatever you send to the model provider you configure. With the default hash embedder and no LLM key, nothing leaves the machine at all.</p>
+        <p>And if you want to get rid of it, you delete the file.</p></div>
+      <div class="feat"><h3>Claude, ChatGPT, Cursor, Codex and Claude Code can all connect to the same Memry instance.</h3>
+        <p>So if Claude Code learns something in the morning, ChatGPT already knows it that afternoon. And if you switch models or vendors later, your memory stays where it is. You don’t have to start over.</p></div>
+      <div class="feat"><h3>An assistant that stays with you all day gradually builds a pretty detailed record of your life.</h3>
+        <p>Your work, your projects, the people around you, and the things you care about all end up in there. That’s unusually personal data. It shouldn’t have to live inside whichever AI product you happen to be using today, under terms that may look different a year from now.</p>
+        <p>Memry gives you somewhere independent to keep it.</p></div>
+      <div class="feat"><h3>Memry periodically cleans up the store.</h3>
+        <p>If two entries clearly refer to the same person, they can be merged. If a tag has drifted into two spellings, Memry flags it for review instead of guessing. Old trivia gradually matters less in ranking, so it stops getting in the way without disappearing.</p>
+        <p>Anything ambiguous waits for you under <b>Knowledge &gt; Upkeep</b>, and each maintenance task can be turned off individually.</p></div>
+      <div class="feat"><h3>Deleting a memory doesn’t immediately erase it.</h3>
+        <p>When something changes, Memry can keep both the old and new version, along with when each one was valid. A deleted memory is marked as invalid instead of being wiped, which means you can still inspect or restore it later.</p>
+        <p>The original conversations stay in the database as well. So if a better extraction pipeline comes along in two years, you can run it over the conversations you already have and rebuild better memories from the same underlying history.</p></div>
     </div>
     </div>
   </div>
