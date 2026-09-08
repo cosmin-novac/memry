@@ -350,10 +350,10 @@ ctx = store.reconstruct_context(
   <div class="wrap">
     <p class="eyebrow">The memory map</p>
     <h2>See what your agents actually know.</h2>
-    <p class="lede">Memry ships a dashboard, not only an API. The map draws every active
-      memory as a graph - grouped by tag, or by the people, projects and tools those
-      memories mention - so the store is something you can read and correct, instead of a
-      table of embeddings you have to trust.</p>
+    <p class="lede">Memry comes with a web dashboard, and the map is part of it. It draws
+      every active memory as a graph. You can group that graph by tag, or by the people,
+      projects and tools the memories mention. This is how you spot that your agent
+      has been keeping two separate people called Jonas.</p>
 
     <figure class="shot">
       <picture>
@@ -362,33 +362,34 @@ ctx = store.reconstruct_context(
              loading="lazy" decoding="async"
              alt="Memry's memory map in entity mode: a force-directed graph of 18 entities and 24 linked memories. Ada Lindqvist sits at the centre with 13 memories, Project Phoenix and Northwind next to her, and tools like Snowflake, dbt, Airflow and Postgres around the edge. Two separate nodes both read Jonas.">
       </picture>
-      <figcaption>Entity mode on a demo store. Node size is how many memories mention that
-        entity; shape marks the memory type. Note the two separate <b>Jonas</b> nodes - a
-        partner and a colleague - kept apart because nothing proved they were the same
-        person.</figcaption>
+      <figcaption>Grouped by entity, on a demo store. A bigger node means more memories
+        mention it. There are two <b>Jonas</b> nodes because nothing in the store proved the
+        partner and the colleague are the same person.</figcaption>
     </figure>
 
-    <h3 class="subhead">And the rest of what is in the box</h3>
-    <p class="lede">The parts that only show up once a store is a few months old.</p>
+    <h3 class="subhead">The rest of it</h3>
+    <p class="lede">The features above are the memory engine. This is everything else the
+      server does.</p>
     <div class="features">
-      <div class="feat"><h3>A dashboard, included</h3>
-        <p>Search, filter by date, tag or person, add and edit memories, inspect provenance - served by the same process as the API. Nothing extra to deploy.</p></div>
-      <div class="feat"><h3>The map, two ways</h3>
-        <p>Group by tag or by entity, choose which entity types appear, and open any node to read the memories behind it. Fullscreen when the store gets big.</p></div>
-      <div class="feat"><h3>Typed relations</h3>
-        <p>Facts carry edges between the entities in them - <code>works_on</code>, <code>reports_to</code>, <code>uses</code>. Search boosts graph neighbours, so multi-hop questions resolve instead of ranking on wording alone.</p></div>
-      <div class="feat"><h3>Accounts &amp; OAuth 2.1</h3>
-        <p>Set <code>MEMRY_PUBLIC_URL</code> and Memry becomes its own authorization server: dynamic client registration, PKCE, rotating refresh tokens. Clients sign in; no key to paste.</p></div>
-      <div class="feat"><h3>ChatGPT and Claude connectors</h3>
-        <p>Streamable HTTP with OAuth, so Memry connects as a custom connector on both. The same memories your editor writes are the ones your chat reads back.</p></div>
-      <div class="feat"><h3>Upkeep you can switch off</h3>
-        <p>Obvious duplicate people merge, drifting tags get flagged, stale trivia decays. Anything less than obvious waits for you under Knowledge &gt; Upkeep - where each task has an off switch.</p></div>
-      <div class="feat"><h3>Deleting keeps the record</h3>
-        <p>A deleted memory is hidden from search, not destroyed. It lands in Forgotten, which is the only route to permanent deletion - and the only place to restore one.</p></div>
-      <div class="feat"><h3>Lossless backup</h3>
-        <p>Export memories, entity links, provenance, relations, timestamps, IDs and history as one bundle, and restore it exactly. Your data leaves the way it came in.</p></div>
-      <div class="feat"><h3>Deferred distillation</h3>
-        <p>A save is durable and searchable the moment it returns. A background worker waits for two minutes of quiet, then distills related saves together - so extraction sees the whole thought, not one sentence at a time.</p></div>
+      <div class="feat"><h3>Search and fix it in a browser</h3>
+        <p>The dashboard runs on the same port as the API. Search, filter by date or tag or person, edit a fact that came out wrong, and check which conversation any memory came from.</p></div>
+      <div class="feat"><h3>Group the map by tag or by person</h3>
+        <p>Two buttons. <b>Tags</b> puts every memory under its tag. <b>Entities</b> puts them under the people, projects and tools they mention. You choose which entity types show, and clicking a node lists the memories behind it.</p></div>
+      <div class="feat"><h3>Facts point at each other</h3>
+        <p>When one memory names two things, Memry stores the edge between them: <code>works_on</code>, <code>reports_to</code>, <code>uses</code>. Search then gives a bump to memories one hop away, so a question that needs two facts chained together can still land.</p></div>
+      <div class="feat"><h3>Sign in instead of pasting a key</h3>
+        <p>Set <code>MEMRY_PUBLIC_URL</code> and Memry runs an OAuth 2.1 server for its own accounts. Clients register themselves, the person logs in on Memry's page, and refresh tokens rotate. PKCE required.</p></div>
+      <div class="feat"><h3>Works as a ChatGPT or Claude connector</h3>
+        <p>Both take a remote MCP server over HTTPS. Point them at <code>https://your-host/mcp</code> and sign in. Step-by-step guides for each are in the docs.</p></div>
+      <div class="feat"><h3>Cleanup you can turn off</h3>
+        <p>Two people who are obviously the same get merged. A tag that drifted into two spellings gets flagged. Old trivia loses importance and stops showing up. Borderline cases wait for you under Knowledge &gt; Upkeep, and every job there has a switch.</p></div>
+      <div class="feat"><h3>Deleted memories go to Forgotten</h3>
+        <p>Deleting hides a memory from search and keeps the row. Open the Forgotten tab to read it, put it back, or delete it for real. That tab is the only place a memory can actually be destroyed.</p></div>
+      <div class="feat"><h3>Export everything, restore it exactly</h3>
+        <p>One file holding the memories, entity links, provenance, relations, timestamps, IDs and the full edit history. Importing it puts the store back the way it was, which is also how you move a store to another machine.</p></div>
+      <div class="feat"><h3>Saves don't wait for the LLM</h3>
+        <p>A save returns as soon as the text is written, and it is searchable straight away. A worker waits two minutes for related saves, then distills the whole group in one pass. If the model call fails, the raw memory stays put and retries.</p></div>
+    </div>
     </div>
   </div>
 </section>
