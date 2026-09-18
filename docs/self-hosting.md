@@ -267,13 +267,16 @@ against the live model, and one of the three did not survive it.
 
 ### Re-ranking search results
 
-The first version of this replaced the hybrid ranking with the relevance judgement and
-measured worse than doing nothing. That result was about the implementation, not the idea.
-The hybrid rank carries recency, decayed importance, entity anchors and the typed-relation
-hops that make multi-hop questions work, and ordering purely by "does this text answer the
-question" throws all of it away.
+On by default once `MEMRY_DECISION_PROVIDER=jev` is set. `MEMRY_DECISION_RERANK=0` turns
+it off, and it stays off for every other provider for the reason in the second table below.
 
-Blending instead of replacing, over a 228-memory store with 90 questions:
+The first version of this replaced the hybrid ranking with the relevance judgement and
+measured worse than doing nothing. That result was about the implementation, not the idea:
+the hybrid rank carries recency, decayed importance, entity anchors and the typed-relation
+hops that make multi-hop questions work, and ordering purely by "does this text answer the
+question" throws all of it away. Blending keeps it and adds what wording alone cannot see.
+
+Over a 228-memory store with 90 questions:
 
 | | recall@3 | MRR |
 |---|---|---|
@@ -283,15 +286,29 @@ Blending instead of replacing, over a 228-memory store with 90 questions:
 | **Blended, 35% relevance, non-answers demoted** | **0.967** | **0.928** |
 | Blended, 50% relevance | 0.933 | 0.906 |
 
-35% beat both 20% and 50%. Two things are doing the work: the blend moves the right answer
-up the list, and a floor at 0.15 lets an obvious non-answer be pushed to the back however
-well it matched on wording. Turn it on with `MEMRY_DECISION_RERANK=1`; it costs one call
-per search.
+35% beat both 20% and 50%. Two things do the work: the blend moves the right answer up the
+list, and a floor at 0.15 pushes an obvious non-answer to the back however well it matched
+on wording.
 
-On latency, be careful which comparison you make. Hybrid search alone is about 3 ms
-because it is a local index lookup with no network in it, and adding any hosted model puts
-a round trip in front of that. Against a *text model* doing the same re-ranking job, Jev is
-the fast option.
+### Why a text model does not get to do this
+
+The same re-ranking, same prompt, same dataset, through the shipped code path:
+
+| Re-ranker | recall@3 | MRR | p50 | p95 |
+|---|---|---|---|---|
+| None (hybrid only) | 0.933 | 0.767 | **3 ms** | 4 ms |
+| **Jev 1.13.0** | **0.967** | **0.917** | 190 ms | 282 ms |
+| gpt-5-mini, same prompt | 0.922 | 0.839 | 10,659 ms | 13,943 ms |
+
+The text model is the only one of the three that makes recall *worse* than not re-ranking,
+and it takes ten and a half seconds a query to do it. At a p95 of fourteen seconds it is
+not a feature anyone would ship, which is why `reranks_by_default` is a property of the
+provider rather than a global switch.
+
+On latency, be careful which comparison you make. Hybrid search alone is 3 ms because it is
+a local index lookup with no network in it, so adding any hosted model puts a round trip in
+front of that. Against *no re-ranking*, Jev costs 187 ms and buys 0.034 recall and 0.150
+MRR. Against a text model doing the same job, Jev is 56 times faster and more accurate.
 
 ### Upkeep stages
 

@@ -78,8 +78,9 @@ class DecisionConfig(BaseModel):
     #: value measured for that provider.
     auto_confirm_confidence: float | None = None
     #: Re-rank search results by asking which candidates answer the query. One
-    #: extra call per search; measured in docs/self-hosting.md.
-    rerank: bool = False
+    #: extra call per search. Unset means the provider's own default: on for
+    #: Jev, which was measured to earn it, off otherwise.
+    rerank: bool | None = None
     #: How many of the hybrid candidates to judge.
     rerank_pool: int = 20
     #: How much the relevance judgement counts against the hybrid rank. The

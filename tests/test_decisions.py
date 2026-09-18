@@ -446,9 +446,16 @@ def test_rerank_leaves_the_order_alone_when_the_provider_cannot_answer():
         store.close()
 
 
-def test_rerank_is_off_unless_asked_for():
+def test_rerank_follows_the_provider_unless_configured():
+    """Re-ranking through a text model measured below not re-ranking at all, so
+    it is on for the provider that earned it and off for the rest."""
     from memry.config import Config
-    assert Config().decision.rerank is False
+    from memry.providers.decisions import JevDecider
+
+    assert Config().decision.rerank is None            # unset: ask the provider
+    assert NoneDecider().reranks_by_default is False
+    assert LLMDecider(FakeLLM()).reranks_by_default is False
+    assert JevDecider(DecisionConfig(provider="jev", api_key="k")).reranks_by_default is True
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64),
                         decider=_stub(lambda k, q: Answer(0.01, {}, 0.9, True)))
     results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()

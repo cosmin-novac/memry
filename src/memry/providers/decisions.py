@@ -136,6 +136,12 @@ class Decider(ABC):
     #: more. Measured per provider; see docs/self-hosting.md.
     auto_confirm_confidence: float = 0.95
 
+    #: Whether re-ranking search results with this provider is worth the round
+    #: trip. Off unless a provider has been measured to earn it: the same
+    #: re-ranking through a text model scored *below* not re-ranking at all,
+    #: and took ten seconds a query doing it.
+    reranks_by_default: bool = False
+
     @abstractmethod
     def decide(self, state: str, questions: dict[str, Question]) -> Answers:
         """Answer every question against ``state``. Never raises: a provider
@@ -268,6 +274,9 @@ class JevDecider(Decider):
     # of headroom over the worst observed mistake and still merges 20 of 22
     # correct pairs without asking.
     auto_confirm_confidence = 0.7
+    # recall@3 0.933 -> 0.967 and MRR 0.767 -> 0.917 over a 228-memory store,
+    # at 190 ms against the 10.7 s a text model takes for the same work.
+    reranks_by_default = True
 
     def __init__(self, cfg: DecisionConfig) -> None:
         self.cfg = cfg

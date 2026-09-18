@@ -1082,7 +1082,8 @@ class MemoryStore:
         leaves the order exactly as it found it.
         """
         cfg = self.config.decision
-        if not cfg.rerank or not self.decider.available or len(results) < 2:
+        wanted = cfg.rerank if cfg.rerank is not None else self.decider.reranks_by_default
+        if not wanted or not self.decider.available or len(results) < 2:
             return results
         pool = results[: max(cfg.rerank_pool, 2)]
         answers = self.decider.decide(
