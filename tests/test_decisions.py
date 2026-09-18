@@ -455,3 +455,121 @@ def test_rerank_is_off_unless_asked_for():
                for i in range(3)]
     assert store._rerank("q", results) == results
     store.close()
+
+
+# --------------------------------------------------- durability / decay
+def test_durability_replaces_the_per_type_half_life():
+    """Two semantic facts decay at the same rate today. One is a train delay
+    and one is a penicillin allergy, so that rate is wrong for both."""
+    from datetime import datetime, timedelta, timezone
+
+    from memry.config import DecayConfig
+    from memry.intelligence.decay import (
+        DURABILITY_KEY, durability_factor, effective_importance,
+    )
+    from memry.models import Memory
+
+    cfg = DecayConfig()
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=90)).isoformat()
+
+    def mem(**meta):
+        return Memory(id="m", user_id="u", content="x", importance=1.0,
+                      memory_type="semantic", created_at=old, updated_at=old,
+                      metadata=meta)
+
+    fleeting = effective_importance(mem(**{DURABILITY_KEY: 0.0}), cfg, now)
+    lasting = effective_importance(mem(**{DURABILITY_KEY: 2.0}), cfg, now)
+    untyped = effective_importance(mem(), cfg, now)
+    assert fleeting < untyped < lasting
+    # an unscored memory keeps exactly the old behaviour
+    assert durability_factor(mem()) is None
+    assert durability_factor(mem(**{DURABILITY_KEY: "nonsense"})) is None
+    # a score between levels interpolates rather than snapping
+    assert 0.2 < durability_factor(mem(**{DURABILITY_KEY: 0.5})) < 1.0
+
+
+def test_durability_pass_scores_and_says_what_it_did(caplog):
+    import logging
+
+    from memry.config import Config
+    from memry.intelligence.decay import DURABILITY_KEY
+
+    stub = _stub(lambda k, q: Answer(1.9, {}, 0.8, True))
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(),
+                        embedder=HashEmbedder(64), decider=stub)
+    store.add("Ada is allergic to penicillin", user_id="u", infer=False)
+    store.add("The train was delayed this morning", user_id="u", infer=False)
+
+    with caplog.at_level(logging.INFO, logger="memry"):
+        outcome = store.score_memory_durability(user_id="u")
+    assert outcome["scored"] == 2 and outcome["provider"] == "stub"
+    assert "durability: scored 2" in caplog.text
+    assert all(DURABILITY_KEY in (m.metadata or {})
+               for m in store.get_all(user_id="u", limit=10))
+    # a second pass has nothing left to do
+    assert store.score_memory_durability(user_id="u")["scored"] == 0
+    store.close()
+
+
+def test_durability_pass_without_a_provider_changes_nothing():
+    from memry.config import Config
+    from memry.intelligence.decay import DURABILITY_KEY
+
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    store.add("Ada is allergic to penicillin", user_id="u", infer=False)
+    assert store.score_memory_durability(user_id="u")["scored"] == 0
+    assert DURABILITY_KEY not in (store.get_all(user_id="u", limit=5)[0].metadata or {})
+    store.close()
+
+
+# --------------------------------------------------- consolidation gate
+def test_consolidation_skips_the_expensive_call_when_the_facts_differ():
+    """Most candidate groups are not the same fact, and each one currently
+    costs a text-model call that also has to write the merged sentence."""
+    from memry.intelligence.consolidate import judge_group
+    from memry.models import Memory
+
+    pair = [Memory(id=f"m{i}", user_id="u", content=c)
+            for i, c in enumerate(["Ada lives in Amsterdam", "Ada works in Amsterdam"])]
+    llm = FakeLLM()          # empty: running out would raise
+    verdict = judge_group(llm, pair, _stub(lambda k, q: Answer(0.04, {}, 0.9, True)))
+    assert verdict["same_fact"] is False
+    assert "typed check" in verdict["reason"]
+    assert llm.calls == []   # the text model was never asked
+
+
+def test_consolidation_still_asks_the_text_model_to_write_the_merge():
+    from memry.intelligence.consolidate import judge_group
+    from memry.models import Memory
+
+    pair = [Memory(id=f"m{i}", user_id="u", content=c)
+            for i, c in enumerate(["Ada lives in Amsterdam", "Ada's home is Amsterdam"])]
+    llm = FakeLLM([json.dumps({"same_fact": True, "content": "Ada lives in Amsterdam",
+                               "reason": "same"})])
+    verdict = judge_group(llm, pair, _stub(lambda k, q: Answer(0.9, {}, 0.9, True)))
+    assert verdict["same_fact"] is True and verdict["content"] == "Ada lives in Amsterdam"
+    assert len(llm.calls) == 1
+
+
+def test_consolidation_abstention_leaves_the_text_model_in_charge():
+    from memry.intelligence.consolidate import judge_group
+    from memry.models import Memory
+
+    pair = [Memory(id=f"m{i}", user_id="u", content="x") for i in range(2)]
+    llm = FakeLLM([json.dumps({"same_fact": False, "reason": "no"})])
+    assert judge_group(llm, pair, NoneDecider())["same_fact"] is False
+    assert len(llm.calls) == 1
+
+
+# --------------------------------------------------- tag drift
+def test_tag_pairs_only_ever_add_suggestions():
+    """On a labelled set this missed pairs a person would merge but never
+    proposed an unrelated one, so it belongs in front of review, not automation."""
+    from memry.intelligence.clustering import judge_tag_pairs
+
+    pairs = [("work", "job"), ("food", "travel")]
+    stub = _stub(lambda k, q: Answer(0.8 if k == "t0" else 0.05, {}, 0.9, True))
+    assert judge_tag_pairs(stub, pairs) == [("work", "job")]
+    assert judge_tag_pairs(NoneDecider(), pairs) == []
+    assert judge_tag_pairs(stub, []) == []

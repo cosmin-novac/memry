@@ -14,15 +14,20 @@ backends, LLMs, and embedders are all replaceable underneath it.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 import re
+import time
 from typing import Any
 
 import numpy as np
+
+log = logging.getLogger("memry")
 
 from .backends.base import MemoryBackend
 from .backends.local import LocalBackend
 from .config import Config
 from .intelligence.clustering import (
+    judge_tag_pairs,
     obvious_canonical_merges,
     propose_synthetic_tags,
     semantic_duplicate_tags,
@@ -30,7 +35,12 @@ from .intelligence.clustering import (
 )
 from .intelligence.consolidate import judge_group, representative, similarity_groups
 from .intelligence.context import build_context, estimate_tokens
-from .intelligence.decay import decay_sweep, effective_importance
+from .intelligence.decay import (
+    DURABILITY_KEY,
+    decay_sweep,
+    effective_importance,
+    score_durability,
+)
 from .intelligence.entities import (
     classify_entity_types,
     judge_entity_referents,
@@ -2076,7 +2086,7 @@ class MemoryStore:
                            "content": representative(memories).content,
                            "reason": "identical text"}
             elif self.llm.available:
-                verdict = judge_group(self.llm, memories)
+                verdict = judge_group(self.llm, memories, self.decider)
             else:
                 continue  # never merge on similarity alone
 
@@ -2225,12 +2235,25 @@ class MemoryStore:
         overlap for the near-synonyms that share no words ("liver bloods" beside
         "liver lab results").
         """
-        proposals = suggest_canonical_merges(self.llm, self.categories(user_id=user_id))
+        tags = self.categories(user_id=user_id)
+        proposals = suggest_canonical_merges(self.llm, tags)
         seen = {v for group in proposals for v in group["variants"]}
         for pair in self.semantic_tag_duplicates(user_id=user_id):
             if not seen.intersection(pair["variants"]):
                 proposals.append(pair)
                 seen.update(pair["variants"])
+        # A fourth pass for the synonyms the three above miss. Suggestion only:
+        # every one of these still needs confirming under Knowledge > Upkeep.
+        names = [str(t["category"]).strip().lower() for t in tags]
+        names = [n for n in names if n and n not in seen]
+        candidates = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
+        if candidates and len(candidates) <= 200:
+            for a, b in judge_tag_pairs(self.decider, candidates):
+                if a in seen or b in seen:
+                    continue
+                proposals.append({"canonical": a, "variants": [a, b],
+                                  "reason": f"{self.decider.name}: same meaning"})
+                seen.update({a, b})
         return proposals
 
     # -- manual tag curation -----------------------------------------------
@@ -2286,7 +2309,52 @@ class MemoryStore:
     # an env-var edit and a restart. A runtime override lives in the meta table
     # so the dashboard toggle survives restarts; config stays the default when
     # no override was ever set.
-    _MAINTENANCE_KEYS = ("dedup_entities", "tag_abstraction")
+    _MAINTENANCE_KEYS = ("dedup_entities", "tag_abstraction", "durability")
+
+    #: How many memories one durability pass scores. Jev answers 128 questions
+    #: in a single call, so the batch is bounded by prudence, not by cost.
+    DURABILITY_BATCH = 64
+
+    def score_memory_durability(
+        self, *, user_id: str | None = None, limit: int | None = None
+    ) -> dict[str, Any]:
+        """Record how long each memory is worth keeping, for memories missing it.
+
+        Decay runs on a half-life per memory type, which treats "the train was
+        delayed this morning" and "allergic to penicillin" the same because both
+        are semantic. A per-fact estimate replaces that guess; anything still
+        unscored keeps the old behaviour.
+        """
+        outcome: dict[str, Any] = {"scored": 0, "skipped": 0, "provider": self.decider.name}
+        if not self.decider.available:
+            outcome["skipped"] = -1
+            log.info("durability: no decision provider configured, nothing scored")
+            return outcome
+        batch = limit or self.DURABILITY_BATCH
+        pending = [
+            m for m in self.get_all(user_id=user_id, limit=100_000)
+            if DURABILITY_KEY not in (m.metadata or {})
+        ][:batch]
+        if not pending:
+            return outcome
+        started = time.time()
+        scores = score_durability(self.decider, [m.content for m in pending])
+        for index, memory in enumerate(pending):
+            score = scores.get(index)
+            if score is None:
+                outcome["skipped"] += 1
+                continue
+            metadata = dict(memory.metadata or {})
+            metadata[DURABILITY_KEY] = round(score, 3)
+            self.backend.update_memory(memory.id, metadata=metadata)
+            outcome["scored"] += 1
+        outcome["ms"] = round((time.time() - started) * 1000)
+        log.info(
+            "durability: scored %d of %d memories in %d ms via %s (%d unanswered)",
+            outcome["scored"], len(pending), outcome["ms"], self.decider.name,
+            outcome["skipped"],
+        )
+        return outcome
 
     def maintenance_enabled(self, key: str) -> bool:
         override = self.backend.get_meta(f"maintenance:{key}:enabled")

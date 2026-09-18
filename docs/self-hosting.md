@@ -293,22 +293,32 @@ because it is a local index lookup with no network in it, and adding any hosted 
 a round trip in front of that. Against a *text model* doing the same re-ranking job, Jev is
 the fast option.
 
-### Upkeep stages, probed but not wired
+### Upkeep stages
 
-Durability scored 11 of 12, which is enough to feed decay a per-fact estimate instead of a
-fixed half-life per memory type. "Ada is allergic to penicillin" came back at the top of
-the scale with 0.98 confidence and "the train was delayed this morning" at the bottom with
-0.81. The one miss put "Marta Reyes is Ada's manager" nearer years than months, which is
-arguable.
+All three are wired, and all three report what they did.
 
-Consolidation scored 11 of 12 and separated cleanly: genuine restatements landed at
-0.62-0.94 and everything else at 0.02-0.08, including the pairs designed to look alike
-("Ada lives in Amsterdam" against "Ada works in Amsterdam"). The miss was a near-tie at
-0.47 on two phrasings of the same Snowflake fact.
+**How long facts stay relevant** (11/12 on a labelled set, one 713 ms call). Forgetting
+decays importance on a half-life per memory type, which treats "the train was delayed this
+morning" and "allergic to penicillin" identically because both are semantic. A pass now
+records a per-fact estimate in the memory's metadata and decay prefers it, falling back to
+the type rate for anything unscored. "Allergic to penicillin" scored top of the scale at
+0.98 confidence and the train delay scored bottom at 0.81. Run it from **Knowledge >
+Upkeep** or `POST /api/v1/maintenance/durability`.
 
-Tag drift is the weakest, at 8 of 10. It missed "food" against "diet" and "project-phoenix"
-against "phoenix", both of which a person would merge. Worth wiring only as a suggestion
-for review, which is what the existing tag flow already does.
+**Consolidation** (11/12, one 230 ms call). The typed question now runs first and the text
+model is only asked when the answer is yes, because writing the merged sentence is the only
+part that needs prose. Most candidate groups are not the same fact, so most of those calls
+stop happening. Genuine restatements scored 0.62-0.94 and everything else 0.02-0.08,
+including pairs built to look alike: "Ada lives in Amsterdam" against "Ada works in
+Amsterdam" came back 0.06.
+
+**Tag drift** (8/10, one 205 ms call). Added as a fourth suggestion pass behind the three
+that already exist, and deliberately never as automation. It missed "food" beside "diet"
+and "project-phoenix" beside "phoenix", both of which a person would merge, but it never
+proposed an unrelated pair. Missing a suggestion costs nothing; inventing one costs trust.
+
+Every pass writes a line to the server log saying what it changed, and the Upkeep panel
+shows the same thing next to the button that ran it.
 
 ### A trap worth remembering
 
