@@ -153,6 +153,42 @@ rerouted.
 
 Connecting ChatGPT this way: [connect-chatgpt.md](connect-chatgpt.md).
 
+## Typed decisions (optional)
+
+Parts of the pipeline do not need a text model. Deciding whether two people called
+Jonas are the same person is a choice between `same`, `different` and `unsure`, and
+Memry already gates automatic merges on the confidence attached to it. Today that
+confidence is a number the text model was asked to report about itself, which nothing
+calibrates.
+
+`MEMRY_DECISION_PROVIDER` selects who answers those questions. It is **off by default**
+and an existing deployment behaves exactly as before:
+
+| Value | Behaviour |
+|---|---|
+| `none` (default) | No decision provider. Identity judgement uses the prompt path Memry has always used. |
+| `llm` | The same questions, typed, answered by the configured text model. An answer outside the declared options is rejected rather than accepted. |
+| `jev` | [TypeSafe Jev](https://typesafe.ai), a System One model that answers typed questions directly and returns a probability per option. |
+
+```bash
+export MEMRY_DECISION_PROVIDER=jev
+export MEMRY_DECISION_API_KEY=...        # TypeSafe API key
+export MEMRY_DECISION_MODEL=jev-latest   # optional
+export MEMRY_DECISION_BASE_URL=...       # optional, for a proxy
+```
+
+Jev is a hosted API, so turning it on means identity questions leave the machine, the
+same trade as configuring an LLM provider. It is a second provider to weigh, not a
+replacement for the first: extraction still needs a text model.
+
+The provider can never fail a write. A transport error, a rate limit, a malformed reply
+or an answer outside the declared options all read as "no answer", and the caller falls
+back to the conservative path rather than treating silence as a verdict.
+
+One caveat worth keeping in mind: "cannot hallucinate" means the reply always matches
+the schema, not that it is right. A confidently wrong `same` still merges two people, so
+the merge-proposal review under **Knowledge > Upkeep** matters as much as it did before.
+
 ## Scaling up
 
 | Situation | Setting |

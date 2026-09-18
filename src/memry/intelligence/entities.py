@@ -22,6 +22,7 @@ from typing import Any
 
 from ..backends.base import MemoryBackend
 from ..models import Entity, EntityMention, MergeProposal, Scope, utcnow
+from ..providers.decisions import Answer, Choice, Decider
 from ..providers.llm import LLM
 from .extraction import parse_lenient_json
 
@@ -212,9 +213,75 @@ def _obvious_same_entity(
         len(shared) / min(len(left), len(right)) >= 0.12
     )
 
+IDENTITY_QUESTION = Choice(
+    instructions=(
+        "Do the EXISTING entity and the NEW fact refer to the same real-world "
+        "person, organization, place or thing?"
+    ),
+    criteria={
+        "same": (
+            "Clearly the same entity: a matching full name with compatible context, "
+            "or strongly consistent roles, relationships or identifiers. Different "
+            "jobs, hobbies or projects are not a contradiction."
+        ),
+        "different": (
+            "Clearly a different entity: concretely conflicting ages, locations, "
+            "relationships, identifiers or types."
+        ),
+        "unsure": "The name matches but the evidence does not settle it either way.",
+    },
+)
+
+
+def _identity_state(
+    existing: Entity, existing_facts: list[str], new_fact: str, surface: str
+) -> str:
+    facts = "\n".join(f"- {f}" for f in existing_facts) or "- (no facts recorded)"
+    description = existing.description or "(no synthesized description yet)"
+    return (
+        f'EXISTING entity "{existing.name}"\nDescription: {description}\n'
+        f"Recent evidence:\n{facts}\n\n"
+        f'NEW fact mentioning "{surface}":\n- {new_fact}'
+    )
+
+
+def _judge_via_decider(
+    decider: Decider,
+    existing: Entity,
+    existing_facts: list[str],
+    new_fact: str,
+    surface: str,
+) -> dict[str, Any] | None:
+    """Identity as a typed choice. Returns None when the provider abstained, so
+    the caller can fall back rather than treat "no answer" as a verdict."""
+    answers = decider.decide(
+        _identity_state(existing, existing_facts, new_fact, surface),
+        {"identity": IDENTITY_QUESTION},
+    )
+    answer: Answer = answers["identity"]
+    if not answer.available:
+        return None
+    return {
+        "verdict": answer.value,
+        "confidence": answer.confidence,
+        "reason": f"{decider.name}: {answer.value}",
+        "probabilities": answer.probabilities,
+    }
+
+
 def _judge(
-    llm: LLM, existing: Entity, existing_facts: list[str], new_fact: str, surface: str
+    llm: LLM,
+    existing: Entity,
+    existing_facts: list[str],
+    new_fact: str,
+    surface: str,
+    decider: Decider | None = None,
 ) -> dict[str, Any]:
+    if decider is not None and decider.available:
+        judged = _judge_via_decider(decider, existing, existing_facts, new_fact, surface)
+        if judged is not None:
+            return judged
+        # fall through: an abstaining or failing provider must not decide by default
     if not llm.available:
         return {"verdict": "unsure", "confidence": 0.5, "reason": "no LLM: same name only"}
     facts = "\n".join(f"- {f}" for f in existing_facts) or "- (no facts recorded)"
@@ -388,6 +455,7 @@ def resolve_mentions(
     *,
     backend: MemoryBackend,
     llm: LLM,
+    decider: Decider | None = None,
     scope: Scope,
     memory_id: str,
     memory_content: str,
@@ -420,7 +488,9 @@ def resolve_mentions(
             ):
                 target = candidate
                 break
-            judgment = _judge(llm, candidate, facts, memory_content, surface)
+            judgment = _judge(
+                llm, candidate, facts, memory_content, surface, decider
+            )
             high_conflict = (
                 judgment["verdict"] == "different"
                 and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
@@ -514,6 +584,7 @@ def resolve_open_proposals(
     *,
     backend: MemoryBackend,
     llm: LLM,
+    decider: Decider | None = None,
     scope: Scope,
     auto_confirm: bool = True,
 ) -> dict[str, int]:
@@ -563,6 +634,7 @@ def resolve_open_proposals(
             facts_a,
             " / ".join(facts_b) or f"(entity named {entity_b.name}, no facts)",
             entity_b.name,
+            decider,
         )
         high_conflict = (
             judgment["verdict"] == "different"

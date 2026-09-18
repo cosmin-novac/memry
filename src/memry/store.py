@@ -72,6 +72,7 @@ from .models import (
     utcnow,
 )
 from .providers.embeddings import Embedder, build_embedder
+from .providers.decisions import Decider, build_decider
 from .providers.llm import LLM, build_llm
 from .retrieval import hybrid_search
 
@@ -184,11 +185,15 @@ class MemoryStore:
         *,
         backend: MemoryBackend | None = None,
         llm: LLM | None = None,
+        decider: Decider | None = None,
         embedder: Embedder | None = None,
     ) -> None:
         self.config = config or Config.load()
         self.backend = backend or LocalBackend(self.config.db_path, ann=self.config.ann)
         self.llm = llm or build_llm(self.config.llm)
+        # Typed judgements (entity identity). Defaults to the text model,
+        # so a store that configures nothing behaves exactly as before.
+        self.decider = decider or build_decider(self.config.decision, self.llm)
         self.embedder = embedder or build_embedder(self.config.embedding)
 
     # ------------------------------------------------------------------
@@ -465,6 +470,7 @@ class MemoryStore:
                 resolved = resolve_mentions(
                     backend=self.backend,
                     llm=self.llm,
+                    decider=self.decider,
                     scope=scope,
                     memory_id=action.memory_id,
                     memory_content=action.content or candidate.content,
@@ -557,6 +563,7 @@ class MemoryStore:
             resolved = resolve_mentions(
                 backend=self.backend,
                 llm=self.llm,
+                decider=self.decider,
                 scope=scope,
                 memory_id=memory_id,
                 memory_content=content,
@@ -1869,7 +1876,7 @@ class MemoryStore:
         # look at it again and would sit there for good.
         proposed = propose_same_name_duplicates(backend=self.backend, scope=scope)
         outcome = resolve_open_proposals(
-            backend=self.backend, llm=self.llm, scope=scope
+            backend=self.backend, llm=self.llm, decider=self.decider, scope=scope
         )
         outcome["proposed"] = proposed
         outcome["purged"] = self.backend.purge_orphan_entities(scope)
@@ -2318,9 +2325,12 @@ class MemoryStore:
 
     def close(self) -> None:
         try:
-            self.llm.close()
+            self.decider.close()
         finally:
             try:
-                self.embedder.close()
+                self.llm.close()
             finally:
-                self.backend.close()
+                try:
+                    self.embedder.close()
+                finally:
+                    self.backend.close()
