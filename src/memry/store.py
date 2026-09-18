@@ -2311,6 +2311,11 @@ class MemoryStore:
                 "llm": f"{self.llm.name}"
                 + (f":{getattr(self.llm, 'model', '')}" if getattr(self.llm, "model", "") else ""),
                 "embedder": self.embedder.model_id,
+                # Which provider answers typed judgements. "none" is the
+                # default and means the built-in prompt path.
+                "decider": self.decider.name
+                + (f":{getattr(self.decider, 'model', '')}"
+                   if getattr(self.decider, "model", "") else ""),
                 # "invalidated" lumps together deleted memories and old versions
                 # of updated ones. Only the first kind is recoverable, and only
                 # that kind is what the Forgotten tab lists, so report it apart.

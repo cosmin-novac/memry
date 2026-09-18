@@ -1226,6 +1226,9 @@ function renderServerInfo(){
     ['Raw messages stored',s.episodes],
     ['Language model',s.llm,'Reads your messages to split them into facts and decide what is new. Without one, messages are stored whole.'],
     ['Embeddings',s.embedder,'Turns text into numbers so search can match on meaning.'],
+    ...(s.decider&&!String(s.decider).startsWith('none')
+      ? [['Typed decisions',s.decider,'Answers yes/no and either/or questions, like whether two people with the same name are the same person. Returns how certain it is, which is what decides whether a merge happens on its own.']]
+      : []),
     ['Storage',s.backend,'Everything lives in one file on this server.'],
   ];
   document.getElementById('serverinfo').innerHTML=rows

@@ -237,3 +237,17 @@ def test_store_uses_a_configured_decider_for_entity_identity():
     assert len(store.entities(user_id="ada")) == 2
     assert llm.responses == []  # every queued response was consumed by extraction
     store.close()
+
+
+def test_stats_reports_the_decision_provider():
+    """The dashboard's About panel reads this, and hides the row when it's off."""
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(),
+                        embedder=HashEmbedder(64))
+    assert store.stats()["decider"] == "none"
+    store.close()
+
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(),
+                        embedder=HashEmbedder(64),
+                        decider=JevDecider(DecisionConfig(provider="jev", api_key="k")))
+    assert store.stats()["decider"] == "jev:jev-latest"
+    store.close()
