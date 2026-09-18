@@ -251,6 +251,45 @@ headroom above the worst mistake Jev made. Override with
 `MEMRY_DECISION_MERGE_CONFIDENCE` once you have measured your own data; 56 cases pin a
 threshold roughly, not precisely.
 
+### The other stages
+
+Three more places where the answers are known before the call is made. Each was probed
+against the live model, and one of the three did not survive it.
+
+| Stage | Result | Shipped |
+|---|---|---|
+| Entity typing | 14/16, and all sixteen in **one 608 ms call** | Yes. It was already a batch call, so this is a straight swap. Both misses were fair: a German company-register number typed as code at 0.28 confidence, which is the model flagging its own doubt, and Hetzner typed as an organization, which it is. |
+| Reconcile (ADD / UPDATE / DELETE / NONE) | 9/10, ~344 ms | Yes, for the decision only. Every high-confidence answer was right, the one miss scored 0.73 and the genuinely hard retraction scored 0.48. Writing the merged sentence for an UPDATE is a writing task and stays with the text model, so this is a cheap call in front of a rarer expensive one. |
+| Re-ranking search results | Worse than what ships | **No.** See below. |
+
+### Re-ranking search results: measured, and rejected
+
+A hand-labelled dozen said 11 out of 12, which looked like a win. Run through the eval
+harness over a 228-memory store with 90 questions, it is not:
+
+| | recall@3 | MRR | p50 |
+|---|---|---|---|
+| Hybrid ranking (what ships) | **0.933** | **0.828** | **3 ms** |
+| Plus a relevance re-rank over 12 candidates | 0.844 | 0.726 | 199 ms |
+| Plus a relevance re-rank over 24 candidates | 0.878 | 0.765 | 208 ms |
+
+Worse on both measures and sixty times slower, so the code came back out rather than
+shipping behind a flag nobody should turn on. Asking "does this text answer the question"
+one memory at a time discards what the existing ranking already knows: recency, decayed
+importance, entity anchors, and the typed-relation hops that make multi-hop questions work
+at all. A sentence can read like an answer and still be the wrong one.
+
+`evals/datasets/distractors_v1.jsonl` was written for this and is worth keeping. The older
+`synthetic_v1` scores recall@3 = 1.000 over a 19-memory store, so nothing can be measured
+on it. The new one keeps several near-duplicates competing for every answer.
+
+### A trap worth remembering
+
+An early entity-typing probe scored 2 out of 16 because the names only ever appeared in
+the shared state, never in the questions, and every answer came back "person" at around
+0.75. Confidence describes the answer to the question that was asked. A question carrying
+no information still gets a confident-looking reply.
+
 ## Scaling up
 
 | Situation | Setting |

@@ -56,7 +56,13 @@ Be conservative when only a short/common name matches.
 Respond with JSON only:
 {"verdict": "same"|"unsure"|"different", "confidence": 0..1, "reason": short}"""
 
-AUTO_CONFIRM_CONFIDENCE = 0.9
+# Measured over 56 labelled identity cases: at 0.9 a text model merges two
+# entities that should stay apart, including a partner and a vendor architect
+# who share a first name - the exact confusion the entity handling exists to
+# prevent, waved through at 0.85. Its wrong answers score as high as its right
+# ones, so the only threshold that lets nothing through is 0.95. Fewer merges
+# happen without asking; the ones that do are the ones that should.
+AUTO_CONFIRM_CONFIDENCE = 0.95
 
 
 def _gate(decider: Decider | None) -> float:
@@ -344,12 +350,58 @@ Use "other" only when none fit.
 JSON only: {"types": [{"name": str, "type": str}]}."""
 
 
-def classify_entity_types(llm: LLM, names: list[str]) -> dict[str, str]:
+TYPE_CRITERIA = {
+    "person": "A human being.",
+    "organization": "A company, team or institution.",
+    "project": "A named piece of work.",
+    "product": "A tool, service, library, brand or product.",
+    "place": "A city, country, building or region.",
+    "event": "Something that happens at a point in time.",
+    "document": ("A contract, invoice, certificate, form, report, or the "
+                 "reference number that identifies one."),
+    "code": "A file, function, table, endpoint or config key.",
+    "concept": "An abstract idea.",
+    "other": "None of the others fit.",
+}
+
+
+def _classify_via_decider(decider: Decider, names: list[str]) -> dict[str, str] | None:
+    """One question per name, all in one call.
+
+    The name has to travel in the question rather than the state: identical
+    questions over a state that does not name them get identical answers, at a
+    confidence that looks fine.
+    """
+    questions = {
+        f"n{i}": Choice(instructions=f'What kind of thing is "{name}"?',
+                        criteria=TYPE_CRITERIA)
+        for i, name in enumerate(names)
+    }
+    answers = decider.decide(
+        "Entity names extracted from a personal long-term memory store.", questions
+    )
+    out: dict[str, str] = {}
+    for i, name in enumerate(names):
+        answer = answers[f"n{i}"]
+        if answer.available and answer.value in TYPE_CRITERIA:
+            out[name.strip().lower()] = answer.value
+    return out or None
+
+
+def classify_entity_types(
+    llm: LLM, names: list[str], decider: Decider | None = None
+) -> dict[str, str]:
     """One call classifies a whole batch of entity names -> type. Cheap: many
     entities per call, used to backfill entities that were linked before typing."""
     from .extraction import ENTITY_TYPES, parse_lenient_json
 
     if not names:
+        return {}
+    if decider is not None and decider.available:
+        typed = _classify_via_decider(decider, names)
+        if typed is not None:
+            return typed
+    if not llm.available:
         return {}
     raw = llm.complete(
         _TYPE_SYSTEM,

@@ -456,6 +456,7 @@ class MemoryStore:
                 embedder=self.embedder,
                 llm=self.llm,
                 episode_ids=episode_ids,
+                decider=self.decider,
                 retrieval_cfg=self.config.retrieval,
                 prepare_update=lambda memory_id, final_content: (
                     self._reanalyze_edited_entities(memory_id, final_content, scope)
@@ -1614,7 +1615,9 @@ class MemoryStore:
         for i in range(0, len(untyped), batch):
             group = untyped[i : i + batch]
             try:
-                types = classify_entity_types(self.llm, [e.name for e in group])
+                types = classify_entity_types(
+                    self.llm, [e.name for e in group], self.decider
+                )
             except Exception:
                 continue
             for e in group:

@@ -303,8 +303,8 @@ def test_each_provider_carries_its_own_merge_gate():
     Measured over 56 labelled cases: a text model's wrong answers score as high
     as its right ones, so its gate stays at 0.9; Jev's separate, so it can sit
     lower and still merge nothing it should not."""
-    assert NoneDecider().auto_confirm_confidence == 0.9
-    assert LLMDecider(FakeLLM()).auto_confirm_confidence == 0.9
+    assert NoneDecider().auto_confirm_confidence == 0.95
+    assert LLMDecider(FakeLLM()).auto_confirm_confidence == 0.95
     assert JevDecider(DecisionConfig(provider="jev", api_key="k")).auto_confirm_confidence == 0.7
 
 
@@ -329,10 +329,75 @@ def test_a_decider_judgement_records_the_gate_it_should_be_measured_against():
 
     stub = Stub()
     assert _gate(stub) == 0.7
-    assert _gate(None) == 0.9          # no provider: today's threshold
-    assert _gate(NoneDecider()) == 0.9  # unavailable provider: today's threshold
+    assert _gate(None) == 0.95          # no provider: the text-model gate
+    assert _gate(NoneDecider()) == 0.95  # unavailable provider: same
 
     judged = _judge_via_decider(stub, Entity(id="e", name="Ada", user_id="ada"),
                                 ["Ada works at Northwind"], "Ada lives in Amsterdam", "Ada")
-    # 0.80 clears Jev's gate but would not clear the text model's 0.9
+    # 0.80 clears Jev's gate but would not clear the text model's 0.95
     assert judged["confidence"] == 0.8 and judged["gate"] == 0.7
+
+
+# ------------------------------------------------- the other wired stages
+def _stub(answers_by_key):
+    class Stub(NoneDecider):
+        name = "stub"
+        available = True
+
+        def decide(self, state, questions):
+            from memry.providers.decisions import Answers
+            self.last_state = state
+            self.last_questions = questions
+            return Answers({k: answers_by_key(k, questions[k]) for k in questions})
+    return Stub()
+
+
+def test_entity_typing_asks_one_question_per_name_in_a_single_call():
+    """The names must travel in the questions. An early probe scored 2/16
+    because they only lived in the state, and every answer came back 'person'
+    at a confident-looking 0.75."""
+    from memry.intelligence.entities import classify_entity_types
+
+    want = {"n0": "person", "n1": "organization", "n2": "place"}
+    stub = _stub(lambda k, q: Answer(want[k], {want[k]: 0.97}, 0.97, True))
+    out = classify_entity_types(NoneLLM(), ["Ada Lindqvist", "Northwind", "Amsterdam"], stub)
+
+    assert out == {"ada lindqvist": "person", "northwind": "organization",
+                   "amsterdam": "place"}
+    assert len(stub.last_questions) == 3          # one call, three questions
+    for name in ("Ada Lindqvist", "Northwind", "Amsterdam"):
+        assert any(name in q.instructions for q in stub.last_questions.values())
+
+
+def test_entity_typing_falls_back_when_the_provider_abstains():
+    from memry.intelligence.entities import classify_entity_types
+
+    assert classify_entity_types(NoneLLM(), ["Ada"], NoneDecider()) == {}
+    assert classify_entity_types(NoneLLM(), ["Ada"], _stub(lambda k, q: Answer())) == {}
+
+
+def test_reconcile_asks_for_an_action_and_a_target():
+    from memry.intelligence.reconcile import _decide_action
+
+    stub = _stub(lambda k, q: Answer("UPDATE" if k == "action" else "1",
+                                     {}, 0.93, True))
+    out = _decide_action(stub, "EXISTING…\nNEW…", count=3)
+    assert out["action"] == "UPDATE" and out["target"] == 1
+    assert out["content"] is None       # writing the merged sentence is not its job
+    assert set(stub.last_questions) == {"action", "target"}
+
+
+def test_reconcile_with_one_candidate_skips_the_target_question():
+    from memry.intelligence.reconcile import _decide_action
+
+    stub = _stub(lambda k, q: Answer("NONE", {}, 0.99, True))
+    out = _decide_action(stub, "state", count=1)
+    assert out["action"] == "NONE" and out["target"] == 0
+    assert set(stub.last_questions) == {"action"}
+
+
+def test_reconcile_abstention_leaves_the_text_model_in_charge():
+    from memry.intelligence.reconcile import _decide_action
+
+    assert _decide_action(NoneDecider(), "state", count=2) is None
+    assert _decide_action(_stub(lambda k, q: Answer()), "state", count=2) is None

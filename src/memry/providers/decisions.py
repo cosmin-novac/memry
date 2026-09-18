@@ -134,7 +134,7 @@ class Decider(ABC):
     #: is right or wrong, so the gate has to sit high and little gets automated.
     #: A calibrated distribution separates, so the gate can sit lower and do
     #: more. Measured per provider; see docs/self-hosting.md.
-    auto_confirm_confidence: float = 0.9
+    auto_confirm_confidence: float = 0.95
 
     @abstractmethod
     def decide(self, state: str, questions: dict[str, Question]) -> Answers:
