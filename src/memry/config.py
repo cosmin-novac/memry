@@ -77,6 +77,18 @@ class DecisionConfig(BaseModel):
     #: Override the provider's own automatic-merge gate. Leave unset to use the
     #: value measured for that provider.
     auto_confirm_confidence: float | None = None
+    #: Re-rank search results by asking which candidates answer the query. One
+    #: extra call per search; measured in docs/self-hosting.md.
+    rerank: bool = False
+    #: How many of the hybrid candidates to judge.
+    rerank_pool: int = 20
+    #: How much the relevance judgement counts against the hybrid rank. The
+    #: hybrid rank carries recency, decay, anchors and relation hops, so
+    #: replacing it outright loses more than the judgement adds.
+    rerank_weight: float = 0.35
+    #: Below this, a candidate is treated as a clear non-answer and pushed to
+    #: the back whatever its hybrid rank.
+    rerank_floor: float = 0.15
 
 
 class EmbeddingConfig(BaseModel):
@@ -248,6 +260,11 @@ def _from_env() -> dict[str, Any]:
         except ValueError:
             return None
 
+    def _bool(value: str | None) -> bool | None:
+        if not value:
+            return None
+        return value.strip().lower() in ("1", "true", "yes", "on")
+
     def _float(value: str | None) -> float | None:
         try:
             return float(value) if value else None
@@ -289,6 +306,7 @@ def _from_env() -> dict[str, Any]:
     put("decision", "api_key", e("MEMRY_DECISION_API_KEY"))
     put("decision", "base_url", e("MEMRY_DECISION_BASE_URL"))
     put("decision", "auto_confirm_confidence", _float(e("MEMRY_DECISION_MERGE_CONFIDENCE")))
+    put("decision", "rerank", _bool(e("MEMRY_DECISION_RERANK")))
 
     put("embedding", "provider", e("MEMRY_EMBEDDING_PROVIDER"))
     put("embedding", "model", e("MEMRY_EMBEDDING_MODEL"))

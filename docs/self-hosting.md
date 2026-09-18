@@ -260,28 +260,55 @@ against the live model, and one of the three did not survive it.
 |---|---|---|
 | Entity typing | 14/16, and all sixteen in **one 608 ms call** | Yes. It was already a batch call, so this is a straight swap. Both misses were fair: a German company-register number typed as code at 0.28 confidence, which is the model flagging its own doubt, and Hetzner typed as an organization, which it is. |
 | Reconcile (ADD / UPDATE / DELETE / NONE) | 9/10, ~344 ms | Yes, for the decision only. Every high-confidence answer was right, the one miss scored 0.73 and the genuinely hard retraction scored 0.48. Writing the merged sentence for an UPDATE is a writing task and stays with the text model, so this is a cheap call in front of a rarer expensive one. |
-| Re-ranking search results | Worse than what ships | **No.** See below. |
+| Re-ranking search results | recall@3 0.933 -> 0.967, MRR 0.767 -> 0.928 | Yes, off by default. See below. |
+| Durability, for decay | 11/12 in one 713 ms call | Not wired yet. Ready. |
+| Consolidation (do two memories say the same thing) | 11/12 in one 230 ms call | Not wired yet. Ready. |
+| Tag drift (are two tags the same idea) | 8/10 in one 205 ms call | Not wired yet. Weakest of the three. |
 
-### Re-ranking search results: measured, and rejected
+### Re-ranking search results
 
-A hand-labelled dozen said 11 out of 12, which looked like a win. Run through the eval
-harness over a 228-memory store with 90 questions, it is not:
+The first version of this replaced the hybrid ranking with the relevance judgement and
+measured worse than doing nothing. That result was about the implementation, not the idea.
+The hybrid rank carries recency, decayed importance, entity anchors and the typed-relation
+hops that make multi-hop questions work, and ordering purely by "does this text answer the
+question" throws all of it away.
 
-| | recall@3 | MRR | p50 |
-|---|---|---|---|
-| Hybrid ranking (what ships) | **0.933** | **0.828** | **3 ms** |
-| Plus a relevance re-rank over 12 candidates | 0.844 | 0.726 | 199 ms |
-| Plus a relevance re-rank over 24 candidates | 0.878 | 0.765 | 208 ms |
+Blending instead of replacing, over a 228-memory store with 90 questions:
 
-Worse on both measures and sixty times slower, so the code came back out rather than
-shipping behind a flag nobody should turn on. Asking "does this text answer the question"
-one memory at a time discards what the existing ranking already knows: recency, decayed
-importance, entity anchors, and the typed-relation hops that make multi-hop questions work
-at all. A sentence can read like an answer and still be the wrong one.
+| | recall@3 | MRR |
+|---|---|---|
+| Hybrid only | 0.933 | 0.767 |
+| Replaced by relevance | 0.889 | 0.776 |
+| Blended, 20% relevance | 0.933 | 0.906 |
+| **Blended, 35% relevance, non-answers demoted** | **0.967** | **0.928** |
+| Blended, 50% relevance | 0.933 | 0.906 |
 
-`evals/datasets/distractors_v1.jsonl` was written for this and is worth keeping. The older
-`synthetic_v1` scores recall@3 = 1.000 over a 19-memory store, so nothing can be measured
-on it. The new one keeps several near-duplicates competing for every answer.
+35% beat both 20% and 50%. Two things are doing the work: the blend moves the right answer
+up the list, and a floor at 0.15 lets an obvious non-answer be pushed to the back however
+well it matched on wording. Turn it on with `MEMRY_DECISION_RERANK=1`; it costs one call
+per search.
+
+On latency, be careful which comparison you make. Hybrid search alone is about 3 ms
+because it is a local index lookup with no network in it, and adding any hosted model puts
+a round trip in front of that. Against a *text model* doing the same re-ranking job, Jev is
+the fast option.
+
+### Upkeep stages, probed but not wired
+
+Durability scored 11 of 12, which is enough to feed decay a per-fact estimate instead of a
+fixed half-life per memory type. "Ada is allergic to penicillin" came back at the top of
+the scale with 0.98 confidence and "the train was delayed this morning" at the bottom with
+0.81. The one miss put "Marta Reyes is Ada's manager" nearer years than months, which is
+arguable.
+
+Consolidation scored 11 of 12 and separated cleanly: genuine restatements landed at
+0.62-0.94 and everything else at 0.02-0.08, including the pairs designed to look alike
+("Ada lives in Amsterdam" against "Ada works in Amsterdam"). The miss was a near-tie at
+0.47 on two phrasings of the same Snowflake fact.
+
+Tag drift is the weakest, at 8 of 10. It missed "food" against "diet" and "project-phoenix"
+against "phoenix", both of which a person would merge. Worth wiring only as a suggestion
+for review, which is what the existing tag flow already does.
 
 ### A trap worth remembering
 

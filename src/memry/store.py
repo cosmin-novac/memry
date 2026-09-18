@@ -72,7 +72,7 @@ from .models import (
     utcnow,
 )
 from .providers.embeddings import Embedder, build_embedder
-from .providers.decisions import Decider, build_decider
+from .providers.decisions import Decider, Noul, build_decider
 from .providers.llm import LLM, build_llm
 from .retrieval import hybrid_search
 
@@ -1056,7 +1056,44 @@ class MemoryStore:
                 results = self._fuse_relational(results, rel_ids, include_invalid)
         if since or until:
             results = [r for r in results if _within(r.memory.created_at, since, until)]
-        return results[:limit]
+        return self._rerank(query, results)[:limit]
+
+    def _rerank(self, query: str, results: list[SearchResult]) -> list[SearchResult]:
+        """Let a relevance judgement adjust the hybrid order, not replace it.
+
+        Hybrid ranking matches wording and carries recency, decayed importance,
+        entity anchors and relation hops with it. Ordering purely by "does this
+        text answer the question" measured worse than doing nothing, because it
+        throws all of that away. Blending keeps it and adds what wording alone
+        cannot see, and a floor lets an obvious non-answer be pushed back
+        however well it matched.
+
+        One call covers the whole shortlist. A provider that abstains or fails
+        leaves the order exactly as it found it.
+        """
+        cfg = self.config.decision
+        if not cfg.rerank or not self.decider.available or len(results) < 2:
+            return results
+        pool = results[: max(cfg.rerank_pool, 2)]
+        answers = self.decider.decide(
+            f"QUESTION: {query}",
+            {f"m{i}": Noul(instructions="This memory helps answer the question. "
+                                        f"Memory: {r.memory.content}")
+             for i, r in enumerate(pool)},
+        )
+        if not any(answers[f"m{i}"].available for i in range(len(pool))):
+            return results
+        span = max(len(pool) - 1, 1)
+        ordered = []
+        for i, result in enumerate(pool):
+            hybrid = 1.0 - (i / span)
+            answer = answers[f"m{i}"]
+            relevance = answer.value if answer.available else hybrid
+            demoted = 1 if (answer.available and relevance < cfg.rerank_floor) else 0
+            blended = cfg.rerank_weight * relevance + (1 - cfg.rerank_weight) * hybrid
+            ordered.append((demoted, -blended, i, result))
+        ordered.sort()
+        return [r for _d, _s, _i, r in ordered] + results[len(pool):]
 
     def _fuse_relational(
         self,

@@ -401,3 +401,57 @@ def test_reconcile_abstention_leaves_the_text_model_in_charge():
 
     assert _decide_action(NoneDecider(), "state", count=2) is None
     assert _decide_action(_stub(lambda k, q: Answer()), "state", count=2) is None
+
+
+# ---------------------------------------------------------------- re-ranking
+def _store_with(decider, **decision):
+    from memry.config import Config
+    cfg = Config(db_path=":memory:")
+    cfg.decision = DecisionConfig(provider="jev", api_key="k", rerank=True, **decision)
+    return MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64), decider=decider)
+
+
+def test_rerank_blends_with_the_hybrid_order_rather_than_replacing_it():
+    """Ordering purely by relevance measured worse than doing nothing: the
+    hybrid rank carries recency, decay, anchors and relation hops with it."""
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+               for i in range(4)]
+    # the model mildly prefers the last candidate; a 35% blend should not be
+    # enough to drag it past the top of the hybrid order
+    rel = {0: 0.55, 1: 0.50, 2: 0.50, 3: 0.75}
+    stub = _stub(lambda k, q: Answer(rel[int(k[1:])], {}, 0.9, True))
+    store = _store_with(stub)
+    order = [r.memory.content for r in store._rerank("q", results)]
+    assert order[0] == "memory 0"
+    store.close()
+
+
+def test_rerank_pushes_a_clear_non_answer_to_the_back():
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+               for i in range(3)]
+    stub = _stub(lambda k, q: Answer(0.02 if k == "m0" else 0.9, {}, 0.9, True))
+    store = _store_with(stub)
+    order = [r.memory.content for r in store._rerank("q", results)]
+    assert order[-1] == "memory 0"      # top of the hybrid order, but not an answer
+    store.close()
+
+
+def test_rerank_leaves_the_order_alone_when_the_provider_cannot_answer():
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+               for i in range(3)]
+    for decider in (NoneDecider(), _stub(lambda k, q: Answer())):
+        store = _store_with(decider)
+        assert [r.memory.content for r in store._rerank("q", results)] == \
+               ["memory 0", "memory 1", "memory 2"]
+        store.close()
+
+
+def test_rerank_is_off_unless_asked_for():
+    from memry.config import Config
+    assert Config().decision.rerank is False
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64),
+                        decider=_stub(lambda k, q: Answer(0.01, {}, 0.9, True)))
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+               for i in range(3)]
+    assert store._rerank("q", results) == results
+    store.close()
