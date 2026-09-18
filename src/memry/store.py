@@ -14,15 +14,20 @@ backends, LLMs, and embedders are all replaceable underneath it.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 import re
+import time
 from typing import Any
 
 import numpy as np
+
+log = logging.getLogger("memry")
 
 from .backends.base import MemoryBackend
 from .backends.local import LocalBackend
 from .config import Config
 from .intelligence.clustering import (
+    judge_tag_pairs,
     obvious_canonical_merges,
     propose_synthetic_tags,
     semantic_duplicate_tags,
@@ -30,7 +35,12 @@ from .intelligence.clustering import (
 )
 from .intelligence.consolidate import judge_group, representative, similarity_groups
 from .intelligence.context import build_context, estimate_tokens
-from .intelligence.decay import decay_sweep, effective_importance
+from .intelligence.decay import (
+    DURABILITY_KEY,
+    decay_sweep,
+    effective_importance,
+    score_durability,
+)
 from .intelligence.entities import (
     classify_entity_types,
     judge_entity_referents,
@@ -72,6 +82,7 @@ from .models import (
     utcnow,
 )
 from .providers.embeddings import Embedder, build_embedder
+from .providers.decisions import Decider, Noul, build_decider
 from .providers.llm import LLM, build_llm
 from .retrieval import hybrid_search
 
@@ -184,11 +195,15 @@ class MemoryStore:
         *,
         backend: MemoryBackend | None = None,
         llm: LLM | None = None,
+        decider: Decider | None = None,
         embedder: Embedder | None = None,
     ) -> None:
         self.config = config or Config.load()
         self.backend = backend or LocalBackend(self.config.db_path, ann=self.config.ann)
         self.llm = llm or build_llm(self.config.llm)
+        # Typed judgements (entity identity). Defaults to the text model,
+        # so a store that configures nothing behaves exactly as before.
+        self.decider = decider or build_decider(self.config.decision, self.llm)
         self.embedder = embedder or build_embedder(self.config.embedding)
 
     # ------------------------------------------------------------------
@@ -451,6 +466,7 @@ class MemoryStore:
                 embedder=self.embedder,
                 llm=self.llm,
                 episode_ids=episode_ids,
+                decider=self.decider,
                 retrieval_cfg=self.config.retrieval,
                 prepare_update=lambda memory_id, final_content: (
                     self._reanalyze_edited_entities(memory_id, final_content, scope)
@@ -465,6 +481,7 @@ class MemoryStore:
                 resolved = resolve_mentions(
                     backend=self.backend,
                     llm=self.llm,
+                    decider=self.decider,
                     scope=scope,
                     memory_id=action.memory_id,
                     memory_content=action.content or candidate.content,
@@ -557,6 +574,7 @@ class MemoryStore:
             resolved = resolve_mentions(
                 backend=self.backend,
                 llm=self.llm,
+                decider=self.decider,
                 scope=scope,
                 memory_id=memory_id,
                 memory_content=content,
@@ -1048,7 +1066,49 @@ class MemoryStore:
                 results = self._fuse_relational(results, rel_ids, include_invalid)
         if since or until:
             results = [r for r in results if _within(r.memory.created_at, since, until)]
-        return results[:limit]
+        return self._rerank(query, results)[:limit]
+
+    def _rerank(self, query: str, results: list[SearchResult]) -> list[SearchResult]:
+        """Let a relevance judgement adjust the hybrid order, not replace it.
+
+        Hybrid ranking matches wording and carries recency, decayed importance,
+        entity anchors and relation hops with it. Ordering purely by "does this
+        text answer the question" measured worse than doing nothing, because it
+        throws all of that away. Blending keeps it and adds what wording alone
+        cannot see, and a floor lets an obvious non-answer be pushed back
+        however well it matched.
+
+        One call covers the whole shortlist. A provider that abstains or fails
+        leaves the order exactly as it found it.
+        """
+        cfg = self.config.decision
+        # A provider that has not been measured to earn this cannot be talked
+        # into it: the same re-ranking through a text model scores below no
+        # re-ranking at all. The setting can only turn off what a provider
+        # already supports, never force it on somewhere it would do harm.
+        wanted = self.decider.reranks_by_default and cfg.rerank is not False
+        if not wanted or not self.decider.available or len(results) < 2:
+            return results
+        pool = results[: max(cfg.rerank_pool, 2)]
+        answers = self.decider.decide(
+            f"QUESTION: {query}",
+            {f"m{i}": Noul(instructions="This memory helps answer the question. "
+                                        f"Memory: {r.memory.content}")
+             for i, r in enumerate(pool)},
+        )
+        if not any(answers[f"m{i}"].available for i in range(len(pool))):
+            return results
+        span = max(len(pool) - 1, 1)
+        ordered = []
+        for i, result in enumerate(pool):
+            hybrid = 1.0 - (i / span)
+            answer = answers[f"m{i}"]
+            relevance = answer.value if answer.available else hybrid
+            demoted = 1 if (answer.available and relevance < cfg.rerank_floor) else 0
+            blended = cfg.rerank_weight * relevance + (1 - cfg.rerank_weight) * hybrid
+            ordered.append((demoted, -blended, i, result))
+        ordered.sort()
+        return [r for _d, _s, _i, r in ordered] + results[len(pool):]
 
     def _fuse_relational(
         self,
@@ -1607,7 +1667,9 @@ class MemoryStore:
         for i in range(0, len(untyped), batch):
             group = untyped[i : i + batch]
             try:
-                types = classify_entity_types(self.llm, [e.name for e in group])
+                types = classify_entity_types(
+                    self.llm, [e.name for e in group], self.decider
+                )
             except Exception:
                 continue
             for e in group:
@@ -1869,7 +1931,7 @@ class MemoryStore:
         # look at it again and would sit there for good.
         proposed = propose_same_name_duplicates(backend=self.backend, scope=scope)
         outcome = resolve_open_proposals(
-            backend=self.backend, llm=self.llm, scope=scope
+            backend=self.backend, llm=self.llm, decider=self.decider, scope=scope
         )
         outcome["proposed"] = proposed
         outcome["purged"] = self.backend.purge_orphan_entities(scope)
@@ -2029,7 +2091,7 @@ class MemoryStore:
                            "content": representative(memories).content,
                            "reason": "identical text"}
             elif self.llm.available:
-                verdict = judge_group(self.llm, memories)
+                verdict = judge_group(self.llm, memories, self.decider)
             else:
                 continue  # never merge on similarity alone
 
@@ -2178,12 +2240,25 @@ class MemoryStore:
         overlap for the near-synonyms that share no words ("liver bloods" beside
         "liver lab results").
         """
-        proposals = suggest_canonical_merges(self.llm, self.categories(user_id=user_id))
+        tags = self.categories(user_id=user_id)
+        proposals = suggest_canonical_merges(self.llm, tags)
         seen = {v for group in proposals for v in group["variants"]}
         for pair in self.semantic_tag_duplicates(user_id=user_id):
             if not seen.intersection(pair["variants"]):
                 proposals.append(pair)
                 seen.update(pair["variants"])
+        # A fourth pass for the synonyms the three above miss. Suggestion only:
+        # every one of these still needs confirming under Knowledge > Upkeep.
+        names = [str(t["category"]).strip().lower() for t in tags]
+        names = [n for n in names if n and n not in seen]
+        candidates = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
+        if candidates and len(candidates) <= 200:
+            for a, b in judge_tag_pairs(self.decider, candidates):
+                if a in seen or b in seen:
+                    continue
+                proposals.append({"canonical": a, "variants": [a, b],
+                                  "reason": f"{self.decider.name}: same meaning"})
+                seen.update({a, b})
         return proposals
 
     # -- manual tag curation -----------------------------------------------
@@ -2239,7 +2314,52 @@ class MemoryStore:
     # an env-var edit and a restart. A runtime override lives in the meta table
     # so the dashboard toggle survives restarts; config stays the default when
     # no override was ever set.
-    _MAINTENANCE_KEYS = ("dedup_entities", "tag_abstraction")
+    _MAINTENANCE_KEYS = ("dedup_entities", "tag_abstraction", "durability")
+
+    #: How many memories one durability pass scores. Jev answers 128 questions
+    #: in a single call, so the batch is bounded by prudence, not by cost.
+    DURABILITY_BATCH = 64
+
+    def score_memory_durability(
+        self, *, user_id: str | None = None, limit: int | None = None
+    ) -> dict[str, Any]:
+        """Record how long each memory is worth keeping, for memories missing it.
+
+        Decay runs on a half-life per memory type, which treats "the train was
+        delayed this morning" and "allergic to penicillin" the same because both
+        are semantic. A per-fact estimate replaces that guess; anything still
+        unscored keeps the old behaviour.
+        """
+        outcome: dict[str, Any] = {"scored": 0, "skipped": 0, "provider": self.decider.name}
+        if not self.decider.available:
+            outcome["skipped"] = -1
+            log.info("durability: no decision provider configured, nothing scored")
+            return outcome
+        batch = limit or self.DURABILITY_BATCH
+        pending = [
+            m for m in self.get_all(user_id=user_id, limit=100_000)
+            if DURABILITY_KEY not in (m.metadata or {})
+        ][:batch]
+        if not pending:
+            return outcome
+        started = time.time()
+        scores = score_durability(self.decider, [m.content for m in pending])
+        for index, memory in enumerate(pending):
+            score = scores.get(index)
+            if score is None:
+                outcome["skipped"] += 1
+                continue
+            metadata = dict(memory.metadata or {})
+            metadata[DURABILITY_KEY] = round(score, 3)
+            self.backend.update_memory(memory.id, metadata=metadata)
+            outcome["scored"] += 1
+        outcome["ms"] = round((time.time() - started) * 1000)
+        log.info(
+            "durability: scored %d of %d memories in %d ms via %s (%d unanswered)",
+            outcome["scored"], len(pending), outcome["ms"], self.decider.name,
+            outcome["skipped"],
+        )
+        return outcome
 
     def maintenance_enabled(self, key: str) -> bool:
         override = self.backend.get_meta(f"maintenance:{key}:enabled")
@@ -2304,6 +2424,11 @@ class MemoryStore:
                 "llm": f"{self.llm.name}"
                 + (f":{getattr(self.llm, 'model', '')}" if getattr(self.llm, "model", "") else ""),
                 "embedder": self.embedder.model_id,
+                # Which provider answers typed judgements. "none" is the
+                # default and means the built-in prompt path.
+                "decider": self.decider.name
+                + (f":{getattr(self.decider, 'model', '')}"
+                   if getattr(self.decider, "model", "") else ""),
                 # "invalidated" lumps together deleted memories and old versions
                 # of updated ones. Only the first kind is recoverable, and only
                 # that kind is what the Forgotten tab lists, so report it apart.
@@ -2318,9 +2443,12 @@ class MemoryStore:
 
     def close(self) -> None:
         try:
-            self.llm.close()
+            self.decider.close()
         finally:
             try:
-                self.embedder.close()
+                self.llm.close()
             finally:
-                self.backend.close()
+                try:
+                    self.embedder.close()
+                finally:
+                    self.backend.close()

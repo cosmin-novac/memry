@@ -153,6 +153,89 @@ rerouted.
 
 Connecting ChatGPT this way: [connect-chatgpt.md](connect-chatgpt.md).
 
+## Typed decisions (experimental, off by default)
+
+**This is experimental and off unless you turn it on.** It sends identity and
+housekeeping questions to a third-party API, it changes how much of the upkeep happens
+without you, and the thresholds behind it were chosen from a small sample. Leave it off
+unless you want to try it.
+
+Parts of the pipeline do not need a text model. Deciding whether two people called Jonas
+are the same person is a choice between `same`, `different` and `unsure`, and Memry
+already gates automatic merges on the confidence attached to it. Without a decision
+provider that confidence is a number the text model was asked to report about itself,
+which nothing calibrates.
+
+`MEMRY_DECISION_PROVIDER` selects who answers those questions:
+
+| Value | Behaviour |
+|---|---|
+| `none` (default) | No decision provider. Everything works exactly as it did before. |
+| `llm` | The same questions, typed, answered by the configured text model. An answer outside the declared options is rejected rather than accepted. |
+| `jev` | [TypeSafe Jev](https://typesafe.ai), a System One model that answers typed questions directly and returns a probability per option. |
+
+```bash
+export MEMRY_DECISION_PROVIDER=jev
+export MEMRY_DECISION_API_KEY=...        # TypeSafe API key
+export MEMRY_DECISION_MODEL=jev-latest   # optional
+export MEMRY_DECISION_BASE_URL=...       # optional, for a proxy
+```
+
+Jev is a hosted API, so turning it on means these questions leave the machine, the same
+trade as configuring an LLM provider. It does not replace one: extraction still needs a
+text model.
+
+The provider can never fail a write. A transport error, a rate limit, a malformed reply
+or an answer outside the declared options all read as "no answer", and the caller falls
+back to the path it would have taken anyway.
+
+One caveat worth keeping in mind: "cannot hallucinate" means the reply always matches the
+schema, not that it is right. A confidently wrong `same` still merges two people, so the
+merge-proposal review under **Knowledge > Upkeep** matters as much as it did before.
+
+### What it is wired to
+
+| Stage | What changes |
+|---|---|
+| Entity identity | The verdict and the confidence the automatic-merge gate reads. |
+| Entity typing | One question per name in a single call, instead of one call per batch through the text model. |
+| Reconcile | The action and its target. Writing the merged sentence for an UPDATE still needs the text model. |
+| How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. |
+| Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. |
+| Tag drift | Suggestions only, for review under Upkeep. Never applied automatically. |
+| Search re-ranking | On with Jev, off otherwise, and `MEMRY_DECISION_RERANK=0` turns it off. |
+
+### The settings, and where they came from
+
+Two numbers are not obvious, so both were measured rather than guessed. The datasets and
+harnesses are in `evals/` if you want to re-run them against your own data, which is the
+only way to know whether these hold for your store.
+
+**The automatic-merge gate** (`Decider.auto_confirm_confidence`) is 0.95 without a
+decision provider and 0.70 with Jev. It is a property of the provider because the number
+only means something relative to how that provider's confidence is spread: a model
+reporting a number about itself scores its wrong answers about as high as its right ones,
+so the gate has to sit high and little gets automated. Override with
+`MEMRY_DECISION_MERGE_CONFIDENCE`.
+
+Raising the no-provider gate from 0.9 to 0.95 is a change to existing behaviour, and it
+is a fix: on the labelled set, 0.9 merged two entities that should have stayed apart.
+Fewer merges now happen unattended, and more proposals wait under Upkeep.
+
+**Re-ranking** blends the relevance judgement with the hybrid rank at 0.35 rather than
+replacing it, and pushes anything under 0.15 to the back. Replacing the hybrid rank
+outright measured worse than not re-ranking at all, because that rank already carries
+recency, decayed importance, entity anchors and the typed-relation hops multi-hop
+questions depend on. It is on only for a provider measured to earn it and cannot be
+forced on elsewhere.
+
+### A trap worth remembering
+
+An early probe scored 2 out of 16 because the names only ever appeared in the shared
+state, never in the questions, so sixteen identical questions got sixteen identical
+answers at around 0.75 confidence. Confidence describes the answer to the question that
+was asked. A question carrying no information still gets a confident-looking reply.
+
 ## Scaling up
 
 | Situation | Setting |

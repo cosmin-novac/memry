@@ -113,6 +113,10 @@ html.knowledge-open,body.knowledge-open{overflow:hidden}
 .entity-side .detail{border:1px solid var(--line);border-radius:10px;padding:.75rem .85rem}
 .modal h2{margin:.1rem 0 .2rem;font-size:1.05rem}.modal h2 .x{float:right;cursor:pointer;color:var(--dim);border:none;background:none;font-size:1rem}
 .modal .hint{color:var(--dim);font-size:.8rem;margin:0 0 .9rem}
+.passlog{margin-top:.25rem;font-variant-numeric:tabular-nums}
+.tagrow .passlog.ran{border:0;padding:0;border-radius:0;font-size:.8rem;color:var(--semantic)}
+.tagrow .passlog.err{border:0;padding:0;border-radius:0;font-size:.8rem;color:var(--warn)}
+#upkeepwho{margin:0 0 .6rem}
 .tagrow{display:flex;align-items:center;gap:.5rem;padding:.32rem .1rem;border-bottom:1px solid var(--line)}
 .tagrow input[type=checkbox]{width:auto;flex:none}
 .tagrow .name{flex:1;min-width:0}
@@ -356,6 +360,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <section class="kpanel" id="kpanel-maintenance" hidden>
   <h2 style="font-size:.95rem;margin-top:.2rem">Automatic passes</h2>
   <p class="hint">What Memry does to your memories on its own. Switch any of them off, or run one right now.</p>
+  <div id="upkeepwho"></div>
   <div id="upkeeplist"></div>
   <h2 style="font-size:.95rem;margin-top:1.1rem">Tag health</h2>
   <p class="hint">A tag that has quietly split in two caps what any search can find under it, because filtering drops the rest of the evidence before ranking starts.</p>
@@ -1226,6 +1231,9 @@ function renderServerInfo(){
     ['Raw messages stored',s.episodes],
     ['Language model',s.llm,'Reads your messages to split them into facts and decide what is new. Without one, messages are stored whole.'],
     ['Embeddings',s.embedder,'Turns text into numbers so search can match on meaning.'],
+    ...(s.decider&&!String(s.decider).startsWith('none')
+      ? [['Typed decisions',s.decider,'Answers yes/no and either/or questions, like whether two people with the same name are the same person. Returns how certain it is, which is what decides whether a merge happens on its own.']]
+      : []),
     ['Storage',s.backend,'Everything lives in one file on this server.'],
   ];
   document.getElementById('serverinfo').innerHTML=rows
@@ -1279,23 +1287,32 @@ async function purgeMemory(id){
 async function loadUpkeep(){
   const info=await api('/api/v1/maintenance');
   const el=document.getElementById('upkeeplist');
+  const missing=p=>(p.needs_llm&&!info.llm_available) ? 'a language model'
+    : (p.needs_decider&&!info.decider_available) ? 'a decision provider' : '';
   el.innerHTML=info.passes.map(p=>{
-    const blocked=p.needs_llm&&!info.llm_available;
-    const state=blocked?'<span class="cnt">needs an LLM</span>'
-      :p.automatic?'<span class="syn">on</span>':'<span class="cnt">off</span>';
+    const need=missing(p);
+    const state=need?`<span class="cnt">needs ${need}</span>`
+      :p.automatic?'<span class="syn">runs on its own</span>'
+      :'<span class="cnt">only when you ask</span>';
     const every=p.automatic&&p.interval_days?` Runs every ${p.interval_days} days.`:'';
     const last=p.last_run?` Last run ${esc(String(p.last_run).slice(0,16).replace('T',' '))}.`:'';
-    const toggle=p.toggleable&&!blocked
+    const toggle=p.toggleable&&!need
       ? `<button class="act" onclick='togglePass(${JSON.stringify(p.key)},${!p.automatic})'
-           title="${p.automatic?'stop running this automatically':'run this automatically from now on'}">turn ${p.automatic?'off':'on'}</button>`
+           title="${p.automatic?'stop running this automatically':'run this automatically from now on'}">${p.automatic?'stop running it':'let it run'}</button>`
       : '';
-    const run=p.run_url&&!blocked
-      ? `<button class="act" onclick='runPass(${JSON.stringify(p.run_url)},this)'
+    const run=p.run_url&&!need
+      ? `<button class="act" onclick='runPass(${JSON.stringify(p.run_url)},this,${JSON.stringify(p.label)})'
            title="run this pass right now">run now</button>`
       : '';
-    return `<div class="tagrow"><span class="name"><b>${esc(p.label)}</b> ${state}
-      <div class="hint">${esc(p.detail)}${every}${last}</div></span>${run}${toggle}</div>`;
+    return `<div class="tagrow" id="pass-${esc(p.key)}"><span class="name"><b>${esc(p.label)}</b> ${state}
+      <div class="hint">${esc(p.detail)}${every}${last}</div>
+      <div class="hint passlog" id="passlog-${esc(p.key)}"></div></span>${run}${toggle}</div>`;
   }).join('');
+  const who=info.decider_available
+    ? `Typed decisions go to <b>${esc(info.decider)}</b>.`
+    : 'No decision provider is configured, so the passes that need one are off.';
+  document.getElementById('upkeepwho').innerHTML=
+    `<div class="hint">${who} Every run below is written to the server log too.</div>`;
   renderTagHealth(info.tag_health||{});
   renderEntityJunk(info.entity_junk||{});
 }
@@ -1332,12 +1349,46 @@ async function togglePass(key,enabled){
     body:JSON.stringify({key,enabled})});
   await loadUpkeep();
 }
-async function runPass(url,button){
-  const label=button.textContent;
+// Running a pass and being told nothing is what makes background maintenance
+// feel like something happening to you. Say what it changed, in words, and keep
+// it on screen until the next run.
+const PASS_WORDS={
+  scored:n=>`scored ${n} ${n===1?'memory':'memories'}`,
+  confirmed:n=>`merged ${n} duplicate ${n===1?'entity':'entities'}`,
+  rejected:n=>`kept ${n} apart`,
+  kept:n=>`left ${n} for you to decide`,
+  purged:n=>`removed ${n} unreferenced ${n===1?'entity':'entities'}`,
+  proposed:n=>`proposed ${n} merge${n===1?'':'s'}`,
+  merged:n=>`merged ${n} ${n===1?'group':'groups'}`,
+  skipped:n=>`could not judge ${n}`,
+  removed:n=>`removed ${n}`,
+  assigned:n=>`filed ${n} under a broader tag`,
+};
+function describePass(result){
+  if(!result||typeof result!=='object')return 'done';
+  const parts=[];
+  for(const [key,word] of Object.entries(PASS_WORDS)){
+    const n=result[key];
+    if(typeof n==='number'&&n>0)parts.push(word(n));
+  }
+  if(!parts.length)return 'nothing needed changing';
+  return parts.join(', ');
+}
+async function runPass(url,button,label){
+  const original=button.textContent;
+  const key=(button.closest('.tagrow')||{}).id||'';
+  const log=document.getElementById('passlog-'+key.replace(/^pass-/,''));
   button.disabled=true;button.textContent='running...';
-  try{ await api(url,{method:'POST',body:'{}'}); }
-  finally{ button.disabled=false;button.textContent=label; }
+  if(log)log.textContent='';
+  let result=null,failed=null;
+  try{ result=await api(url,{method:'POST',body:'{}'}); }
+  catch(err){ failed=String(err&&err.message||err); }
+  finally{ button.disabled=false;button.textContent=original; }
+  const when=new Date().toLocaleTimeString();
+  const line=failed?`${when} — failed: ${failed}`:`${when} — ${describePass(result)}`;
   await Promise.all([loadUpkeep(),loadTags(),loadEntities(),loadStats(),loadMapData()]);
+  const after=document.getElementById('passlog-'+key.replace(/^pass-/,''));
+  if(after){ after.textContent=line; after.classList.add(failed?'err':'ran'); }
 }
 // Obvious non-entities (dates, amounts, URLs) are cleaned automatically; the
 // judgement cases (style instructions vs. real niche terms) need a reader, so
@@ -2398,6 +2449,18 @@ def create_app(
                     "run_url": "/api/v1/tags/abstract",
                 },
                 {
+                    "key": "durability",
+                    "label": "How long facts stay relevant",
+                    "detail": "Estimates whether each memory matters for days, "
+                              "months or years, and forgetting uses that instead "
+                              "of one rate per memory type. Needs a decision "
+                              "provider; without one, nothing is scored.",
+                    "automatic": store.maintenance_enabled("durability"),
+                    "needs_decider": True,
+                    "toggleable": True,
+                    "run_url": "/api/v1/maintenance/durability",
+                },
+                {
                     "key": "consolidation",
                     "label": "Memory consolidation",
                     "detail": "Merges memories that record the same fact more than "
@@ -2407,12 +2470,23 @@ def create_app(
                 },
             ],
             "llm_available": store.llm.available,
+            "decider": store.decider.name,
+            "decider_available": store.decider.available,
             "embedding_model": store.embedder.model_id,
             "tag_health": await run_in_threadpool(partial(
                 store.tag_health, user_id=user_id)),
             "entity_junk": await run_in_threadpool(partial(
                 store.entity_junk, user_id=user_id)),
         })
+
+    async def durability_route(request: Request) -> Response:
+        """Score how long each memory is worth keeping. Feeds forgetting."""
+        body = await request.json() if await request.body() else {}
+        outcome = await run_in_threadpool(partial(
+            store.score_memory_durability,
+            user_id=_p(request).namespace(body.get("user_id")),
+        ))
+        return JSONResponse(outcome)
 
     async def suggest_merges_route(request: Request) -> Response:
         user_id = _p(request).namespace(request.query_params.get("user_id"))
@@ -2954,6 +3028,7 @@ def create_app(
         Route("/api/v1/maintenance/consolidate", guarded(consolidate_route), methods=["POST"]),
         Route("/api/v1/maintenance/toggle", guarded(maintenance_toggle_route), methods=["POST"]),
         Route("/api/v1/maintenance/entity-review", guarded(entity_review_route), methods=["POST"]),
+        Route("/api/v1/maintenance/durability", guarded(durability_route), methods=["POST"]),
         Route("/api/v1/entities/remove", guarded(remove_entities_route), methods=["POST"]),
         Route("/api/v1/relations", guarded(relations_route), methods=["GET"]),
         Route("/api/v1/relations/backfill", guarded(backfill_relations_route), methods=["POST"]),

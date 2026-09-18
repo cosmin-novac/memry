@@ -22,6 +22,7 @@ from typing import Any
 
 from ..backends.base import MemoryBackend
 from ..models import Entity, EntityMention, MergeProposal, Scope, utcnow
+from ..providers.decisions import Answer, Choice, Decider
 from ..providers.llm import LLM
 from .extraction import parse_lenient_json
 
@@ -55,7 +56,24 @@ Be conservative when only a short/common name matches.
 Respond with JSON only:
 {"verdict": "same"|"unsure"|"different", "confidence": 0..1, "reason": short}"""
 
-AUTO_CONFIRM_CONFIDENCE = 0.9
+# Measured over 56 labelled identity cases: at 0.9 a text model merges two
+# entities that should stay apart, including a partner and a vendor architect
+# who share a first name - the exact confusion the entity handling exists to
+# prevent, waved through at 0.85. Its wrong answers score as high as its right
+# ones, so the only threshold that lets nothing through is 0.95. Fewer merges
+# happen without asking; the ones that do are the ones that should.
+AUTO_CONFIRM_CONFIDENCE = 0.95
+
+
+def _gate(decider: Decider | None) -> float:
+    """How confident a "same" has to be before it merges without asking.
+
+    Each provider carries its own, because the number only means something
+    relative to how that provider's confidence is distributed.
+    """
+    if decider is not None and decider.available:
+        return decider.auto_confirm_confidence
+    return AUTO_CONFIRM_CONFIDENCE
 
 DESCRIPTION_MAX_CHARS = 1200
 DESCRIPTION_MAX_WORDS = 300
@@ -212,9 +230,76 @@ def _obvious_same_entity(
         len(shared) / min(len(left), len(right)) >= 0.12
     )
 
+IDENTITY_QUESTION = Choice(
+    instructions=(
+        "Do the EXISTING entity and the NEW fact refer to the same real-world "
+        "person, organization, place or thing?"
+    ),
+    criteria={
+        "same": (
+            "Clearly the same entity: a matching full name with compatible context, "
+            "or strongly consistent roles, relationships or identifiers. Different "
+            "jobs, hobbies or projects are not a contradiction."
+        ),
+        "different": (
+            "Clearly a different entity: concretely conflicting ages, locations, "
+            "relationships, identifiers or types."
+        ),
+        "unsure": "The name matches but the evidence does not settle it either way.",
+    },
+)
+
+
+def _identity_state(
+    existing: Entity, existing_facts: list[str], new_fact: str, surface: str
+) -> str:
+    facts = "\n".join(f"- {f}" for f in existing_facts) or "- (no facts recorded)"
+    description = existing.description or "(no synthesized description yet)"
+    return (
+        f'EXISTING entity "{existing.name}"\nDescription: {description}\n'
+        f"Recent evidence:\n{facts}\n\n"
+        f'NEW fact mentioning "{surface}":\n- {new_fact}'
+    )
+
+
+def _judge_via_decider(
+    decider: Decider,
+    existing: Entity,
+    existing_facts: list[str],
+    new_fact: str,
+    surface: str,
+) -> dict[str, Any] | None:
+    """Identity as a typed choice. Returns None when the provider abstained, so
+    the caller can fall back rather than treat "no answer" as a verdict."""
+    answers = decider.decide(
+        _identity_state(existing, existing_facts, new_fact, surface),
+        {"identity": IDENTITY_QUESTION},
+    )
+    answer: Answer = answers["identity"]
+    if not answer.available:
+        return None
+    return {
+        "verdict": answer.value,
+        "confidence": answer.confidence,
+        "reason": f"{decider.name}: {answer.value}",
+        "gate": decider.auto_confirm_confidence,
+        "probabilities": answer.probabilities,
+    }
+
+
 def _judge(
-    llm: LLM, existing: Entity, existing_facts: list[str], new_fact: str, surface: str
+    llm: LLM,
+    existing: Entity,
+    existing_facts: list[str],
+    new_fact: str,
+    surface: str,
+    decider: Decider | None = None,
 ) -> dict[str, Any]:
+    if decider is not None and decider.available:
+        judged = _judge_via_decider(decider, existing, existing_facts, new_fact, surface)
+        if judged is not None:
+            return judged
+        # fall through: an abstaining or failing provider must not decide by default
     if not llm.available:
         return {"verdict": "unsure", "confidence": 0.5, "reason": "no LLM: same name only"}
     facts = "\n".join(f"- {f}" for f in existing_facts) or "- (no facts recorded)"
@@ -265,12 +350,58 @@ Use "other" only when none fit.
 JSON only: {"types": [{"name": str, "type": str}]}."""
 
 
-def classify_entity_types(llm: LLM, names: list[str]) -> dict[str, str]:
+TYPE_CRITERIA = {
+    "person": "A human being.",
+    "organization": "A company, team or institution.",
+    "project": "A named piece of work.",
+    "product": "A tool, service, library, brand or product.",
+    "place": "A city, country, building or region.",
+    "event": "Something that happens at a point in time.",
+    "document": ("A contract, invoice, certificate, form, report, or the "
+                 "reference number that identifies one."),
+    "code": "A file, function, table, endpoint or config key.",
+    "concept": "An abstract idea.",
+    "other": "None of the others fit.",
+}
+
+
+def _classify_via_decider(decider: Decider, names: list[str]) -> dict[str, str] | None:
+    """One question per name, all in one call.
+
+    The name has to travel in the question rather than the state: identical
+    questions over a state that does not name them get identical answers, at a
+    confidence that looks fine.
+    """
+    questions = {
+        f"n{i}": Choice(instructions=f'What kind of thing is "{name}"?',
+                        criteria=TYPE_CRITERIA)
+        for i, name in enumerate(names)
+    }
+    answers = decider.decide(
+        "Entity names extracted from a personal long-term memory store.", questions
+    )
+    out: dict[str, str] = {}
+    for i, name in enumerate(names):
+        answer = answers[f"n{i}"]
+        if answer.available and answer.value in TYPE_CRITERIA:
+            out[name.strip().lower()] = answer.value
+    return out or None
+
+
+def classify_entity_types(
+    llm: LLM, names: list[str], decider: Decider | None = None
+) -> dict[str, str]:
     """One call classifies a whole batch of entity names -> type. Cheap: many
     entities per call, used to backfill entities that were linked before typing."""
     from .extraction import ENTITY_TYPES, parse_lenient_json
 
     if not names:
+        return {}
+    if decider is not None and decider.available:
+        typed = _classify_via_decider(decider, names)
+        if typed is not None:
+            return typed
+    if not llm.available:
         return {}
     raw = llm.complete(
         _TYPE_SYSTEM,
@@ -388,6 +519,7 @@ def resolve_mentions(
     *,
     backend: MemoryBackend,
     llm: LLM,
+    decider: Decider | None = None,
     scope: Scope,
     memory_id: str,
     memory_content: str,
@@ -420,14 +552,16 @@ def resolve_mentions(
             ):
                 target = candidate
                 break
-            judgment = _judge(llm, candidate, facts, memory_content, surface)
+            judgment = _judge(
+                llm, candidate, facts, memory_content, surface, decider
+            )
             high_conflict = (
                 judgment["verdict"] == "different"
-                and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
+                and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
             )
             if (
                 judgment["verdict"] == "same"
-                and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
+                and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
             ) or (
                 not high_conflict
                 and _obvious_same_entity(
@@ -514,6 +648,7 @@ def resolve_open_proposals(
     *,
     backend: MemoryBackend,
     llm: LLM,
+    decider: Decider | None = None,
     scope: Scope,
     auto_confirm: bool = True,
 ) -> dict[str, int]:
@@ -563,10 +698,11 @@ def resolve_open_proposals(
             facts_a,
             " / ".join(facts_b) or f"(entity named {entity_b.name}, no facts)",
             entity_b.name,
+            decider,
         )
         high_conflict = (
             judgment["verdict"] == "different"
-            and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
+            and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
         )
         obvious = _obvious_same_entity(
             entity_a,
@@ -578,7 +714,7 @@ def resolve_open_proposals(
         should_merge = auto_confirm and (
             (
                 judgment["verdict"] == "same"
-                and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
+                and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
             )
             or (obvious and not high_conflict)
         )

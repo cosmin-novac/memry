@@ -32,6 +32,7 @@ from ..models import (
 )
 from ..providers.embeddings import Embedder
 from ..providers.llm import LLM
+from ..providers.decisions import Choice, Decider
 from .extraction import parse_lenient_json
 
 RECONCILE_SCHEMA: dict[str, Any] = {
@@ -76,6 +77,53 @@ def _normalize(text: str) -> str:
     return _WS_RE.sub(" ", text.lower()).strip()
 
 
+ACTION_QUESTION = Choice(
+    instructions="What should happen to the store, given the NEW fact?",
+    criteria={
+        "ADD": "The new fact is new information. Keep the existing memories and store it too.",
+        "UPDATE": "The new fact replaces one existing memory that is now out of date.",
+        "DELETE": "The new fact says one existing memory was wrong and it should go.",
+        "NONE": "An existing memory already says this. Store nothing.",
+    },
+)
+
+
+def _decide_action(
+    decider: Decider, state: str, count: int
+) -> dict[str, Any] | None:
+    """Which action, and against which memory, as two typed questions in one call.
+
+    Only the action and the target come from here. Writing the merged sentence
+    for an UPDATE is a writing task and stays with the text model, so this is a
+    cheaper call in front of a rarer expensive one rather than a replacement.
+    Returns None when the provider abstains, leaving the old path in charge.
+    """
+    if not decider.available or count <= 0:
+        return None
+    questions: dict[str, Choice] = {"action": ACTION_QUESTION}
+    if count > 1:
+        questions["target"] = Choice(
+            instructions="Which existing memory does the NEW fact act on?",
+            criteria={str(i): f"memory [{i}]" for i in range(count)},
+        )
+    answers = decider.decide(state, questions)
+    action = answers["action"]
+    if not action.available:
+        return None
+    if count == 1:
+        target: int | None = 0
+    else:
+        chosen = answers["target"]
+        target = int(chosen.value) if chosen.available else None
+    return {
+        "action": action.value,
+        "target": target,
+        "content": None,            # an UPDATE still needs prose written for it
+        "reason": f"{decider.name}: {action.value} at {action.confidence:.2f}",
+        "confidence": action.confidence,
+    }
+
+
 def reconcile_candidate(
     *,
     candidate: CandidateFact,
@@ -85,6 +133,7 @@ def reconcile_candidate(
     embedder: Embedder,
     llm: LLM,
     episode_ids: list[str],
+    decider: Decider | None = None,
     retrieval_cfg: RetrievalConfig | None = None,
     prepare_update: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> AddAction:
@@ -102,18 +151,21 @@ def reconcile_candidate(
             )
 
     decision: dict[str, Any] = {"action": "ADD", "target": None, "content": None, "reason": "new information"}
-    if similar and llm.available:
+    if similar:
         listing = "\n".join(
             f"[{i}] {r.memory.content}" for i, r in enumerate(similar)
         )
-        raw = llm.complete(
-            RECONCILE_SYSTEM,
-            f"EXISTING memories:\n{listing}\n\nNEW fact:\n{candidate.content}",
-            json_schema=RECONCILE_SCHEMA,
-        )
-        parsed = parse_lenient_json(raw)
-        if isinstance(parsed, dict) and parsed.get("action") in ("ADD", "UPDATE", "DELETE", "NONE"):
-            decision = parsed
+        state = f"EXISTING memories:\n{listing}\n\nNEW fact:\n{candidate.content}"
+        judged = _decide_action(decider, state, len(similar)) if decider else None
+        if judged is not None:
+            decision = judged
+        elif llm.available:
+            raw = llm.complete(
+                RECONCILE_SYSTEM, state, json_schema=RECONCILE_SCHEMA,
+            )
+            parsed = parse_lenient_json(raw)
+            if isinstance(parsed, dict) and parsed.get("action") in ("ADD", "UPDATE", "DELETE", "NONE"):
+                decision = parsed
 
     action = decision.get("action", "ADD")
     target_idx = decision.get("target")

@@ -548,7 +548,11 @@ def test_maintenance_status_lists_every_automatic_pass(client):
     """Background work that rewrites memories must be inspectable."""
     info = client.get("/api/v1/maintenance?user_id=u").json()
     passes = {p["key"]: p for p in info["passes"]}
-    assert set(passes) == {"dedup_entities", "tag_abstraction", "consolidation"}
+    assert set(passes) == {"dedup_entities", "tag_abstraction", "consolidation",
+                           "durability"}
+    # durability needs a decision provider, and says so rather than failing quietly
+    assert passes["durability"]["needs_decider"] is True
+    assert info["decider_available"] is False
     # tag abstraction is off unless configured, and needs an LLM
     assert passes["tag_abstraction"]["automatic"] is False
     assert passes["tag_abstraction"]["needs_llm"] is True

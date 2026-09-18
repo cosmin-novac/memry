@@ -129,8 +129,36 @@ def representative(memories: list[Memory]) -> Memory:
     )[0]
 
 
-def judge_group(llm, memories: list[Memory]) -> dict[str, Any]:
+SAME_FACT = "same_fact"
+
+
+def _looks_like_one_fact(decider, memories: list[Memory]) -> bool | None:
+    """Cheap pre-check: are these even the same fact?
+
+    Most candidate groups are not, and each one currently costs a full call to
+    a text model that also has to write the merged sentence. Asking the cheap
+    question first skips that call for the groups that were never going to
+    merge. Returns None when the provider cannot answer.
+    """
+    from ..providers.decisions import Noul
+
+    if decider is None or not decider.available or len(memories) < 2:
+        return None
+    listing = "\n".join(f"- {m.content}" for m in memories)
+    answers = decider.decide(
+        f"Memories from one person's store:\n{listing}",
+        {SAME_FACT: Noul(instructions="These memories all state the same fact, "
+                                      "even if they are worded differently.")},
+    )
+    answer = answers[SAME_FACT]
+    return None if not answer.available else answer.value >= 0.5
+
+
+def judge_group(llm, memories: list[Memory], decider=None) -> dict[str, Any]:
     """Ask whether the group is one fact, and get the merged text if so."""
+    if _looks_like_one_fact(decider, memories) is False:
+        return {"same_fact": False, "content": "",
+                "reason": "not the same fact (typed check)"}
     listing = "\n".join(f"[{i}] {m.content}" for i, m in enumerate(memories))
     try:
         raw = llm.complete(

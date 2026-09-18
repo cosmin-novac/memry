@@ -27,6 +27,9 @@ DEFAULT_DIR = Path.home() / ".memry"
 
 LLMProvider = Literal["anthropic", "openai", "ollama", "none"]
 EmbeddingProvider = Literal["openai", "ollama", "voyage", "hash", "none"]
+# "none" keeps the built-in prompt path; "llm" routes typed questions through
+# the configured text model; "jev" uses TypeSafe's System One model.
+DecisionProvider = Literal["none", "llm", "jev"]
 
 DEFAULT_LLM_MODELS: dict[str, str] = {
     "anthropic": "claude-haiku-4-5",
@@ -53,6 +56,41 @@ class LLMConfig(BaseModel):
 
     def resolved_model(self) -> str:
         return self.model or DEFAULT_LLM_MODELS.get(self.provider, "")
+
+
+class DecisionConfig(BaseModel):
+    """Provider for typed judgements. Experimental, and off by default.
+
+    Off by default. "none" means no separate decision provider, so identity
+    judgement keeps using the prompt path Memry has always used and nothing
+    about an existing deployment changes. "llm" routes the same questions
+    through the configured text model over the typed interface, and "jev" opts
+    in to TypeSafe's System One model, which answers them directly and returns
+    a calibrated distribution instead of a self-reported number.
+    """
+
+    provider: DecisionProvider = "none"
+    model: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    timeout: float = 30.0
+    #: Override the provider's own automatic-merge gate. Leave unset to use the
+    #: value measured for that provider.
+    auto_confirm_confidence: float | None = None
+    #: Turn re-ranking off for a provider that supports it. Unset leaves it as
+    #: the provider has it. This cannot switch re-ranking *on*: a provider that
+    #: was not measured to earn it does not get to do it, because through a
+    #: text model the same work scores below no re-ranking at all.
+    rerank: bool | None = None
+    #: How many of the hybrid candidates to judge.
+    rerank_pool: int = 20
+    #: How much the relevance judgement counts against the hybrid rank. The
+    #: hybrid rank carries recency, decay, anchors and relation hops, so
+    #: replacing it outright loses more than the judgement adds.
+    rerank_weight: float = 0.35
+    #: Below this, a candidate is treated as a clear non-answer and pushed to
+    #: the back whatever its hybrid rank.
+    rerank_floor: float = 0.15
 
 
 class EmbeddingConfig(BaseModel):
@@ -156,6 +194,7 @@ class Config(BaseModel):
     dedup_entities: bool = True
     dedup_interval_days: float = 7.0
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    decision: DecisionConfig = Field(default_factory=DecisionConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     decay: DecayConfig = Field(default_factory=DecayConfig)
@@ -223,6 +262,17 @@ def _from_env() -> dict[str, Any]:
         except ValueError:
             return None
 
+    def _bool(value: str | None) -> bool | None:
+        if not value:
+            return None
+        return value.strip().lower() in ("1", "true", "yes", "on")
+
+    def _float(value: str | None) -> float | None:
+        try:
+            return float(value) if value else None
+        except ValueError:
+            return None
+
     put(None, "db_path", e("MEMRY_DB_PATH"))
     put(None, "default_user_id", e("MEMRY_DEFAULT_USER"))
     put(None, "api_key", e("MEMRY_API_KEY"))
@@ -252,6 +302,13 @@ def _from_env() -> dict[str, Any]:
     put("llm", "api_key", e("MEMRY_LLM_API_KEY"))
     put("llm", "base_url", e("MEMRY_LLM_BASE_URL"))
     put("llm", "effort", e("MEMRY_LLM_EFFORT"))
+
+    put("decision", "provider", e("MEMRY_DECISION_PROVIDER"))
+    put("decision", "model", e("MEMRY_DECISION_MODEL"))
+    put("decision", "api_key", e("MEMRY_DECISION_API_KEY"))
+    put("decision", "base_url", e("MEMRY_DECISION_BASE_URL"))
+    put("decision", "auto_confirm_confidence", _float(e("MEMRY_DECISION_MERGE_CONFIDENCE")))
+    put("decision", "rerank", _bool(e("MEMRY_DECISION_RERANK")))
 
     put("embedding", "provider", e("MEMRY_EMBEDDING_PROVIDER"))
     put("embedding", "model", e("MEMRY_EMBEDDING_MODEL"))
