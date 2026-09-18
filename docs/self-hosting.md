@@ -213,11 +213,43 @@ Its confidence tracked the difficulty: 0.93-0.95 on the clear-cut cases, 0.31 on
 first name with nothing to go on, 0.35 on a nickname that needs a leap. Those low scores
 are the useful part. They are the cases a person should look at.
 
-**Expect fewer automatic merges.** Only one of seven genuinely-same cases cleared the
-0.9 gate, because a calibrated probability is lower than the number a text model reports
-about itself. The same threshold is a stricter filter with Jev behind it: safer, and more
-proposals waiting under Upkeep. Retune `AUTO_CONFIRM_CONFIDENCE` against your own data
-before deciding that is wrong.
+### Jev against the text model, on 56 labelled cases
+
+Same cases, same prompt shape, both providers. The labels say what the store should end
+up doing: one entity, two entities, or a decision a person should make.
+
+| | Jev 1.13.0 | gpt-5-mini (the path without Jev) |
+|---|---|---|
+| Verdicts that would not corrupt the store | 53/56 | 49/56 |
+| Genuinely the same person, spotted | 22/22 | 22/22 |
+| Genuinely different, kept apart | 22/22 | 21/22 |
+| Genuinely undecidable, left for a person | 9/12 | 6/12 |
+| Median latency | 211 ms | 2,535 ms |
+
+The verdicts are close. The confidence is not, and that is what decides how much the
+store can look after itself:
+
+| | Jev | gpt-5-mini |
+|---|---|---|
+| Highest confidence on a merge that would have been **wrong** | 0.50 | 0.90 |
+| Confidence range on merges that were **right** | 0.40-0.95, median 0.89 | 0.85-0.90, median 0.90 |
+| Lowest gate that lets nothing wrong through | **0.70** | 0.95 |
+| Correct merges made automatically at that gate | **20 of 22** | 4 of 22 |
+
+The text model's wrong answers score as high as its right ones, so the two distributions
+sit on top of each other and no threshold separates them. Its numbers are also suspiciously
+round - 0.70, 0.80, 0.85, 0.90 - which is what self-reporting looks like.
+
+**The current 0.9 gate is not safe on the path without Jev.** On this set it merges two
+entities that should have stayed apart. One of them is the case Memry's entity handling
+exists for: a partner called Jonas and a Snowflake architect called Jonas, which
+gpt-5-mini calls the same person with 0.85 confidence. Jev answers `unsure` at 0.39.
+
+So the gate belongs to the provider, and each one carries its own
+(`Decider.auto_confirm_confidence`): 0.9 without Jev, 0.7 with it. 0.7 leaves 0.20 of
+headroom above the worst mistake Jev made. Override with
+`MEMRY_DECISION_MERGE_CONFIDENCE` once you have measured your own data; 56 cases pin a
+threshold roughly, not precisely.
 
 ## Scaling up
 

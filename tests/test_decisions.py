@@ -295,3 +295,44 @@ def test_the_served_model_is_recorded_because_jev_latest_is_an_alias():
     assert decider.served_model is None
     decider.decide("s", QUESTIONS)
     assert decider.served_model == "jev-1.13.0"
+
+
+# ---------------------------------------------------------------- merge gate
+def test_each_provider_carries_its_own_merge_gate():
+    """The gate is only meaningful relative to a provider's confidence spread.
+    Measured over 56 labelled cases: a text model's wrong answers score as high
+    as its right ones, so its gate stays at 0.9; Jev's separate, so it can sit
+    lower and still merge nothing it should not."""
+    assert NoneDecider().auto_confirm_confidence == 0.9
+    assert LLMDecider(FakeLLM()).auto_confirm_confidence == 0.9
+    assert JevDecider(DecisionConfig(provider="jev", api_key="k")).auto_confirm_confidence == 0.7
+
+
+def test_the_gate_can_be_overridden_per_deployment():
+    d = JevDecider(DecisionConfig(provider="jev", api_key="k",
+                                  auto_confirm_confidence=0.85))
+    assert d.auto_confirm_confidence == 0.85
+
+
+def test_a_decider_judgement_records_the_gate_it_should_be_measured_against():
+    from memry.intelligence.entities import _gate, _judge_via_decider
+    from memry.models import Entity
+
+    class Stub(NoneDecider):
+        name = "stub"
+        available = True
+        auto_confirm_confidence = 0.7
+
+        def decide(self, state, questions):
+            from memry.providers.decisions import Answers
+            return Answers({k: Answer("same", {"same": 0.8}, 0.8, True) for k in questions})
+
+    stub = Stub()
+    assert _gate(stub) == 0.7
+    assert _gate(None) == 0.9          # no provider: today's threshold
+    assert _gate(NoneDecider()) == 0.9  # unavailable provider: today's threshold
+
+    judged = _judge_via_decider(stub, Entity(id="e", name="Ada", user_id="ada"),
+                                ["Ada works at Northwind"], "Ada lives in Amsterdam", "Ada")
+    # 0.80 clears Jev's gate but would not clear the text model's 0.9
+    assert judged["confidence"] == 0.8 and judged["gate"] == 0.7

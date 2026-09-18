@@ -58,6 +58,17 @@ Respond with JSON only:
 
 AUTO_CONFIRM_CONFIDENCE = 0.9
 
+
+def _gate(decider: Decider | None) -> float:
+    """How confident a "same" has to be before it merges without asking.
+
+    Each provider carries its own, because the number only means something
+    relative to how that provider's confidence is distributed.
+    """
+    if decider is not None and decider.available:
+        return decider.auto_confirm_confidence
+    return AUTO_CONFIRM_CONFIDENCE
+
 DESCRIPTION_MAX_CHARS = 1200
 DESCRIPTION_MAX_WORDS = 300
 DESCRIPTION_SCHEMA: dict[str, Any] = {
@@ -265,6 +276,7 @@ def _judge_via_decider(
         "verdict": answer.value,
         "confidence": answer.confidence,
         "reason": f"{decider.name}: {answer.value}",
+        "gate": decider.auto_confirm_confidence,
         "probabilities": answer.probabilities,
     }
 
@@ -493,11 +505,11 @@ def resolve_mentions(
             )
             high_conflict = (
                 judgment["verdict"] == "different"
-                and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
+                and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
             )
             if (
                 judgment["verdict"] == "same"
-                and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
+                and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
             ) or (
                 not high_conflict
                 and _obvious_same_entity(
@@ -638,7 +650,7 @@ def resolve_open_proposals(
         )
         high_conflict = (
             judgment["verdict"] == "different"
-            and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
+            and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
         )
         obvious = _obvious_same_entity(
             entity_a,
@@ -650,7 +662,7 @@ def resolve_open_proposals(
         should_merge = auto_confirm and (
             (
                 judgment["verdict"] == "same"
-                and judgment["confidence"] >= AUTO_CONFIRM_CONFIDENCE
+                and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
             )
             or (obvious and not high_conflict)
         )

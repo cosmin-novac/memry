@@ -74,6 +74,9 @@ class DecisionConfig(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     timeout: float = 30.0
+    #: Override the provider's own automatic-merge gate. Leave unset to use the
+    #: value measured for that provider.
+    auto_confirm_confidence: float | None = None
 
 
 class EmbeddingConfig(BaseModel):
@@ -245,6 +248,12 @@ def _from_env() -> dict[str, Any]:
         except ValueError:
             return None
 
+    def _float(value: str | None) -> float | None:
+        try:
+            return float(value) if value else None
+        except ValueError:
+            return None
+
     put(None, "db_path", e("MEMRY_DB_PATH"))
     put(None, "default_user_id", e("MEMRY_DEFAULT_USER"))
     put(None, "api_key", e("MEMRY_API_KEY"))
@@ -279,6 +288,7 @@ def _from_env() -> dict[str, Any]:
     put("decision", "model", e("MEMRY_DECISION_MODEL"))
     put("decision", "api_key", e("MEMRY_DECISION_API_KEY"))
     put("decision", "base_url", e("MEMRY_DECISION_BASE_URL"))
+    put("decision", "auto_confirm_confidence", _float(e("MEMRY_DECISION_MERGE_CONFIDENCE")))
 
     put("embedding", "provider", e("MEMRY_EMBEDDING_PROVIDER"))
     put("embedding", "model", e("MEMRY_EMBEDDING_MODEL"))

@@ -127,6 +127,15 @@ class Decider(ABC):
     name: str = "decider"
     available: bool = False
 
+    #: Confidence at or above which a "same" verdict may merge two entities
+    #: without asking. This belongs to the provider, not to the caller: it is a
+    #: property of how that provider's confidence is distributed. A text model
+    #: reporting a number about itself bunches everything at 0.7-0.9 whether it
+    #: is right or wrong, so the gate has to sit high and little gets automated.
+    #: A calibrated distribution separates, so the gate can sit lower and do
+    #: more. Measured per provider; see docs/self-hosting.md.
+    auto_confirm_confidence: float = 0.9
+
     @abstractmethod
     def decide(self, state: str, questions: dict[str, Question]) -> Answers:
         """Answer every question against ``state``. Never raises: a provider
@@ -254,9 +263,16 @@ class JevDecider(Decider):
     """
 
     name = "jev"
+    # Measured over 56 labelled identity cases: the worst wrong "same" scored
+    # 0.50, correct ones ran 0.40-0.95 with a median of 0.89. 0.70 leaves 0.20
+    # of headroom over the worst observed mistake and still merges 20 of 22
+    # correct pairs without asking.
+    auto_confirm_confidence = 0.7
 
     def __init__(self, cfg: DecisionConfig) -> None:
         self.cfg = cfg
+        if cfg.auto_confirm_confidence is not None:
+            self.auto_confirm_confidence = cfg.auto_confirm_confidence
         self.model = cfg.model or JEV_DEFAULT_MODEL
         # "jev-latest" is an alias. Every reply names the version that actually
         # answered, which is what belongs in a bug report.
