@@ -189,6 +189,36 @@ One caveat worth keeping in mind: "cannot hallucinate" means the reply always ma
 the schema, not that it is right. A confidently wrong `same` still merges two people, so
 the merge-proposal review under **Knowledge > Upkeep** matters as much as it did before.
 
+### Measured against jev-1.13.0
+
+Numbers from this repo, not from TypeSafe's marketing. `jev-latest` resolved to
+`jev-1.13.0`; every reply names the version that answered it.
+
+| | |
+|---|---|
+| One identity check | ~250 ms, ~450 input tokens |
+| 128 questions in one call | 330 ms (one question alone: ~690 ms) |
+| Largest state accepted | 32 KB fine, 128 KB rejected with `max_tokens_exceeded` |
+| Choice options | 200 answered without complaint |
+
+Batching is close to free, which is the whole reason this is worth doing: an episode's
+identity checks are several sequential calls today and can become one.
+
+On twelve identity cases with a known answer - two different people called Jonas, a
+nickname for someone already in the store, a person and a project sharing a name, two
+cities, a bare first name with no evidence - Jev agreed with the expected verdict 12 out
+of 12, and never proposed an automatic merge that should not have happened.
+
+Its confidence tracked the difficulty: 0.93-0.95 on the clear-cut cases, 0.31 on a bare
+first name with nothing to go on, 0.35 on a nickname that needs a leap. Those low scores
+are the useful part. They are the cases a person should look at.
+
+**Expect fewer automatic merges.** Only one of seven genuinely-same cases cleared the
+0.9 gate, because a calibrated probability is lower than the number a text model reports
+about itself. The same threshold is a stricter filter with Jev behind it: safer, and more
+proposals waiting under Upkeep. Retune `AUTO_CONFIRM_CONFIDENCE` against your own data
+before deciding that is wrong.
+
 ## Scaling up
 
 | Situation | Setting |

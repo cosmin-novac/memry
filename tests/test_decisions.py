@@ -251,3 +251,47 @@ def test_stats_reports_the_decision_provider():
                         decider=JevDecider(DecisionConfig(provider="jev", api_key="k")))
     assert store.stats()["decider"] == "jev:jev-latest"
     store.close()
+
+
+def test_score_is_a_weighted_average_not_an_index():
+    """The API returns the probability-weighted average of the levels, which
+    falls between them. Truncating it to an int throws the signal away."""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"answers": {"urgency": {
+            "type": "score", "score": 1.7, "confidence": 0.9,
+            "legend": {"0": "low", "1": "medium", "2": "high"},
+            "probabilities": {"0": 0.1, "1": 0.1, "2": 0.8}}}})
+
+    answer = jev(handler).decide("s", {"urgency": QUESTIONS["urgency"]})["urgency"]
+    assert answer.value == pytest.approx(1.7)
+
+
+def test_score_outside_the_rubric_abstains():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"answers": {
+            "urgency": {"score": 9.0, "confidence": 0.9}}})
+
+    assert jev(handler).decide("s", {"urgency": QUESTIONS["urgency"]})["urgency"].available is False
+
+
+def test_noul_confidence_comes_from_distance_from_a_coin_flip():
+    """A noul carries no confidence field, and 0.03 is a confident no."""
+    def answer_for(value: float):
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"answers": {
+                "is_question": {"type": "noul", "noul": value}}})
+        return jev(handler).decide("s", {"is_question": QUESTIONS["is_question"]})["is_question"]
+
+    assert answer_for(0.03).confidence == pytest.approx(0.94)   # confidently no
+    assert answer_for(0.97).confidence == pytest.approx(0.94)   # confidently yes
+    assert answer_for(0.50).confidence == pytest.approx(0.0)    # a shrug
+
+
+def test_the_served_model_is_recorded_because_jev_latest_is_an_alias():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {}})
+
+    decider = jev(handler)
+    assert decider.served_model is None
+    decider.decide("s", QUESTIONS)
+    assert decider.served_model == "jev-1.13.0"

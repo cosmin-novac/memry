@@ -66,7 +66,12 @@ class Choice:
 
 @dataclass(frozen=True)
 class Score:
-    """Place the state on an ordered scale. ``levels`` runs low to high."""
+    """Place the state on an ordered scale. ``levels`` runs low to high.
+
+    The answer is the probability-weighted average of the levels, so it is a
+    float that usually falls between them: 1.7 on a three-level rubric means
+    "between the middle and the top, nearer the top".
+    """
 
     instructions: str
     levels: list[str]
@@ -228,12 +233,12 @@ def _coerce(question: Question, answer: Any, confidence: Any) -> Answer:
         return Answer(value=answer, probabilities=probs, confidence=conf, available=True)
     if isinstance(question, Score):
         try:
-            index = int(answer)
+            score = float(answer)
         except (TypeError, ValueError):
             return Answer()
-        if not 0 <= index < len(question.levels):
+        if not 0.0 <= score <= len(question.levels) - 1:
             return Answer()
-        return Answer(value=index, confidence=conf, available=True)
+        return Answer(value=score, confidence=conf, available=True)
     truth = _clamp(answer, -1.0)
     if truth < 0.0:
         return Answer()
@@ -253,6 +258,9 @@ class JevDecider(Decider):
     def __init__(self, cfg: DecisionConfig) -> None:
         self.cfg = cfg
         self.model = cfg.model or JEV_DEFAULT_MODEL
+        # "jev-latest" is an alias. Every reply names the version that actually
+        # answered, which is what belongs in a bug report.
+        self.served_model: str | None = None
         self.base_url = (cfg.base_url or JEV_BASE_URL).rstrip("/")
         self.available = bool(cfg.api_key)
         if not self.available:
@@ -287,6 +295,8 @@ class JevDecider(Decider):
             # A save must survive a decision provider being down or rate limited.
             log.warning("jev decision call failed: %s", exc)
             return _unavailable(questions)
+        if isinstance(payload, dict) and isinstance(payload.get("model"), str):
+            self.served_model = payload["model"]
         return self._parse(payload, questions)
 
     @staticmethod
@@ -320,20 +330,22 @@ class JevDecider(Decider):
                 out[key] = Answer(value, probs, conf, available=True)
             elif isinstance(q, Score):
                 try:
-                    index = int(item.get("score"))
+                    score = float(item.get("score"))
                 except (TypeError, ValueError):
                     out[key] = Answer()
                     continue
-                if not 0 <= index < len(q.levels):
+                if not 0.0 <= score <= len(q.levels) - 1:
                     out[key] = Answer()
                     continue
-                out[key] = Answer(index, probs, _clamp(item.get("confidence")), available=True)
+                out[key] = Answer(score, probs, _clamp(item.get("confidence")), available=True)
             else:
                 truth = _clamp(item.get("noul"), -1.0)
                 if truth < 0.0:
                     out[key] = Answer()
                     continue
-                out[key] = Answer(truth, probs, _clamp(item.get("confidence"), truth), True)
+                # A noul carries no confidence of its own. Distance from 0.5 is
+                # the honest reading: 0.03 is a confident no, 0.5 is a shrug.
+                out[key] = Answer(truth, probs, abs(truth - 0.5) * 2, available=True)
         return Answers(out)
 
 
