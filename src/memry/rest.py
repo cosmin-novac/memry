@@ -114,7 +114,8 @@ html.knowledge-open,body.knowledge-open{overflow:hidden}
 .modal h2{margin:.1rem 0 .2rem;font-size:1.05rem}.modal h2 .x{float:right;cursor:pointer;color:var(--dim);border:none;background:none;font-size:1rem}
 .modal .hint{color:var(--dim);font-size:.8rem;margin:0 0 .9rem}
 .passlog{margin-top:.25rem;font-variant-numeric:tabular-nums}
-.passlog.syn{color:var(--semantic)}.passlog.err{color:var(--warn)}
+.tagrow .passlog.ran{border:0;padding:0;border-radius:0;font-size:.8rem;color:var(--semantic)}
+.tagrow .passlog.err{border:0;padding:0;border-radius:0;font-size:.8rem;color:var(--warn)}
 #upkeepwho{margin:0 0 .6rem}
 .tagrow{display:flex;align-items:center;gap:.5rem;padding:.32rem .1rem;border-bottom:1px solid var(--line)}
 .tagrow input[type=checkbox]{width:auto;flex:none}
@@ -1387,7 +1388,7 @@ async function runPass(url,button,label){
   const line=failed?`${when} — failed: ${failed}`:`${when} — ${describePass(result)}`;
   await Promise.all([loadUpkeep(),loadTags(),loadEntities(),loadStats(),loadMapData()]);
   const after=document.getElementById('passlog-'+key.replace(/^pass-/,''));
-  if(after){ after.textContent=line; after.classList.add(failed?'err':'syn'); }
+  if(after){ after.textContent=line; after.classList.add(failed?'err':'ran'); }
 }
 // Obvious non-entities (dates, amounts, URLs) are cleaned automatically; the
 // judgement cases (style instructions vs. real niche terms) need a reader, so
