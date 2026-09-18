@@ -77,9 +77,10 @@ class DecisionConfig(BaseModel):
     #: Override the provider's own automatic-merge gate. Leave unset to use the
     #: value measured for that provider.
     auto_confirm_confidence: float | None = None
-    #: Re-rank search results by asking which candidates answer the query. One
-    #: extra call per search. Unset means the provider's own default: on for
-    #: Jev, which was measured to earn it, off otherwise.
+    #: Turn re-ranking off for a provider that supports it. Unset leaves it as
+    #: the provider has it. This cannot switch re-ranking *on*: a provider that
+    #: was not measured to earn it does not get to do it, because through a
+    #: text model the same work scores below no re-ranking at all.
     rerank: bool | None = None
     #: How many of the hybrid candidates to judge.
     rerank_pool: int = 20

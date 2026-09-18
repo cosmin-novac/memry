@@ -1082,7 +1082,11 @@ class MemoryStore:
         leaves the order exactly as it found it.
         """
         cfg = self.config.decision
-        wanted = cfg.rerank if cfg.rerank is not None else self.decider.reranks_by_default
+        # A provider that has not been measured to earn this cannot be talked
+        # into it: the same re-ranking through a text model scores below no
+        # re-ranking at all. The setting can only turn off what a provider
+        # already supports, never force it on somewhere it would do harm.
+        wanted = self.decider.reranks_by_default and cfg.rerank is not False
         if not wanted or not self.decider.available or len(results) < 2:
             return results
         pool = results[: max(cfg.rerank_pool, 2)]

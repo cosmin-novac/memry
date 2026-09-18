@@ -407,7 +407,8 @@ def test_reconcile_abstention_leaves_the_text_model_in_charge():
 def _store_with(decider, **decision):
     from memry.config import Config
     cfg = Config(db_path=":memory:")
-    cfg.decision = DecisionConfig(provider="jev", api_key="k", rerank=True, **decision)
+    cfg.decision = DecisionConfig(provider="jev", api_key="k", **decision)
+    decider.reranks_by_default = True     # stand in for a provider that earned it
     return MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64), decider=decider)
 
 
@@ -580,3 +581,43 @@ def test_tag_pairs_only_ever_add_suggestions():
     assert judge_tag_pairs(stub, pairs) == [("work", "job")]
     assert judge_tag_pairs(NoneDecider(), pairs) == []
     assert judge_tag_pairs(stub, []) == []
+
+
+def test_rerank_cannot_be_forced_onto_a_provider_that_did_not_earn_it():
+    """Through a text model the same re-ranking scored below no re-ranking at
+    all, at ten seconds a query. The setting turns it off, never on."""
+    from memry.config import Config
+
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+               for i in range(3)]
+    reversing = _stub(lambda k, q: Answer(int(k[1:]) / 10.0, {}, 0.9, True))
+
+    for provider, explicit in (("llm", True), ("llm", None), ("none", True)):
+        cfg = Config(db_path=":memory:")
+        cfg.decision = DecisionConfig(provider=provider, rerank=explicit)
+        store = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64),
+                            decider=reversing)
+        reversing.reranks_by_default = False
+        assert store._rerank("q", results) == results, (provider, explicit)
+        store.close()
+
+
+def test_rerank_can_be_turned_off_where_it_is_on():
+    from memry.config import Config
+
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+               for i in range(3)]
+    stub = _stub(lambda k, q: Answer(int(k[1:]) / 10.0, {}, 0.9, True))
+    stub.reranks_by_default = True
+
+    cfg = Config(db_path=":memory:")
+    cfg.decision = DecisionConfig(provider="jev", api_key="k", rerank=False)
+    off = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64), decider=stub)
+    assert off._rerank("q", results) == results
+    off.close()
+
+    cfg2 = Config(db_path=":memory:")
+    cfg2.decision = DecisionConfig(provider="jev", api_key="k")
+    on = MemoryStore(cfg2, llm=NoneLLM(), embedder=HashEmbedder(64), decider=stub)
+    assert on._rerank("q", results) != results
+    on.close()

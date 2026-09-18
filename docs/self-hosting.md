@@ -267,8 +267,10 @@ against the live model, and one of the three did not survive it.
 
 ### Re-ranking search results
 
-On by default once `MEMRY_DECISION_PROVIDER=jev` is set. `MEMRY_DECISION_RERANK=0` turns
-it off, and it stays off for every other provider for the reason in the second table below.
+On once `MEMRY_DECISION_PROVIDER=jev` is set, and off in every other case. There is no
+re-ranking without Jev: `MEMRY_DECISION_RERANK=0` turns it off, and setting it to 1 cannot
+turn it on for a provider that was not measured to earn it, for the reason in the second
+table below.
 
 The first version of this replaced the hybrid ranking with the relevance judgement and
 measured worse than doing nothing. That result was about the implementation, not the idea:
