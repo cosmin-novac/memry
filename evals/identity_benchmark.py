@@ -1,9 +1,9 @@
-"""Entity identity: which provider's confidence can an automatic merge trust?
+"""Entity identity: which confidence can an automatic merge trust?
 
 Memry merges two entities without asking when a "same" verdict clears
 ``Decider.auto_confirm_confidence``. That number is only meaningful relative to
-how a provider's confidence is distributed, so it is measured per provider here
-rather than guessed once.
+how a provider's confidence is distributed, so it is measured per provider
+rather than guessed once. This is what measured it.
 
 ``datasets/identity_v1.jsonl`` holds 56 labelled cases - 22 that are one entity,
 22 that are two, and 12 that nothing in the store settles - covering the
@@ -11,25 +11,16 @@ confusions that actually happen: a partner and a colleague sharing a first name,
 a nickname, a person and a project sharing a name, a role change, a house move,
 conflicting employee numbers, a bare first name with no evidence.
 
-What the numbers in docs/self-hosting.md came from:
+The gate sweep at the end is the useful output: for each threshold, how many
+correct merges happen on their own and how many wrong ones slip through. Pick
+the lowest threshold that lets nothing wrong through, with some headroom.
 
-  jev-1.13.0      53/56 safe verdicts, median 211 ms. Its worst wrong "same"
-                  scored 0.50 while correct ones ran to a median of 0.89, so the
-                  two separate and a gate at 0.70 merges 20 of 22 correct pairs
-                  and nothing it should not.
-  gpt-5-mini      49/56, median 2,535 ms. A wrong "same" scored 0.90, the same
-                  as the median of its right ones, so nothing separates them:
-                  the lowest gate that lets nothing through is 0.95, and that
-                  automates 4 of 22.
-
-The conclusion that matters is not which model is better at answering. Both
-found all 22 genuine matches. It is that one of them reports useful uncertainty
-and the other does not, and only the first can be allowed to act alone.
+Neither provider is deterministic, so repeat runs move a case or two. Run it
+against your own data before trusting a threshold on your own store.
 
 Run:
     TYPESAFE_API_KEY=... python evals/identity_benchmark.py jev
     OPENAI_API_KEY=...   python evals/identity_benchmark.py llm --model gpt-5-mini
-    ... python evals/identity_benchmark.py both
 """
 
 from __future__ import annotations

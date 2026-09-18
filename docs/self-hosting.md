@@ -153,20 +153,24 @@ rerouted.
 
 Connecting ChatGPT this way: [connect-chatgpt.md](connect-chatgpt.md).
 
-## Typed decisions (optional)
+## Typed decisions (experimental, off by default)
 
-Parts of the pipeline do not need a text model. Deciding whether two people called
-Jonas are the same person is a choice between `same`, `different` and `unsure`, and
-Memry already gates automatic merges on the confidence attached to it. Today that
-confidence is a number the text model was asked to report about itself, which nothing
-calibrates.
+**This is experimental and off unless you turn it on.** It sends identity and
+housekeeping questions to a third-party API, it changes how much of the upkeep happens
+without you, and the thresholds behind it were chosen from a small sample. Leave it off
+unless you want to try it.
 
-`MEMRY_DECISION_PROVIDER` selects who answers those questions. It is **off by default**
-and an existing deployment behaves exactly as before:
+Parts of the pipeline do not need a text model. Deciding whether two people called Jonas
+are the same person is a choice between `same`, `different` and `unsure`, and Memry
+already gates automatic merges on the confidence attached to it. Without a decision
+provider that confidence is a number the text model was asked to report about itself,
+which nothing calibrates.
+
+`MEMRY_DECISION_PROVIDER` selects who answers those questions:
 
 | Value | Behaviour |
 |---|---|
-| `none` (default) | No decision provider. Identity judgement uses the prompt path Memry has always used. |
+| `none` (default) | No decision provider. Everything works exactly as it did before. |
 | `llm` | The same questions, typed, answered by the configured text model. An answer outside the declared options is rejected rather than accepted. |
 | `jev` | [TypeSafe Jev](https://typesafe.ai), a System One model that answers typed questions directly and returns a probability per option. |
 
@@ -177,189 +181,60 @@ export MEMRY_DECISION_MODEL=jev-latest   # optional
 export MEMRY_DECISION_BASE_URL=...       # optional, for a proxy
 ```
 
-Jev is a hosted API, so turning it on means identity questions leave the machine, the
-same trade as configuring an LLM provider. It is a second provider to weigh, not a
-replacement for the first: extraction still needs a text model.
+Jev is a hosted API, so turning it on means these questions leave the machine, the same
+trade as configuring an LLM provider. It does not replace one: extraction still needs a
+text model.
 
 The provider can never fail a write. A transport error, a rate limit, a malformed reply
 or an answer outside the declared options all read as "no answer", and the caller falls
-back to the conservative path rather than treating silence as a verdict.
+back to the path it would have taken anyway.
 
-One caveat worth keeping in mind: "cannot hallucinate" means the reply always matches
-the schema, not that it is right. A confidently wrong `same` still merges two people, so
-the merge-proposal review under **Knowledge > Upkeep** matters as much as it did before.
+One caveat worth keeping in mind: "cannot hallucinate" means the reply always matches the
+schema, not that it is right. A confidently wrong `same` still merges two people, so the
+merge-proposal review under **Knowledge > Upkeep** matters as much as it did before.
 
-### Measured against jev-1.13.0
+### What it is wired to
 
-Numbers from this repo, not from TypeSafe's marketing. `jev-latest` resolved to
-`jev-1.13.0`; every reply names the version that answered it.
-
-| | |
+| Stage | What changes |
 |---|---|
-| One identity check | ~250 ms, ~450 input tokens |
-| 128 questions in one call | 330 ms (one question alone: ~690 ms) |
-| Largest state accepted | 32 KB fine, 128 KB rejected with `max_tokens_exceeded` |
-| Choice options | 200 answered without complaint |
+| Entity identity | The verdict and the confidence the automatic-merge gate reads. |
+| Entity typing | One question per name in a single call, instead of one call per batch through the text model. |
+| Reconcile | The action and its target. Writing the merged sentence for an UPDATE still needs the text model. |
+| How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. |
+| Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. |
+| Tag drift | Suggestions only, for review under Upkeep. Never applied automatically. |
+| Search re-ranking | On with Jev, off otherwise, and `MEMRY_DECISION_RERANK=0` turns it off. |
 
-Batching is close to free, which is the whole reason this is worth doing: an episode's
-identity checks are several sequential calls today and can become one.
+### The settings, and where they came from
 
-On twelve identity cases with a known answer - two different people called Jonas, a
-nickname for someone already in the store, a person and a project sharing a name, two
-cities, a bare first name with no evidence - Jev agreed with the expected verdict 12 out
-of 12, and never proposed an automatic merge that should not have happened.
+Two numbers are not obvious, so both were measured rather than guessed. The datasets and
+harnesses are in `evals/` if you want to re-run them against your own data, which is the
+only way to know whether these hold for your store.
 
-Its confidence tracked the difficulty: 0.93-0.95 on the clear-cut cases, 0.31 on a bare
-first name with nothing to go on, 0.35 on a nickname that needs a leap. Those low scores
-are the useful part. They are the cases a person should look at.
+**The automatic-merge gate** (`Decider.auto_confirm_confidence`) is 0.95 without a
+decision provider and 0.70 with Jev. It is a property of the provider because the number
+only means something relative to how that provider's confidence is spread: a model
+reporting a number about itself scores its wrong answers about as high as its right ones,
+so the gate has to sit high and little gets automated. Override with
+`MEMRY_DECISION_MERGE_CONFIDENCE`.
 
-### Jev against the text model, on 56 labelled cases
+Raising the no-provider gate from 0.9 to 0.95 is a change to existing behaviour, and it
+is a fix: on the labelled set, 0.9 merged two entities that should have stayed apart.
+Fewer merges now happen unattended, and more proposals wait under Upkeep.
 
-The cases are in `evals/datasets/identity_v1.jsonl` and the harness is
-`evals/identity_benchmark.py`, so none of this has to be taken on trust:
-
-```bash
-TYPESAFE_API_KEY=... python evals/identity_benchmark.py jev
-OPENAI_API_KEY=...   python evals/identity_benchmark.py llm --model gpt-5-mini
-```
-
-Same cases, same prompt shape, both providers. The labels say what the store should end
-up doing: one entity, two entities, or a decision a person should make.
-
-Neither model is deterministic, so a repeat run moves a case or two: the figures below
-come from one run, and re-running put safe verdicts at 52/56 rather than 53 and the
-automatic merges at 19 of 22 rather than 20. The shape holds across runs; treat single
-cases as illustrative and the gap between the two providers as the result.
-
-| | Jev 1.13.0 | gpt-5-mini (the path without Jev) |
-|---|---|---|
-| Verdicts that would not corrupt the store | 53/56 | 49/56 |
-| Genuinely the same person, spotted | 22/22 | 22/22 |
-| Genuinely different, kept apart | 22/22 | 21/22 |
-| Genuinely undecidable, left for a person | 9/12 | 6/12 |
-| Median latency | 211 ms | 2,535 ms |
-
-The verdicts are close. The confidence is not, and that is what decides how much the
-store can look after itself:
-
-| | Jev | gpt-5-mini |
-|---|---|---|
-| Highest confidence on a merge that would have been **wrong** | 0.50 | 0.90 |
-| Confidence range on merges that were **right** | 0.40-0.95, median 0.89 | 0.85-0.90, median 0.90 |
-| Lowest gate that lets nothing wrong through | **0.70** | 0.95 |
-| Correct merges made automatically at that gate | **20 of 22** | 4 of 22 |
-
-The text model's wrong answers score as high as its right ones, so the two distributions
-sit on top of each other and no threshold separates them. Its numbers also cluster on round
-values - 0.70, 0.80, 0.85, 0.90 - which is what a model asked to rate its own certainty
-tends to produce.
-
-**The current 0.9 gate is not safe on the path without Jev.** On this set it merges two
-entities that should have stayed apart. One of them is the case Memry's entity handling
-exists for: a partner called Jonas and a Snowflake architect called Jonas, which
-gpt-5-mini calls the same person with 0.85 confidence. Jev answers `unsure` at 0.39.
-
-So the gate belongs to the provider, and each one carries its own
-(`Decider.auto_confirm_confidence`): 0.95 without Jev, 0.70 with it. 0.70 leaves headroom
-above the worst mistake Jev made. Override with
-`MEMRY_DECISION_MERGE_CONFIDENCE` once you have measured your own data; 56 cases pin a
-threshold roughly, not precisely.
-
-### The other stages
-
-Three more places where the answers are known before the call is made. Each was probed
-against the live model, and one of the three did not survive it.
-
-| Stage | Result | Shipped |
-|---|---|---|
-| Entity typing | 14/16, and all sixteen in **one 608 ms call** | Yes. It was already a batch call, so this is a straight swap. Both misses were fair: a German company-register number typed as code at 0.28 confidence, which is the model flagging its own doubt, and Hetzner typed as an organization, which it is. |
-| Reconcile (ADD / UPDATE / DELETE / NONE) | 9/10, ~344 ms | Yes, for the decision only. Every high-confidence answer was right, the one miss scored 0.73 and the genuinely hard retraction scored 0.48. Writing the merged sentence for an UPDATE is a writing task and stays with the text model, so this is a cheap call in front of a rarer expensive one. |
-| Re-ranking search results | recall@3 0.933 -> 0.967, MRR 0.767 -> 0.928 | Yes, off by default. See below. |
-| Durability, for decay | 11/12 in one 713 ms call | Not wired yet. Ready. |
-| Consolidation (do two memories say the same thing) | 11/12 in one 230 ms call | Not wired yet. Ready. |
-| Tag drift (are two tags the same idea) | 8/10 in one 205 ms call | Not wired yet. Weakest of the three. |
-
-### Re-ranking search results
-
-On once `MEMRY_DECISION_PROVIDER=jev` is set, and off in every other case. There is no
-re-ranking without Jev: `MEMRY_DECISION_RERANK=0` turns it off, and setting it to 1 cannot
-turn it on for a provider that was not measured to earn it, for the reason in the second
-table below.
-
-The first version of this replaced the hybrid ranking with the relevance judgement and
-measured worse than doing nothing. That result was about the implementation, not the idea:
-the hybrid rank carries recency, decayed importance, entity anchors and the typed-relation
-hops that make multi-hop questions work, and ordering purely by "does this text answer the
-question" throws all of it away. Blending keeps it and adds what wording alone cannot see.
-
-Over a 228-memory store with 90 questions, from
-`evals/datasets/distractors_v1.jsonl` through the standard harness:
-
-| | recall@3 | MRR |
-|---|---|---|
-| Hybrid only | 0.933 | 0.767 |
-| Replaced by relevance | 0.889 | 0.776 |
-| Blended, 20% relevance | 0.933 | 0.906 |
-| **Blended, 35% relevance, non-answers demoted** | **0.967** | **0.928** |
-| Blended, 50% relevance | 0.933 | 0.906 |
-
-35% beat both 20% and 50%. Two things do the work: the blend moves the right answer up the
-list, and a floor at 0.15 pushes an obvious non-answer to the back however well it matched
-on wording.
-
-### Why a text model does not get to do this
-
-The same re-ranking, same prompt, same dataset, through the shipped code path:
-
-| Re-ranker | recall@3 | MRR | p50 | p95 |
-|---|---|---|---|---|
-| None (hybrid only) | 0.933 | 0.767 | **3 ms** | 4 ms |
-| **Jev 1.13.0** | **0.967** | **0.917** | 190 ms | 282 ms |
-| gpt-5-mini, same prompt | 0.922 | 0.839 | 10,659 ms | 13,943 ms |
-
-The text model is the only one of the three that makes recall *worse* than not re-ranking,
-and it takes ten and a half seconds a query to do it. At a p95 of fourteen seconds it is
-not a feature anyone would ship, which is why `reranks_by_default` is a property of the
-provider rather than a global switch.
-
-On latency, be careful which comparison you make. Hybrid search alone is 3 ms because it is
-a local index lookup with no network in it, so adding any hosted model puts a round trip in
-front of that. Against *no re-ranking*, Jev costs 187 ms and buys 0.034 recall and 0.150
-MRR. Against a text model doing the same job, Jev is 56 times faster and more accurate.
-
-### Upkeep stages
-
-All three are wired, and all three report what they did.
-
-**How long facts stay relevant** (11/12 on a labelled set, one 713 ms call). Forgetting
-decays importance on a half-life per memory type, which treats "the train was delayed this
-morning" and "allergic to penicillin" identically because both are semantic. A pass now
-records a per-fact estimate in the memory's metadata and decay prefers it, falling back to
-the type rate for anything unscored. "Allergic to penicillin" scored top of the scale at
-0.98 confidence and the train delay scored bottom at 0.81. Run it from **Knowledge >
-Upkeep** or `POST /api/v1/maintenance/durability`.
-
-**Consolidation** (11/12, one 230 ms call). The typed question now runs first and the text
-model is only asked when the answer is yes, because writing the merged sentence is the only
-part that needs prose. Most candidate groups are not the same fact, so most of those calls
-stop happening. Genuine restatements scored 0.62-0.94 and everything else 0.02-0.08,
-including pairs built to look alike: "Ada lives in Amsterdam" against "Ada works in
-Amsterdam" came back 0.06.
-
-**Tag drift** (8/10, one 205 ms call). Added as a fourth suggestion pass behind the three
-that already exist, and deliberately never as automation. It missed "food" beside "diet"
-and "project-phoenix" beside "phoenix", both of which a person would merge, but it never
-proposed an unrelated pair. Missing a suggestion costs nothing; inventing one costs trust.
-
-Every pass writes a line to the server log saying what it changed, and the Upkeep panel
-shows the same thing next to the button that ran it.
+**Re-ranking** blends the relevance judgement with the hybrid rank at 0.35 rather than
+replacing it, and pushes anything under 0.15 to the back. Replacing the hybrid rank
+outright measured worse than not re-ranking at all, because that rank already carries
+recency, decayed importance, entity anchors and the typed-relation hops multi-hop
+questions depend on. It is on only for a provider measured to earn it and cannot be
+forced on elsewhere.
 
 ### A trap worth remembering
 
-An early entity-typing probe scored 2 out of 16 because the names only ever appeared in
-the shared state, never in the questions, and every answer came back "person" at around
-0.75. Confidence describes the answer to the question that was asked. A question carrying
-no information still gets a confident-looking reply.
+An early probe scored 2 out of 16 because the names only ever appeared in the shared
+state, never in the questions, so sixteen identical questions got sixteen identical
+answers at around 0.75 confidence. Confidence describes the answer to the question that
+was asked. A question carrying no information still gets a confident-looking reply.
 
 ## Scaling up
 

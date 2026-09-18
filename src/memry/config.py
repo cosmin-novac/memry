@@ -59,7 +59,7 @@ class LLMConfig(BaseModel):
 
 
 class DecisionConfig(BaseModel):
-    """Provider for typed judgements (entity identity today, more later).
+    """Provider for typed judgements. Experimental, and off by default.
 
     Off by default. "none" means no separate decision provider, so identity
     judgement keeps using the prompt path Memry has always used and nothing
