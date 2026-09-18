@@ -215,8 +215,21 @@ are the useful part. They are the cases a person should look at.
 
 ### Jev against the text model, on 56 labelled cases
 
+The cases are in `evals/datasets/identity_v1.jsonl` and the harness is
+`evals/identity_benchmark.py`, so none of this has to be taken on trust:
+
+```bash
+TYPESAFE_API_KEY=... python evals/identity_benchmark.py jev
+OPENAI_API_KEY=...   python evals/identity_benchmark.py llm --model gpt-5-mini
+```
+
 Same cases, same prompt shape, both providers. The labels say what the store should end
 up doing: one entity, two entities, or a decision a person should make.
+
+Neither model is deterministic, so a repeat run moves a case or two: the figures below
+come from one run, and re-running put safe verdicts at 52/56 rather than 53 and the
+automatic merges at 19 of 22 rather than 20. The shape holds across runs; treat single
+cases as illustrative and the gap between the two providers as the result.
 
 | | Jev 1.13.0 | gpt-5-mini (the path without Jev) |
 |---|---|---|
@@ -237,8 +250,9 @@ store can look after itself:
 | Correct merges made automatically at that gate | **20 of 22** | 4 of 22 |
 
 The text model's wrong answers score as high as its right ones, so the two distributions
-sit on top of each other and no threshold separates them. Its numbers are also suspiciously
-round - 0.70, 0.80, 0.85, 0.90 - which is what self-reporting looks like.
+sit on top of each other and no threshold separates them. Its numbers also cluster on round
+values - 0.70, 0.80, 0.85, 0.90 - which is what a model asked to rate its own certainty
+tends to produce.
 
 **The current 0.9 gate is not safe on the path without Jev.** On this set it merges two
 entities that should have stayed apart. One of them is the case Memry's entity handling
@@ -246,8 +260,8 @@ exists for: a partner called Jonas and a Snowflake architect called Jonas, which
 gpt-5-mini calls the same person with 0.85 confidence. Jev answers `unsure` at 0.39.
 
 So the gate belongs to the provider, and each one carries its own
-(`Decider.auto_confirm_confidence`): 0.9 without Jev, 0.7 with it. 0.7 leaves 0.20 of
-headroom above the worst mistake Jev made. Override with
+(`Decider.auto_confirm_confidence`): 0.95 without Jev, 0.70 with it. 0.70 leaves headroom
+above the worst mistake Jev made. Override with
 `MEMRY_DECISION_MERGE_CONFIDENCE` once you have measured your own data; 56 cases pin a
 threshold roughly, not precisely.
 
@@ -278,7 +292,8 @@ the hybrid rank carries recency, decayed importance, entity anchors and the type
 hops that make multi-hop questions work, and ordering purely by "does this text answer the
 question" throws all of it away. Blending keeps it and adds what wording alone cannot see.
 
-Over a 228-memory store with 90 questions:
+Over a 228-memory store with 90 questions, from
+`evals/datasets/distractors_v1.jsonl` through the standard harness:
 
 | | recall@3 | MRR |
 |---|---|---|
