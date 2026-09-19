@@ -42,6 +42,7 @@ from .intelligence.decay import (
     score_durability,
 )
 from .intelligence.entities import (
+    _gate,
     classify_entity_types,
     judge_entity_referents,
     non_referent_reason,
@@ -2431,6 +2432,10 @@ class MemoryStore:
                 "decider": self.decider.name
                 + (f":{getattr(self.decider, 'model', '')}"
                    if getattr(self.decider, "model", "") else ""),
+                # The merge gate in force right now, so the About panel can say
+                # whether merges happen on their own and above what. Above 1.0
+                # means never: the model answering has not been measured.
+                "merge_gate": _gate(self.decider, self.llm),
                 # "invalidated" lumps together deleted memories and old versions
                 # of updated ones. Only the first kind is recoverable, and only
                 # that kind is what the Forgotten tab lists, so report it apart.

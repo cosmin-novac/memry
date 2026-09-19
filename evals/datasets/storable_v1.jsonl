@@ -1,0 +1,44 @@
+{"id": "s01", "text": "My partner Jonas is vegetarian, so no meat when you plan dinners.", "storable": true, "why": "a durable fact about a person close to the user"}
+{"id": "s02", "text": "I've decided to go with Postgres for the new service, not SQLite.", "storable": true, "why": "a decision"}
+{"id": "s03", "text": "Actually I'm not vegetarian any more, I started eating fish in March.", "storable": true, "why": "a correction to a stored fact"}
+{"id": "s04", "text": "I prefer short answers. Skip the preamble.", "storable": true, "why": "a preference about how to be answered"}
+{"id": "s05", "text": "I'm allergic to penicillin.", "storable": true, "why": "a health fact that must not be forgotten"}
+{"id": "s06", "text": "We're moving to Amsterdam in September.", "storable": true, "why": "a plan with a date"}
+{"id": "s07", "text": "Marta Reyes is my manager now, Priya moved to the platform team.", "storable": true, "why": "two relationship changes"}
+{"id": "s08", "text": "My daughter's name is Lina and she turns six on the 14th.", "storable": true, "why": "a family fact and a date"}
+{"id": "s09", "text": "I use uv instead of pip for everything now.", "storable": true, "why": "a tooling preference"}
+{"id": "s10", "text": "The Phoenix cutover is planned for 14 March 2027.", "storable": true, "why": "a project date"}
+{"id": "s11", "text": "Remind me to call my mum on Sunday, she's back from hospital.", "storable": true, "why": "a plan and a fact about a person"}
+{"id": "s12", "text": "I work as a data engineer at Northwind, mostly on the warehouse.", "storable": true, "why": "a fact about the user's job"}
+{"id": "s13", "text": "I don't drink coffee after 2pm, it wrecks my sleep.", "storable": true, "why": "a habit stated as a rule"}
+{"id": "s14", "text": "Our team standup moved to Thursdays at 10.", "storable": true, "why": "a recurring schedule change"}
+{"id": "s15", "text": "I speak Swedish fluently and some Dutch.", "storable": true, "why": "a stable fact about the user"}
+{"id": "s16", "text": "The vendor we picked for the audit is Halvorsen & Co.", "storable": true, "why": "a decision naming an organisation"}
+{"id": "s17", "text": "Use metric units with me, never Fahrenheit.", "storable": true, "why": "a preference"}
+{"id": "s18", "text": "My employee number is 44812, HR keeps asking.", "storable": true, "why": "an identifier the user wants remembered"}
+{"id": "s19", "text": "I'm training for the Rotterdam marathon in April.", "storable": true, "why": "a plan"}
+{"id": "s20", "text": "Jonas and I got engaged last weekend.", "storable": true, "why": "a relationship change"}
+{"id": "s21", "text": "For the record, I hate being called Adalyn. It's Ada.", "storable": true, "why": "a preference about the user's own name"}
+{"id": "s22", "text": "The house has a gas boiler, serviced last in 2024.", "storable": true, "why": "a fact about the user's home"}
+{"id": "n01", "text": "thanks!", "storable": false, "why": "an acknowledgement"}
+{"id": "n02", "text": "ok sounds good", "storable": false, "why": "an acknowledgement"}
+{"id": "n03", "text": "What's the capital of Australia?", "storable": false, "why": "a question carrying nothing about the user"}
+{"id": "n04", "text": "Can you rephrase that last paragraph?", "storable": false, "why": "an instruction about the conversation itself"}
+{"id": "n05", "text": "lol", "storable": false, "why": "filler"}
+{"id": "n06", "text": "brb, doorbell", "storable": false, "why": "a transient status"}
+{"id": "n07", "text": "Search the web for the latest numpy release notes.", "storable": false, "why": "a tool request with nothing to remember"}
+{"id": "n08", "text": "Hmm, let me think about that.", "storable": false, "why": "filler"}
+{"id": "n09", "text": "Is it going to rain in Amsterdam tomorrow?", "storable": false, "why": "a question about the weather"}
+{"id": "n10", "text": "Good morning", "storable": false, "why": "a greeting"}
+{"id": "n11", "text": "Translate 'where is the station' into Dutch.", "storable": false, "why": "a one-off task"}
+{"id": "n12", "text": "Never mind, I found it.", "storable": false, "why": "closing a thread, no fact"}
+{"id": "n13", "text": "How many grams in an ounce?", "storable": false, "why": "a lookup"}
+{"id": "n14", "text": "Summarise this article for me: [link]", "storable": false, "why": "a one-off task"}
+{"id": "n15", "text": "Yes please, go ahead.", "storable": false, "why": "an acknowledgement"}
+{"id": "n16", "text": "That's not what I asked.", "storable": false, "why": "feedback on the reply, no fact"}
+{"id": "n17", "text": "Write a haiku about Mondays.", "storable": false, "why": "a one-off task"}
+{"id": "n18", "text": "Can you see my screen?", "storable": false, "why": "a question about the session"}
+{"id": "n19", "text": "Ugh, Mondays.", "storable": false, "why": "a passing remark"}
+{"id": "n20", "text": "What time is it in Tokyo right now?", "storable": false, "why": "a lookup"}
+{"id": "n21", "text": "Explain how BM25 scoring works.", "storable": false, "why": "a question about the world, not the user"}
+{"id": "n22", "text": "Okay, one more try.", "storable": false, "why": "filler"}

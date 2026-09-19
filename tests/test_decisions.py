@@ -694,3 +694,26 @@ def test_rerank_may_be_turned_on_for_a_text_model_measured_to_help():
         store = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64), decider=reversing)
         assert (store._rerank("q", results) != results) is expect_reranked, explicit
         store.close()
+
+
+def test_stats_reports_the_merge_gate_in_force():
+    """Someone on an unmeasured text model will see merges stop happening on
+    their own. The About panel and the Upkeep page read this to say why."""
+    from memry.config import Config
+
+    luna = FakeLLM(); luna.model = "gpt-5.6-luna"
+    quiet = MemoryStore(Config(db_path=":memory:"), llm=luna, embedder=HashEmbedder(64))
+    assert quiet.stats()["merge_gate"] == NEVER_AUTO_MERGE
+    quiet.close()
+
+    cfg = Config(db_path=":memory:")
+    cfg.decision.auto_confirm_confidence = 0.9
+    chosen = MemoryStore(cfg, llm=luna, embedder=HashEmbedder(64))
+    assert chosen.stats()["merge_gate"] == 0.9
+    chosen.close()
+
+    jev = MemoryStore(Config(db_path=":memory:"), llm=luna, embedder=HashEmbedder(64),
+                      decider=_stub(lambda k, q: Answer()))
+    jev.decider.auto_confirm_confidence = 0.7
+    assert jev.stats()["merge_gate"] == 0.7      # the provider's own, while it answers
+    jev.close()
