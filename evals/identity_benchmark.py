@@ -18,6 +18,11 @@ the lowest threshold that lets nothing wrong through, with some headroom.
 Neither provider is deterministic, so repeat runs move a case or two. Run it
 against your own data before trusting a threshold on your own store.
 
+Measured so far: Jev is clean from 0.60 (set to 0.70 with headroom); gpt-5-mini
+is clean only at 0.95; gpt-5.6-luna has no clean threshold at all, its worst
+wrong "same" arriving at 0.98. That last result is why a text model that has
+not been run through here never merges on its own.
+
 Run:
     TYPESAFE_API_KEY=... python evals/identity_benchmark.py jev
     OPENAI_API_KEY=...   python evals/identity_benchmark.py llm --model gpt-5-mini

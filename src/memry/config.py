@@ -77,10 +77,11 @@ class DecisionConfig(BaseModel):
     #: Override the provider's own automatic-merge gate. Leave unset to use the
     #: value measured for that provider.
     auto_confirm_confidence: float | None = None
-    #: Turn re-ranking off for a provider that supports it. Unset leaves it as
-    #: the provider has it. This cannot switch re-ranking *on*: a provider that
-    #: was not measured to earn it does not get to do it, because through a
-    #: text model the same work scores below no re-ranking at all.
+    #: Turn re-ranking on or off. Unset leaves it as the provider has it: on
+    #: with Jev, off otherwise. Turning it on only works for a provider that
+    #: was measured to beat no re-ranking (Jev, and gpt-5.6-luna as the text
+    #: model); gpt-5-mini scored below the baseline, so for it and for any
+    #: unmeasured model the setting is refused.
     rerank: bool | None = None
     #: How many of the hybrid candidates to judge.
     rerank_pool: int = 20
