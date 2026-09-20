@@ -62,6 +62,7 @@ from .intelligence.extraction import (
     verify_coverage,
 )
 from .intelligence.reconcile import reconcile_candidate
+from .intelligence.when import extract_when, overlaps as when_overlaps
 from .models import (
     MEMORY_TYPES,
     AddAction,
@@ -221,6 +222,24 @@ def _within(created_at: str, since: str | None, until: str | None) -> bool:
     if hi is not None and created >= hi:
         return False
     return True
+
+
+WHEN_KEY = "when"
+WHEN_CHECKED_KEY = "when_checked"
+
+
+def _when_within(
+    memory: Memory, when_since: str | None, when_until: str | None
+) -> bool:
+    """Does this memory's occurrence time fall in the [when_since, when_until]
+    window? A memory with no occurrence time never matches: "what is on this
+    weekend" must not answer with everything that was merely saved then.
+    """
+    if not (when_since or when_until):
+        return True
+    return when_overlaps(
+        (memory.metadata or {}).get(WHEN_KEY), when_since, when_until
+    )
 
 
 class MemoryStore:
@@ -1064,6 +1083,8 @@ class MemoryStore:
         entity_id: str | list[str] | None = None,
         since: str | None = None,
         until: str | None = None,
+        when_since: str | None = None,
+        when_until: str | None = None,
         relational: bool = True,
     ) -> list[SearchResult]:
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
@@ -1077,10 +1098,13 @@ class MemoryStore:
                 user_id=user_id, agent_id=agent_id, run_id=run_id,
                 include_invalid=include_invalid, limit=limit,
                 categories=categories, entity_id=entity_id, since=since, until=until,
+                when_since=when_since, when_until=when_until,
             )
             return [SearchResult(memory=m, score=0.0) for m in memories]
         # Over-fetch when we will post-filter or fuse, so a full page survives.
-        wide = (since or until) or (relational and not categories and not entity_id)
+        wide = (since or until or when_since or when_until) or (
+            relational and not categories and not entity_id
+        )
         fetch = limit if not wide else min(max(limit * 8, 40), 500)
         results = hybrid_search(
             backend=self.backend,
@@ -1101,6 +1125,10 @@ class MemoryStore:
                 results = self._fuse_relational(results, rel_ids, include_invalid)
         if since or until:
             results = [r for r in results if _within(r.memory.created_at, since, until)]
+        if when_since or when_until:
+            results = [
+                r for r in results if _when_within(r.memory, when_since, when_until)
+            ]
         return self._rerank(query, results)[:limit]
 
     def _rerank(self, query: str, results: list[SearchResult]) -> list[SearchResult]:
@@ -1383,13 +1411,15 @@ class MemoryStore:
         entity_id: str | list[str] | None = None,
         since: str | None = None,
         until: str | None = None,
+        when_since: str | None = None,
+        when_until: str | None = None,
     ) -> list[Memory]:
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         if entity_id:
             entity_id = self._resolve_entity_filter(entity_id)
             if not entity_id:
                 return []
-        if not (since or until):
+        if not (since or until or when_since or when_until):
             return self.backend.list_memories(
                 scope, include_invalid=include_invalid, limit=limit, offset=offset,
                 categories=categories, entity_id=entity_id,
@@ -1400,7 +1430,10 @@ class MemoryStore:
             scope, include_invalid=include_invalid, limit=1_000_000, offset=0,
             categories=categories, entity_id=entity_id,
         )
-        rows = [m for m in rows if _within(m.created_at, since, until)]
+        if since or until:
+            rows = [m for m in rows if _within(m.created_at, since, until)]
+        if when_since or when_until:
+            rows = [m for m in rows if _when_within(m, when_since, when_until)]
         return rows[offset : offset + limit]
 
     def history(
@@ -1714,6 +1747,68 @@ class MemoryStore:
                 if etype:
                     self.backend.set_entity_type(e.id, etype)
                     summary["typed"] += 1
+        return summary
+
+    def backfill_when(
+        self,
+        *,
+        user_id: str | None = None,
+        batch: int = 20,
+        limit: int | None = None,
+        dry_run: bool = False,
+        types: tuple[str, ...] = ("episodic", "semantic"),
+    ) -> dict[str, Any]:
+        """Read an occurrence time out of memories written before there was one.
+
+        Only memories with neither a ``when`` nor a ``when_checked`` mark are
+        looked at, and every memory that comes back without one is marked, so a
+        second run over the same store spends nothing. ``dry_run`` writes
+        nothing and hands back what it would have set, which is the way to see
+        what a batch of proposals looks like before paying for the whole store.
+        """
+        if not self.llm.available:
+            return {"skipped": "no LLM configured"}
+        summary: dict[str, Any] = {"checked": 0, "found": 0}
+        proposals: list[dict[str, Any]] = []
+        pending = [
+            m for m in self.get_all(user_id=user_id, limit=1_000_000)
+            if m.memory_type in types
+            and not (m.metadata or {}).get(WHEN_KEY)
+            and not (m.metadata or {}).get(WHEN_CHECKED_KEY)
+        ]
+        if limit is not None:
+            pending = pending[: max(int(limit), 0)]
+        for index in range(0, len(pending), max(int(batch), 1)):
+            group = pending[index : index + max(int(batch), 1)]
+            found = extract_when(
+                self.llm,
+                [
+                    {"content": m.content, "recorded_at": m.created_at}
+                    for m in group
+                ],
+            )
+            for memory, when in zip(group, found):
+                summary["checked"] += 1
+                if when:
+                    summary["found"] += 1
+                if dry_run:
+                    if when:
+                        proposals.append(
+                            {"id": memory.id, "content": memory.content, "when": when}
+                        )
+                    continue
+                metadata = dict(memory.metadata or {})
+                if when:
+                    metadata[WHEN_KEY] = when
+                else:
+                    # Marked, not retried: a memory the model already read and
+                    # found no time in costs nothing on the next run.
+                    metadata[WHEN_CHECKED_KEY] = True
+                self.backend.update_memory(
+                    memory.id, metadata=metadata, touch=False
+                )
+        if dry_run:
+            summary["proposals"] = proposals
         return summary
 
     def _refresh_entity_description(

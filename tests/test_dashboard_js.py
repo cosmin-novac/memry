@@ -271,6 +271,40 @@ check(memoryTypeBadge({memory_type:'unknown'}).includes('semantic'),'safe fallba
     assert result.returncode == 0, result.stderr
 
 
+def test_memory_cards_show_when_the_fact_happens():
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+
+    assert ".when-chip" in html
+    assert "${memoryTypeBadge(m)}${whenChip(m)}" in source
+
+    chip_source = source[
+        source.index("const WHEN_UNITS=") : source.index("function viewCard")
+    ]
+    contract = chip_source + """
+function esc(value){return value}
+function check(condition,message){if(!condition)throw new Error(message)}
+check(occursText({})==='','no when, no chip');
+check(whenChip({})==='','no when, no chip');
+check(occursText({when:{start:'2026-10-03'},next_occurrence:'2026-10-03'})
+  ==='happens 2026-10-03','a one-off still ahead');
+check(occursText({when:{start:'2026-09-10'},next_occurrence:null})
+  ==='happened 2026-09-10','a one-off that has passed');
+check(occursText({when:{start:'2026-10-03',end:'2026-10-07'},next_occurrence:'2026-10-03'})
+  ==='happens 2026-10-03 to 2026-10-07','a span');
+check(occursText({when:{start:'--03-03',recurrence:'yearly'},next_occurrence:'2027-03-03'})
+  ==='every year on 03-03, next 2027-03-03','a yearly recurrence');
+check(occursText({when:{start:'2026-09-01',recurrence:'daily'},next_occurrence:'2026-09-20'})
+  ==='every day, next 2026-09-20','a daily recurrence');
+check(whenChip({when:{start:'2026-10-03'},next_occurrence:'2026-10-03'})
+  .includes('when-chip'),'the chip carries its class');
+"""
+    result = subprocess.run(
+        ["node", "-"], input=contract, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_primary_dashboard_controls_have_tooltips_and_compact_add():
     html = _dashboard_html()
 

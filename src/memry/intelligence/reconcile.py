@@ -190,6 +190,13 @@ def reconcile_candidate(
         embedding = _embed_or_none(embedder, new_content)
         merged_sources = list(dict.fromkeys(target.source_episode_ids + episode_ids))
         prepared = prepare_update(target.id, new_content) if prepare_update else {}
+        # A rewrite that says when the thing happens sets the occurrence time;
+        # one that says nothing about time leaves the stored one alone, because
+        # the merged text still describes the same event.
+        when = (candidate.metadata or {}).get("when")
+        extra: dict[str, Any] = {}
+        if when:
+            extra["metadata"] = {**(target.metadata or {}), "when": when}
         backend.update_memory(
             target.id,
             content=new_content,
@@ -197,6 +204,7 @@ def reconcile_candidate(
             embedding_model=embedder.model_id if embedding else None,
             importance=max(target.importance, candidate.importance),
             source_episode_ids=merged_sources,
+            **extra,
             **prepared,
         )
         backend.add_event(

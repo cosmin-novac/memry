@@ -6,6 +6,7 @@ extraction - selecting *which* memories fit the budget, most valuable first.
 from __future__ import annotations
 
 from ..models import ContextResult, SearchResult
+from .when import describe_when
 
 _HEADER = "## Relevant long-term memories (memry)\n"
 _FOOTER = "\n(Use these silently as background knowledge; they may be incomplete.)"
@@ -29,7 +30,13 @@ def build_context(
     for result in results:
         memory = result.memory
         date = (memory.updated_at or memory.created_at)[:10]
+        # The bracketed date says when this was recorded. When the fact itself
+        # happens at a time, say so too: without it an agent reads a stored
+        # birthday or a dated plan as something that was merely written down.
+        occurs = describe_when((memory.metadata or {}).get("when"))
         line = f"- [{memory.memory_type} · {date}] {memory.content}"
+        if occurs:
+            line += f" ({occurs})"
         cost = estimate_tokens(line) + 1
         if used + cost > token_budget and lines:
             break

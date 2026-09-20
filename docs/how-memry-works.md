@@ -29,6 +29,14 @@ Two important properties of a **Memory**:
 - **Derived, with provenance.** A memory links back to the episode(s) it came
   from (`source_episode_ids`), so you can always re-run a better extraction over
   the original text.
+- **A "when" is separate from the record's own dates.** A memory whose fact
+  happens at a time carries `metadata["when"]` with a `start` (`YYYY-MM-DD`,
+  `YYYY-MM-DDTHH:MM`, or `--MM-DD` for a yearly date), an optional `end`, and an
+  optional `recurrence`. Extraction sets it only for something that happened or
+  will happen (a meeting, a launch, a trip, a deadline), never for a state, a
+  price or a log, even when those carry a date. `when_since`/`when_until` search
+  on it, so "what is on this weekend" reaches events rather than everything
+  saved that weekend.
 - **`updated_at` tracks content, not housekeeping.** It moves only on a genuine
   content change (a user edit, or a reconciliation UPDATE), because it drives
   recency ranking and decay *age*. Tagging, relation backfill, and re-embedding
