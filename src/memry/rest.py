@@ -1334,8 +1334,7 @@ async function loadForgotten(){
   if(!rows.length){el.innerHTML='<div class="empty">Nothing forgotten.</div>';return}
   el.innerHTML=rows.map(row=>`<div class="tagrow"><span class="name">
     ${esc(row.memory.content)}
-    <div class="hint">forgotten ${esc((row.forgotten_at||'').slice(0,10))}
-      by ${esc(row.actor||'system')}${row.reason?' · '+esc(row.reason):''}</div></span>
+    <div class="hint">forgotten ${esc((row.forgotten_at||'').slice(0,10))} · ${esc(row.trigger||row.reason||'')}</div></span>
     <button class="act" title="bring this memory back into search"
       onclick='unforgetMemory(${JSON.stringify(row.memory.id)})'>restore</button>
     <button class="act del" title="delete permanently - this cannot be undone"
@@ -1419,7 +1418,7 @@ const QUEUE_SECTIONS=[
   {kind:'tag_split',label:'Tags',
    ask:'Two tags that look like one subject. Combining files everything under the one shown.'},
   {kind:'role',label:'Roles',
-   ask:'Names that look like a role someone holds, such as creator or client. Accepting removes the name and, where one person clearly holds it, records that as a relation. Removed names can be restored under Forgotten.'},
+   ask:'Words for a role someone holds, such as landlord or customers, that were filed as if they were things. Ticked names are removed, the rest are kept and not asked about again. The memories keep saying who holds the role, and a removed name can be restored under Forgotten.'},
   {kind:'entity_review',label:'Not an entity?',
    ask:'Names the model judged not to be a person, place or thing. Ticked names are removed, the rest are kept and not asked about again. Removing a name never touches the memories behind it.'},
 ];
@@ -1444,7 +1443,8 @@ function renderUpkeepQueue(queue){
   if(!sections.some(sec=>sec.kind===queueTab))queueTab=sections[0].kind;
   const tabs=sections.map(sec=>`<button aria-pressed="${sec.kind===queueTab}" onclick='showQueueTab(${JSON.stringify(sec.kind)})'>${esc(sec.label)} <span class="cnt">${byKind[sec.kind].length}</span></button>`).join('');
   const section=sections.find(sec=>sec.kind===queueTab),items=byKind[section.kind];
-  const body=section.kind==='entity_review'?queueChecklist(section,items):items.map(queueRow).join('');
+  const listed=(section.kind==='entity_review'||section.kind==='role')&&items.length>5;
+  const body=listed?queueChecklist(section,items):items.map(queueRow).join('');
   el.innerHTML=`<div class="knowledge-tabs queue-tabs">${tabs}</div>
     <p class="hint">${esc(section.ask)}</p><div class="queue-body">${body}</div>`;
   const card=el.querySelector('.foldcard');if(card)foldChanged(card);
@@ -1453,7 +1453,7 @@ function queueRow(item){
   const replaces=item.replaces&&item.replaces.length
     ?`<details class="qdetail"><summary>the ${item.replaces.length} memories it replaces</summary><ul>${item.replaces.map(c=>`<li>${esc(c)}</li>`).join('')}</ul></details>`:'';
   return `<div class="tagrow qrow"><span class="name"><b>${esc(item.title)}</b>
-    <div class="hint">${esc(item.detail)}</div>${replaces}</span>
+    ${item.detail?`<div class="hint">${esc(item.detail)}</div>`:''}${replaces}</span>
     <button class="q-yes" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"accept",this)'>${esc(item.accept)}</button>
     <button class="q-no" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"decline",this)'>${esc(item.decline)}</button></div>`;
 }
@@ -2351,6 +2351,7 @@ def create_app(
                 "forgotten_at": row["forgotten_at"],
                 "actor": row["actor"],
                 "reason": row["reason"],
+                "trigger": row.get("trigger"),
             }
             for row in rows
         ])

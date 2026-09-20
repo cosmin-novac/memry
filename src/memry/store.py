@@ -209,6 +209,25 @@ def _due(last_run: str | None, interval_days: float, now: datetime) -> bool:
     return (now - last) >= timedelta(days=max(interval_days, 0.0))
 
 
+def _forgetting_trigger(event: Any) -> str:
+    """What made a memory go, as a sentence someone can read."""
+    if event is None:
+        return "Nothing recorded what removed it. It predates the event log."
+    reason = event.reason or ""
+    if event.actor == "user":
+        return "You deleted it."
+    if event.actor == "decay":
+        score = re.search(r"importance ([0-9.]+) < ([0-9.]+)", reason)
+        if score:
+            return (f"The forgetting sweep removed it: its importance had faded to "
+                    f"{score.group(1)}, below the {score.group(2)} it needs to stay.")
+        return "The forgetting sweep removed it: its importance had faded too far."
+    if event.event == "SUPERSEDE" and "into 0 fact" in reason:
+        return ("It was a raw saved message, and distilling it produced nothing new: "
+                "every fact in it was already stored, or there was nothing to keep.")
+    return reason or f"Removed by {event.actor or 'the system'}, with no reason recorded."
+
+
 def _tag_run_key(user_id: str | None) -> str:
     """Meta key under which the last tag-abstraction run time is stamped."""
     return f"tag_abstraction:last_run:{user_id or ''}"
@@ -1596,11 +1615,14 @@ class MemoryStore:
         ):
             if memory.invalid_at is None or memory.superseded_by:
                 continue
+            # Whatever ended it: a delete (yours, or the forgetting sweep), or
+            # a distillation that put nothing in its place. Looking for DELETE
+            # alone is what left "forgotten by system" with no explanation.
             removal = next(
                 (
                     event
                     for event in reversed(self.backend.history(memory.id))
-                    if event.event == "DELETE"
+                    if event.event in ("DELETE", "SUPERSEDE")
                 ),
                 None,
             )
@@ -1609,6 +1631,7 @@ class MemoryStore:
                 "forgotten_at": memory.invalid_at,
                 "actor": removal.actor if removal else "system",
                 "reason": removal.reason if removal else None,
+                "trigger": _forgetting_trigger(removal),
             })
             if len(out) >= limit:
                 break
@@ -2734,22 +2757,6 @@ class MemoryStore:
                 rows.append((entity, screen))
         return rows
 
-    def _role_relation(self, entity: Entity) -> tuple[str, str, str] | None:
-        """(person id, predicate, home id) when a role name has one obvious
-        holder: exactly one person across its memories, and a home."""
-        home = (entity.metadata or {}).get("home")
-        if not isinstance(home, dict) or not home.get("id"):
-            return None
-        people: set[str] = set()
-        for memory in self.backend.entity_memories(entity.id, limit=50):
-            for other in self.backend.entities_of_memory(memory.id):
-                if other.entity_type == "person" and other.merged_into is None:
-                    people.add(other.id)
-        if len(people) != 1:
-            return None
-        predicate = re.sub(r"[^a-z0-9]+", "_", entity.name.strip().lower()).strip("_") + "_of"
-        return next(iter(people)), predicate, home["id"]
-
     # ------------------------------------------------------------------
     # upkeep: what runs on its own, and the queue of what needs a person
     # ------------------------------------------------------------------
@@ -2967,27 +2974,19 @@ class MemoryStore:
         for entity, screen in self._screen_rows(user_id):
             if entity.id in listed:
                 continue
-            if screen["verdict"] == "role":
-                relation = self._role_relation(entity)
-                home = ((entity.metadata or {}).get("home") or {}).get("name", "")
-                if relation:
-                    holder = self.backend.get_entity(relation[0])
-                    detail = (f"Looks like a role {holder.name if holder else 'someone'} holds"
-                              f" in {home}. Accepting records that as a relation and removes the name.")
-                else:
-                    detail = ("Looks like a role someone holds, not a name of its own"
-                              + (f" (in {home})." if home else "."))
-                items.append({
-                    "kind": "role", "id": entity.id, "title": entity.name, "detail": detail,
-                    "accept": "remove the name", "decline": "keep",
-                })
-            else:
-                items.append({
-                    "kind": "entity_review", "id": entity.id, "title": entity.name,
-                    "detail": "Judged a value or a fragment, not a person, place or thing. "
-                              "Removing it never touches the memories behind it.",
-                    "accept": "remove", "decline": "keep",
-                })
+            # A role ("landlord", "customers") is a word in a memory, not a thing
+            # with a name. Removing the name records nothing in its place: the
+            # memory keeps saying who is a landlord, and a stated link between
+            # two things is already a relation. Guessing the holder from who
+            # else the memory mentions was wrong about half the time on a real
+            # store (a tax memory listing profile types is not a list of what
+            # its owner is), so nothing is guessed.
+            role = screen["verdict"] == "role"
+            items.append({
+                "kind": "role" if role else "entity_review", "id": entity.id,
+                "title": entity.name, "detail": "",
+                "accept": "remove", "decline": "keep",
+            })
 
         health = tag_health if tag_health is not None else self.tag_health(user_id=user_id)
         ignored = {
@@ -3052,13 +3051,6 @@ class MemoryStore:
                     metadata["screen"] = {**screen, "kept": True}
                     self.backend.set_entity_metadata(entity.id, metadata)
                     return True
-                if kind == "role":
-                    relation = self._role_relation(entity)
-                    if relation:
-                        self.backend.add_relation(Relation(
-                            subject=relation[0], predicate=relation[1],
-                            object=relation[2], user_id=user_id,
-                        ))
                 return self.remove_entities([item_id], owner_prefix=owner_prefix) > 0
         if kind == "entity_review":
             pending = self._upkeep_get("entity_review:pending", user_id, [])

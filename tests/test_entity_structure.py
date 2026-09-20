@@ -559,8 +559,9 @@ def test_a_role_and_a_value_reach_the_queue_as_their_own_kinds(store, screened):
 
     assert queue["role"]["id"] == screened["contact"].id
     assert queue["role"]["title"] == "billing contact"
-    assert "Ada" in queue["role"]["detail"] and "Nimbus" in queue["role"]["detail"]
-    assert queue["role"]["accept"] == "remove the name"
+    # the section explains what a role is once; a row repeats none of it
+    assert queue["role"]["detail"] == ""
+    assert queue["role"]["accept"] == "remove"
     assert queue["entity_review"]["id"] == screened["deadline"].id
     assert queue["entity_review"]["accept"] == "remove"
     # a named thing is not a question for anybody
@@ -595,35 +596,20 @@ def test_accepting_a_value_retires_the_entity_and_it_can_be_brought_back(store, 
     assert store.backend.get_entity(deadline) is not None
 
 
-def test_accepting_a_role_records_who_holds_it_where(store, screened):
+def test_accepting_a_role_removes_the_name_and_invents_nothing(store, screened):
+    """A role is a word in a memory, not a thing. Guessing its holder from who
+    else the memory mentions was wrong about half the time on a real store (a
+    tax memory listing profile types is not a list of what its owner is), so
+    accepting retires the name and records no relation in its place."""
     store.run_name_screen(user_id="ada")
+    contact = screened["contact"].id
 
-    assert store.decide_upkeep("role", screened["contact"].id, "accept", user_id="ada")
+    assert store.decide_upkeep("role", contact, "accept", user_id="ada")
 
-    assert store.backend.get_entity(screened["contact"].id) is None
-    relations = store.relations(user_id="ada")
-    assert [(r.subject, r.predicate, r.object) for r in relations] == [
-        (screened["ada"].id, "billing_contact_of", screened["nimbus"].id)]
-
-
-def test_a_role_with_no_single_holder_is_still_asked_about_plainly(store):
-    nimbus = _entity(store, "Nimbus", "project")
-    contact = _entity(store, "billing contact")
-    people = [_entity(store, "Ada", "person"), _entity(store, "Bo", "person")]
-    for i in range(3):
-        memory = _write(store, f"Ada and Bo share the billing contact for Nimbus ({i})")
-        for entity in (nimbus, contact, *people):
-            _mention(store, entity, memory)
-    store.decider = FakeScreener({"billing contact": ("role", 0.93)})
-    store.run_structure_pass(user_id="ada")
-    store.run_name_screen(user_id="ada")
-
-    row = next(i for i in store.upkeep_queue(user_id="ada") if i["kind"] == "role")
-    assert "Nimbus" in row["detail"]
-    assert store._role_relation(store.backend.get_entity(contact.id)) is None
-
-    assert store.decide_upkeep("role", contact.id, "accept", user_id="ada")
-    assert store.relations(user_id="ada") == [], "no obvious holder, no invented edge"
+    assert store.backend.get_entity(contact) is None
+    assert store.relations(user_id="ada") == []
+    assert contact in {row["entity_id"] for row in store.retired_entities(user_id="ada")}
+    assert store.restore_entities([contact]) == 1
 
 
 def test_the_screen_is_skipped_entirely_without_a_provider(store):
