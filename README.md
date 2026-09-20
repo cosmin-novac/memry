@@ -188,7 +188,8 @@ concept and other entity types are hidden by default and the type menu controls 
 shown. Heavily-used groups gravitate to the gold core, the working set orbits in the teal
 belt, and one-off groups drift at the violet rim. Orbit-marker shapes distinguish semantic,
 procedural, episodic, and working memories. Idle link and orbit rendering is bounded for
-large stores; selecting a planet reveals its complete visible neighborhood and filters the
+large stores (above 400 groups, orbit markers stay on the core and on whatever you hover
+or select); selecting a planet reveals its complete visible neighborhood and filters the
 detail list through the server. Selecting an entity also surfaces its summary, aliases, and
 rename control, with explicit controls to merge a duplicate or remove a mistaken entity without
 deleting memories. When a mistaken entity occurs in multiple memories, its name is retained as a tag.

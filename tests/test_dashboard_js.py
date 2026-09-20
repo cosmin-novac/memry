@@ -74,7 +74,13 @@ def test_map_uses_complete_aggregates_entity_types_and_rendering_bounds():
     assert "const displayedEdges=displayedGalaxyEdges(G,sel,hov)" in source
     assert "A+=((hovTouches?1:0.06)-A)*hoverMix" in source
     assert "const satelliteFocus=sel||hov" in source
-    assert "const showSatellites=satelliteFocus?focusedNeighbor:n.zone!=='rim'" in source
+    assert (
+        "const showSatellites=satelliteFocus?focusedNeighbor:"
+        "(G.lod?n.zone==='core':n.zone!=='rim')" in source
+    )
+    assert "const LOD_NODES=400,LOD_FRAME_MS=32" in source
+    assert "function planetSprite(n,c,dark,dpr)" in source
+    assert "ctx.drawImage(galaxyBackdrop(W,H,dark,WARM,STAR,dpr),0,0,W,H)" in source
     assert "function drawMemoryMarker(ctx,type,x,y,size)" in source
     assert 'data-entity-type="' in source
     assert "handleMapEntityTypeChange" in source
@@ -122,6 +128,8 @@ check(tags.total===432,'tag total');
 check(tags.byKey['tag:work'].count===2,'tag count');
 check(tags.byKey['tag:work'].typeCounts.procedural===1,'type counts');
 check(tags.idleEdges.length===400,'idle edge cap');
+check(tags.lod===true,'431 planets is above the detail threshold');
+check(tags.byKey['tag:work'].satTypes.length===2,'orbit marker types are precomputed');
 const hoverEdges=displayedGalaxyEdges(tags,null,tags.byKey['tag:work']);
 check(hoverEdges.length===430,'hover shows every node edge');
 check(tags.idleEdges.every(edge=>hoverEdges.includes(edge)),'hover preserves every idle edge');
@@ -130,6 +138,7 @@ mapMode='entities';
 mapEntityTypes=null;
 const defaultEntities=buildGalaxy(data);
 check(defaultEntities.total===2,'linked memory total');
+check(defaultEntities.lod===false,'small graphs keep full detail');
 check(defaultEntities.byKey['entity:ada-1'].count===2,'entity count');
 check(!defaultEntities.byKey['entity:rag-1'],'concept should default off');
 mapEntityTypes.add('concept');

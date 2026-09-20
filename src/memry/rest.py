@@ -493,13 +493,20 @@ const gStars=Array.from({length:230},(_,i)=>{const r=mulberry(i*2654435761+11);c
   return{x:r(),y:r(),s:.3+r()*1.4,a:.2+r()*.7,ph:r()*6.28,sp:.3+r()*.7,hue:k>.94?36:(k>.84?176:(k>.78?252:null)),big:r()>.965};});
 const gDust=Array.from({length:150},(_,i)=>{const r=mulberry(i*97+5);
   return{a:r()*Math.PI*2,rad:0.12+r()*0.95,off:(r()-0.5)*0.3,s:0.35+r()*0.75,al:0.05+r()*0.10,teal:r()>0.8};});
-const gTone=(n,dark)=>{const j=((n.seed%1000)/1000-0.5);
+const gTone=(n,dark)=>{const j=Math.round(((n.seed%1000)/1000-0.5)*12)/12;
   if(n.zone==='core')return{h:36+j*16,s:dark?95:80,l:dark?66:42};
   if(n.zone==='belt')return{h:172+j*34,s:dark?75:65,l:dark?60:36};
   return{h:248+j*40,s:dark?60:50,l:dark?74:44};};
 const hsla=(c,a,dl)=>'hsla('+c.h+','+c.s+'%,'+Math.max(4,Math.min(96,c.l+(dl||0)))+'%,'+a+')';
 const hexA=(hex,a)=>{const v=parseInt(hex.slice(1),16);return'rgba('+((v>>16)&255)+','+((v>>8)&255)+','+(v&255)+','+a+')'};
 const MAX_IDLE_EDGES=400;
+// Level of detail for big graphs. Above LOD_NODES planets the frame is drawn
+// at half rate and orbit markers are kept for the core and the focused
+// neighbourhood only; planets and the backdrop always come from cached
+// sprites, so a thousand planets cost drawImage calls rather than a thousand
+// gradients with blurred shadows.
+const LOD_NODES=400,LOD_FRAME_MS=32;
+const gSprites=new Map();let gBackdrop=null,gLastFrame=0;
 let mapData=null,mapEntityTypes=null;
 function knownEntityTypes(){
   if(!mapData)return[];
@@ -574,6 +581,22 @@ function setMapMode(mode){
   mapMode=mode;localStorage.setItem('memry_map_mode',mode);
   activeMapKey=null;clearMapEntityDetail();updateHover(null);syncMapModeButtons();drawMap();
 }
+function memoryMarkerTypes(typeCounts,limit){
+  const order=['semantic','procedural','episodic','working'];
+  const entries=Object.entries(typeCounts||{}).sort((a,b)=>{
+    const ai=order.indexOf(a[0]),bi=order.indexOf(b[0]);
+    return(ai<0?99:ai)-(bi<0?99:bi)||a[0].localeCompare(b[0]);
+  });
+  const total=entries.reduce((sum,entry)=>sum+entry[1],0);
+  if(!total||!limit)return[];
+  return Array.from({length:limit},(_,index)=>{
+    const target=(index+0.5)*total/limit;let cumulative=0;
+    for(const [type,count] of entries){
+      cumulative+=count;if(target<=cumulative)return type;
+    }
+    return entries[entries.length-1][0];
+  });
+}
 function buildGalaxy(data){
   let source=mapMode==='entities'?data.entities:data.tags;
   if(mapMode==='entities'){
@@ -591,6 +614,7 @@ function buildGalaxy(data){
     const zone=(fb?raw.count===maxC:raw.count>=coreMin)?'core':(raw.count<=rimMax?'rim':'belt');
     return{...raw,typeCounts:raw.type_counts||{},zone,
       entityType:raw.entity_type||'untyped',
+      satTypes:memoryMarkerTypes(raw.type_counts||{},Math.min(raw.count,10)),
       radius:Math.min(34,(9+5*Math.sqrt(raw.count))*ZF[zone]),
       seed:hashCode(raw.key),h:0};
   }).sort((a,b)=>a.label.localeCompare(b.label));
@@ -624,7 +648,7 @@ function buildGalaxy(data){
     nodes,edges,neigh,edgesByNode,idleEdges:edges.slice(0,MAX_IDLE_EDGES),
     byKey:Object.fromEntries(nodes.map(node=>[node.key,node])),fb,
     total:mapMode==='entities'?(data.entity_memories??data.memories):data.memories,
-    mode:mapMode,
+    mode:mapMode,lod:nodes.length>LOD_NODES,
   };
 }
 function displayedGalaxyEdges(graph,selected,hovered){
@@ -686,24 +710,15 @@ function galaxyRead(){
   statEl.textContent=G.nodes.length+' '+noun+' · '+G.total+linked+' memories'+linkNote
     +(G.fb?' · core = largest':'');
 }
-function galaxyFrame(now){
-  if(!G){gRAF=0;return}
-  const canvas=document.getElementById('map'),ctx=canvas.getContext('2d');
-  const W=G.W,H=G.H,RX=G.RX,RY=G.RY,Rm=Math.max(RX,RY),CX=G.CX,CY=G.CY,t=now;
-  const rootStyle=getComputedStyle(document.documentElement);
-  const bg=(rootStyle.getPropertyValue('--bg').trim()||'#0b0e14');
-  const dark=parseInt(bg.slice(5,7)||'14',16)<120;
-  const TEXT=rootStyle.getPropertyValue('--text').trim()||'#dbe4f0';
-  const DIM=rootStyle.getPropertyValue('--dim').trim()||'#8494ab';
-  const WARM=rootStyle.getPropertyValue('--warn').trim()||'#f0a35e';
-  const STAR=dark?'#c9d6ea':'#33415c';
-  if(hoverMapKey){hoverFocusTag=hoverMapKey;hoverFocusMix=1;hoverFadeStarted=0}
-  else if(hoverFocusTag){
-    hoverFocusMix=reducedMotion||!hoverFadeStarted?0:Math.max(0,1-(now-hoverFadeStarted)/HOVER_FADE_MS);
-    if(!hoverFocusMix)hoverFocusTag=null;
-  }
-  const still=reducedMotion||!!hoverFocusTag||!!activeMapKey;
-  ctx.clearRect(0,0,W,H);
+// The static part of the scene (ground, nebulae, sun, dust band) is rendered
+// once per size and theme and blitted every frame.
+function galaxyBackdrop(W,H,dark,WARM,STAR,dpr){
+  const key=[W,H,dark?1:0,WARM,STAR,dpr].join('|');
+  if(gBackdrop&&gBackdrop.key===key)return gBackdrop;
+  const layer=document.createElement('canvas');
+  layer.width=Math.ceil(W*dpr);layer.height=Math.ceil(H*dpr);layer.key=key;
+  const ctx=layer.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);
+  const CX=W/2,CY=H/2,Rm=Math.max(W/2-46,H/2-42);
   // deep space ground
   const g0=ctx.createRadialGradient(CX,CY-H*0.05,Rm*0.12,CX,CY,Rm*1.45);
   g0.addColorStop(0,dark?'#0b1020':'#f0f4f9');g0.addColorStop(1,dark?'#04060c':'#e3e9f2');
@@ -729,6 +744,60 @@ function galaxyFrame(now){
     ctx.beginPath();ctx.arc(Math.cos(d.a)*Rm*1.3*d.rad,Math.sin(d.a)*Rm*1.3*d.rad+d.off*Rm,d.s*2,0,Math.PI*2);ctx.fill();
   }
   ctx.globalAlpha=1;ctx.restore();
+  gBackdrop=layer;return layer;
+}
+function drawPlanetCount(ctx,n,x,y,dark){
+  ctx.font=`700 ${Math.max(8,Math.min(15,n.radius*0.55))}px ui-sans-serif,system-ui`;
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.shadowColor=dark?'rgba(0,0,0,0.7)':'rgba(255,255,255,0.8)';ctx.shadowBlur=4;
+  ctx.fillStyle=dark?'#ffffff':'#0c1524';
+  ctx.fillText(n.count,x,y+0.5);
+  ctx.shadowBlur=0;
+}
+// A resting planet's disc, rim and count, pre-rendered once per look. Planets
+// of one zone with the same count and hue step share a sprite.
+function planetSprite(n,c,dark,dpr){
+  const key=(dark?'d':'l')+dpr+'|'+n.radius.toFixed(1)+'|'+c.h.toFixed(2)+','+c.s+','+c.l+'|'+(n.radius>=9?n.count:'');
+  let sprite=gSprites.get(key);
+  if(sprite)return sprite;
+  if(gSprites.size>1500)gSprites.clear();
+  const pad=14,size=Math.ceil(n.radius+pad)*2,half=size/2;
+  sprite=document.createElement('canvas');
+  sprite.width=Math.ceil(size*dpr);sprite.height=Math.ceil(size*dpr);
+  sprite.size=size;sprite.half=half;
+  const sc=sprite.getContext('2d');sc.setTransform(dpr,0,0,dpr,0,0);
+  sc.shadowColor=hsla(c,0.5,6);sc.shadowBlur=5*(dark?1:0.5);
+  const body=sc.createRadialGradient(half,half,0,half,half,n.radius);
+  body.addColorStop(0,hsla(c,1,3));body.addColorStop(0.8,hsla(c,1));body.addColorStop(1,hsla(c,1,-3));
+  sc.fillStyle=body;sc.beginPath();sc.arc(half,half,n.radius,0,Math.PI*2);sc.fill();
+  sc.shadowBlur=0;
+  sc.strokeStyle=hsla(c,0.85,dark?16:-14);sc.lineWidth=1.2;
+  sc.beginPath();sc.arc(half,half,n.radius,0,Math.PI*2);sc.stroke();
+  if(n.radius>=9)drawPlanetCount(sc,n,half,half,dark);
+  gSprites.set(key,sprite);return sprite;
+}
+function galaxyFrame(now){
+  if(!G){gRAF=0;return}
+  if(G.lod&&!reducedMotion&&now-gLastFrame<LOD_FRAME_MS){gRAF=requestAnimationFrame(galaxyFrame);return}
+  gLastFrame=now;
+  const canvas=document.getElementById('map'),ctx=canvas.getContext('2d');
+  const W=G.W,H=G.H,RX=G.RX,RY=G.RY,Rm=Math.max(RX,RY),CX=G.CX,CY=G.CY,t=now;
+  const dpr=window.devicePixelRatio||1;
+  const rootStyle=getComputedStyle(document.documentElement);
+  const bg=(rootStyle.getPropertyValue('--bg').trim()||'#0b0e14');
+  const dark=parseInt(bg.slice(5,7)||'14',16)<120;
+  const TEXT=rootStyle.getPropertyValue('--text').trim()||'#dbe4f0';
+  const DIM=rootStyle.getPropertyValue('--dim').trim()||'#8494ab';
+  const WARM=rootStyle.getPropertyValue('--warn').trim()||'#f0a35e';
+  const STAR=dark?'#c9d6ea':'#33415c';
+  if(hoverMapKey){hoverFocusTag=hoverMapKey;hoverFocusMix=1;hoverFadeStarted=0}
+  else if(hoverFocusTag){
+    hoverFocusMix=reducedMotion||!hoverFadeStarted?0:Math.max(0,1-(now-hoverFadeStarted)/HOVER_FADE_MS);
+    if(!hoverFocusMix)hoverFocusTag=null;
+  }
+  const still=reducedMotion||!!hoverFocusTag||!!activeMapKey;
+  ctx.clearRect(0,0,W,H);
+  ctx.drawImage(galaxyBackdrop(W,H,dark,WARM,STAR,dpr),0,0,W,H);
   // starfield
   for(const s of gStars){
     const tw=reducedMotion?0.7:0.5+0.5*Math.sin(s.ph+t*0.00025*s.sp);
@@ -758,10 +827,9 @@ function galaxyFrame(now){
     ctx.beginPath();ctx.ellipse(CX,CY,RX*fr,RY*fr,0,0,Math.PI*2);ctx.stroke();
   }
   // positions + focus
-  const pts={};
   for(const n of G.nodes){
     n.ang+=still?0:0.00010*(n.zone==='core'?1:(n.zone==='belt'?-0.5:0.3));
-    pts[n.key]={x:CX+n.rFrac*RX*Math.cos(n.ang),y:CY+n.rFrac*RY*Math.sin(n.ang)};
+    n.px=CX+n.rFrac*RX*Math.cos(n.ang);n.py=CY+n.rFrac*RY*Math.sin(n.ang);
   }
   const sel=activeMapKey?G.byKey[activeMapKey]:null;
   const hov=hoverFocusTag?G.byKey[hoverFocusTag]:null;
@@ -780,7 +848,7 @@ function galaxyFrame(now){
   const displayedEdges=displayedGalaxyEdges(G,sel,hov);
   for(const e of displayedEdges){
     const na=G.nodes[e.a],nb=G.nodes[e.b];
-    const p=pts[na.key],q=pts[nb.key];
+    const p={x:na.px,y:na.py},q={x:nb.px,y:nb.py};
     const ca=gTone(na,dark),cb=gTone(nb,dark);
     const selTouches=!!sel&&(na===sel||nb===sel);
     let touchMix=selTouches?1:0;
@@ -829,7 +897,7 @@ function galaxyFrame(now){
   // Draw the hovered planet last so its disc and label are always in front.
   const planetOrder=hov?[...G.nodes.filter(node=>node!==hov),hov]:G.nodes;
   for(const n of planetOrder){
-    const p=pts[n.key],x=p.x,y=p.y,A=emph(n),c=gTone(n,dark);
+    const x=n.px,y=n.py,A=emph(n),c=gTone(n,dark);
     const glowTarget=Math.max(activeMapKey===n.key?1:0,n===hov?hoverMix:0);
     n.h+=(glowTarget-n.h)*(reducedMotion?1:0.14);
     ctx.globalAlpha=A;
@@ -843,19 +911,27 @@ function galaxyFrame(now){
         ctx.beginPath();ctx.moveTo(x-sx*len,y-sy*len);ctx.lineTo(x+sx*len,y+sy*len);ctx.stroke();
       }
     }
-    ctx.shadowColor=hsla(c,0.5,6);ctx.shadowBlur=(5+5*n.h)*(dark?1:0.5);
-    const body=ctx.createRadialGradient(x,y,0,x,y,n.radius);
-    body.addColorStop(0,hsla(c,1,3));body.addColorStop(0.8,hsla(c,1));body.addColorStop(1,hsla(c,1,-3));
-    ctx.fillStyle=body;
-    ctx.beginPath();ctx.arc(x,y,n.radius,0,Math.PI*2);ctx.fill();
-    ctx.shadowBlur=0;
-    ctx.strokeStyle=hsla(c,0.85+0.15*n.h,dark?16:-14);ctx.lineWidth=1.2;
-    ctx.beginPath();ctx.arc(x,y,n.radius,0,Math.PI*2);ctx.stroke();
+    if(n.h>0.03){
+      // A glowing planet is drawn live; every other planet is a cached sprite.
+      ctx.shadowColor=hsla(c,0.5,6);ctx.shadowBlur=(5+5*n.h)*(dark?1:0.5);
+      const body=ctx.createRadialGradient(x,y,0,x,y,n.radius);
+      body.addColorStop(0,hsla(c,1,3));body.addColorStop(0.8,hsla(c,1));body.addColorStop(1,hsla(c,1,-3));
+      ctx.fillStyle=body;
+      ctx.beginPath();ctx.arc(x,y,n.radius,0,Math.PI*2);ctx.fill();
+      ctx.shadowBlur=0;
+      ctx.strokeStyle=hsla(c,0.85+0.15*n.h,dark?16:-14);ctx.lineWidth=1.2;
+      ctx.beginPath();ctx.arc(x,y,n.radius,0,Math.PI*2);ctx.stroke();
+      if(n.radius>=9){ctx.globalAlpha=Math.min(1,A+0.05);drawPlanetCount(ctx,n,x,y,dark);ctx.globalAlpha=A;}
+    }else{
+      const sprite=planetSprite(n,c,dark,dpr);
+      ctx.drawImage(sprite,x-sprite.half,y-sprite.half,sprite.size,sprite.size);
+    }
     const satelliteFocus=sel||hov;
     const focusedNeighbor=satelliteFocus&&(n===satelliteFocus
       ||(G.neigh[satelliteFocus.key]&&G.neigh[satelliteFocus.key].has(n.key)));
-    const showSatellites=satelliteFocus?focusedNeighbor:n.zone!=='rim';
-    const satelliteTypes=showSatellites?memoryMarkerTypes(n.typeCounts,Math.min(n.count,10)):[];
+    // Big graphs keep orbit markers for the core and the focused neighbourhood.
+    const showSatellites=satelliteFocus?focusedNeighbor:(G.lod?n.zone==='core':n.zone!=='rim');
+    const satelliteTypes=showSatellites?n.satTypes:[];
     for(let i=0;i<satelliteTypes.length;i++){
       const angle=i/satelliteTypes.length*Math.PI*2-Math.PI/2+(reducedMotion?0:t*0.00008);
       const ds=1.55+(((n.seed>>3)+i*37)%10)/15;
@@ -865,15 +941,6 @@ function galaxyFrame(now){
     if(activeMapKey===n.key){
       ctx.strokeStyle=hsla(c,0.95,18);ctx.lineWidth=1.3;
       ctx.beginPath();ctx.arc(x,y,n.radius+5,0,Math.PI*2);ctx.stroke();
-    }
-    if(n.radius>=9){
-      ctx.globalAlpha=Math.min(1,A+0.05);
-      ctx.font=`700 ${Math.max(8,Math.min(15,n.radius*0.55))}px ui-sans-serif,system-ui`;
-      ctx.textAlign='center';ctx.textBaseline='middle';
-      ctx.shadowColor=dark?'rgba(0,0,0,0.7)':'rgba(255,255,255,0.8)';ctx.shadowBlur=4;
-      ctx.fillStyle=dark?'#ffffff':'#0c1524';
-      ctx.fillText(n.count,x,y+0.5);
-      ctx.shadowBlur=0;
     }
     const selLinked=sel&&(n===sel||(G.neigh[sel.key]&&G.neigh[sel.key].has(n.key)));
     const hovLinked=hov&&(n===hov||(G.neigh[hov.key]&&G.neigh[hov.key].has(n.key)));
@@ -902,22 +969,7 @@ function galaxyFrame(now){
   if(!reducedMotion&&panels.map&&mapVisible)gRAF=requestAnimationFrame(galaxyFrame);
   else gRAF=0;
 }
-function memoryMarkerTypes(typeCounts,limit){
-  const order=['semantic','procedural','episodic','working'];
-  const entries=Object.entries(typeCounts||{}).sort((a,b)=>{
-    const ai=order.indexOf(a[0]),bi=order.indexOf(b[0]);
-    return(ai<0?99:ai)-(bi<0?99:bi)||a[0].localeCompare(b[0]);
-  });
-  const total=entries.reduce((sum,entry)=>sum+entry[1],0);
-  if(!total||!limit)return[];
-  return Array.from({length:limit},(_,index)=>{
-    const target=(index+0.5)*total/limit;let cumulative=0;
-    for(const [type,count] of entries){
-      cumulative+=count;if(target<=cumulative)return type;
-    }
-    return entries[entries.length-1][0];
-  });
-}function drawMemoryMarker(ctx,type,x,y,size){
+function drawMemoryMarker(ctx,type,x,y,size){
   ctx.beginPath();
   if(type==='procedural')ctx.rect(x-size,y-size,size*2,size*2);
   else if(type==='episodic'){
