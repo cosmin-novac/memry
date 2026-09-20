@@ -264,3 +264,21 @@ def test_deciding_a_queue_row_over_rest(client):
     assert client.post("/api/v1/maintenance/decide",
                        json={"kind": "consolidation", "id": "x", "decision": "maybe"}
                        ).status_code == 400
+
+
+def test_many_rows_of_one_kind_are_decided_in_one_call(client):
+    s = client.store
+    for name in ("formal tone", "morning routine", "Acme"):
+        _entity(s, name, f"A memory about {name}", user_id="u")
+    s.llm = FakeLLM([json.dumps({"junk": ["formal tone", "morning routine"]})])
+    s.run_entity_review(user_id="u")
+    queue = client.get("/api/v1/maintenance?user_id=u").json()["queue"]
+    ids = [q["id"] for q in queue if q["kind"] == "entity_review"]
+    assert len(ids) == 2
+
+    done = client.post("/api/v1/maintenance/decide",
+                       json={"kind": "entity_review", "ids": ids,
+                             "decision": "accept", "user_id": "u"})
+    assert done.status_code == 200 and done.json()["done"] == 2
+    assert client.get("/api/v1/maintenance?user_id=u").json()["queue"] == []
+    assert {e.name for e in s.entities(user_id="u", limit=100)} == {"Acme"}

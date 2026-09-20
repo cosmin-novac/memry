@@ -117,6 +117,7 @@ html.knowledge-open,body.knowledge-open{overflow:hidden}
 .tagrow .passlog.ran{border:0;padding:0;border-radius:0;font-size:.8rem;color:var(--semantic)}
 .tagrow .passlog.err{border:0;padding:0;border-radius:0;font-size:.8rem;color:var(--warn)}
 #upkeepwho{margin:0 0 .6rem}
+.fold{display:grid;grid-template-columns:repeat(auto-fill,minmax(14rem,1fr));gap:0 .8rem;max-height:16rem;overflow:auto;margin:.4rem 0;padding:.2rem .3rem;border:1px solid var(--line);border-radius:6px}
 .upkeep-auto{margin-top:1.2rem}.upkeep-auto summary{cursor:pointer;font-weight:600;font-size:.95rem;margin-bottom:.5rem}
 .tagrow{display:flex;align-items:center;gap:.5rem;padding:.32rem .1rem;border-bottom:1px solid var(--line)}
 .tagrow input[type=checkbox]{width:auto;flex:none}
@@ -1366,15 +1367,52 @@ async function loadUpkeep(){
 function upkeepCount(n){
   document.getElementById('ktab-maintenance').textContent=n?`Upkeep · ${n}`:'Upkeep';
 }
+// Past a handful, rows of one kind fold into a single card with a checklist:
+// a model that judged 177 names in one go must not become 177 decisions.
+const QUEUE_FOLD_AT=6;
+function queueRow(item){
+  return `<div class="tagrow"><span class="name">
+    <span class="cnt">${esc(QUEUE_KINDS[item.kind]||item.kind)}</span> <b>${esc(item.title)}</b>
+    <div class="hint">${esc(item.detail)}</div></span>
+    <button class="act" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"accept",this)'>${esc(item.accept)}</button>
+    <button class="act del" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"decline",this)'>${esc(item.decline)}</button></div>`;
+}
+function queueCard(kind,items){
+  const first=items[0];
+  return `<div class="tagrow" data-fold="${esc(kind)}"><span class="name">
+    <span class="cnt">${esc(QUEUE_KINDS[kind]||kind)}</span> <b>${items.length} to look at</b>
+    <div class="hint">${esc(first.detail)} Untick any to keep, then apply once.</div>
+    <div class="fold">${items.map(item=>`<label class="gx-type-option"><input type="checkbox" class="foldpick" value="${esc(item.id)}" checked><span>${esc(item.title)}</span></label>`).join('')}</div></span>
+    <button class="act" onclick='decideFolded(${JSON.stringify(kind)},this)'>${esc(first.accept)} ticked, keep the rest</button></div>`;
+}
 function renderUpkeepQueue(queue){
   const el=document.getElementById('upkeepqueue');
   upkeepCount(queue.length);
   if(!queue.length){el.innerHTML='<div class="empty">Nothing needs you.</div>';return}
-  el.innerHTML=queue.map(item=>`<div class="tagrow"><span class="name">
-    <span class="cnt">${esc(QUEUE_KINDS[item.kind]||item.kind)}</span> <b>${esc(item.title)}</b>
-    <div class="hint">${esc(item.detail)}</div></span>
-    <button class="act" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"accept",this)'>${esc(item.accept)}</button>
-    <button class="act del" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"decline",this)'>${esc(item.decline)}</button></div>`).join('');
+  const byKind={};
+  for(const item of queue)(byKind[item.kind]??=[]).push(item);
+  const parts=[];
+  for(const kind of ['proposal','consolidation','tag_split','entity_review']){
+    const items=byKind[kind]||[];
+    if(!items.length)continue;
+    if(items.length>=QUEUE_FOLD_AT)parts.push(queueCard(kind,items));
+    else parts.push(...items.map(queueRow));
+  }
+  el.innerHTML=parts.join('');
+}
+async function decideFolded(kind,button){
+  const card=button.closest('.tagrow');
+  const picks=[...card.querySelectorAll('.foldpick')];
+  const accept=picks.filter(c=>c.checked).map(c=>c.value);
+  const decline=picks.filter(c=>!c.checked).map(c=>c.value);
+  button.disabled=true;button.textContent='applying...';
+  try{
+    if(accept.length)await api('/api/v1/maintenance/decide',{method:'POST',body:JSON.stringify({kind,ids:accept,decision:'accept'})});
+    if(decline.length)await api('/api/v1/maintenance/decide',{method:'POST',body:JSON.stringify({kind,ids:decline,decision:'decline'})});
+  }catch(error){
+    alert('Some of those could not be applied. The list has been refreshed.');
+  }
+  await Promise.all([loadUpkeep(),loadTags(),loadEntities(),loadStats(),loadMapData()]);
 }
 async function decideUpkeep(kind,id,decision,button){
   const row=button.closest('.tagrow');
@@ -2460,17 +2498,22 @@ def create_app(
         """Clear one row of the queue: accept or decline."""
         body = await request.json()
         kind = str(body.get("kind") or "")
-        item_id = str(body.get("id") or "")
+        raw_ids = body.get("ids") if isinstance(body.get("ids"), list) else [body.get("id")]
+        ids = [str(i) for i in raw_ids if i]
         decision = str(body.get("decision") or "")
-        if decision not in ("accept", "decline") or not item_id:
-            return JSONResponse({"error": "kind, id and decision required"}, status_code=400)
-        ok = await run_in_threadpool(partial(
-            store.decide_upkeep, kind, item_id, decision,
-            user_id=_p(request).namespace(body.get("user_id")),
-            owner_prefix=_p(request).prefix,
-        ))
-        return JSONResponse({"ok": ok, "kind": kind, "id": item_id},
-                            status_code=200 if ok else 409)
+        if decision not in ("accept", "decline") or not ids:
+            return JSONResponse({"error": "kind, id (or ids) and decision required"},
+                                status_code=400)
+        user_id = _p(request).namespace(body.get("user_id"))
+        prefix = _p(request).prefix
+        done = 0
+        for item_id in ids:
+            done += await run_in_threadpool(partial(
+                store.decide_upkeep, kind, item_id, decision,
+                user_id=user_id, owner_prefix=prefix,
+            ))
+        return JSONResponse({"ok": done == len(ids), "kind": kind, "done": done},
+                            status_code=200 if done == len(ids) else 409)
 
     async def durability_route(request: Request) -> Response:
         """Score how long each memory is worth keeping. Feeds forgetting."""
