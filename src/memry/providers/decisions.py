@@ -122,6 +122,33 @@ def _unavailable(questions: dict[str, Question]) -> Answers:
     return Answers({key: Answer() for key in questions})
 
 
+# -- what was measured, per model --------------------------------------------
+#: Above any confidence a provider can report, so a gate set here never lets a
+#: merge happen without asking.
+NEVER_AUTO_MERGE = 1.01
+
+#: Automatic-merge gates measured per text model over the 56 labelled identity
+#: cases in evals/identity_benchmark.py: the lowest threshold that let no wrong
+#: merge through, with headroom. A model that is not in here never merges on
+#: its own, because there is no threshold that is safe for a model nobody has
+#: measured: gpt-5.6-luna put a wrong "same" at 0.98, above any gate.
+MEASURED_MERGE_GATES: dict[str, float] = {
+    "gpt-5-mini": 0.95,
+}
+
+#: Text models measured to make search re-ranking better than no re-ranking.
+#: gpt-5-mini scored below the baseline, so it is not here and cannot be turned
+#: on; gpt-5.6-luna scored above it (recall@3 0.933 -> 0.956, MRR 0.828 ->
+#: 0.933 over 90 questions) at 1.7 s a search, so it may be turned on but is
+#: not on by default.
+MEASURED_RERANKERS: frozenset[str] = frozenset({"gpt-5.6-luna"})
+
+
+def merge_gate_for(model: str | None) -> float:
+    """The automatic-merge gate for a text model's own reported confidence."""
+    return MEASURED_MERGE_GATES.get(model or "", NEVER_AUTO_MERGE)
+
+
 # -- providers ---------------------------------------------------------------
 class Decider(ABC):
     name: str = "decider"
@@ -133,14 +160,24 @@ class Decider(ABC):
     #: reporting a number about itself bunches everything at 0.7-0.9 whether it
     #: is right or wrong, so the gate has to sit high and little gets automated.
     #: A calibrated distribution separates, so the gate can sit lower and do
-    #: more. Measured per provider; see docs/self-hosting.md.
-    auto_confirm_confidence: float = 0.95
+    #: more. Measured per provider, and per model for text models; a provider
+    #: nobody has measured never merges on its own. See docs/self-hosting.md.
+    auto_confirm_confidence: float = NEVER_AUTO_MERGE
 
-    #: Whether re-ranking search results with this provider is worth the round
-    #: trip. Off unless a provider has been measured to earn it: the same
-    #: re-ranking through a text model scored *below* not re-ranking at all,
-    #: and took ten seconds a query doing it.
+    #: The gate for the path taken when this provider cannot answer, which is
+    #: the configured text model reporting a confidence about itself.
+    #: ``build_decider`` sets it from that model's name.
+    fallback_gate: float = NEVER_AUTO_MERGE
+
+    #: Whether re-ranking search results with this provider is on unless it is
+    #: turned off. Only Jev earned that: 190 ms a search for better recall.
     reranks_by_default: bool = False
+
+    #: Whether re-ranking may be turned on at all. A provider that was not
+    #: measured to beat no re-ranking cannot be talked into it: through
+    #: gpt-5-mini the same work scored below the baseline at ten seconds a
+    #: search.
+    may_rerank: bool = False
 
     @abstractmethod
     def decide(self, state: str, questions: dict[str, Question]) -> Answers:
@@ -185,6 +222,10 @@ class LLMDecider(Decider):
     def __init__(self, llm: LLM) -> None:
         self.llm = llm
         self.available = llm.available
+        self.model: str | None = getattr(llm, "model", None)
+        self.auto_confirm_confidence = merge_gate_for(self.model)
+        self.fallback_gate = self.auto_confirm_confidence
+        self.may_rerank = self.model in MEASURED_RERANKERS
 
     def decide(self, state: str, questions: dict[str, Question]) -> Answers:
         if not self.available or not questions:
@@ -274,9 +315,10 @@ class JevDecider(Decider):
     # of headroom over the worst observed mistake and still merges 20 of 22
     # correct pairs without asking.
     auto_confirm_confidence = 0.7
-    # recall@3 0.933 -> 0.967 and MRR 0.767 -> 0.917 over a 228-memory store,
-    # at 190 ms against the 10.7 s a text model takes for the same work.
+    # recall@3 0.933 -> 0.967 and MRR 0.828 -> 0.917 over a 228-memory store,
+    # at 190 ms against the 9.7 s gpt-5-mini takes to score below the baseline.
     reranks_by_default = True
+    may_rerank = True
 
     def __init__(self, cfg: DecisionConfig) -> None:
         self.cfg = cfg
@@ -378,7 +420,15 @@ def build_decider(cfg: DecisionConfig, llm: LLM) -> Decider:
     """Pick the decision provider. ``llm`` backs the default, so a deployment
     that configures nothing keeps exactly the behaviour it has today."""
     if cfg.provider == "jev":
-        return JevDecider(cfg)
-    if cfg.provider == "none":
-        return NoneDecider()
-    return LLMDecider(llm)
+        decider: Decider = JevDecider(cfg)
+    elif cfg.provider == "none":
+        decider = NoneDecider()
+    else:
+        decider = LLMDecider(llm)
+    # Whatever answers, the path taken when it cannot is the text model
+    # reporting on itself, and that gate depends on which text model.
+    decider.fallback_gate = merge_gate_for(getattr(llm, "model", None))
+    if cfg.auto_confirm_confidence is not None:
+        decider.auto_confirm_confidence = cfg.auto_confirm_confidence
+        decider.fallback_gate = cfg.auto_confirm_confidence
+    return decider

@@ -17,6 +17,8 @@ from conftest import FakeLLM
 from memry.config import Config, DecisionConfig
 from memry.intelligence.entities import IDENTITY_QUESTION
 from memry.providers.decisions import (
+    MEASURED_MERGE_GATES,
+    NEVER_AUTO_MERGE,
     Answer,
     Choice,
     JevDecider,
@@ -25,6 +27,7 @@ from memry.providers.decisions import (
     NoneDecider,
     Score,
     build_decider,
+    merge_gate_for,
 )
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
@@ -300,12 +303,50 @@ def test_the_served_model_is_recorded_because_jev_latest_is_an_alias():
 # ---------------------------------------------------------------- merge gate
 def test_each_provider_carries_its_own_merge_gate():
     """The gate is only meaningful relative to a provider's confidence spread.
-    Measured over 56 labelled cases: a text model's wrong answers score as high
-    as its right ones, so its gate stays at 0.9; Jev's separate, so it can sit
-    lower and still merge nothing it should not."""
-    assert NoneDecider().auto_confirm_confidence == 0.95
-    assert LLMDecider(FakeLLM()).auto_confirm_confidence == 0.95
+    Measured over 56 labelled cases: gpt-5-mini's wrong answers score as high
+    as its right ones, so its gate is 0.95; Jev's separate, so it can sit lower
+    and still merge nothing it should not."""
+    mini = FakeLLM(); mini.model = "gpt-5-mini"
+    assert LLMDecider(mini).auto_confirm_confidence == 0.95
     assert JevDecider(DecisionConfig(provider="jev", api_key="k")).auto_confirm_confidence == 0.7
+
+
+def test_a_text_model_nobody_measured_never_merges_on_its_own():
+    """gpt-5.6-luna got more verdicts right than gpt-5-mini and put its worst
+    wrong "same" at 0.98, above any gate. So there is no safe number for a model
+    that has not been run through evals/identity_benchmark.py."""
+    luna = FakeLLM(); luna.model = "gpt-5.6-luna"
+    assert LLMDecider(luna).auto_confirm_confidence == NEVER_AUTO_MERGE > 1.0
+    assert LLMDecider(FakeLLM()).auto_confirm_confidence == NEVER_AUTO_MERGE
+    assert NoneDecider().auto_confirm_confidence == NEVER_AUTO_MERGE
+    assert merge_gate_for("gpt-5-mini") == MEASURED_MERGE_GATES["gpt-5-mini"] == 0.95
+    assert merge_gate_for(None) == NEVER_AUTO_MERGE
+
+
+def test_the_gate_override_reaches_the_text_model_path_too():
+    """MEMRY_DECISION_MERGE_CONFIDENCE used to apply to Jev only, so someone on
+    the text-model path with a model of their own had no way to set the gate
+    they measured."""
+    from memry.intelligence.entities import _gate
+
+    luna = FakeLLM(); luna.model = "gpt-5.6-luna"
+    unset = build_decider(DecisionConfig(provider="none"), luna)
+    assert _gate(unset, luna) == NEVER_AUTO_MERGE
+    chosen = build_decider(DecisionConfig(provider="none", auto_confirm_confidence=0.8), luna)
+    assert _gate(chosen, luna) == 0.8
+    jev = build_decider(DecisionConfig(provider="jev", api_key="k"), luna)
+    assert jev.auto_confirm_confidence == 0.7 and jev.fallback_gate == NEVER_AUTO_MERGE
+
+
+def test_a_confident_different_still_blocks_an_obvious_merge_under_a_never_gate():
+    """The same-name shortcut merges unless the model objects confidently. If
+    that bar followed a never-merge gate it could never be cleared, and raising
+    the gate would make merging *easier*. It is capped at 0.95."""
+    from memry.intelligence.entities import _conflict_bar
+
+    assert _conflict_bar({"gate": NEVER_AUTO_MERGE}) == 0.95
+    assert _conflict_bar({"gate": 0.7}) == 0.7
+    assert _conflict_bar({}) == 0.95
 
 
 def test_the_gate_can_be_overridden_per_deployment():
@@ -329,8 +370,11 @@ def test_a_decider_judgement_records_the_gate_it_should_be_measured_against():
 
     stub = Stub()
     assert _gate(stub) == 0.7
-    assert _gate(None) == 0.95          # no provider: the text-model gate
-    assert _gate(NoneDecider()) == 0.95  # unavailable provider: same
+    mini = FakeLLM(); mini.model = "gpt-5-mini"
+    assert _gate(None, mini) == 0.95                 # no provider: the text model's own gate
+    assert _gate(None, FakeLLM()) == NEVER_AUTO_MERGE  # ...which an unmeasured model has none of
+    unavailable = build_decider(DecisionConfig(provider="jev"), mini)   # no key
+    assert not unavailable.available and _gate(unavailable, mini) == 0.95
 
     judged = _judge_via_decider(stub, Entity(id="e", name="Ada", user_id="ada"),
                                 ["Ada works at Northwind"], "Ada lives in Amsterdam", "Ada")
@@ -409,6 +453,7 @@ def _store_with(decider, **decision):
     cfg = Config(db_path=":memory:")
     cfg.decision = DecisionConfig(provider="jev", api_key="k", **decision)
     decider.reranks_by_default = True     # stand in for a provider that earned it
+    decider.may_rerank = True
     return MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64), decider=decider)
 
 
@@ -423,7 +468,8 @@ def test_rerank_blends_with_the_hybrid_order_rather_than_replacing_it():
     stub = _stub(lambda k, q: Answer(rel[int(k[1:])], {}, 0.9, True))
     store = _store_with(stub)
     order = [r.memory.content for r in store._rerank("q", results)]
-    assert order[0] == "memory 0"
+    assert len(stub.last_questions) == 4          # the judgement did run
+    assert order == ["memory 0", "memory 1", "memory 2", "memory 3"]
     store.close()
 
 
@@ -584,8 +630,9 @@ def test_tag_pairs_only_ever_add_suggestions():
 
 
 def test_rerank_cannot_be_forced_onto_a_provider_that_did_not_earn_it():
-    """Through a text model the same re-ranking scored below no re-ranking at
-    all, at ten seconds a query. The setting turns it off, never on."""
+    """Through gpt-5-mini the same re-ranking scored below no re-ranking at all,
+    at ten seconds a query. For a provider that was not measured to beat the
+    baseline the setting is refused."""
     from memry.config import Config
 
     results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
@@ -609,6 +656,7 @@ def test_rerank_can_be_turned_off_where_it_is_on():
                for i in range(3)]
     stub = _stub(lambda k, q: Answer(int(k[1:]) / 10.0, {}, 0.9, True))
     stub.reranks_by_default = True
+    stub.may_rerank = True
 
     cfg = Config(db_path=":memory:")
     cfg.decision = DecisionConfig(provider="jev", api_key="k", rerank=False)
@@ -621,3 +669,51 @@ def test_rerank_can_be_turned_off_where_it_is_on():
     on = MemoryStore(cfg2, llm=NoneLLM(), embedder=HashEmbedder(64), decider=stub)
     assert on._rerank("q", results) != results
     on.close()
+
+
+def test_rerank_may_be_turned_on_for_a_text_model_measured_to_help():
+    """gpt-5.6-luna lifted recall@3 0.933 -> 0.956 and MRR 0.828 -> 0.933 at
+    1.7 s a search, so the setting may turn it on; it is not on by default at
+    that speed. gpt-5-mini scored below the baseline and stays refused."""
+    from memry.config import Config
+
+    luna = FakeLLM(); luna.model = "gpt-5.6-luna"
+    mini = FakeLLM(); mini.model = "gpt-5-mini"
+    assert LLMDecider(luna).may_rerank and not LLMDecider(luna).reranks_by_default
+    assert not LLMDecider(mini).may_rerank
+
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+               for i in range(3)]
+    reversing = _stub(lambda k, q: Answer(int(k[1:]) / 10.0, {}, 0.9, True))
+    reversing.may_rerank = True                     # measured to help...
+    reversing.reranks_by_default = False            # ...but not on by itself
+
+    for explicit, expect_reranked in ((None, False), (True, True), (False, False)):
+        cfg = Config(db_path=":memory:")
+        cfg.decision = DecisionConfig(provider="llm", rerank=explicit)
+        store = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64), decider=reversing)
+        assert (store._rerank("q", results) != results) is expect_reranked, explicit
+        store.close()
+
+
+def test_stats_reports_the_merge_gate_in_force():
+    """Someone on an unmeasured text model will see merges stop happening on
+    their own. The About panel and the Upkeep page read this to say why."""
+    from memry.config import Config
+
+    luna = FakeLLM(); luna.model = "gpt-5.6-luna"
+    quiet = MemoryStore(Config(db_path=":memory:"), llm=luna, embedder=HashEmbedder(64))
+    assert quiet.stats()["merge_gate"] == NEVER_AUTO_MERGE
+    quiet.close()
+
+    cfg = Config(db_path=":memory:")
+    cfg.decision.auto_confirm_confidence = 0.9
+    chosen = MemoryStore(cfg, llm=luna, embedder=HashEmbedder(64))
+    assert chosen.stats()["merge_gate"] == 0.9
+    chosen.close()
+
+    jev = MemoryStore(Config(db_path=":memory:"), llm=luna, embedder=HashEmbedder(64),
+                      decider=_stub(lambda k, q: Answer()))
+    jev.decider.auto_confirm_confidence = 0.7
+    assert jev.stats()["merge_gate"] == 0.7      # the provider's own, while it answers
+    jev.close()

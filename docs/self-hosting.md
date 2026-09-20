@@ -203,7 +203,7 @@ merge-proposal review under **Knowledge > Upkeep** matters as much as it did bef
 | How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. |
 | Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. |
 | Tag drift | Suggestions only, for review under Upkeep. Never applied automatically. |
-| Search re-ranking | On with Jev, off otherwise, and `MEMRY_DECISION_RERANK=0` turns it off. |
+| Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna), and is refused for one that was not. |
 
 ### The settings, and where they came from
 
@@ -211,23 +211,37 @@ Two numbers are not obvious, so both were measured rather than guessed. The data
 harnesses are in `evals/` if you want to re-run them against your own data, which is the
 only way to know whether these hold for your store.
 
-**The automatic-merge gate** (`Decider.auto_confirm_confidence`) is 0.95 without a
-decision provider and 0.70 with Jev. It is a property of the provider because the number
-only means something relative to how that provider's confidence is spread: a model
+**The automatic-merge gate** (`Decider.auto_confirm_confidence`) is 0.70 with Jev and
+0.95 with gpt-5-mini as the text model. It is a property of the model because the number
+only means something relative to how that model's confidence is spread: a model
 reporting a number about itself scores its wrong answers about as high as its right ones,
 so the gate has to sit high and little gets automated. Override with
 `MEMRY_DECISION_MERGE_CONFIDENCE`.
 
-Raising the no-provider gate from 0.9 to 0.95 is a change to existing behaviour, and it
-is a fix: on the labelled set, 0.9 merged two entities that should have stayed apart.
-Fewer merges now happen unattended, and more proposals wait under Upkeep.
+**A text model nobody has measured never merges on its own.** On the same 56 cases,
+gpt-5.6-luna got 52 verdicts safe, better than gpt-5-mini's 49, and put its worst wrong
+"same" at 0.98, above any threshold. There is no number that is safe for a model that
+has not been run against the labelled set, so for any text model other than gpt-5-mini
+every proposed merge waits for you under **Knowledge > Upkeep**. To measure your own
+model, run `evals/identity_benchmark.py llm --model <name>` and set the gate it reports
+with `MEMRY_DECISION_MERGE_CONFIDENCE`. A confident "different" still blocks an
+obvious-looking merge at 0.95 whatever the gate, so raising the gate never makes merging
+easier.
+
+Raising the gpt-5-mini gate from 0.9 to 0.95 was a change to existing behaviour, and a
+fix: on the labelled set, 0.9 merged two entities that should have stayed apart.
 
 **Re-ranking** blends the relevance judgement with the hybrid rank at 0.35 rather than
 replacing it, and pushes anything under 0.15 to the back. Replacing the hybrid rank
 outright measured worse than not re-ranking at all, because that rank already carries
 recency, decayed importance, entity anchors and the typed-relation hops multi-hop
-questions depend on. It is on only for a provider measured to earn it and cannot be
-forced on elsewhere.
+questions depend on.
+
+It is on by default with Jev. With a text model it depends on which one, measured over
+the same 228 memories and 90 questions: gpt-5.6-luna lifted recall@3 from 0.933 to 0.956
+and MRR from 0.828 to 0.933 at 1.7 seconds a search, so `MEMRY_DECISION_RERANK=1` turns
+it on; gpt-5-mini scored below not re-ranking at all at nearly ten seconds a search, so
+for it, and for any model not measured, the setting is refused.
 
 ### A trap worth remembering
 

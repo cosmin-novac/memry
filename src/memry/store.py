@@ -42,6 +42,7 @@ from .intelligence.decay import (
     score_durability,
 )
 from .intelligence.entities import (
+    _gate,
     classify_entity_types,
     judge_entity_referents,
     non_referent_reason,
@@ -1082,12 +1083,14 @@ class MemoryStore:
         leaves the order exactly as it found it.
         """
         cfg = self.config.decision
-        # A provider that has not been measured to earn this cannot be talked
-        # into it: the same re-ranking through a text model scores below no
-        # re-ranking at all. The setting can only turn off what a provider
-        # already supports, never force it on somewhere it would do harm.
-        wanted = self.decider.reranks_by_default and cfg.rerank is not False
-        if not wanted or not self.decider.available or len(results) < 2:
+        # The setting decides where it is set; otherwise the provider's default
+        # stands. Either way a provider that was not measured to beat no
+        # re-ranking cannot be talked into it: through gpt-5-mini the same work
+        # scored below the baseline at ten seconds a search.
+        wanted = cfg.rerank if cfg.rerank is not None else self.decider.reranks_by_default
+        if not wanted or not self.decider.may_rerank:
+            return results
+        if not self.decider.available or len(results) < 2:
             return results
         pool = results[: max(cfg.rerank_pool, 2)]
         answers = self.decider.decide(
@@ -2429,6 +2432,10 @@ class MemoryStore:
                 "decider": self.decider.name
                 + (f":{getattr(self.decider, 'model', '')}"
                    if getattr(self.decider, "model", "") else ""),
+                # The merge gate in force right now, so the About panel can say
+                # whether merges happen on their own and above what. Above 1.0
+                # means never: the model answering has not been measured.
+                "merge_gate": _gate(self.decider, self.llm),
                 # "invalidated" lumps together deleted memories and old versions
                 # of updated ones. Only the first kind is recoverable, and only
                 # that kind is what the Forgotten tab lists, so report it apart.

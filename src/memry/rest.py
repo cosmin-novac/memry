@@ -1234,6 +1234,11 @@ function renderServerInfo(){
     ...(s.decider&&!String(s.decider).startsWith('none')
       ? [['Typed decisions',s.decider,'Answers yes/no and either/or questions, like whether two people with the same name are the same person. Returns how certain it is, which is what decides whether a merge happens on its own.']]
       : []),
+    ['Automatic merges',
+      (s.merge_gate>1 ? 'never on their own' : `above ${s.merge_gate} confidence`),
+      (s.merge_gate>1
+        ? 'The model answering the "same person" question has not been measured on the identity test set, so every proposed merge waits for you under Upkeep. Run evals/identity_benchmark.py on it and set MEMRY_DECISION_MERGE_CONFIDENCE to what it reports.'
+        : 'A "same person" answer at least this sure merges two records without asking. Anything less sure waits for you under Upkeep.')],
     ['Storage',s.backend,'Everything lives in one file on this server.'],
   ];
   document.getElementById('serverinfo').innerHTML=rows
@@ -1311,8 +1316,11 @@ async function loadUpkeep(){
   const who=info.decider_available
     ? `Typed decisions go to <b>${esc(info.decider)}</b>.`
     : 'No decision provider is configured, so the passes that need one are off.';
+  const gate=info.merge_gate>1
+    ? ' Merges never happen on their own here, because the model answering has not been measured on the identity test set; every proposal waits below.'
+    : ` Merges happen on their own above ${esc(String(info.merge_gate))} confidence; anything less sure waits below.`;
   document.getElementById('upkeepwho').innerHTML=
-    `<div class="hint">${who} Every run below is written to the server log too.</div>`;
+    `<div class="hint">${who}${gate} Every run below is written to the server log too.</div>`;
   renderTagHealth(info.tag_health||{});
   renderEntityJunk(info.entity_junk||{});
 }
@@ -2472,6 +2480,7 @@ def create_app(
             "llm_available": store.llm.available,
             "decider": store.decider.name,
             "decider_available": store.decider.available,
+            "merge_gate": store.stats()["merge_gate"],
             "embedding_model": store.embedder.model_id,
             "tag_health": await run_in_threadpool(partial(
                 store.tag_health, user_id=user_id)),
@@ -2686,6 +2695,7 @@ def create_app(
                 ),
                 "llm": data.get("llm"),
                 "embedder": data.get("embedder"),
+                "merge_gate": data.get("merge_gate"),
             }
         return JSONResponse(json.loads(json.dumps(data, default=str)))
 

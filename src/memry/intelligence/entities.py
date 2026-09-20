@@ -22,7 +22,13 @@ from typing import Any
 
 from ..backends.base import MemoryBackend
 from ..models import Entity, EntityMention, MergeProposal, Scope, utcnow
-from ..providers.decisions import Answer, Choice, Decider
+from ..providers.decisions import (
+    MEASURED_MERGE_GATES,
+    Answer,
+    Choice,
+    Decider,
+    merge_gate_for,
+)
 from ..providers.llm import LLM
 from .extraction import parse_lenient_json
 
@@ -62,18 +68,33 @@ Respond with JSON only:
 # prevent, waved through at 0.85. Its wrong answers score as high as its right
 # ones, so the only threshold that lets nothing through is 0.95. Fewer merges
 # happen without asking; the ones that do are the ones that should.
-AUTO_CONFIRM_CONFIDENCE = 0.95
+#: That 0.95 is gpt-5-mini's number. Other text models get their own from
+#: ``MEASURED_MERGE_GATES``, and one nobody has measured never merges on its own.
+AUTO_CONFIRM_CONFIDENCE = MEASURED_MERGE_GATES["gpt-5-mini"]
 
 
-def _gate(decider: Decider | None) -> float:
+def _gate(decider: Decider | None, llm: LLM | None = None) -> float:
     """How confident a "same" has to be before it merges without asking.
 
     Each provider carries its own, because the number only means something
-    relative to how that provider's confidence is distributed.
+    relative to how that provider's confidence is distributed. When the
+    provider cannot answer, the text model is reporting on itself, and that
+    gate depends on which text model it is.
     """
     if decider is not None and decider.available:
         return decider.auto_confirm_confidence
-    return AUTO_CONFIRM_CONFIDENCE
+    if decider is not None:
+        return decider.fallback_gate
+    return merge_gate_for(getattr(llm, "model", None))
+
+
+def _conflict_bar(judgment: dict[str, Any]) -> float:
+    """How confident a "different" has to be to block an obvious-looking merge.
+
+    Never higher than 0.95: a model whose "same" may not merge on its own can
+    still veto one, otherwise raising its gate would make merging *easier*.
+    """
+    return min(judgment.get("gate", AUTO_CONFIRM_CONFIDENCE), AUTO_CONFIRM_CONFIDENCE)
 
 DESCRIPTION_MAX_CHARS = 1200
 DESCRIPTION_MAX_WORDS = 300
@@ -317,6 +338,7 @@ def _judge(
             parsed["confidence"] = min(max(float(parsed.get("confidence", 0.5)), 0.0), 1.0)
         except (TypeError, ValueError):
             parsed["confidence"] = 0.5
+        parsed["gate"] = _gate(decider, llm)
         return parsed
     return {"verdict": "unsure", "confidence": 0.5, "reason": "unparseable judgment"}
 
@@ -557,7 +579,7 @@ def resolve_mentions(
             )
             high_conflict = (
                 judgment["verdict"] == "different"
-                and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
+                and judgment["confidence"] >= _conflict_bar(judgment)
             )
             if (
                 judgment["verdict"] == "same"
@@ -702,7 +724,7 @@ def resolve_open_proposals(
         )
         high_conflict = (
             judgment["verdict"] == "different"
-            and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
+            and judgment["confidence"] >= _conflict_bar(judgment)
         )
         obvious = _obvious_same_entity(
             entity_a,

@@ -54,7 +54,12 @@ def decision(action: str, target=None, content=None, reason="test") -> str:
 
 @pytest.fixture
 def config() -> Config:
-    return Config(db_path=":memory:")
+    cfg = Config(db_path=":memory:")
+    # The scripted FakeLLM is no model anyone measured, so on its own it would
+    # never merge without asking. Tests pin the gate at gpt-5-mini's 0.95, the
+    # value the identity tests below were written against.
+    cfg.decision.auto_confirm_confidence = 0.95
+    return cfg
 
 
 @pytest.fixture
