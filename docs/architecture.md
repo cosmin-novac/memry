@@ -157,7 +157,7 @@ filter selects specific entities, never a type. Three things do use it:
 1. **Disambiguation guardrail.** A known type conflict blocks an automatic merge, so a
    `document` never silently absorbs a `person` that happens to share its name. Absent or
    equal types leave the decision to the evidence.
-2. **Browsing.** Knowledge > People and things groups by type, capped per group.
+2. **Browsing.** Upkeep > Entities groups by type, capped per group.
 3. **Cleanup triage.** Only `concept`, `other` and `event` entities are offered to the
    non-referent review, because those are where extraction puts style instructions and
    task descriptions. A `person` is never proposed for removal.

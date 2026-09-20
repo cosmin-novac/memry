@@ -129,7 +129,7 @@ Entities are **extracted, disambiguated, and typed.**
   **`memry backfill-entity-types`** (or `POST /api/v1/entities/backfill-types`) -
   batched, so a whole namespace is a handful of calls, and only untyped entities
   are touched.
-- See them under **Knowledge -> People and things**, grouped by type with aliases,
+- See them under **Upkeep > Entities**, grouped by type with aliases,
   descriptions, active evidence, merge controls, and the entity's own relations.
   The same data is available through **`GET /api/v1/entities`** and
   `/api/v1/relations`.
@@ -141,7 +141,7 @@ canonical scoped rows linked to memories through an indexed many-to-many table. 
 enter entity disambiguation: `health` is a classification, while `Jonas` may refer to several
 people.
 
-- The **Topics** tab in the dashboard Knowledge area lists topics A-to-Z with counts and
+- The **Tags** tab in the dashboard's Upkeep area lists topics A-to-Z with counts and
   supports rename, combine, and delete operations.
 - Separator and conservative singular/plural duplicates such as `food`/`foods` merge
   automatically. "Suggest merges" proposes semantic synonyms for review; distinct related
@@ -153,11 +153,11 @@ people.
 - Entity structure decides which extracted names are hubs, files a part under the project
   or product it keeps appearing with, and reads a shared name through that home. It is
   computed from mentions and relations and deletes nothing; a removed name is retired and
-  can be restored under Knowledge > Forgotten.
+  can be restored under Upkeep > Archive.
 - Consolidation merges memories that record the same fact more than once. Grouping is
   geometric over the stored vectors; the merge itself is judged by an LLM and written to
   preserve every detail. Originals are superseded, never deleted. Word-for-word duplicates
-  merge on their own; a merge the LLM proposed waits for a yes under Knowledge > Upkeep.
+  merge on their own; a merge the LLM proposed waits for a yes under Upkeep.
 ## How the layers fit together
 
 ```
@@ -190,7 +190,7 @@ people.
 - Run **`memry backfill-relations`** once to extract relations from memories that
   predate the feature (cheap: only multi-entity memories, marked done so re-runs
   are free).
-- Use **Knowledge → Topics** and conservative "Suggest merges" to keep the
+- Use **Upkeep > Tags** and conservative "Suggest merges" to keep the
   classification vocabulary clean; prefer specific topics.
   runs on a schedule, so it spends no tokens unasked.
 - Nothing the system does destroys data: forgetting is invalidation, and every
@@ -208,5 +208,5 @@ people.
 | Normalized topics, hierarchy expansion, canonicalization | real (abstraction opt-in) |
 | Entity types (person/project/place/…) + typing backfill | real |
 | Memory-type-driven decay (episodic fades, procedural persists) | real |
-| Unified Knowledge dashboard for tags, entity hubs with their relations, forgotten memories, and upkeep | real |
+| Unified Upkeep area: what needs you, entity hubs with their relations, tags, and the archive of what was removed | real |
 | Memory-type effect on *ranking* (in addition to decay) | not yet |

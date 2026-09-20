@@ -133,7 +133,8 @@ html.knowledge-open,body.knowledge-open{overflow:hidden}
 .tagrow .name{flex:1;min-width:0}
 .tagrow .name b{font-weight:600}
 .tagrow .cnt{color:var(--dim);font-size:.78rem}
-.tagrow .syn{border:1px solid var(--accent);color:var(--accent);border-radius:999px;padding:0 .45rem;font-size:.68rem}
+.tagrow .badge{display:inline-block;min-width:1.15rem;padding:0 .35rem;margin-left:.35rem;border-radius:999px;background:var(--warn);color:var(--bg);font-size:.68rem;font-weight:700;line-height:1.15rem;text-align:center;vertical-align:middle}
+.syn{border:1px solid var(--accent);color:var(--accent);border-radius:999px;padding:0 .45rem;font-size:.68rem}
 .tagrow .entity-type{flex:0 0 6.5rem;text-align:center;white-space:nowrap}
 .tagrow .act{border:none;background:none;color:var(--dim);cursor:pointer;padding:.15rem .35rem;font-size:.8rem}
 .tagrow .act:hover{color:var(--accent)}.tagrow .act.del:hover{color:var(--warn)}
@@ -212,7 +213,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 @media(max-width:44rem){.map-entity-actions{grid-template-columns:1fr}.map-entity-actions button{width:100%}}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><a class="knowledge-link" href="#" onclick="openKnowledge();return false" title="Open Knowledge to browse and maintain tags, people, things, and forgotten memories.">Knowledge</a> · <a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a> · <a href="#" onclick="openAbout();return false" title="What Memry does with what you tell it, in plain words.">about</a> <span class="account-links">· <span title="signed-in account">@__WHOAMI__</span> · <a href="/logout" title="Sign out of this Memry dashboard.">sign out</a></span></span></h1>
+<span class="datalinks"><a class="knowledge-link" href="#" onclick="openKnowledge();return false" title="What needs you, plus entities, tags and the archive of what was removed.">Upkeep<span class="badge" id="upkeepbadge" hidden></span></a> · <a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a> · <a href="#" onclick="openAbout();return false" title="What Memry does with what you tell it, in plain words.">about</a> <span class="account-links">· <span title="signed-in account">@__WHOAMI__</span> · <a href="/logout" title="Sign out of this Memry dashboard.">sign out</a></span></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <span class="qwrap"><input id="q" placeholder="search memories…" oninput="toggleClear()">
@@ -299,10 +300,10 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <p>A note about a meeting last spring gradually stops crowding your results. "Always answer briefly" keeps its weight, because a rule does not expire the way an appointment does. Nothing disappears on its own - it just stops coming first.</p></div>
 
   <div class="step"><h3>It tidies up on a schedule</h3>
-  <p>Duplicate people get merged once it is clear they are the same. Names that were never really things - a bare year, an amount, a greeting - get removed. Tags that have drifted into two spellings get flagged. Anything less than obvious waits for you to confirm it, under Knowledge &gt; Upkeep, where you can also switch each of these off.</p></div>
+  <p>Duplicate people get merged once it is clear they are the same. Names that were never really things - a bare year, an amount, a greeting - get removed. Tags that have drifted into two spellings get flagged. Anything less than obvious waits for you to confirm it, under Upkeep, where you can also pause all of it.</p></div>
 
   <div class="step"><h3>Deleting takes two steps, on purpose</h3>
-  <p>Deleting a memory takes it out of search but keeps the record, in Knowledge &gt; Forgotten. From there you can put it back, or delete it for good. Only that second step is permanent.</p></div>
+  <p>Deleting a memory takes it out of search but keeps the record, in Upkeep &gt; Archive. From there you can put it back, or delete it for good. Only that second step is permanent.</p></div>
 
   <div class="step"><h3>You can take everything with you</h3>
   <p>Export downloads the whole store - memories, people, links, history, timestamps - in a form that restores exactly. Every change ever made to a memory is recorded, so you can always see what happened to it.</p></div>
@@ -334,13 +335,13 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 </section>
 </div></div>
 <div class="modal" id="knowmodal"><div class="sheet">
-<h2><button class="x" onclick="closeKnowledge()" title="close">x</button>Knowledge</h2>
-<p class="hint">Tags classify memories. People and things are stable entity hubs with aliases, a bounded description, supporting memories, and their evidence-linked relations.</p>
+<h2><button class="x" onclick="closeKnowledge()" title="close">x</button>Upkeep</h2>
+<p class="hint">What needs a yes or a no from you, the entities your memories are about, the tags they are filed under, and the archive of what was removed.</p>
 <div class="knowledge-tabs">
-  <button id="ktab-topics" onclick="showKnowledge('topics')">Tags</button>
-  <button id="ktab-entities" onclick="showKnowledge('entities')">People &amp; things</button>
-  <button id="ktab-forgotten" onclick="showKnowledge('forgotten')">Forgotten</button>
   <button id="ktab-maintenance" onclick="showKnowledge('maintenance')">Upkeep</button>
+  <button id="ktab-entities" onclick="showKnowledge('entities')">Entities</button>
+  <button id="ktab-topics" onclick="showKnowledge('topics')">Tags</button>
+  <button id="ktab-forgotten" onclick="showKnowledge('forgotten')">Archive</button>
 </div>
 <section class="kpanel" id="kpanel-topics">
   <div class="tagbar">
@@ -1273,7 +1274,7 @@ function setKnowledgeOpen(open){
   document.body.classList.toggle('knowledge-open',open);
   if(!open&&wasOpen)resumeMapAfterKnowledge();
 }
-async function openKnowledge(tab='topics'){
+async function openKnowledge(tab='maintenance'){
   setKnowledgeOpen(true);
   showKnowledge(tab);
   await Promise.all([loadTags(),loadEntities()]);
@@ -1411,14 +1412,14 @@ const whenText=iso=>iso?String(iso).slice(0,16).replace('T',' '):'';
 // and rows that carry only what the decision needs. The long list of names the
 // model judged is a checklist with one apply, never one row per name.
 const QUEUE_SECTIONS=[
-  {kind:'proposal',label:'People & things',
+  {kind:'proposal',label:'Entities',
    ask:'Two entities that might be the same one. Merging joins them; keeping them separate is remembered for good.'},
   {kind:'consolidation',label:'Duplicate memories',
-   ask:'Memories that say the same thing. Merging replaces them with the text shown; the originals stay under Forgotten.'},
+   ask:'Memories that say the same thing. Merging replaces them with the text shown; the originals stay under Archive.'},
   {kind:'tag_split',label:'Tags',
    ask:'Two tags that look like one subject. Combining files everything under the one shown.'},
   {kind:'role',label:'Roles',
-   ask:'Words for a role someone holds, such as landlord or customers, that were filed as if they were things. Ticked names are removed, the rest are kept and not asked about again. The memories keep saying who holds the role, and a removed name can be restored under Forgotten.'},
+   ask:'Words for a role someone holds, such as landlord or customers, that were filed as if they were things. Ticked names are removed, the rest are kept and not asked about again. The memories keep saying who holds the role, and a removed name can be restored under Archive.'},
   {kind:'entity_review',label:'Not an entity?',
    ask:'Names the model judged not to be a person, place or thing. Ticked names are removed, the rest are kept and not asked about again. Removing a name never touches the memories behind it.'},
 ];
@@ -1431,6 +1432,12 @@ async function loadUpkeep(){
 }
 function upkeepCount(n){
   document.getElementById('ktab-maintenance').textContent=n?`Upkeep · ${n}`:'Upkeep';
+  const badge=document.getElementById('upkeepbadge');
+  badge.hidden=!n;badge.textContent=n>99?'99+':String(n);
+  badge.title=n?`${n} thing${n===1?'':'s'} waiting for a yes or a no`:'';
+}
+async function loadUpkeepBadge(){
+  try{upkeepCount((await api('/api/v1/maintenance/count')).count||0)}catch(error){}
 }
 function showQueueTab(kind){queueTab=kind;renderUpkeepQueue(lastQueue)}
 function renderUpkeepQueue(queue){
@@ -1860,7 +1867,7 @@ async function loadStats(){
   document.getElementById('stats').textContent=bits.join(' · ');
 }
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
-syncPanels(); loadStats(); loadSearchFilters(); loadMapData(); loadAll();
+syncPanels(); loadStats(); loadSearchFilters(); loadMapData(); loadAll(); loadUpkeepBadge();
 </script></body></html>"""
 
 
@@ -2604,6 +2611,14 @@ def create_app(
                 store.entity_junk, user_id=user_id)),
         })
 
+    async def maintenance_count_route(request: Request) -> Response:
+        """How many rows wait under Upkeep. Cheap: the dashboard asks on every load."""
+        count = await run_in_threadpool(partial(
+            store.upkeep_count,
+            user_id=_p(request).namespace(request.query_params.get("user_id")),
+        ))
+        return JSONResponse({"count": count})
+
     async def maintenance_pause_route(request: Request) -> Response:
         """Stop every automatic pass until resumed. One switch, persisted."""
         body = await request.json()
@@ -3218,6 +3233,7 @@ def create_app(
         Route("/api/v1/maintenance/consolidate", guarded(consolidate_route), methods=["POST"]),
         Route("/api/v1/maintenance/toggle", guarded(maintenance_toggle_route), methods=["POST"]),
         Route("/api/v1/maintenance/entity-review", guarded(entity_review_route), methods=["POST"]),
+        Route("/api/v1/maintenance/count", guarded(maintenance_count_route), methods=["GET"]),
         Route("/api/v1/maintenance/pause", guarded(maintenance_pause_route), methods=["POST"]),
         Route("/api/v1/maintenance/run/{key}", guarded(maintenance_run_route), methods=["POST"]),
         Route("/api/v1/maintenance/decide", guarded(maintenance_decide_route), methods=["POST"]),

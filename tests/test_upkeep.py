@@ -285,3 +285,28 @@ def test_many_rows_of_one_kind_are_decided_in_one_call(client):
     assert done.status_code == 200 and done.json()["done"] == 2
     assert client.get("/api/v1/maintenance?user_id=u").json()["queue"] == []
     assert {e.name for e in s.entities(user_id="u", limit=100)} == {"Acme"}
+
+
+def test_the_badge_count_is_cheap_and_matches_the_queue(client):
+    s = client.store
+    s.UPKEEP_CONSOLIDATION_THRESHOLD = 0.25
+    s.import_verbatim([{"content": c, "user_id": "u"} for c in
+                       ("User is Marcus Vandenberg", "The user's name is Marc.")], dedup=False)
+    s.llm = FakeLLM([_verdict(True, "User is Marcus Vandenberg (Marc).")])
+    assert client.get("/api/v1/maintenance/count?user_id=u").json() == {"count": 0}
+    s.run_consolidation_pass(user_id="u")
+    calls = len(s.llm.calls)
+
+    assert client.get("/api/v1/maintenance/count?user_id=u").json() == {"count": 1}
+    assert len(s.llm.calls) == calls, "counting asks no model anything"
+    assert len(client.get("/api/v1/maintenance?user_id=u").json()["queue"]) == 1
+
+
+def test_the_button_is_upkeep_and_the_tabs_open_on_what_needs_you(client):
+    page = client.get("/").text
+    assert '>Upkeep<span class="badge" id="upkeepbadge" hidden></span></a>' in page
+    order = [page.index(f'id="ktab-{name}"') for name in
+             ("maintenance", "entities", "topics", "forgotten")]
+    assert order == sorted(order), "Upkeep, Entities, Tags, Archive"
+    assert ">Entities</button>" in page and ">Archive</button>" in page
+    assert "async function openKnowledge(tab='maintenance')" in page

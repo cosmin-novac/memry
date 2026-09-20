@@ -191,7 +191,7 @@ back to the path it would have taken anyway.
 
 One caveat worth keeping in mind: "cannot hallucinate" means the reply always matches the
 schema, not that it is right. A confidently wrong `same` still merges two people, so the
-merge-proposal review under **Knowledge > Upkeep** matters as much as it did before.
+merge-proposal review under **Upkeep** matters as much as it did before.
 
 ### What it is wired to
 
@@ -222,7 +222,7 @@ so the gate has to sit high and little gets automated. Override with
 gpt-5.6-luna got 52 verdicts safe, better than gpt-5-mini's 49, and put its worst wrong
 "same" at 0.98, above any threshold. There is no number that is safe for a model that
 has not been run against the labelled set, so for any text model other than gpt-5-mini
-every proposed merge waits for you under **Knowledge > Upkeep**. To measure your own
+every proposed merge waits for you under **Upkeep**. To measure your own
 model, run `evals/identity_benchmark.py llm --model <name>` and set the gate it reports
 with `MEMRY_DECISION_MERGE_CONFIDENCE`. A confident "different" still blocks an
 obvious-looking merge at 0.95 whatever the gate, so raising the gate never makes merging
@@ -314,7 +314,8 @@ are invalidated (auditable, recoverable), never destroyed.
 
 ## Managing topics and entities
 
-The dashboard's **Knowledge** area contains Tags, People and things, Forgotten, and Upkeep.
+The dashboard's **Upkeep** button opens four tabs: Upkeep (what needs you), Entities, Tags, and
+Archive (what was removed). A badge on the button counts what is waiting.
 Tags show memory counts, can be filtered by name, and can be renamed, combined, or deleted
 under the current user filter. The same topic operations remain available at
 `POST /api/v1/tags/edit` for API compatibility.
@@ -328,7 +329,7 @@ edges and expands a parent filter at query time; it does not copy the parent lab
 memory. Synthetic parents remain visible through `/api/v1/categories` and
 `GET /api/v1/tags/synthetic`.
 
-People and things open as entity hubs with aliases, a bounded description, and active
+Entities open as hubs with aliases, a bounded description, and active
 supporting memories. Relations are listed under the entity they describe and can open their
 members.
 
@@ -346,7 +347,7 @@ these rules were built on, 3,314 entities came out of 985 memories, and 2,073 of
 appeared in exactly one memory. Memry keeps every one of them and shows you the ones that
 earned it.
 
-- **A hub** is a name the map and the People and things list show. With a decision
+- **A hub** is a name the map and the Entities list show. With a decision
   provider, a name is a hub when the provider called it a named thing, or when it is a
   person, organization, project, product or place that the provider did not call a value or
   a role. Without a provider, it is one of those five types, or a name two memories mention.
@@ -368,10 +369,10 @@ New names are screened before they become entities. Measurements and counts ("25
 question in the memory it came from, and a name judged a value or a role with at least 0.80
 probability is not made an entity. The phrase stays on the memory. Names already in the
 store get the same question during upkeep, and the ones judged a value or a role wait under
-**Knowledge > Upkeep** for a yes or a no.
+**Upkeep** for a yes or a no.
 
 An entity is never deleted. When you or a rule removes a name, Memry retires it, and
-**Knowledge > Forgotten > Removed names** lists it with the reason and a restore button.
+**Upkeep > Archive > Removed names** lists it with the reason and a restore button.
 `POST /api/v1/maintenance/run/structure` with `{"dry_run": true}` returns every home and
 every merge the pass would make, and changes nothing.
 

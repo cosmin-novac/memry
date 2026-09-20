@@ -288,7 +288,7 @@ def test_primary_dashboard_controls_have_tooltips_and_compact_add():
     html = _dashboard_html()
 
     assert 'class="knowledge-link"' in html
-    assert 'title="Open Knowledge' in html
+    assert 'title="What needs you, plus entities' in html
     assert 'class="account-links"' in html
     assert html.index('class="knowledge-link"') < html.index('class="account-links"')
     assert html.index('>about</a>') < html.index('class="account-links"')

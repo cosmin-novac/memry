@@ -182,7 +182,7 @@ memry serve --host 0.0.0.0 --port 8787
 ```
 
 The dashboard shows your memories with inline editing, filtered search, lossless JSON
-backup/restore, a unified Knowledge area, and a galaxy map aggregated over every active
+backup/restore, a unified Upkeep area, and a galaxy map aggregated over every active
 memory independently of the paginated detail list. The map groups by tag or entity, and on
 the entity side it shows hubs, with the parts of a project or product as moons on it;
 concept and other entity types are hidden by default and the type menu controls what is
@@ -194,7 +194,7 @@ or select); selecting a planet reveals its complete visible neighborhood and fil
 detail list through the server. Selecting an entity also surfaces its summary, aliases, and
 rename control, with explicit controls to merge a duplicate or remove a mistaken entity without
 deleting memories. When a mistaken entity occurs in multiple memories, its name is retained as a tag.
-Opening Knowledge temporarily unloads the map and restores it on close to avoid holding both views in memory.
+Opening Upkeep temporarily unloads the map and restores it on close to avoid holding both views in memory.
 ![Memry dashboard: galaxy tag map and memory list](docs/assets/dashboard.png)
 
 With Docker: `docker compose up -d --build` (see [docker-compose.yml](docker-compose.yml)).

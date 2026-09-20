@@ -2001,7 +2001,7 @@ class MemoryStore:
     ) -> int:
         """Retire the listed entities. Their memories are untouched.
 
-        Retired, not deleted: the name lands in Knowledge > Forgotten with its
+        Retired, not deleted: the name lands in Upkeep > Archive with its
         mentions, aliases and relations kept, so a removal made in error - by
         the user or by an automatic pass - can be taken back.
         """
@@ -2109,7 +2109,7 @@ class MemoryStore:
         )
         # Mechanical non-referents ("2019", "$149", a URL) are removed without
         # review: no accumulation of evidence will ever make one a thing with an
-        # identity. Judgement cases stay for the user in Knowledge > Upkeep.
+        # identity. Judgement cases stay for the user under Upkeep.
         # Each carries the rule that caught it, so the Forgotten list can say
         # why a name went rather than only that it did.
         junk = self.entity_junk(user_id=user_id)["mechanical"]
@@ -2441,7 +2441,7 @@ class MemoryStore:
                 proposals.append(pair)
                 seen.update(pair["variants"])
         # A fourth pass for the synonyms the three above miss. Suggestion only:
-        # every one of these still needs confirming under Knowledge > Upkeep.
+        # every one of these still needs confirming under Upkeep.
         names = [str(t["category"]).strip().lower() for t in tags]
         names = [n for n in names if n and n not in seen]
         candidates = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
@@ -2989,6 +2989,7 @@ class MemoryStore:
             })
 
         health = tag_health if tag_health is not None else self.tag_health(user_id=user_id)
+        splits_listed = 0
         ignored = {
             tuple(sorted(pair)) for pair in self._upkeep_get("tag_split:ignored", user_id, [])
         }
@@ -2996,6 +2997,7 @@ class MemoryStore:
             a, b = split["variants"]
             if tuple(sorted((a, b))) in ignored:
                 continue
+            splits_listed += 1
             items.append({
                 "kind": "tag_split", "id": _group_id([a, b]),
                 "title": f"#{a} and #{b}",
@@ -3003,7 +3005,25 @@ class MemoryStore:
                           f"search under either can find (similarity {split['similarity']}).",
                 "accept": f"combine into #{split['canonical']}", "decline": "keep apart",
             })
+        if self._upkeep_get("tag_split:count", user_id, None) != splits_listed:
+            self._upkeep_set("tag_split:count", user_id, splits_listed)
         return items
+
+    def upkeep_count(self, *, user_id: str | None = None) -> int:
+        """How many rows wait under Upkeep, without asking a model anything.
+
+        The dashboard shows this as a badge on every load, so it must not cost
+        what the full queue costs: tag health embeds every tag name. The split
+        count is therefore the one the last full look at the queue found.
+        """
+        waiting = {entity.id for entity, _ in self._screen_rows(user_id)}
+        waiting |= {p["id"] for p in self._upkeep_get("entity_review:pending", user_id, [])}
+        return (
+            len(self.merge_proposals(user_id=user_id, limit=1000))
+            + len(self._upkeep_get("consolidation:pending", user_id, []))
+            + len(waiting)
+            + int(self._upkeep_get("tag_split:count", user_id, 0) or 0)
+        )
 
     def decide_upkeep(
         self, kind: str, item_id: str, decision: str, *,
