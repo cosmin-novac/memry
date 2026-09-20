@@ -240,6 +240,19 @@ def test_selected_map_entity_shows_identity_and_cleanup_actions():
     assert "syncEntityIdentity" in knowledge_alias
 
 
+def test_forgotten_panel_lists_removed_names_with_a_way_back():
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+
+    assert 'id="retiredlist"' in html
+    assert ">Removed names</h2>" in html
+    assert "if(tab==='forgotten'){loadForgotten();loadRetiredEntities()}" in source
+    assert "async function loadRetiredEntities()" in source
+    assert "api('/api/v1/entities/retired')" in source
+    assert "async function restoreEntity(id)" in source
+    assert "api('/api/v1/entities/restore'" in source
+
+
 def test_memory_cards_show_colored_type_symbols():
     html = _dashboard_html()
     source = "\n".join(_scripts(html))

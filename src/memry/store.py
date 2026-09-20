@@ -151,6 +151,19 @@ def _owned(record: Any, owner_prefix: str | None) -> bool:
     )
 
 
+class _Owner:
+    """A namespace with no record behind it, for ``_owned``.
+
+    Retired entities are rows in the trash, not ``Entity`` objects, and the
+    ownership gate reads ``user_id`` off a record; this carries one.
+    """
+
+    __slots__ = ("user_id",)
+
+    def __init__(self, user_id: str | None) -> None:
+        self.user_id = user_id
+
+
 def _dedup_run_key(user_id: str | None) -> str:
     return f"entity_dedup:v2:last_run:{user_id or ''}"
 
@@ -1895,19 +1908,51 @@ class MemoryStore:
                 "reviewable": len(candidates)}
 
     def remove_entities(
-        self, entity_ids: list[str], *, owner_prefix: str | None = None
+        self,
+        entity_ids: list[str],
+        *,
+        owner_prefix: str | None = None,
+        reason: str = "removed by you",
     ) -> int:
-        """Delete the listed entities outright. Their memories are untouched."""
+        """Retire the listed entities. Their memories are untouched.
+
+        Retired, not deleted: the name lands in Knowledge > Forgotten with its
+        mentions, aliases and relations kept, so a removal made in error - by
+        the user or by an automatic pass - can be taken back.
+        """
         removed = 0
         for entity_id in entity_ids:
             if _owned(self.backend.get_entity(entity_id), owner_prefix):
-                removed += int(self.backend.delete_entity(entity_id))
+                removed += int(self.backend.retire_entity(entity_id, reason))
         return removed
+
+    def retired_entities(
+        self, *, user_id: str | None = None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Names that were removed and can still be brought back."""
+        return self.backend.list_retired_entities(Scope(user_id=user_id), limit=limit)
+
+    def restore_entities(
+        self, entity_ids: list[str], *, owner_prefix: str | None = None
+    ) -> int:
+        """Bring retired entities back, with the evidence that still exists."""
+        owners = {
+            row["entity_id"]: row.get("user_id")
+            for row in self.backend.list_retired_entities(Scope(), limit=1_000_000)
+        }
+        restored = 0
+        for entity_id in entity_ids:
+            if entity_id not in owners:
+                continue
+            if not _owned(_Owner(owners[entity_id]), owner_prefix):
+                continue
+            restored += int(self.backend.restore_entity(entity_id))
+        return restored
 
     def remove_entity_preserving_tag(
         self, entity_id: str, *, owner_prefix: str | None = None
     ) -> dict[str, Any]:
-        """Delete one mistaken entity, retaining repeated evidence as a tag."""
+        """Retire one mistaken entity, retaining repeated evidence as a tag."""
         entity = self.backend.get_entity(entity_id)
         if not _owned(entity, owner_prefix):
             return {"removed": 0, "tagged": 0, "tag": None}
@@ -1932,7 +1977,10 @@ class MemoryStore:
                         continue
                 tagged += 1
 
-        removed = int(self.backend.delete_entity(entity_id))
+        removed = int(self.backend.retire_entity(
+            entity_id,
+            "removed by you, name kept as a tag" if preserve else "removed by you",
+        ))
         return {
             "removed": removed,
             "tagged": tagged if removed else 0,
@@ -1971,12 +2019,19 @@ class MemoryStore:
             backend=self.backend, llm=self.llm, decider=self.decider, scope=scope
         )
         outcome["proposed"] = proposed
-        outcome["purged"] = self.backend.purge_orphan_entities(scope)
+        outcome["purged"] = self.backend.purge_orphan_entities(
+            scope, reason="nothing referenced it"
+        )
         # Mechanical non-referents ("2019", "$149", a URL) are removed without
         # review: no accumulation of evidence will ever make one a thing with an
         # identity. Judgement cases stay for the user in Knowledge > Upkeep.
+        # Each carries the rule that caught it, so the Forgotten list can say
+        # why a name went rather than only that it did.
         junk = self.entity_junk(user_id=user_id)["mechanical"]
-        outcome["junk_removed"] = self.remove_entities([j["id"] for j in junk])
+        outcome["junk_removed"] = sum(
+            self.remove_entities([item["id"]], reason=item["reason"])
+            for item in junk
+        )
         return outcome
 
     # ------------------------------------------------------------------

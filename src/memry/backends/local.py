@@ -181,6 +181,18 @@ CREATE TABLE IF NOT EXISTS entity_proposals (
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON entity_proposals(status, user_id);
 
+CREATE TABLE IF NOT EXISTS retired_entities (
+    entity_id   TEXT PRIMARY KEY,
+    user_id     TEXT,
+    name        TEXT NOT NULL,
+    entity_type TEXT,
+    reason      TEXT,
+    retired_at  TEXT NOT NULL,
+    snapshot    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_retired_entities_user
+    ON retired_entities(user_id, retired_at);
+
 CREATE TABLE IF NOT EXISTS ann_keys (
     key INTEGER PRIMARY KEY AUTOINCREMENT,
     memory_id TEXT NOT NULL UNIQUE
@@ -1255,7 +1267,9 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [{"category": row["category"], "count": row["count"]} for row in rows]
 
-    def purge_orphan_entities(self, scope: Scope) -> int:
+    def purge_orphan_entities(
+        self, scope: Scope, *, reason: str = "nothing referenced it"
+    ) -> int:
         clause, params = _scope_clause(scope, prefix="e.")
         with self._lock:
             rows = self._db.execute(
@@ -1273,15 +1287,12 @@ class LocalBackend(MemoryBackend):
             ids = [row["id"] for row in rows]
             if not ids:
                 return 0
-            marks = ",".join("?" * len(ids))
-            self._db.execute(
-                f"DELETE FROM entity_proposals WHERE entity_a IN ({marks}) "
-                f"OR entity_b IN ({marks})",
-                (*ids, *ids),
-            )
-            self._db.execute(f"DELETE FROM entities WHERE id IN ({marks})", ids)
+            # Snapshotted like any other removal: an unreferenced entity is
+            # still a name the user may recognise, so it lands in the trash
+            # rather than going away for good.
+            purged = sum(self._retire_locked(entity_id, reason) for entity_id in ids)
             self._db.commit()
-        return len(ids)
+        return purged
 
     def topic_memory_ids(self, scope: Scope) -> list[tuple[str, str]]:
         topic_clause, topic_params = _scope_clause(scope, prefix="t.")
@@ -1936,11 +1947,11 @@ class LocalBackend(MemoryBackend):
             self._db.commit()
 
     def delete_entity(self, entity_id: str) -> bool:
-        """Remove an entity and everything that points at it. Memories stay.
+        """Remove an entity and everything that points at it, for good.
 
-        Entities are a derived index over the memories, so deleting one loses
-        no evidence: at worst a later re-extraction recreates it. Used to clear
-        records that should never have been entities at all.
+        Internal: the store retires entities instead, so that a removal can be
+        taken back. This is the irreversible form, kept for callers inside the
+        backend that have already preserved whatever needed preserving.
         """
         with self._lock:
             row = self._db.execute(
@@ -1948,24 +1959,204 @@ class LocalBackend(MemoryBackend):
             ).fetchone()
             if row is None:
                 return False
-            self._db.execute(
-                "DELETE FROM entity_mentions WHERE entity_id = ?", (entity_id,)
-            )
-            self._db.execute(
-                "DELETE FROM relations WHERE subject = ? OR object = ?",
-                (entity_id, entity_id),
-            )
-            self._db.execute(
-                "DELETE FROM entity_proposals WHERE entity_a = ? OR entity_b = ?",
-                (entity_id, entity_id),
-            )
             # tombstones redirecting here would dangle; they carry nothing
-            self._db.execute(
-                "DELETE FROM entities WHERE merged_into = ?", (entity_id,)
-            )
-            self._db.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+            self._remove_entity_rows_locked(entity_id)
             self._db.commit()
         return True
+
+    # -- retirement: removal with a way back --------------------------------
+    def _entity_snapshot_locked(self, entity_id: str) -> dict[str, Any] | None:
+        """Everything that would be lost by removing this entity.
+
+        Kept as plain row dicts so a restore can put the rows back exactly as
+        they were, without depending on the model classes of the day.
+        """
+        entity = self._db.execute(
+            "SELECT * FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()
+        if entity is None:
+            return None
+
+        def rows(sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+            return [dict(row) for row in self._db.execute(sql, params).fetchall()]
+
+        return {
+            "entity": dict(entity),
+            "aliases": self.entity_aliases(entity_id),
+            "tombstones": rows(
+                "SELECT * FROM entities WHERE merged_into = ?", (entity_id,)
+            ),
+            "mentions": rows(
+                "SELECT * FROM entity_mentions WHERE entity_id = ?", (entity_id,)
+            ),
+            "relations": rows(
+                "SELECT * FROM relations WHERE subject = ? OR object = ?",
+                (entity_id, entity_id),
+            ),
+            "proposals": rows(
+                "SELECT * FROM entity_proposals WHERE entity_a = ? OR entity_b = ?",
+                (entity_id, entity_id),
+            ),
+        }
+
+    def _remove_entity_rows_locked(self, entity_id: str) -> None:
+        """The deletions of ``delete_entity``, without the bookkeeping."""
+        self._db.execute(
+            "DELETE FROM entity_mentions WHERE entity_id = ?", (entity_id,)
+        )
+        self._db.execute(
+            "DELETE FROM relations WHERE subject = ? OR object = ?",
+            (entity_id, entity_id),
+        )
+        self._db.execute(
+            "DELETE FROM entity_proposals WHERE entity_a = ? OR entity_b = ?",
+            (entity_id, entity_id),
+        )
+        self._db.execute("DELETE FROM entities WHERE merged_into = ?", (entity_id,))
+        self._db.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+
+    def _retire_locked(self, entity_id: str, reason: str) -> bool:
+        snapshot = self._entity_snapshot_locked(entity_id)
+        if snapshot is None:
+            return False
+        entity = snapshot["entity"]
+        self._db.execute(
+            "INSERT OR REPLACE INTO retired_entities "
+            "(entity_id, user_id, name, entity_type, reason, retired_at, snapshot) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                entity_id, entity["user_id"], entity["name"], entity["entity_type"],
+                reason, utcnow(), json.dumps(snapshot),
+            ),
+        )
+        self._remove_entity_rows_locked(entity_id)
+        return True
+
+    def retire_entity(self, entity_id: str, reason: str = "removed") -> bool:
+        """Remove an entity the recoverable way: snapshot first, then delete.
+
+        Same end state as ``delete_entity`` - the entity, its mentions,
+        relations, proposals and merge tombstones are gone and the memories are
+        untouched - except that everything removed is kept in
+        ``retired_entities`` so ``restore_entity`` can put it back.
+        """
+        with self._lock:
+            retired = self._retire_locked(entity_id, reason)
+            if retired:
+                self._db.commit()
+            return retired
+
+    def _insert_row_locked(self, table: str, row: dict[str, Any]) -> None:
+        columns = ", ".join(row)
+        marks = ",".join("?" * len(row))
+        self._db.execute(
+            f"INSERT OR IGNORE INTO {table} ({columns}) VALUES ({marks})",
+            tuple(row.values()),
+        )
+
+    def restore_entity(self, entity_id: str) -> bool:
+        """Put a retired entity back, with whatever it pointed at still exists.
+
+        Mentions come back only for memories that are still there, and edges
+        only where the entity at the other end is still active: a restore must
+        not resurrect rows that dangle.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT snapshot FROM retired_entities WHERE entity_id = ?",
+                (entity_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            if self._db.execute(
+                "SELECT 1 FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone() is not None:
+                return False  # something already lives under this id
+            snapshot = json.loads(row["snapshot"])
+            self._insert_row_locked("entities", snapshot["entity"])
+            for tombstone in snapshot.get("tombstones", []):
+                self._insert_row_locked("entities", tombstone)
+            for mention in snapshot.get("mentions", []):
+                if self._db.execute(
+                    "SELECT 1 FROM memories WHERE id = ?", (mention["memory_id"],)
+                ).fetchone() is not None:
+                    self._insert_row_locked("entity_mentions", mention)
+            for relation in snapshot.get("relations", []):
+                other = (
+                    relation["object"]
+                    if relation["subject"] == entity_id
+                    else relation["subject"]
+                )
+                if self._db.execute(
+                    "SELECT 1 FROM entities WHERE id = ?", (other,)
+                ).fetchone() is not None:
+                    self._insert_row_locked("relations", relation)
+            for proposal in snapshot.get("proposals", []):
+                other = (
+                    proposal["entity_b"]
+                    if proposal["entity_a"] == entity_id
+                    else proposal["entity_a"]
+                )
+                if self._db.execute(
+                    "SELECT 1 FROM entities WHERE id = ?", (other,)
+                ).fetchone() is not None:
+                    self._insert_row_locked("entity_proposals", proposal)
+            self._restore_aliases_locked(entity_id, snapshot.get("aliases", []))
+            self._db.execute(
+                "DELETE FROM retired_entities WHERE entity_id = ?", (entity_id,)
+            )
+            self._db.commit()
+        return True
+
+    def _restore_aliases_locked(self, entity_id: str, aliases: list[str]) -> None:
+        """Keep every name the entity answered to, even without its evidence.
+
+        Most aliases come back with the rows they were derived from. Any that
+        do not - a surface whose memory is gone, a tombstone that could not be
+        restored - are written into the entity's own metadata, because a name
+        the user taught the system is not something a cleanup should cost them.
+        """
+        known = {value.strip().lower() for value in self.entity_aliases(entity_id)}
+        missing = [
+            value.strip()
+            for value in aliases
+            if value.strip() and value.strip().lower() not in known
+        ]
+        if not missing:
+            return
+        row = self._db.execute(
+            "SELECT metadata FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()
+        if row is None:
+            return
+        metadata = json.loads(row["metadata"])
+        raw = metadata.get("aliases", [])
+        if isinstance(raw, str):
+            raw = [raw]
+        metadata["aliases"] = [
+            str(value).strip() for value in raw if str(value).strip()
+        ] + missing
+        self._db.execute(
+            "UPDATE entities SET metadata = ? WHERE id = ?",
+            (json.dumps(metadata), entity_id),
+        )
+        self._has_metadata_aliases = True
+
+    def list_retired_entities(
+        self, scope: Scope, *, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Retired entities, newest first. The snapshot itself stays behind."""
+        # The trash row carries the namespace only; agent/run live in the
+        # snapshot, and nothing lists retired names per agent or run.
+        clause, params = _scope_clause(Scope(user_id=scope.user_id))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT entity_id, user_id, name, entity_type, reason, retired_at "
+                f"FROM retired_entities WHERE {clause} "
+                "ORDER BY retired_at DESC, name LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def merge_entities(self, keep_id: str, merge_id: str) -> bool:
         """Idempotently fold both IDs' active roots into one entity."""
