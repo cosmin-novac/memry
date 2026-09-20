@@ -14,6 +14,8 @@ backends, LLMs, and embedders are all replaceable underneath it.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import logging
 import re
 import time
@@ -147,6 +149,38 @@ def _owned(record: Any, owner_prefix: str | None) -> bool:
         if owner_prefix.endswith("::")
         else value == owner_prefix
     )
+
+
+def _dedup_run_key(user_id: str | None) -> str:
+    return f"entity_dedup:v2:last_run:{user_id or ''}"
+
+
+def _consolidation_run_key(user_id: str | None) -> str:
+    return f"consolidation:last_run:{user_id or ''}"
+
+
+def _upkeep_key(name: str, user_id: str | None) -> str:
+    return f"upkeep:{name}:{user_id or ''}"
+
+
+def _group_id(parts) -> str:
+    """A stable, URL-safe id for a set of names or memory ids."""
+    joined = "\x1f".join(sorted(str(part) for part in parts))
+    return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def _due(last_run: str | None, interval_days: float, now: datetime) -> bool:
+    """Has ``interval_days`` elapsed since ``last_run``? Never run, or an
+    unreadable stamp, counts as due rather than wedging the scheduler."""
+    if not last_run:
+        return True
+    try:
+        last = datetime.fromisoformat(last_run)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return True
+    return (now - last) >= timedelta(days=max(interval_days, 0.0))
 
 
 def _tag_run_key(user_id: str | None) -> str:
@@ -2052,13 +2086,16 @@ class MemoryStore:
         max_groups: int = 25,
         apply: bool = True,
         only: list[list[str]] | None = None,
+        exclude: set[frozenset[str]] | None = None,
     ) -> dict[str, Any]:
         """Merge memories that record the same fact more than once.
 
         ``apply=False`` returns exactly what would happen without touching
         anything, which is what the dashboard shows before the user confirms.
         ``only`` restricts the run to the listed groups, so a user can accept
-        some proposals from a preview and leave the rest alone.
+        some proposals from a preview and leave the rest alone. ``exclude``
+        skips groups already judged, so the upkeep pass asks the model about
+        each group once rather than every cycle.
 
         The merged text becomes a NEW memory carrying the union of the group's
         tags, entities and provenance, and every original is invalidated with
@@ -2081,9 +2118,12 @@ class MemoryStore:
         # densest first: the most obviously redundant families are worth the
         # LLM budget before a long tail of borderline pairs
         groups.sort(key=len, reverse=True)
+        groups = [
+            g for g in groups
+            if (wanted is None or frozenset(g) in wanted)
+            and not (exclude and frozenset(g) in exclude)
+        ]
         for member_ids in groups[:max_groups]:
-            if wanted is not None and frozenset(member_ids) not in wanted:
-                continue
             memories = [m for m in (self.backend.get_memory(i) for i in member_ids)
                         if m is not None and m.invalid_at is None]
             if len(memories) < 2:
@@ -2108,45 +2148,55 @@ class MemoryStore:
             summary["groups"].append(entry)
             if not verdict["same_fact"] or not apply:
                 continue
-
-            content = verdict["content"]
-            oldest = min(memories, key=lambda m: m.created_at)
-            merged = Memory(
-                content=content,
-                memory_type=oldest.memory_type,
-                user_id=user_id,
-                importance=max(m.importance for m in memories),
-                categories=list(dict.fromkeys(
-                    [c for m in memories for c in (m.categories or [])])),
-                entities=list(dict.fromkeys(
-                    [e for m in memories for e in (m.entities or [])])),
-                # keep the earliest creation date: the fact is as old as the
-                # first time it was recorded, not as old as the merge
-                created_at=oldest.created_at,
-                source_episode_ids=list(dict.fromkeys(
-                    [e for m in memories for e in (m.source_episode_ids or [])])),
-                metadata={"consolidated_from": [m.id for m in memories]},
+            entry["survivor"] = self._merge_group(
+                memories, verdict["content"], user_id=user_id
             )
-            embedding = (
-                self.embedder.embed([content])[0] if self.embedder.dimensions else None
-            )
-            stored = self.backend.insert_memory(merged, embedding=embedding)
-            self.backend.add_event(MemoryEvent(
-                memory_id=stored.id, event="ADD", new_content=content,
-                reason=f"consolidated {len(memories)} duplicate memories",
-            ))
-            # every original is forgotten, including the one it reads most like
-            for memory in memories:
-                self.backend.invalidate_memory(memory.id, superseded_by=stored.id)
-                self.backend.add_event(MemoryEvent(
-                    memory_id=memory.id, event="SUPERSEDE",
-                    old_content=memory.content, new_content=content,
-                    reason=f"consolidated into {stored.id}",
-                ))
-                summary["superseded"] += 1
-            entry["survivor"] = stored.id
             summary["merged"] += 1
+            summary["superseded"] += len(memories)
         return summary
+
+    def _merge_group(
+        self, memories: list[Memory], content: str, *, user_id: str | None
+    ) -> str:
+        """Replace ``memories`` with one new memory saying ``content``.
+
+        The originals are invalidated with ``superseded_by`` pointing at the
+        survivor, never deleted. Returns the survivor's id.
+        """
+        oldest = min(memories, key=lambda m: m.created_at)
+        merged = Memory(
+            content=content,
+            memory_type=oldest.memory_type,
+            user_id=user_id,
+            importance=max(m.importance for m in memories),
+            categories=list(dict.fromkeys(
+                [c for m in memories for c in (m.categories or [])])),
+            entities=list(dict.fromkeys(
+                [e for m in memories for e in (m.entities or [])])),
+            # keep the earliest creation date: the fact is as old as the
+            # first time it was recorded, not as old as the merge
+            created_at=oldest.created_at,
+            source_episode_ids=list(dict.fromkeys(
+                [e for m in memories for e in (m.source_episode_ids or [])])),
+            metadata={"consolidated_from": [m.id for m in memories]},
+        )
+        embedding = (
+            self.embedder.embed([content])[0] if self.embedder.dimensions else None
+        )
+        stored = self.backend.insert_memory(merged, embedding=embedding)
+        self.backend.add_event(MemoryEvent(
+            memory_id=stored.id, event="ADD", new_content=content,
+            reason=f"consolidated {len(memories)} duplicate memories",
+        ))
+        # every original is forgotten, including the one it reads most like
+        for memory in memories:
+            self.backend.invalidate_memory(memory.id, superseded_by=stored.id)
+            self.backend.add_event(MemoryEvent(
+                memory_id=memory.id, event="SUPERSEDE",
+                old_content=memory.content, new_content=content,
+                reason=f"consolidated into {stored.id}",
+            ))
+        return stored.id
 
     def semantic_tag_duplicates(
         self, *, user_id: str | None = None, threshold: float = 0.93
@@ -2317,7 +2367,7 @@ class MemoryStore:
     # an env-var edit and a restart. A runtime override lives in the meta table
     # so the dashboard toggle survives restarts; config stays the default when
     # no override was ever set.
-    _MAINTENANCE_KEYS = ("dedup_entities", "tag_abstraction", "durability")
+    _MAINTENANCE_KEYS = ("dedup_entities", "tag_abstraction", "durability", "consolidation")
 
     #: How many memories one durability pass scores. Jev answers 128 questions
     #: in a single call, so the batch is bounded by prudence, not by cost.
@@ -2372,6 +2422,10 @@ class MemoryStore:
             return self.config.dedup_entities
         if key == "tag_abstraction":
             return self.config.tags.enabled and self.llm.available
+        if key == "durability":
+            return self.decider.available
+        if key == "consolidation":
+            return self.llm.available
         return False
 
     def set_maintenance_enabled(self, key: str, enabled: bool) -> bool:
@@ -2387,6 +2441,289 @@ class MemoryStore:
 
     def last_tag_run(self, user_id: str | None) -> str | None:
         return self.backend.get_meta(_tag_run_key(user_id))
+
+    # ------------------------------------------------------------------
+    # upkeep: what runs on its own, and the queue of what needs a person
+    # ------------------------------------------------------------------
+    #: Similarity at which the automatic consolidation pass looks for
+    #: duplicates; the dashboard's old "close" setting.
+    UPKEEP_CONSOLIDATION_THRESHOLD = 0.90
+    #: Judged consolidation groups remembered per namespace, newest kept.
+    UPKEEP_SEEN_LIMIT = 5000
+
+    def upkeep_paused(self) -> bool:
+        return self.backend.get_meta("maintenance:paused") == "true"
+
+    def set_upkeep_paused(self, paused: bool) -> None:
+        self.backend.set_meta("maintenance:paused", "true" if paused else "false")
+
+    def _upkeep_get(self, name: str, user_id: str | None, default: Any) -> Any:
+        raw = self.backend.get_meta(_upkeep_key(name, user_id))
+        if not raw:
+            return default
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return default
+
+    def _upkeep_set(self, name: str, user_id: str | None, value: Any) -> None:
+        self.backend.set_meta(_upkeep_key(name, user_id), json.dumps(value))
+
+    def last_pass_run(self, key: str, user_id: str | None) -> dict[str, Any] | None:
+        """When a pass last ran for this namespace and what it reported."""
+        return self._upkeep_get(f"last:{key}", user_id, None)
+
+    def run_upkeep_pass(
+        self, key: str, *, user_id: str | None = None, record: bool = True
+    ) -> dict[str, Any]:
+        """Run one pass now, with the same code the scheduler uses."""
+        if key == "dedup_entities":
+            self.merge_obvious_topics(user_id=user_id)
+            result = self.resolve_entities(user_id=user_id)
+            if self.llm.available:
+                result.update(self.run_entity_review(user_id=user_id))
+            self.backend.set_meta(_dedup_run_key(user_id), utcnow())
+        elif key == "tag_abstraction":
+            result = self.abstract_tags(user_id=user_id)
+        elif key == "durability":
+            result = self.score_memory_durability(user_id=user_id)
+        elif key == "consolidation":
+            result = self.run_consolidation_pass(user_id=user_id)
+            self.backend.set_meta(_consolidation_run_key(user_id), utcnow())
+        else:
+            raise ValueError(f"unknown pass: {key}")
+        if record:
+            self._upkeep_set(f"last:{key}", user_id, {"at": utcnow(), "result": result})
+        return result
+
+    def run_upkeep_cycle(
+        self, *, user_id: str | None = None, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """One scheduler tick for one namespace: every pass that is on and due.
+
+        Returns what ran, keyed by pass, so the scheduler can spread work over
+        cycles on a many-account server.
+        """
+        now = now or datetime.now(timezone.utc)
+        ran: dict[str, Any] = {}
+        if self.upkeep_paused():
+            return ran
+        every = self.config.dedup_interval_days
+        if self.maintenance_enabled("dedup_entities") and _due(
+            self.backend.get_meta(_dedup_run_key(user_id)), every, now
+        ):
+            ran["dedup_entities"] = self.run_upkeep_pass("dedup_entities", user_id=user_id)
+        if (
+            self.maintenance_enabled("tag_abstraction") and self.llm.available
+            and _due(self.last_tag_run(user_id), self.config.tags.interval_days, now)
+        ):
+            ran["tag_abstraction"] = self.run_upkeep_pass("tag_abstraction", user_id=user_id)
+        if (
+            self.maintenance_enabled("consolidation") and self.llm.available
+            and _due(self.backend.get_meta(_consolidation_run_key(user_id)), every, now)
+        ):
+            ran["consolidation"] = self.run_upkeep_pass("consolidation", user_id=user_id)
+        if self.maintenance_enabled("durability") and self.decider.available:
+            # Cheap when nothing is unscored, so it runs every tick; only a
+            # tick that scored something is worth remembering as a run.
+            result = self.run_upkeep_pass("durability", user_id=user_id, record=False)
+            if result.get("scored"):
+                self._upkeep_set("last:durability", user_id, {"at": utcnow(), "result": result})
+                ran["durability"] = result
+        return ran
+
+    def run_consolidation_pass(self, *, user_id: str | None = None) -> dict[str, Any]:
+        """Merge exact duplicates on sight; queue what only a model vouched for.
+
+        Entity identity was measured against a labelled set before it was
+        allowed to merge on its own; a model's "same fact" has not been, so
+        those merges wait for a person under Upkeep. Every judged group is
+        remembered, so the model is asked about each one once.
+        """
+        seen_lists = self._upkeep_get("consolidation:seen", user_id, [])
+        seen = {frozenset(ids) for ids in seen_lists}
+        result = self.consolidate_memories(
+            user_id=user_id, threshold=self.UPKEEP_CONSOLIDATION_THRESHOLD,
+            apply=False, exclude=seen,
+        )
+        pending = self._upkeep_get("consolidation:pending", user_id, [])
+        known = {frozenset(entry["memory_ids"]) for entry in pending}
+        outcome = {"scanned": result["scanned"], "judged": 0, "merged": 0, "queued": 0}
+        for group in result["groups"]:
+            ids = frozenset(group["memory_ids"])
+            seen_lists.append(sorted(ids))
+            outcome["judged"] += 1
+            if not group["same_fact"]:
+                continue
+            if group["reason"] == "identical text":
+                memories = [
+                    m for m in (self.backend.get_memory(i) for i in ids)
+                    if m is not None and m.invalid_at is None
+                ]
+                if len(memories) >= 2:
+                    self._merge_group(memories, group["merged_content"], user_id=user_id)
+                    outcome["merged"] += 1
+                continue
+            if ids in known:
+                continue
+            pending.append({
+                "id": _group_id(ids),
+                "memory_ids": sorted(ids),
+                "contents": group["contents"],
+                "merged_content": group["merged_content"],
+                "reason": group["reason"],
+                "found_at": utcnow(),
+            })
+            known.add(ids)
+            outcome["queued"] += 1
+        self._upkeep_set("consolidation:seen", user_id, seen_lists[-self.UPKEEP_SEEN_LIMIT:])
+        self._upkeep_set("consolidation:pending", user_id, pending)
+        return outcome
+
+    def run_entity_review(self, *, user_id: str | None = None) -> dict[str, Any]:
+        """Ask the model which concept names are not things; queue its verdicts.
+
+        Nothing is removed here. A name the user chose to keep is never asked
+        about again.
+        """
+        kept = set(self._upkeep_get("entity_review:kept", user_id, []))
+        judged = self.entity_junk(user_id=user_id, judge=True)["judged"]
+        pending = [
+            {"id": j["id"], "name": j["name"]} for j in judged if j["id"] not in kept
+        ]
+        self._upkeep_set("entity_review:pending", user_id, pending)
+        return {"reviewed": len(judged), "queued": len(pending)}
+
+    def upkeep_queue(
+        self, *, user_id: str | None = None, tag_health: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Everything upkeep will not decide on its own, as rows a person can clear.
+
+        Each row carries the labels for its two buttons so the dashboard never
+        has to know what kind of thing it is showing.
+        """
+        items: list[dict[str, Any]] = []
+
+        def entity_name(entity_id: str) -> str:
+            entity = self.backend.get_entity(entity_id)
+            return entity.name if entity is not None else entity_id
+
+        for proposal in self.merge_proposals(user_id=user_id, limit=1000):
+            items.append({
+                "kind": "proposal", "id": proposal.id,
+                "title": f"{entity_name(proposal.entity_a)} and {entity_name(proposal.entity_b)}",
+                "detail": "Might be the same one. "
+                          + (proposal.reason or "The evidence did not settle it."),
+                "accept": "merge", "decline": "keep separate",
+            })
+
+        pending = self._upkeep_get("consolidation:pending", user_id, [])
+        live: list[dict[str, Any]] = []
+        for entry in pending:
+            memories = [
+                m for m in (self.backend.get_memory(i) for i in entry["memory_ids"])
+                if m is not None and m.invalid_at is None
+            ]
+            if len(memories) < 2:
+                continue
+            live.append(entry)
+            items.append({
+                "kind": "consolidation", "id": entry["id"],
+                "title": entry["merged_content"],
+                "detail": f"Would replace {len(memories)} memories that say the same thing: "
+                          + " · ".join(m.content for m in memories)
+                          + f". {entry['reason']}",
+                "accept": "merge", "decline": "keep all",
+            })
+        if len(live) != len(pending):
+            self._upkeep_set("consolidation:pending", user_id, live)
+
+        for entry in self._upkeep_get("entity_review:pending", user_id, []):
+            if self.backend.get_entity(entry["id"]) is None:
+                continue
+            items.append({
+                "kind": "entity_review", "id": entry["id"],
+                "title": entry["name"],
+                "detail": "Judged not to be a person, place or thing. Removing it "
+                          "never touches the memories behind it.",
+                "accept": "remove", "decline": "keep",
+            })
+
+        health = tag_health if tag_health is not None else self.tag_health(user_id=user_id)
+        ignored = {
+            tuple(sorted(pair)) for pair in self._upkeep_get("tag_split:ignored", user_id, [])
+        }
+        for split in health.get("splits", []):
+            a, b = split["variants"]
+            if tuple(sorted((a, b))) in ignored:
+                continue
+            items.append({
+                "kind": "tag_split", "id": _group_id([a, b]),
+                "title": f"#{a} and #{b}",
+                "detail": "Look like one subject split in two, which caps what a "
+                          f"search under either can find (similarity {split['similarity']}).",
+                "accept": f"combine into #{split['canonical']}", "decline": "keep apart",
+            })
+        return items
+
+    def decide_upkeep(
+        self, kind: str, item_id: str, decision: str, *,
+        user_id: str | None = None, owner_prefix: str | None = None,
+    ) -> bool:
+        """Clear one queue row. ``decision`` is "accept" or "decline"."""
+        accept = decision == "accept"
+        if kind == "proposal":
+            if accept:
+                return self.confirm_merge(item_id, owner_prefix=owner_prefix)
+            return self.reject_merge(item_id, owner_prefix=owner_prefix)
+        if kind == "consolidation":
+            pending = self._upkeep_get("consolidation:pending", user_id, [])
+            entry = next((p for p in pending if p["id"] == item_id), None)
+            if entry is None:
+                return False
+            # declined groups stay in the judged set, so they are not proposed again
+            self._upkeep_set(
+                "consolidation:pending", user_id, [p for p in pending if p["id"] != item_id]
+            )
+            if not accept:
+                return True
+            memories = [
+                m for m in (self.backend.get_memory(i) for i in entry["memory_ids"])
+                if m is not None and m.invalid_at is None and _owned(m, owner_prefix)
+            ]
+            if len(memories) < 2:
+                return False
+            self._merge_group(memories, entry["merged_content"], user_id=user_id)
+            return True
+        if kind == "entity_review":
+            pending = self._upkeep_get("entity_review:pending", user_id, [])
+            if not any(p["id"] == item_id for p in pending):
+                return False
+            self._upkeep_set(
+                "entity_review:pending", user_id, [p for p in pending if p["id"] != item_id]
+            )
+            if accept:
+                return self.remove_entities([item_id], owner_prefix=owner_prefix) > 0
+            kept = self._upkeep_get("entity_review:kept", user_id, [])
+            if item_id not in kept:
+                kept.append(item_id)
+            self._upkeep_set("entity_review:kept", user_id, kept)
+            return True
+        if kind == "tag_split":
+            for split in self.tag_health(user_id=user_id).get("splits", []):
+                a, b = split["variants"]
+                if _group_id([a, b]) != item_id:
+                    continue
+                if accept:
+                    drop = [v for v in (a, b) if v != split["canonical"]]
+                    self.merge_tags(drop, split["canonical"], user_id=user_id)
+                    return True
+                ignored = self._upkeep_get("tag_split:ignored", user_id, [])
+                ignored.append(sorted((a, b)))
+                self._upkeep_set("tag_split:ignored", user_id, ignored)
+                return True
+            return False
+        return False
 
     # ------------------------------------------------------------------
     # maintenance

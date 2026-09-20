@@ -556,8 +556,9 @@ def test_maintenance_status_lists_every_automatic_pass(client):
     # tag abstraction is off unless configured, and needs an LLM
     assert passes["tag_abstraction"]["automatic"] is False
     assert passes["tag_abstraction"]["needs_llm"] is True
-    # consolidation never runs on its own
+    # consolidation runs on its own only with an LLM to judge the groups
     assert passes["consolidation"]["automatic"] is False
+    assert passes["consolidation"]["needs_llm"] is True
     assert info["embedding_model"].startswith("hash:")
 
 

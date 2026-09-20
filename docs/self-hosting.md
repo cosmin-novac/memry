@@ -201,7 +201,7 @@ merge-proposal review under **Knowledge > Upkeep** matters as much as it did bef
 | Entity typing | One question per name in a single call, instead of one call per batch through the text model. |
 | Reconcile | The action and its target. Writing the merged sentence for an UPDATE still needs the text model. |
 | How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. |
-| Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. |
+| Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. Word-for-word duplicates merge on their own; a merge the model proposed waits under Upkeep, because that judgement has not been measured. |
 | Tag drift | Suggestions only, for review under Upkeep. Never applied automatically. |
 | Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna), and is refused for one that was not. |
 
@@ -331,6 +331,14 @@ memory. Synthetic parents remain visible through `/api/v1/categories` and
 People and things open as entity hubs with aliases, a bounded description, and active
 supporting memories. Relations are listed under the entity they describe and can open their
 members.
+
+Upkeep runs on its own and asks only for what it will not decide: it lists the entity
+merges below the gate, the memory merges a model proposed, the tag pairs that look like one
+subject split in two, and the names the model judged not to be entities, each with a yes
+and a no. Everything else (entity self-healing, word-for-word duplicate consolidation,
+durability scoring when a decision provider is configured, and tag abstraction if you turn
+it on) runs on its interval, records what it changed, and can be paused with one switch.
+`POST /api/v1/maintenance/run/<pass>` runs any pass now.
 
 ## Searching by tag and date
 

@@ -152,8 +152,8 @@ people.
   browsing: a filter that names the specific tag retrieves better than its parent.
 - Consolidation merges memories that record the same fact more than once. Grouping is
   geometric over the stored vectors; the merge itself is judged by an LLM and written to
-  preserve every detail. Originals are superseded, never deleted. Review it under
-  Knowledge > Upkeep before applying.
+  preserve every detail. Originals are superseded, never deleted. Word-for-word duplicates
+  merge on their own; a merge the LLM proposed waits for a yes under Knowledge > Upkeep.
 ## How the layers fit together
 
 ```

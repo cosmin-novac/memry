@@ -60,7 +60,7 @@ from .enrichment import EnrichmentWorker
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
 from .oauth import MEMRY_SCOPE, MemryOAuthProvider
 from .principal import ADMIN, Principal
-from .store import MemoryStore
+from .store import MemoryStore, _due
 
 SESSION_COOKIE = "memry_session"
 
@@ -117,6 +117,7 @@ html.knowledge-open,body.knowledge-open{overflow:hidden}
 .tagrow .passlog.ran{border:0;padding:0;border-radius:0;font-size:.8rem;color:var(--semantic)}
 .tagrow .passlog.err{border:0;padding:0;border-radius:0;font-size:.8rem;color:var(--warn)}
 #upkeepwho{margin:0 0 .6rem}
+.upkeep-auto{margin-top:1.2rem}.upkeep-auto summary{cursor:pointer;font-weight:600;font-size:.95rem;margin-bottom:.5rem}
 .tagrow{display:flex;align-items:center;gap:.5rem;padding:.32rem .1rem;border-bottom:1px solid var(--line)}
 .tagrow input[type=checkbox]{width:auto;flex:none}
 .tagrow .name{flex:1;min-width:0}
@@ -358,30 +359,15 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   <div id="forgottenlist"></div>
 </section>
 <section class="kpanel" id="kpanel-maintenance" hidden>
-  <h2 style="font-size:.95rem;margin-top:.2rem">Automatic passes</h2>
-  <p class="hint">What Memry does to your memories on its own. Switch any of them off, or run one right now.</p>
-  <div id="upkeepwho"></div>
-  <div id="upkeeplist"></div>
-  <h2 style="font-size:.95rem;margin-top:1.1rem">Tag health</h2>
-  <p class="hint">A tag that has quietly split in two caps what any search can find under it, because filtering drops the rest of the evidence before ranking starts.</p>
-  <div id="taghealth"></div>
-  <h2 style="font-size:.95rem;margin-top:1.1rem">Entity health</h2>
-  <p class="hint">Some extracted names are not really things - bare dates, amounts, style instructions. Obvious cases are removed automatically by the self-healing pass; the rest can be reviewed here. Removing an entity never touches the memories behind it.</p>
-  <div id="entityjunk"></div>
-  <h2 style="font-size:.95rem;margin-top:1.1rem">Consolidate duplicate memories</h2>
-  <p class="hint">Finds memories that record the same fact more than once and merges them into one that keeps every detail. The originals are kept and linked, never deleted.</p>
-  <div class="tagbar">
-    <label>Similarity
-      <select id="conthresh">
-        <option value="0.95">very close only (0.95)</option>
-        <option value="0.90" selected>close (0.90)</option>
-        <option value="0.85">looser (0.85)</option>
-      </select>
-    </label>
-    <button onclick="previewConsolidation()" title="show what would be merged, without changing anything">Preview</button>
-    <button id="conapply" onclick="applyConsolidation()" disabled title="apply the merges shown above">Apply shown merges</button>
-  </div>
-  <div id="conresult"></div>
+  <h2 style="font-size:.95rem;margin-top:.2rem">Needs you</h2>
+  <p class="hint">Upkeep runs on its own. These are the calls it will not make for you: say yes or no and they are gone.</p>
+  <div id="upkeepqueue"></div>
+  <details id="upkeepauto" class="upkeep-auto">
+    <summary>Done on its own <span class="cnt" id="upkeepsummary"></span></summary>
+    <div id="upkeepwho"></div>
+    <div id="upkeeplist"></div>
+    <div class="bar" style="margin-top:.6rem"><button id="upkeeppause" onclick="togglePause()" title="stop every automatic pass until resumed">Pause automatic upkeep</button></div>
+  </details>
 </section>
 </div></div>
 </main><script>
@@ -1340,86 +1326,21 @@ async function purgeMemory(id){
   await Promise.all([loadForgotten(),loadStats()]);
 }
 
-// -- upkeep: what runs on its own, and consolidation under review -----------
-async function loadUpkeep(){
-  const info=await api('/api/v1/maintenance');
-  const el=document.getElementById('upkeeplist');
-  const missing=p=>(p.needs_llm&&!info.llm_available) ? 'a language model'
-    : (p.needs_decider&&!info.decider_available) ? 'a decision provider' : '';
-  el.innerHTML=info.passes.map(p=>{
-    const need=missing(p);
-    const state=need?`<span class="cnt">needs ${need}</span>`
-      :p.automatic?'<span class="syn">runs on its own</span>'
-      :'<span class="cnt">only when you ask</span>';
-    const every=p.automatic&&p.interval_days?` Runs every ${p.interval_days} days.`:'';
-    const last=p.last_run?` Last run ${esc(String(p.last_run).slice(0,16).replace('T',' '))}.`:'';
-    const toggle=p.toggleable&&!need
-      ? `<button class="act" onclick='togglePass(${JSON.stringify(p.key)},${!p.automatic})'
-           title="${p.automatic?'stop running this automatically':'run this automatically from now on'}">${p.automatic?'stop running it':'let it run'}</button>`
-      : '';
-    const run=p.run_url&&!need
-      ? `<button class="act" onclick='runPass(${JSON.stringify(p.run_url)},this,${JSON.stringify(p.label)})'
-           title="run this pass right now">run now</button>`
-      : '';
-    return `<div class="tagrow" id="pass-${esc(p.key)}"><span class="name"><b>${esc(p.label)}</b> ${state}
-      <div class="hint">${esc(p.detail)}${every}${last}</div>
-      <div class="hint passlog" id="passlog-${esc(p.key)}"></div></span>${run}${toggle}</div>`;
-  }).join('');
-  const who=info.decider_available
-    ? `Typed decisions go to <b>${esc(info.decider)}</b>.`
-    : 'No decision provider is configured, so the passes that need one are off.';
-  const gate=info.merge_gate>1
-    ? ' Merges never happen on their own here, because the model answering has not been measured on the identity test set; every proposal waits below.'
-    : ` Merges happen on their own above ${esc(String(info.merge_gate))} confidence; anything less sure waits below.`;
-  document.getElementById('upkeepwho').innerHTML=
-    `<div class="hint">${who}${gate} Every run below is written to the server log too.</div>`;
-  renderTagHealth(info.tag_health||{});
-  renderEntityJunk(info.entity_junk||{});
-}
-// Fragmentation caps recall silently: filtering to a tag that has split its
-// subject drops the memories the question needed. Show it rather than wait for
-// someone to go looking.
-function renderTagHealth(h){
-  const el=document.getElementById('taghealth');
-  if(!el)return;
-  const splits=(h.splits||[]);
-  const rows=splits.map(s=>{
-    const [a,b]=s.variants;
-    return `<div class="tagrow"><span class="name">
-      <b>${esc(a)}</b> and <b>${esc(b)}</b> <span class="cnt">${s.similarity}</span>
-      <div class="hint">look like one subject split in two</div></span>
-      <button onclick='healSplit(${JSON.stringify(s.variants)},${JSON.stringify(s.canonical)})'
-        title="combine these two tags">Combine into "${esc(s.canonical)}"</button></div>`;
-  }).join('');
-  el.innerHTML=`<div class="hint">
-      ${h.tags} tags over ${h.memories} memories · ${h.untagged} untagged ·
-      ${h.single_use_tags} used once (${Math.round((h.single_use_share||0)*100)}%) ·
-      ${h.suspected_splits} suspected split${h.suspected_splits===1?'':'s'}
-    </div>`+(rows||'<div class="empty">No split tags detected.</div>');
-}
-async function healSplit(variants,canonical){
-  const drop=variants.filter(v=>v!==canonical);
-  if(!confirm(`Combine ${drop.join(', ')} into "${canonical}"?`))return;
-  await api('/api/v1/tags/edit',{method:'POST',
-    body:JSON.stringify({op:'merge',tags:drop,to:canonical})});
-  await Promise.all([loadTags(),loadUpkeep()]);
-}
-async function togglePass(key,enabled){
-  await api('/api/v1/maintenance/toggle',{method:'POST',
-    body:JSON.stringify({key,enabled})});
-  await loadUpkeep();
-}
+// -- upkeep: runs on its own; the queue is what it will not decide for you --
 // Running a pass and being told nothing is what makes background maintenance
-// feel like something happening to you. Say what it changed, in words, and keep
-// it on screen until the next run.
+// feel like something happening to you. Say what it changed, in words.
 const PASS_WORDS={
   scored:n=>`scored ${n} ${n===1?'memory':'memories'}`,
   confirmed:n=>`merged ${n} duplicate ${n===1?'entity':'entities'}`,
   rejected:n=>`kept ${n} apart`,
   kept:n=>`left ${n} for you to decide`,
   purged:n=>`removed ${n} unreferenced ${n===1?'entity':'entities'}`,
+  junk_removed:n=>`removed ${n} ${n===1?'name that was':'names that were'} not an entity`,
   proposed:n=>`proposed ${n} merge${n===1?'':'s'}`,
   merged:n=>`merged ${n} ${n===1?'group':'groups'}`,
+  judged:n=>`judged ${n} ${n===1?'group':'groups'}`,
+  reviewed:n=>`reviewed ${n} ${n===1?'name':'names'}`,
+  queued:n=>`left ${n} for you`,
   skipped:n=>`could not judge ${n}`,
   removed:n=>`removed ${n}`,
   assigned:n=>`filed ${n} under a broader tag`,
@@ -1434,118 +1355,105 @@ function describePass(result){
   if(!parts.length)return 'nothing needed changing';
   return parts.join(', ');
 }
-async function runPass(url,button,label){
+const whenText=iso=>iso?String(iso).slice(0,16).replace('T',' '):'';
+const QUEUE_KINDS={proposal:'people & things',consolidation:'duplicate memories',
+  entity_review:'not an entity?',tag_split:'tags'};
+async function loadUpkeep(){
+  const info=await api('/api/v1/maintenance');
+  renderUpkeepQueue(info.queue||[]);
+  renderUpkeepPasses(info);
+}
+function upkeepCount(n){
+  document.getElementById('ktab-maintenance').textContent=n?`Upkeep · ${n}`:'Upkeep';
+}
+function renderUpkeepQueue(queue){
+  const el=document.getElementById('upkeepqueue');
+  upkeepCount(queue.length);
+  if(!queue.length){el.innerHTML='<div class="empty">Nothing needs you.</div>';return}
+  el.innerHTML=queue.map(item=>`<div class="tagrow"><span class="name">
+    <span class="cnt">${esc(QUEUE_KINDS[item.kind]||item.kind)}</span> <b>${esc(item.title)}</b>
+    <div class="hint">${esc(item.detail)}</div></span>
+    <button class="act" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"accept",this)'>${esc(item.accept)}</button>
+    <button class="act del" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"decline",this)'>${esc(item.decline)}</button></div>`).join('');
+}
+async function decideUpkeep(kind,id,decision,button){
+  const row=button.closest('.tagrow');
+  row.querySelectorAll('button').forEach(b=>b.disabled=true);
+  try{
+    await api('/api/v1/maintenance/decide',{method:'POST',body:JSON.stringify({kind,id,decision})});
+  }catch(error){
+    alert('That could not be applied; it may have changed meanwhile. The list has been refreshed.');
+    await loadUpkeep();return;
+  }
+  row.remove();
+  const left=document.querySelectorAll('#upkeepqueue .tagrow').length;
+  upkeepCount(left);
+  if(!left)document.getElementById('upkeepqueue').innerHTML='<div class="empty">Nothing needs you.</div>';
+  // merges and removals show up elsewhere without a reload
+  await Promise.all([loadTags(),loadEntities(),loadStats(),loadMapData()]);
+}
+function renderUpkeepPasses(info){
+  const el=document.getElementById('upkeeplist');
+  const missing=p=>(p.needs_llm&&!info.llm_available) ? 'a language model'
+    : (p.needs_decider&&!info.decider_available) ? 'a decision provider' : '';
+  el.innerHTML=info.passes.map(p=>{
+    const need=missing(p);
+    const state=need?`<span class="cnt">needs ${need}</span>`
+      :info.paused?'<span class="cnt">paused</span>'
+      :p.automatic?'<span class="syn">on</span>'
+      :'<span class="cnt">off</span>';
+    const every=p.automatic&&p.interval_days?` Every ${p.interval_days} days.`:'';
+    const last=p.last?` Last run ${esc(whenText(p.last.at))}: ${esc(describePass(p.last.result))}.`
+      :(p.last_run?` Last run ${esc(whenText(p.last_run))}.`:' Has not run yet.');
+    const toggle=p.toggleable&&!need
+      ? `<button class="act" onclick='togglePass(${JSON.stringify(p.key)},${!p.automatic})'
+           title="${p.automatic?'stop running this on its own':'run this on its own from now on'}">${p.automatic?'turn off':'turn on'}</button>`
+      : '';
+    const run=p.run_url&&!need
+      ? `<button class="act" onclick='runPass(${JSON.stringify(p.run_url)},this,${JSON.stringify(p.key)})'
+           title="run this pass right now">run now</button>`
+      : '';
+    return `<div class="tagrow" id="pass-${esc(p.key)}"><span class="name"><b>${esc(p.label)}</b> ${state}
+      <div class="hint">${esc(p.detail)}${every}${last}</div>
+      <div class="hint passlog" id="passlog-${esc(p.key)}"></div></span>${run}${toggle}</div>`;
+  }).join('');
+  const who=info.decider_available
+    ? `Typed questions go to <b>${esc(info.decider)}</b>.`
+    : 'No decision provider is configured, so the passes that need one are off.';
+  const gate=info.merge_gate>1
+    ? ' Entities never merge without you here, because the model answering has not been measured on the identity set.'
+    : ` Entities merge on their own above ${esc(String(info.merge_gate))} confidence; anything less sure is queued above.`;
+  const h=info.tag_health||{};
+  const health=h.tags!=null?` ${h.tags} tags over ${h.memories} memories, ${h.untagged} untagged, ${h.single_use_tags} used once.`:'';
+  document.getElementById('upkeepwho').innerHTML=`<div class="hint">${who}${gate}${health} Every run is written to the server log too.</div>`;
+  const pause=document.getElementById('upkeeppause');
+  pause.textContent=info.paused?'Resume automatic upkeep':'Pause automatic upkeep';
+  pause.setAttribute('aria-pressed',String(!!info.paused));
+  const on=info.passes.filter(p=>p.automatic&&!missing(p)).length;
+  document.getElementById('upkeepsummary').textContent=info.paused?'paused':`${on} of ${info.passes.length} passes on`;
+}
+async function togglePause(){
+  const paused=document.getElementById('upkeeppause').getAttribute('aria-pressed')!=='true';
+  await api('/api/v1/maintenance/pause',{method:'POST',body:JSON.stringify({paused})});
+  await loadUpkeep();
+}
+async function togglePass(key,enabled){
+  await api('/api/v1/maintenance/toggle',{method:'POST',
+    body:JSON.stringify({key,enabled})});
+  await loadUpkeep();
+}
+async function runPass(url,button,key){
   const original=button.textContent;
-  const key=(button.closest('.tagrow')||{}).id||'';
-  const log=document.getElementById('passlog-'+key.replace(/^pass-/,''));
   button.disabled=true;button.textContent='running...';
-  if(log)log.textContent='';
   let result=null,failed=null;
   try{ result=await api(url,{method:'POST',body:'{}'}); }
   catch(err){ failed=String(err&&err.message||err); }
   finally{ button.disabled=false;button.textContent=original; }
   const when=new Date().toLocaleTimeString();
-  const line=failed?`${when} — failed: ${failed}`:`${when} — ${describePass(result)}`;
+  const line=failed?`${when} - failed: ${failed}`:`${when} - ${describePass(result)}`;
   await Promise.all([loadUpkeep(),loadTags(),loadEntities(),loadStats(),loadMapData()]);
-  const after=document.getElementById('passlog-'+key.replace(/^pass-/,''));
+  const after=document.getElementById('passlog-'+key);
   if(after){ after.textContent=line; after.classList.add(failed?'err':'ran'); }
-}
-// Obvious non-entities (dates, amounts, URLs) are cleaned automatically; the
-// judgement cases (style instructions vs. real niche terms) need a reader, so
-// the AI proposes and the user confirms with checkboxes.
-function renderEntityJunk(junk){
-  const el=document.getElementById('entityjunk');
-  if(!el)return;
-  const mech=junk.mechanical||[];
-  const parts=[];
-  if(mech.length){
-    parts.push(`<div class="hint">${mech.length} obvious non-entit${mech.length===1?'y':'ies'} found - these are removed by the next self-healing run, or now:</div>`
-      +mech.map(j=>`<div class="tagrow"><span class="name"><b>${esc(j.name)}</b>
-        <div class="hint">${esc(j.reason)}</div></span></div>`).join('')
-      +`<div class="bar"><button onclick="removeMechanicalJunk()">Remove ${mech.length} now</button></div>`);
-  }else{
-    parts.push('<div class="empty">No obvious non-entities.</div>');
-  }
-  parts.push(`<div class="bar"><button onclick="reviewEntities(this)"
-    title="one AI call proposes which concept-type names are not really entities; nothing is removed until you confirm">
-    Review ${junk.reviewable||0} concept names with AI</button></div>
-    <div id="entityreview"></div>`);
-  el.innerHTML=parts.join('');
-  window._mechJunk=mech.map(j=>j.id);
-}
-async function removeMechanicalJunk(){
-  const ids=window._mechJunk||[];
-  if(!ids.length)return;
-  await api('/api/v1/entities/remove',{method:'POST',body:JSON.stringify({ids})});
-  await Promise.all([loadUpkeep(),loadEntities(),loadMapData()]);
-}
-async function reviewEntities(button){
-  button.disabled=true;button.textContent='Reviewing...';
-  const res=await api('/api/v1/maintenance/entity-review',{method:'POST',body:'{}'});
-  const judged=res.judged||[];
-  const el=document.getElementById('entityreview');
-  if(!judged.length){
-    el.innerHTML='<div class="empty">The review found nothing to remove.</div>';
-    button.textContent='Review again';button.disabled=false;return;
-  }
-  el.innerHTML=`<div class="hint">${judged.length} name${judged.length===1?'':'s'} judged not to be entities. Untick any you want to keep.</div>`
-    +judged.map(j=>`<div class="tagrow">
-      <input type="checkbox" class="junkpick" checked value="${esc(j.id)}">
-      <span class="name"><b>${esc(j.name)}</b></span></div>`).join('')
-    +`<div class="bar"><button onclick="removeReviewedJunk()">Remove selected</button></div>`;
-  button.textContent='Review again';button.disabled=false;
-}
-async function removeReviewedJunk(){
-  const ids=[...document.querySelectorAll('.junkpick:checked')].map(c=>c.value);
-  if(!ids.length)return;
-  if(!confirm(`Remove ${ids.length} entit${ids.length===1?'y':'ies'}? Their memories are untouched.`))return;
-  await api('/api/v1/entities/remove',{method:'POST',body:JSON.stringify({ids})});
-  await Promise.all([loadUpkeep(),loadEntities(),loadMapData()]);
-}
-let consolidationPreview=null;
-async function previewConsolidation(){
-  const el=document.getElementById('conresult');
-  el.innerHTML='<div class="empty">Looking for duplicates...</div>';
-  const threshold=parseFloat(document.getElementById('conthresh').value);
-  const res=await api('/api/v1/maintenance/consolidate',
-    {method:'POST',body:JSON.stringify({threshold,apply:false})});
-  consolidationPreview=threshold;
-  const merges=(res.groups||[]).filter(g=>g.same_fact);
-  document.getElementById('conapply').disabled=!merges.length;
-  if(!merges.length){
-    el.innerHTML=`<div class="empty">Scanned ${res.scanned} memories. Nothing to merge.</div>`;
-    return;
-  }
-  // each proposal is ticked individually: accepting one is not accepting all
-  el.innerHTML=`<div class="hint">${merges.length} group${merges.length===1?'':'s'} found. Tick the ones to merge.</div>`
-   +merges.map(g=>`<div class="tagrow">
-    <input type="checkbox" class="congroup" checked
-           value="${esc(JSON.stringify(g.memory_ids))}" onchange="updateConsolidationCount()">
-    <span class="name">
-      <b>${esc(g.merged_content)}</b>
-      <div class="hint">replaces ${g.memory_ids.length}: ${g.contents.map(c=>esc(c)).join(' · ')}</div>
-      <div class="hint">${esc(g.reason)}</div></span></div>`).join('');
-  updateConsolidationCount();
-}
-function chosenGroups(){
-  return [...document.querySelectorAll('.congroup:checked')].map(c=>JSON.parse(c.value));
-}
-function updateConsolidationCount(){
-  const n=chosenGroups().length,button=document.getElementById('conapply');
-  button.disabled=!n;
-  button.textContent=n?`Merge ${n} selected`:'Merge selected';
-}
-async function applyConsolidation(){
-  const only=chosenGroups();
-  if(!only.length)return;
-  const count=only.reduce((n,g)=>n+g.length,0);
-  if(!confirm(`Merge ${only.length} group(s)? ${count} memories become ${only.length} new one(s); the originals are forgotten and stay listed under Forgotten.`))return;
-  const res=await api('/api/v1/maintenance/consolidate',
-    {method:'POST',body:JSON.stringify({threshold:consolidationPreview,apply:true,only})});
-  document.getElementById('conresult').innerHTML=
-    `<div class="empty">Merged ${res.merged} group(s); ${res.superseded} memories forgotten.</div>`;
-  document.getElementById('conapply').disabled=true;
-  load();
 }
 function tagSel(){return[...document.querySelectorAll('.tagrow input:checked')].map(c=>c.value)}
 function updateSel(){
@@ -1903,20 +1811,9 @@ color:var(--warn);border-radius:8px;padding:.5rem .7rem;font-size:.85rem;margin-
 
 
 def _tag_run_due(last_run: str | None, interval_days: float, now: datetime) -> bool:
-    """Has ``interval_days`` elapsed since the last tag-abstraction run?
-
-    A namespace never run before (``None``) is due. An unparseable stamp is
-    treated as due rather than wedging the scheduler forever.
-    """
-    if last_run is None:
-        return True
-    try:
-        last = datetime.fromisoformat(last_run)
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return True
-    return (now - last) >= timedelta(days=max(interval_days, 0.0))
+    """Has ``interval_days`` elapsed since the last run? Kept for callers; the
+    scheduler's own checks live in ``MemoryStore.run_upkeep_cycle``."""
+    return _due(last_run, interval_days, now)
 
 
 MCP_ORIGIN_KEY = "memry.mcp_origin"
@@ -2479,66 +2376,101 @@ def create_app(
         """
         user_id = _p(request).namespace(request.query_params.get("user_id"))
         tcfg = store.config.tags
+        every = store.config.dedup_interval_days
+
+        def entry(key: str, label: str, detail: str, **extra: Any) -> dict[str, Any]:
+            return {
+                "key": key, "label": label, "detail": detail,
+                "automatic": store.maintenance_enabled(key),
+                "toggleable": True,
+                "run_url": f"/api/v1/maintenance/run/{key}",
+                "last": store.last_pass_run(key, user_id),
+                **extra,
+            }
+
+        health = await run_in_threadpool(partial(store.tag_health, user_id=user_id))
+        queue = await run_in_threadpool(partial(
+            store.upkeep_queue, user_id=user_id, tag_health=health))
         return JSONResponse({
             "namespace": user_id,
+            "paused": store.upkeep_paused(),
+            "queue": queue,
             "passes": [
-                {
-                    "key": "dedup_entities",
-                    "label": "Entity self-healing",
-                    "detail": "Merges duplicate people and things once evidence "
-                              "is clear, drops entities nothing references, and "
-                              "removes names that cannot be entities at all - "
-                              "bare dates, amounts, URLs, salutations.",
-                    "automatic": store.maintenance_enabled("dedup_entities"),
-                    "interval_days": store.config.dedup_interval_days,
-                    "needs_llm": False,
-                    "toggleable": True,
-                    "run_url": "/api/v1/entities/resolve",
-                },
-                {
-                    "key": "tag_abstraction",
-                    "label": "Tag abstraction",
-                    "detail": "Groups tags under broader parents for browsing. "
-                              "Off by default: measured retrieval is best at the "
-                              "specific tag level, not the broad one.",
-                    "automatic": store.maintenance_enabled("tag_abstraction"),
-                    "interval_days": tcfg.interval_days,
-                    "last_run": store.last_tag_run(user_id),
-                    "needs_llm": True,
-                    "toggleable": True,
-                    "run_url": "/api/v1/tags/abstract",
-                },
-                {
-                    "key": "durability",
-                    "label": "How long facts stay relevant",
-                    "detail": "Estimates whether each memory matters for days, "
-                              "months or years, and forgetting uses that instead "
-                              "of one rate per memory type. Needs a decision "
-                              "provider; without one, nothing is scored.",
-                    "automatic": store.maintenance_enabled("durability"),
-                    "needs_decider": True,
-                    "toggleable": True,
-                    "run_url": "/api/v1/maintenance/durability",
-                },
-                {
-                    "key": "consolidation",
-                    "label": "Memory consolidation",
-                    "detail": "Merges memories that record the same fact more than "
-                              "once. Manual: review each group before applying.",
-                    "automatic": False,
-                    "needs_llm": True,
-                },
+                entry(
+                    "dedup_entities", "Entity self-healing",
+                    "Merges duplicate people and things once the evidence is "
+                    "clear, drops entities nothing references, removes names "
+                    "that cannot be entities at all, and asks the model which "
+                    "concept names are not things; those wait for you above.",
+                    interval_days=every, needs_llm=False,
+                ),
+                entry(
+                    "tag_abstraction", "Tag abstraction",
+                    "Groups tags under broader parents for browsing. Off by "
+                    "default: measured retrieval is best at the specific tag "
+                    "level, not the broad one.",
+                    interval_days=tcfg.interval_days,
+                    last_run=store.last_tag_run(user_id), needs_llm=True,
+                ),
+                entry(
+                    "durability", "How long facts stay relevant",
+                    "Estimates whether each memory matters for days, months or "
+                    "years, and forgetting uses that instead of one rate per "
+                    "memory type. Needs a decision provider.",
+                    needs_decider=True,
+                ),
+                entry(
+                    "consolidation", "Memory consolidation",
+                    "Finds memories that record the same fact more than once. "
+                    "Word-for-word duplicates are merged on sight; merges the "
+                    "model proposed wait for you above. Originals are kept and "
+                    "linked, never deleted.",
+                    interval_days=every, needs_llm=True,
+                ),
             ],
             "llm_available": store.llm.available,
             "decider": store.decider.name,
             "decider_available": store.decider.available,
             "merge_gate": store.stats()["merge_gate"],
             "embedding_model": store.embedder.model_id,
-            "tag_health": await run_in_threadpool(partial(
-                store.tag_health, user_id=user_id)),
+            "tag_health": health,
             "entity_junk": await run_in_threadpool(partial(
                 store.entity_junk, user_id=user_id)),
         })
+
+    async def maintenance_pause_route(request: Request) -> Response:
+        """Stop every automatic pass until resumed. One switch, persisted."""
+        body = await request.json()
+        await run_in_threadpool(partial(store.set_upkeep_paused, bool(body.get("paused"))))
+        return JSONResponse({"paused": store.upkeep_paused()})
+
+    async def maintenance_run_route(request: Request) -> Response:
+        """Run one pass now, with the same code the scheduler runs."""
+        key = request.path_params["key"]
+        if key not in store._MAINTENANCE_KEYS:
+            return JSONResponse({"error": "unknown pass"}, status_code=404)
+        body = await request.json() if await request.body() else {}
+        result = await run_in_threadpool(partial(
+            store.run_upkeep_pass, key,
+            user_id=_p(request).namespace(body.get("user_id")),
+        ))
+        return JSONResponse(result)
+
+    async def maintenance_decide_route(request: Request) -> Response:
+        """Clear one row of the queue: accept or decline."""
+        body = await request.json()
+        kind = str(body.get("kind") or "")
+        item_id = str(body.get("id") or "")
+        decision = str(body.get("decision") or "")
+        if decision not in ("accept", "decline") or not item_id:
+            return JSONResponse({"error": "kind, id and decision required"}, status_code=400)
+        ok = await run_in_threadpool(partial(
+            store.decide_upkeep, kind, item_id, decision,
+            user_id=_p(request).namespace(body.get("user_id")),
+            owner_prefix=_p(request).prefix,
+        ))
+        return JSONResponse({"ok": ok, "kind": kind, "id": item_id},
+                            status_code=200 if ok else 409)
 
     async def durability_route(request: Request) -> Response:
         """Score how long each memory is worth keeping. Feeds forgetting."""
@@ -3003,11 +2935,13 @@ def create_app(
         await mcp_app(scope, receive, send)
 
     async def _maintenance_scheduler() -> None:
-        """Periodic per-namespace maintenance: deterministic topic cleanup,
-        entity de-duplication (resolve stale/obvious proposals), and optional tag
-        abstraction. Each task runs on its own interval; last-run times are
-        persisted (backend meta) so restarts don't re-run, and per-cycle work is
-        capped so a many-account server spreads LLM cost across cycles.
+        """Periodic per-namespace upkeep: entity self-healing, consolidation,
+        durability scoring and optional tag abstraction, each on its own
+        interval. Last-run times are persisted (backend meta) so restarts don't
+        re-run, and per-cycle work is capped so a many-account server spreads
+        LLM cost across cycles. The passes themselves live in
+        ``MemoryStore.run_upkeep_cycle`` so the dashboard's "run now" and the
+        tests exercise the same code.
         """
         tcfg = store.config.tags
         tag_interval = max(tcfg.interval_days, 0.001)
@@ -3015,31 +2949,18 @@ def create_app(
         check_every = max(min(min(tag_interval, dedup_interval) * 86400, 6 * 3600), 60)
         max_per_cycle = 25
 
-        def dedup_key(uid: str | None) -> str:
-            return f"entity_dedup:v2:last_run:{uid or ''}"
-
         while True:
             try:
                 now = datetime.now(timezone.utc)
-                stamp = now.isoformat(timespec="seconds")
                 processed = 0
-                for uid in store.backend.distinct_user_ids() or [None]:
-                    if processed >= max_per_cycle:
-                        break
-                    did = False
-                    if store.maintenance_enabled("dedup_entities") and _tag_run_due(
-                        store.backend.get_meta(dedup_key(uid)), dedup_interval, now
-                    ):
-                        await run_in_threadpool(store.merge_obvious_topics, user_id=uid)
-                        await run_in_threadpool(store.resolve_entities, user_id=uid)
-                        store.backend.set_meta(dedup_key(uid), stamp)
-                        did = True
-                    if store.maintenance_enabled("tag_abstraction") and _tag_run_due(
-                        store.last_tag_run(uid), tag_interval, now
-                    ):
-                        await run_in_threadpool(store.abstract_tags, user_id=uid)
-                        did = True
-                    processed += 1 if did else 0
+                if not store.upkeep_paused():
+                    for uid in store.backend.distinct_user_ids() or [None]:
+                        if processed >= max_per_cycle:
+                            break
+                        ran = await run_in_threadpool(partial(
+                            store.run_upkeep_cycle, user_id=uid, now=now
+                        ))
+                        processed += 1 if ran else 0
             except Exception:  # a scheduler hiccup must never take the server down
                 pass
             await asyncio.sleep(check_every)
@@ -3090,6 +3011,9 @@ def create_app(
         Route("/api/v1/maintenance/consolidate", guarded(consolidate_route), methods=["POST"]),
         Route("/api/v1/maintenance/toggle", guarded(maintenance_toggle_route), methods=["POST"]),
         Route("/api/v1/maintenance/entity-review", guarded(entity_review_route), methods=["POST"]),
+        Route("/api/v1/maintenance/pause", guarded(maintenance_pause_route), methods=["POST"]),
+        Route("/api/v1/maintenance/run/{key}", guarded(maintenance_run_route), methods=["POST"]),
+        Route("/api/v1/maintenance/decide", guarded(maintenance_decide_route), methods=["POST"]),
         Route("/api/v1/maintenance/durability", guarded(durability_route), methods=["POST"]),
         Route("/api/v1/entities/remove", guarded(remove_entities_route), methods=["POST"]),
         Route("/api/v1/relations", guarded(relations_route), methods=["GET"]),
