@@ -75,7 +75,7 @@ from .intelligence.structure import (
     is_hub,
     same_name_plan,
 )
-from .intelligence.when import extract_when, overlaps as when_overlaps
+from .intelligence.when import confirm_whens, extract_when, overlaps as when_overlaps
 from .models import (
     MEMORY_TYPES,
     AddAction,
@@ -377,6 +377,7 @@ class MemoryStore:
                     context=_ingestion_context(metadata),
                     tag_hints=_client_tag_hints(metadata, categories),
                 )
+                self._confirm_candidate_whens(candidates)
             except Exception as exc:
                 # Provider outage / exhausted credits must not lose the save:
                 # degrade to verbatim, tell the caller, and flag the memories
@@ -1058,6 +1059,7 @@ class MemoryStore:
             context=context or None,
             tag_hints=tag_hints,
         )
+        self._confirm_candidate_whens(candidates)
         if not candidates:
             for memory in active:
                 metadata = self._clear_enrichment_metadata(memory.metadata)
@@ -1847,6 +1849,22 @@ class MemoryStore:
                     summary["typed"] += 1
         return summary
 
+    def _confirm_candidate_whens(self, candidates: list[Any]) -> None:
+        """Drop an extracted "when" the checks in intelligence/when.py do not
+        believe. The text model proposes a date; it is not taken at its word."""
+        dated = [c for c in candidates if (c.metadata or {}).get(WHEN_KEY)]
+        if not dated:
+            return
+        today = utcnow()
+        kept = confirm_whens(
+            self.decider,
+            [{"content": c.content, "recorded_at": today} for c in dated],
+            [c.metadata[WHEN_KEY] for c in dated],
+        )
+        for candidate, when in zip(dated, kept):
+            if when is None:
+                candidate.metadata.pop(WHEN_KEY, None)
+
     def backfill_when(
         self,
         *,
@@ -1884,6 +1902,11 @@ class MemoryStore:
                     {"content": m.content, "recorded_at": m.created_at}
                     for m in group
                 ],
+            )
+            found = confirm_whens(
+                self.decider,
+                [{"content": m.content, "recorded_at": m.created_at} for m in group],
+                found,
             )
             for memory, when in zip(group, found):
                 summary["checked"] += 1

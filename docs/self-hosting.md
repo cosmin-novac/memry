@@ -435,3 +435,18 @@ curl -X POST http://localhost:8080/api/v1/maintenance/run/when \
 A dry run writes nothing and returns what it would set. Without `dry_run` it stores each
 `when` it finds and marks the rest as checked, so a second run over the same memories
 spends nothing. The pass needs an LLM; without one it reports that and changes nothing.
+
+A date in a memory does not make it an event, and the text model is not trusted to tell the
+difference. Measured on 160 labelled memories from one store, 44 of them events: the text
+model alone gave a `when` to 61 memories and was right about 56% of them, because it dates
+work logs and price checks even when told not to. Memry runs two checks on every `when` it
+proposes, on the write path and in the backfill:
+
+| Check | Precision | Events found |
+|---|---|---|
+| The text model alone | 56% | 77% |
+| Minus write dates read back (a `when` on the recording day, in a text naming no date) | 66% | 70% |
+| And the decision provider calls the memory an event, not a record | 90% | 64% |
+
+A wrong `when` is worse than none, so Memry takes the last row when a decision provider is
+configured, and the middle row without one.

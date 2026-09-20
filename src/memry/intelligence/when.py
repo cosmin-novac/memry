@@ -309,7 +309,14 @@ def describe_when(when: Any, now: Any = None) -> str:
 
     end = data.get("end")
     span = f"{start} to {end.replace('T', ' ')}" if end else start
-    return f"happens {span}" if upcoming else f"happened {span}"
+    if upcoming:
+        return f"happens {span}"
+    if end and not start.startswith("--"):
+        end_kind = _point(end)[1]  # type: ignore[index]
+        last = _day_of(end, end_kind)
+        if last is not None and last >= _today(now):
+            return f"happening now, {span}"
+    return f"happened {span}"
 
 
 # ----------------------------------------------------------------------
@@ -389,6 +396,103 @@ Answer for every memory, by its index. Return JSON only:
 {"items": [{"index": int, "start": str|null, "end": str|null,
 "recurrence": str|null}]}
 Set start to null for a memory that has no "when"."""
+
+
+# ----------------------------------------------------------------------
+# confirming a "when": the text model proposes a date, and is not believed
+# on its own
+# ----------------------------------------------------------------------
+#
+# Measured on 160 labelled memories of a real store, 44 of them events. The
+# text model alone gave a "when" to 61 memories and was right about 56% of
+# them: told in capitals that a work log with a date is not an event, it dated
+# work logs anyway. Two checks fix most of that.
+#
+# * A "when" equal to the day the memory was recorded, in a memory whose text
+#   names no date, is the write date read back: 14 cases, 3 of them events.
+# * The decision provider is asked the one thing it is good at, whether the
+#   memory is an event or a record. Requiring its agreement took precision to
+#   90% at 64% recall. A wrong "when" is worse than none, so that trade is
+#   taken; without a provider only the first check applies (66%).
+
+_NAMES_A_DATE = re.compile(
+    r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\.\d{1,2}\.\d{2,4}|\d{1,2}/\d{1,2}/\d{2,4}"
+    r"|\b(?:today|yesterday|tomorrow|tonight|this (?:morning|afternoon|evening|week|month)"
+    r"|last|next|ago|heute|gestern|morgen|letzte[nrs]?|n\u00e4chste[nrs]?)\b"
+    r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d{1,2}\b"
+    r"|\b\d{1,2}(?:st|nd|rd|th)? (?:of )?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
+    re.IGNORECASE,
+)
+
+EVENT_CRITERIA = {
+    "event": ("Something that happened or will happen at a particular time and "
+              "that a person would put on a calendar or a timeline: a meeting, "
+              "an appointment, a launch, a public release, a purchase, a "
+              "payment, a trip, a move, a deadline, an incident, a decision or "
+              "a request made on a day."),
+    "record": ("A record of work done, a state, a fact, a preference, a rule, a "
+               "price, a measurement, a specification, a test or verification "
+               "result, a commit or a deployment log. It may carry a date, but "
+               "nothing in it is an occasion."),
+}
+#: Probability on "event" the provider must give before a "when" is kept.
+EVENT_GATE = 0.5
+
+
+def is_write_date(when: Any, content: str, recorded_at: str | None) -> bool:
+    """A one-off "when" on the very day the memory was recorded, in a text
+    that names no date: the model read the write date back."""
+    data = parse_when(when)
+    if data is None or data.get("recurrence") or not recorded_at:
+        return False
+    return (
+        data["start"][:10] == str(recorded_at)[:10]
+        and not _NAMES_A_DATE.search(content or "")
+    )
+
+
+def confirm_whens(
+    decider: Any, items: list[dict[str, Any]], found: list[dict[str, Any] | None]
+) -> list[dict[str, Any] | None]:
+    """Keep only the proposed "when"s that survive both checks.
+
+    ``items`` are {"content", "recorded_at"}, aligned with ``found``. Never
+    raises: a provider that fails or does not answer leaves the mechanical
+    check as the only one, exactly as when no provider is configured.
+    """
+    kept = [
+        None if (when and is_write_date(when, item.get("content") or "", item.get("recorded_at")))
+        else when
+        for item, when in zip(items, found)
+    ]
+    asked = [i for i, when in enumerate(kept) if when]
+    if not asked or decider is None or not getattr(decider, "available", False):
+        return kept
+    try:
+        from ..providers.decisions import Choice
+
+        def ask(index: int):
+            answer = decider.decide(
+                "A memory from a personal long-term memory store: "
+                + str(items[index].get("content") or ""),
+                {"k": Choice(instructions="Is this memory an event or a record?",
+                             criteria=EVENT_CRITERIA)},
+            )["k"]
+            return index, answer
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            answers = list(pool.map(ask, asked))
+    except Exception:
+        return kept
+    for index, answer in answers:
+        if not getattr(answer, "available", False):
+            continue
+        probability = (answer.probabilities or {}).get(answer.value, answer.confidence)
+        if answer.value != "event" or float(probability or 0.0) < EVENT_GATE:
+            kept[index] = None
+    return kept
 
 
 def extract_when(llm: Any, items: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
