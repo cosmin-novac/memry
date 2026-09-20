@@ -213,9 +213,29 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .map-entity-detail[hidden]{display:none}.map-entity-detail h3{margin:0 0 .35rem;font-size:1rem}.map-entity-actions{display:grid;grid-template-columns:minmax(10rem,1fr) auto auto;gap:.45rem;align-items:center;margin-top:.7rem;padding-top:.65rem;border-top:1px solid var(--line)}
 .map-entity-actions .danger{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
 @media(max-width:44rem){.map-entity-actions{grid-template-columns:1fr}.map-entity-actions button{width:100%}}
+/* Header menu: the account name is the button, everything else sits under it. */
+h1 .datalinks .menuwrap{position:relative;display:inline-block}
+h1 .datalinks .menubtn{background:none;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:.22rem .55rem;font:inherit;font-size:.75rem;cursor:pointer}
+h1 .datalinks .menubtn:hover,h1 .datalinks .menubtn[aria-expanded="true"]{color:var(--accent);border-color:var(--accent)}
+h1 .datalinks .menu{position:absolute;right:0;top:1.75rem;z-index:99997;min-width:9.5rem;padding:.3rem;background:var(--panel);border:1px solid var(--line);border-radius:9px;box-shadow:0 .6rem 1.6rem rgba(0,0,0,.28);text-align:left}
+h1 .datalinks .menu[hidden]{display:none}
+h1 .datalinks .menu a,h1 .datalinks .menu button{display:block;width:100%;text-align:left;background:none;border:none;color:var(--text);font:inherit;font-size:.78rem;padding:.3rem .5rem;border-radius:6px;cursor:pointer;text-decoration:none}
+h1 .datalinks .menu a:hover,h1 .datalinks .menu button:hover{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent);border-color:transparent}
+h1 .datalinks .menu .account-links[hidden]{display:none}
+/* Timeline: one scrolling column, today in the middle of it. */
+.timeline{position:relative;max-height:min(66vh,38rem);overflow:auto;padding:.1rem .2rem}
+.timeline .tl-month{position:sticky;top:0;z-index:1;background:var(--panel);color:var(--dim);font-size:.72rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:.5rem .2rem .3rem}
+.timeline .tl-today{display:flex;align-items:center;gap:.5rem;color:var(--accent);font-size:.75rem;font-weight:700;padding:.4rem .2rem}
+.timeline .tl-today::after{content:"";flex:1;height:1px;background:var(--accent)}
+.timeline .tl-row{display:grid;grid-template-columns:8rem minmax(0,1fr) auto;gap:.6rem;align-items:start;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid var(--line);border-radius:0;padding:.5rem .2rem;color:var(--text);font:inherit;cursor:pointer}
+.timeline .tl-row:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.timeline .tl-when{color:var(--dim);font-size:.78rem;font-variant-numeric:tabular-nums;white-space:nowrap}
+.timeline .tl-text{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.4;font-size:.85rem}
+.timeline .tl-side{display:flex;gap:.35rem;align-items:center;flex-wrap:wrap;color:var(--dim);font-size:.78rem}
+@media(max-width:44rem){.timeline .tl-row{grid-template-columns:1fr}}
 </style></head><body><main>
-<h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">memory dashboard</small>
-<span class="datalinks"><a class="knowledge-link" href="#" onclick="openKnowledge();return false" title="What needs you, plus entities, tags and the archive of what was removed.">Upkeep<span class="badge" id="upkeepbadge" hidden></span></a> · <a href="#" onclick="exportMemories();return false" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</a> · <a href="#" id="importbtn" onclick="document.getElementById('importfile').click();return false" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</a> · <a href="#" onclick="openAbout();return false" title="What Memry does with what you tell it, in plain words.">about</a> <span class="account-links">· <span title="signed-in account">@__WHOAMI__</span> · <a href="/logout" title="Sign out of this Memry dashboard.">sign out</a></span></span></h1>
+<h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">Dashboard</small>
+<span class="datalinks"><a class="knowledge-link" href="#" onclick="openKnowledge();return false" title="What needs you, plus entities, tags and the archive of what was removed.">Upkeep<span class="badge" id="upkeepbadge" hidden></span></a> <a class="knowledge-link" href="#" onclick="openTimeline();return false" title="Every memory that carries a time, in date order around today.">Timeline</a> <span class="menuwrap"><button class="menubtn" id="usermenubtn" aria-haspopup="menu" aria-expanded="false" onclick="toggleUserMenu();return false" title="Your account, and what you can do with this store.">@__WHOAMI__</button><div class="menu" id="usermenu" role="menu" hidden><button role="menuitem" onclick="menuExport()" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</button><button role="menuitem" id="importbtn" onclick="chooseImportFile()" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</button><button role="menuitem" onclick="menuAbout()" title="What Memry does with what you tell it, in plain words.">about</button><span class="account-links" id="accountlinks" data-account="__WHOAMI__"><a role="menuitem" href="/logout" title="Sign out of this Memry dashboard.">sign out</a></span></div></span></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <span class="qwrap"><input id="q" placeholder="search memories…" oninput="toggleClear()">
@@ -263,8 +283,8 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 </div>
 <div class="gx-read" id="mapread"></div><div class="gx-stat" id="mapstat"></div>
 <div class="gx-legend" aria-label="Memory type shapes">
-  <span><i class="gx-shape semantic"></i>semantic</span><span><i class="gx-shape procedural"></i>procedural</span>
-  <span><i class="gx-shape episodic"></i>episodic</span><span><i class="gx-shape working"></i>working</span>
+  <span data-memory-type="semantic"><i class="gx-shape semantic"></i>semantic</span><span data-memory-type="procedural"><i class="gx-shape procedural"></i>procedural</span>
+  <span data-memory-type="episodic"><i class="gx-shape episodic"></i>episodic</span><span data-memory-type="working"><i class="gx-shape working"></i>working</span>
 </div>
 <div class="gx-empty" id="mapempty" hidden></div></div>
 <section class="map-entity-detail" id="mapentitydetail" aria-live="polite" hidden></section>
@@ -385,6 +405,11 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
   </details>
 </section>
 </div></div>
+<div class="modal" id="timemodal"><div class="sheet" style="width:min(96vw,46rem)">
+<h2><button class="x" onclick="closeTimeline()" title="close">x</button>Timeline</h2>
+<p class="hint">Every memory that says when the thing itself happens, oldest first. Today opens near the top, with what has passed above it.</p>
+<div class="timeline" id="timelinebody"></div>
+</div></div>
 </main><script>
 // Auth rides the session cookie set at /login; no key to paste anymore.
 const H = {'Content-Type':'application/json'};
@@ -443,9 +468,17 @@ function normalizedMemoryType(m){
   const type=String(m.memory_type||m.type||'semantic').toLowerCase();
   return ['semantic','procedural','episodic','working'].includes(type)?type:'semantic';
 }
+// One wording for what each memory type means. Every badge, the map legend and
+// the timeline read it from here, so the four sentences cannot drift apart.
+const MEMORY_TYPE_HELP={
+  semantic:'A fact that holds for a while: who someone is, what you prefer, how something works.',
+  episodic:'Something tied to a particular time: a meeting, a decision, an incident.',
+  procedural:'How to do something, or a rule to follow: steps, conventions, instructions.',
+  working:'A short-lived note for a task in progress. It fades fastest of the four.'
+};
 function memoryTypeBadge(m){
   const type=normalizedMemoryType(m);
-  return `<span class="tag memory-type ${type}"><i class="type-symbol" aria-hidden="true"></i>${type}</span>`;
+  return `<span class="tag memory-type ${type}" title="${MEMORY_TYPE_HELP[type]}"><i class="type-symbol" aria-hidden="true"></i>${type}</span>`;
 }
 // When the fact itself happens, which is not the date the card already shows
 // (that one is when it was recorded).
@@ -1466,7 +1499,7 @@ function showQueueTab(kind){queueTab=kind;renderUpkeepQueue(lastQueue)}
 function renderUpkeepQueue(queue){
   const el=document.getElementById('upkeepqueue');
   upkeepCount(queue.length);
-  if(!queue.length){el.innerHTML='<div class="empty">Nothing needs you.</div>';return}
+  if(!queue.length){el.innerHTML='<div class="empty">Nothing needs your attention right now.</div>';return}
   const byKind={};
   for(const item of queue)(byKind[item.kind]??=[]).push(item);
   const sections=QUEUE_SECTIONS.filter(sec=>byKind[sec.kind]);
@@ -1877,6 +1910,141 @@ async function importMemories(file){
   btn.textContent='import';
   loadAll();loadStats();loadSearchFilters();loadMapData();
 }
+// -- header menu: one button per account, the rest of the links under it ----
+function userMenuOpen(){return document.getElementById('usermenu').hidden===false}
+function setUserMenu(open){
+  document.getElementById('usermenu').hidden=!open;
+  document.getElementById('usermenubtn').setAttribute('aria-expanded',open?'true':'false');
+}
+function toggleUserMenu(){setUserMenu(!userMenuOpen())}
+function closeUserMenu(){setUserMenu(false)}
+function menuExport(){closeUserMenu();exportMemories()}
+function menuAbout(){closeUserMenu();openAbout()}
+function chooseImportFile(){closeUserMenu();document.getElementById('importfile').click()}
+// Without a signed-in account the sign-out link is hidden and there is no name
+// to put on the button, so it says what it is instead.
+function initUserMenu(){
+  const button=document.getElementById('usermenubtn');
+  const links=document.getElementById('accountlinks');
+  const name=links&&!links.hidden?(links.dataset.account||'').trim():'';
+  button.textContent=name?'@'+name:'menu';
+  if(!name&&links)links.hidden=true;
+  setUserMenu(false);
+}
+function labelMemoryTypes(){
+  document.querySelectorAll('[data-memory-type]').forEach(node=>{
+    const help=MEMORY_TYPE_HELP[node.dataset.memoryType];
+    if(help)node.setAttribute('title',help);
+  });
+}
+document.addEventListener('click',event=>{
+  if(!userMenuOpen())return;
+  if(event.target.closest&&event.target.closest('.menuwrap'))return;
+  closeUserMenu();
+});
+
+// -- timeline: every memory that carries a time, in order around today ------
+const MONTH_NAMES=['January','February','March','April','May','June','July',
+  'August','September','October','November','December'];
+function timelineMonth(at){
+  const parts=String(at).slice(0,7).split('-');
+  return (MONTH_NAMES[Number(parts[1])-1]||parts[1])+' '+parts[0];
+}
+// Where a memory sits: a one-off at its own start, a repeating one at its next
+// turn. A yearly date carries no year of its own, so it waits for the next
+// occurrence the server worked out; without one there is nothing to place.
+function timelinePoint(m){
+  const w=m&&m.when;
+  if(!w||!w.start)return null;
+  const start=String(w.start);
+  if(w.recurrence||start.startsWith('--'))
+    return m.next_occurrence?String(m.next_occurrence):null;
+  return start;
+}
+// Pure on purpose: rows and a date in, the entries the timeline draws out. The
+// ordering and the place of the Today line are the part worth testing, and
+// neither needs a DOM.
+function timelineEntries(rows,todayISO){
+  const today=String(todayISO||'').slice(0,10);
+  const dated=[];
+  for(const m of rows||[]){
+    const at=timelinePoint(m);
+    if(at)dated.push({at:String(at),memory:m});
+  }
+  dated.sort((a,b)=>a.at<b.at?-1:(a.at>b.at?1:0));
+  const out=[];
+  let month='',todayPlaced=false;
+  const openMonth=at=>{
+    const label=timelineMonth(at);
+    if(label===month)return;
+    month=label;out.push({kind:'month',label});
+  };
+  const placeToday=()=>{
+    if(todayPlaced||!today)return;
+    todayPlaced=true;openMonth(today);out.push({kind:'today',at:today});
+  };
+  for(const item of dated){
+    if(item.at.slice(0,10)>=today)placeToday();
+    openMonth(item.at);
+    out.push({kind:'row',at:item.at,memory:item.memory});
+  }
+  placeToday();
+  return out;
+}
+function timelineRepeat(m){
+  const w=m.when||{};
+  if(!w.recurrence)return'';
+  if(w.recurrence==='daily')return'every day';
+  return'every '+(WHEN_UNITS[w.recurrence]||w.recurrence);
+}
+function timelineRow(entry){
+  const m=entry.memory,at=String(entry.at);
+  const day=at.slice(0,10),time=at.length>10?at.slice(11,16):'';
+  const repeat=timelineRepeat(m);
+  return `<button class="tl-row" onclick='openTimelineMemory(${JSON.stringify(String(m.id))})'>
+    <span class="tl-when">${esc(day)}${time?' '+esc(time):''}</span>
+    <span class="tl-text">${esc(m.content)}</span>
+    <span class="tl-side">${memoryTypeBadge(m)}${repeat?`<span class="tag when-chip">${esc(repeat)}</span>`:''}</span></button>`;
+}
+function renderTimeline(rows){
+  const el=document.getElementById('timelinebody');
+  const entries=timelineEntries(rows,new Date().toISOString().slice(0,10));
+  if(!entries.some(entry=>entry.kind==='row')){
+    el.innerHTML='<div class="empty">No memories carry a time yet.</div>';return;
+  }
+  el.innerHTML=entries.map(entry=>
+    entry.kind==='month'?`<div class="tl-month">${esc(entry.label)}</div>`
+    :entry.kind==='today'?`<div class="tl-today" id="tl-today">Today · ${esc(entry.at)}</div>`
+    :timelineRow(entry)).join('');
+  // Today near the top: what has passed is above it, what is coming below.
+  const marker=document.getElementById('tl-today');
+  if(marker)el.scrollTop=Math.max(0,marker.offsetTop-26);
+}
+function setTimelineOpen(open){
+  const modal=document.getElementById('timemodal'),wasOpen=modal.classList.contains('on');
+  if(open&&!wasOpen)suspendMapForKnowledge();
+  modal.classList.toggle('on',open);
+  document.documentElement.classList.toggle('knowledge-open',open);
+  document.body.classList.toggle('knowledge-open',open);
+  if(!open&&wasOpen)resumeMapAfterKnowledge();
+}
+async function openTimeline(){
+  closeUserMenu();
+  setTimelineOpen(true);
+  const el=document.getElementById('timelinebody');
+  el.innerHTML='<div class="empty">loading…</div>';
+  let rows;
+  try{rows=await api('/api/v1/memories?when_since=1900-01-01&limit=1000')}
+  catch(error){el.innerHTML='<div class="empty">The timeline could not be loaded.</div>';return}
+  renderTimeline(Array.isArray(rows)?rows:[]);
+}
+function closeTimeline(){setTimelineOpen(false)}
+function openTimelineMemory(id){closeTimeline();showMemory(id)}
+window.addEventListener('keydown',event=>{
+  if(event.key!=='Escape')return;
+  if(userMenuOpen()){closeUserMenu();return}
+  if(document.getElementById('timemodal').classList.contains('on'))closeTimeline();
+});
 let serverInfo={};
 async function loadStats(){
   const s=await api('/api/v1/stats');
@@ -1890,6 +2058,7 @@ async function loadStats(){
   document.getElementById('stats').textContent=bits.join(' · ');
 }
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
+initUserMenu(); labelMemoryTypes();
 syncPanels(); loadStats(); loadSearchFilters(); loadMapData(); loadAll(); loadUpkeepBadge();
 </script></body></html>"""
 

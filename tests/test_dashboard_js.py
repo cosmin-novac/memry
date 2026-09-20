@@ -325,7 +325,9 @@ def test_primary_dashboard_controls_have_tooltips_and_compact_add():
     assert 'title="What needs you, plus entities' in html
     assert 'class="account-links"' in html
     assert html.index('class="knowledge-link"') < html.index('class="account-links"')
-    assert html.index('>about</a>') < html.index('class="account-links"')
+    # export, import, about and sign out now live behind the account button,
+    # where about still comes before the sign-out link.
+    assert html.index('>about</button>') < html.index('class="account-links"')
     assert 'id="addbtn"' in html
     assert 'aria-label="Add a memory">+</button>' in html
     assert 'title="Show or hide the memory map."' in html
