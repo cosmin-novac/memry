@@ -242,11 +242,17 @@ def test_rest_map_is_complete_content_free_and_not_card_paginated():
     concept = store.backend.insert_entity(
         Entity(name="Retrieval", entity_type="concept", user_id="ada")
     )
-    for entity in (person, concept):
+    # a phrase seen once is not a planet; the concept earns its place by
+    # appearing in two memories, the person by being a person
+    phrase = store.backend.insert_entity(
+        Entity(name="one-off phrase", entity_type="concept", user_id="ada")
+    )
+    for entity, memory in ((person, memories[0]), (concept, memories[0]),
+                           (concept, memories[1]), (phrase, memories[2])):
         store.backend.add_mention(
             EntityMention(
                 entity_id=entity.id,
-                memory_id=memories[0].id,
+                memory_id=memory.id,
                 surface=entity.name,
             )
         )
@@ -256,6 +262,8 @@ def test_rest_map_is_complete_content_free_and_not_card_paginated():
             "/api/v1/memories", params={"user_id": "ada", "limit": 100}
         ).json()
         response = scoped_client.get("/api/v1/map", params={"user_id": "ada"})
+        assert "one-off phrase" not in {n["label"] for n in response.json()["entities"]}
+        assert response.json()["entity_names"] == 3
 
     assert response.status_code == 200
     data = response.json()
@@ -548,7 +556,7 @@ def test_maintenance_status_lists_every_automatic_pass(client):
     """Background work that rewrites memories must be inspectable."""
     info = client.get("/api/v1/maintenance?user_id=u").json()
     passes = {p["key"]: p for p in info["passes"]}
-    assert set(passes) == {"dedup_entities", "consolidation", "durability"}
+    assert set(passes) == {"dedup_entities", "consolidation", "durability", "structure"}
     # durability needs a decision provider, and says so rather than failing quietly
     assert passes["durability"]["needs_decider"] is True
     assert info["decider_available"] is False

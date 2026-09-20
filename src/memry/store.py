@@ -13,6 +13,8 @@ backends, LLMs, and embedders are all replaceable underneath it.
 
 from __future__ import annotations
 
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -48,6 +50,9 @@ from .intelligence.entities import (
     classify_entity_types,
     judge_entity_referents,
     non_referent_reason,
+    screen_names,
+    SCREEN_GATE,
+    SCREEN_SKIPS,
     propose_same_name_duplicates,
     resolve_mentions,
     resolve_open_proposals,
@@ -62,6 +67,14 @@ from .intelligence.extraction import (
     verify_coverage,
 )
 from .intelligence.reconcile import reconcile_candidate
+from .intelligence.structure import (
+    ANCHOR_TYPES,
+    Node,
+    derive_homes,
+    hub_reason,
+    is_hub,
+    same_name_plan,
+)
 from .models import (
     MEMORY_TYPES,
     AddAction,
@@ -1280,10 +1293,50 @@ class MemoryStore:
         agent_id: str | None = None,
         run_id: str | None = None,
     ) -> dict[str, Any]:
-        """Content-free aggregate graph over every active memory in scope."""
-        return self.backend.knowledge_map(
+        """Content-free aggregate graph over every active memory in scope.
+
+        The entity side shows hubs only. A part that has a home is not a planet
+        of its own: it rides along on its home as one of its ``parts``, which
+        is what keeps a store of three thousand names down to a few hundred
+        planets without hiding anything that was earned.
+        """
+        data = self.backend.knowledge_map(
             Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         )
+        structure = self.entity_structure(user_id=user_id)
+        nodes = data.get("entities") or []
+        by_id = {node.get("entity_id"): node for node in nodes}
+        planets: list[dict[str, Any]] = []
+        parts: dict[str, list[dict[str, Any]]] = {}
+        for node in nodes:
+            info = structure.get(node.get("entity_id"))
+            if not info or not info["hub"]:
+                continue
+            home = info["home"]
+            if (
+                home and home["id"] in by_id
+                and node.get("entity_type") not in ANCHOR_TYPES
+                and structure.get(home["id"], {}).get("hub")
+            ):
+                parts.setdefault(home["id"], []).append({
+                    "entity_id": node["entity_id"], "label": node["label"],
+                    "count": node["count"],
+                })
+                continue
+            planets.append(node)
+        for node in planets:
+            mine = sorted(parts.get(node["entity_id"], []),
+                          key=lambda part: (-part["count"], part["label"].lower()))
+            node["parts"] = mine[:24]
+            node["part_count"] = len(mine)
+        shown = {node["key"] for node in planets}
+        data["entity_names"] = len(nodes)
+        data["entities"] = planets
+        data["entity_edges"] = [
+            edge for edge in data.get("entity_edges") or []
+            if edge["a"] in shown and edge["b"] in shown
+        ]
+        return data
 
     def categories(
         self,
@@ -2367,7 +2420,9 @@ class MemoryStore:
     # an env-var edit and a restart. A runtime override lives in the meta table
     # so the dashboard toggle survives restarts; config stays the default when
     # no override was ever set.
-    _MAINTENANCE_KEYS = ("dedup_entities", "tag_abstraction", "durability", "consolidation")
+    _MAINTENANCE_KEYS = (
+        "dedup_entities", "tag_abstraction", "durability", "consolidation", "structure",
+    )
 
     #: How many memories one durability pass scores. Jev answers 128 questions
     #: in a single call, so the batch is bounded by prudence, not by cost.
@@ -2426,6 +2481,8 @@ class MemoryStore:
             return self.decider.available
         if key == "consolidation":
             return self.llm.available
+        if key == "structure":
+            return True
         return False
 
     def set_maintenance_enabled(self, key: str, enabled: bool) -> bool:
@@ -2441,6 +2498,183 @@ class MemoryStore:
 
     def last_tag_run(self, user_id: str | None) -> str | None:
         return self.backend.get_meta(_tag_run_key(user_id))
+
+    # ------------------------------------------------------------------
+    # entity structure: hubs, homes and shared names (intelligence/structure.py)
+    # ------------------------------------------------------------------
+    #: Names screened per pass; one typed question each, asked in parallel.
+    SCREEN_BATCH = 300
+
+    def _structure_inputs(self, user_id: str | None):
+        scope = Scope(user_id=user_id)
+        entities = self.backend.list_entities(scope, limit=1_000_000)
+        links = self.backend.entity_memory_links(scope)
+        relations = [
+            r for r in self.backend.list_relations(scope, limit=1_000_000)
+            if r.invalid_at is None
+        ]
+        memories = Counter(entity_id for entity_id, _ in links)
+        involved: Counter[str] = Counter()
+        for relation in relations:
+            involved[relation.subject] += 1
+            involved[relation.object] += 1
+        nodes = [
+            Node(
+                id=e.id, name=e.name, normalized=e.normalized or e.name.strip().lower(),
+                entity_type=e.entity_type, memories=memories[e.id],
+                relations=involved[e.id], created_at=e.created_at,
+            )
+            for e in entities
+        ]
+        triples = [(r.subject, r.predicate, r.object) for r in relations]
+        return entities, nodes, links, triples
+
+    def entity_structure(self, *, user_id: str | None = None) -> dict[str, dict[str, Any]]:
+        """Hub status and home for every active entity.
+
+        Computed on request and never stored, so a phrase seen a second time is
+        a hub the next time anyone looks, and nothing has to be kept in step.
+        """
+        _, nodes, links, triples = self._structure_inputs(user_id)
+        homes = derive_homes(nodes, links, triples)
+        names = {node.id: node.name for node in nodes}
+        out: dict[str, dict[str, Any]] = {}
+        for node in nodes:
+            home = homes.get(node.id)
+            out[node.id] = {
+                "hub": is_hub(node.entity_type, node.memories, node.relations),
+                "why": hub_reason(node.entity_type, node.memories, node.relations),
+                "memories": node.memories,
+                "relations": node.relations,
+                "home": ({"id": home["id"], "name": names.get(home["id"], ""),
+                          "share": home["share"], "source": home["source"]}
+                         if home else None),
+            }
+        return out
+
+    def run_structure_pass(
+        self, *, user_id: str | None = None, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Record where parts belong, and settle names that are shared.
+
+        Nothing is deleted. A home is a note in the entity's metadata,
+        recomputed every pass. A merge sets ``merged_into`` on the entity with
+        less evidence, exactly as a confirmed proposal does. ``dry_run=True``
+        changes nothing and returns the full plan instead.
+        """
+        entities, nodes, links, triples = self._structure_inputs(user_id)
+        homes = derive_homes(nodes, links, triples)
+        names = {node.id: node.name for node in nodes}
+        outcome: dict[str, Any] = {
+            "homes": len(homes), "homes_changed": 0,
+            "merged": 0, "asked": 0, "separate": 0, "dry_run": dry_run,
+        }
+        for entity in entities:
+            wanted = homes.get(entity.id)
+            stored = None
+            if wanted:
+                stored = {"id": wanted["id"], "name": names.get(wanted["id"], ""),
+                          "share": wanted["share"], "source": wanted["source"]}
+            metadata = dict(entity.metadata or {})
+            if metadata.get("home") == stored:
+                continue
+            outcome["homes_changed"] += 1
+            if dry_run:
+                continue
+            if stored:
+                metadata["home"] = stored
+            else:
+                metadata.pop("home", None)
+            self.backend.set_entity_metadata(entity.id, metadata)
+
+        plan = same_name_plan(nodes, homes)
+        tally = {"merge": "merged", "ask": "asked", "separate": "separate"}
+        for step in plan:
+            outcome[tally[step["action"]]] += 1
+            if step["action"] == "merge" and not dry_run:
+                self.backend.merge_entities(step["keep"], step["other"])
+        if dry_run:
+            outcome["plan"] = [
+                {"action": step["action"], "name": step["name"], "reason": step["reason"],
+                 "keep_home": names.get((homes.get(step["keep"]) or {}).get("id", ""), ""),
+                 "other_home": names.get((homes.get(step["other"]) or {}).get("id", ""), "")}
+                for step in plan
+            ]
+            outcome["home_list"] = sorted(
+                (names.get(entity_id, ""), names.get(home["id"], ""), home["share"], home["source"])
+                for entity_id, home in homes.items()
+            )
+        return outcome
+
+    def run_name_screen(
+        self, *, user_id: str | None = None, limit: int | None = None
+    ) -> dict[str, Any]:
+        """Ask the decision provider what each not-yet-screened name is.
+
+        The verdict is a note on the entity and nothing more: a name judged a
+        value or a role shows up under Upkeep for a yes or a no. Anchors are
+        not asked about, and neither is a name that was screened or kept.
+        """
+        outcome: dict[str, Any] = {"screened": 0, "queued": 0, "skipped": 0}
+        if not self.decider.available:
+            outcome["skipped"] = -1
+            return outcome
+        scope = Scope(user_id=user_id)
+        pending = [
+            e for e in self.backend.list_entities(scope, limit=1_000_000)
+            if e.entity_type not in ANCHOR_TYPES and "screen" not in (e.metadata or {})
+        ][: limit or self.SCREEN_BATCH]
+
+        def ask(entity: Entity):
+            memories = self.backend.entity_memories(entity.id, limit=1)
+            if not memories:
+                return entity, None
+            verdict = screen_names(self.decider, memories[0].content, [entity.name])
+            return entity, verdict.get(entity.name.strip().lower())
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(ask, pending))
+        for entity, verdict in results:
+            if verdict is None:
+                outcome["skipped"] += 1
+                continue
+            metadata = dict(entity.metadata or {})
+            metadata["screen"] = {**verdict, "at": utcnow()}
+            self.backend.set_entity_metadata(entity.id, metadata)
+            outcome["screened"] += 1
+            if verdict["verdict"] in SCREEN_SKIPS and verdict["probability"] >= SCREEN_GATE:
+                outcome["queued"] += 1
+        return outcome
+
+    def _screen_rows(self, user_id: str | None) -> list[tuple[Entity, dict[str, Any]]]:
+        """Entities whose screening verdict is waiting for a person."""
+        rows = []
+        for entity in self.backend.list_entities(Scope(user_id=user_id), limit=1_000_000):
+            screen = (entity.metadata or {}).get("screen")
+            if (
+                isinstance(screen, dict)
+                and not screen.get("kept")
+                and screen.get("verdict") in SCREEN_SKIPS
+                and float(screen.get("probability") or 0.0) >= SCREEN_GATE
+            ):
+                rows.append((entity, screen))
+        return rows
+
+    def _role_relation(self, entity: Entity) -> tuple[str, str, str] | None:
+        """(person id, predicate, home id) when a role name has one obvious
+        holder: exactly one person across its memories, and a home."""
+        home = (entity.metadata or {}).get("home")
+        if not isinstance(home, dict) or not home.get("id"):
+            return None
+        people: set[str] = set()
+        for memory in self.backend.entity_memories(entity.id, limit=50):
+            for other in self.backend.entities_of_memory(memory.id):
+                if other.entity_type == "person" and other.merged_into is None:
+                    people.add(other.id)
+        if len(people) != 1:
+            return None
+        predicate = re.sub(r"[^a-z0-9]+", "_", entity.name.strip().lower()).strip("_") + "_of"
+        return next(iter(people)), predicate, home["id"]
 
     # ------------------------------------------------------------------
     # upkeep: what runs on its own, and the queue of what needs a person
@@ -2480,9 +2714,15 @@ class MemoryStore:
         if key == "dedup_entities":
             self.merge_obvious_topics(user_id=user_id)
             result = self.resolve_entities(user_id=user_id)
-            if self.llm.available:
+            # A calibrated provider judges names one by one in their memory; the
+            # text model's batch review is the fallback when there is none.
+            if self.decider.available:
+                result.update(self.run_name_screen(user_id=user_id))
+            elif self.llm.available:
                 result.update(self.run_entity_review(user_id=user_id))
             self.backend.set_meta(_dedup_run_key(user_id), utcnow())
+        elif key == "structure":
+            result = self.run_structure_pass(user_id=user_id)
         elif key == "tag_abstraction":
             result = self.abstract_tags(user_id=user_id)
         elif key == "durability":
@@ -2509,9 +2749,10 @@ class MemoryStore:
         if self.upkeep_paused():
             return ran
         every = self.config.dedup_interval_days
-        if self.maintenance_enabled("dedup_entities") and _due(
-            self.backend.get_meta(_dedup_run_key(user_id)), every, now
-        ):
+        dedup_due = _due(self.backend.get_meta(_dedup_run_key(user_id)), every, now)
+        if self.maintenance_enabled("structure") and dedup_due:
+            ran["structure"] = self.run_upkeep_pass("structure", user_id=user_id)
+        if self.maintenance_enabled("dedup_entities") and dedup_due:
             ran["dedup_entities"] = self.run_upkeep_pass("dedup_entities", user_id=user_id)
         if (
             self.maintenance_enabled("tag_abstraction") and self.llm.available
@@ -2648,6 +2889,32 @@ class MemoryStore:
                 "accept": "remove", "decline": "keep",
             })
 
+        listed = {item["id"] for item in items if item["kind"] == "entity_review"}
+        for entity, screen in self._screen_rows(user_id):
+            if entity.id in listed:
+                continue
+            if screen["verdict"] == "role":
+                relation = self._role_relation(entity)
+                home = ((entity.metadata or {}).get("home") or {}).get("name", "")
+                if relation:
+                    holder = self.backend.get_entity(relation[0])
+                    detail = (f"Looks like a role {holder.name if holder else 'someone'} holds"
+                              f" in {home}. Accepting records that as a relation and removes the name.")
+                else:
+                    detail = ("Looks like a role someone holds, not a name of its own"
+                              + (f" (in {home})." if home else "."))
+                items.append({
+                    "kind": "role", "id": entity.id, "title": entity.name, "detail": detail,
+                    "accept": "remove the name", "decline": "keep",
+                })
+            else:
+                items.append({
+                    "kind": "entity_review", "id": entity.id, "title": entity.name,
+                    "detail": "Judged a value or a fragment, not a person, place or thing. "
+                              "Removing it never touches the memories behind it.",
+                    "accept": "remove", "decline": "keep",
+                })
+
         health = tag_health if tag_health is not None else self.tag_health(user_id=user_id)
         ignored = {
             tuple(sorted(pair)) for pair in self._upkeep_get("tag_split:ignored", user_id, [])
@@ -2694,6 +2961,23 @@ class MemoryStore:
                 return False
             self._merge_group(memories, entry["merged_content"], user_id=user_id)
             return True
+        if kind in ("entity_review", "role"):
+            entity = self.backend.get_entity(item_id)
+            screen = (entity.metadata or {}).get("screen") if entity else None
+            if isinstance(screen, dict) and _owned(entity, owner_prefix):
+                if not accept:
+                    metadata = dict(entity.metadata or {})
+                    metadata["screen"] = {**screen, "kept": True}
+                    self.backend.set_entity_metadata(entity.id, metadata)
+                    return True
+                if kind == "role":
+                    relation = self._role_relation(entity)
+                    if relation:
+                        self.backend.add_relation(Relation(
+                            subject=relation[0], predicate=relation[1],
+                            object=relation[2], user_id=user_id,
+                        ))
+                return self.remove_entities([item_id], owner_prefix=owner_prefix) > 0
         if kind == "entity_review":
             pending = self._upkeep_get("entity_review:pending", user_id, [])
             if not any(p["id"] == item_id for p in pending):

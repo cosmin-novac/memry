@@ -355,6 +355,15 @@ class MemoryBackend(ABC):
     def set_entity_type(self, entity_id: str, entity_type: str) -> None:
         return None
 
+    def set_entity_metadata(self, entity_id: str, metadata: dict[str, Any]) -> None:
+        """Replace an entity's metadata. Derived notes only (home, screening);
+        it never touches ``updated_at``, so recomputing them changes no order."""
+        return None
+
+    def entity_memory_links(self, scope: Scope) -> list[tuple[str, str]]:
+        """(entity_id, memory_id) for every active entity and active memory."""
+        return []
+
     def list_entities(
         self, scope: Scope, *, include_merged: bool = False, limit: int = 100
     ) -> list[Entity]:

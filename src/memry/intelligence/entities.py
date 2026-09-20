@@ -455,6 +455,23 @@ _QUANTITY_UNITS = {
     "eur", "usd", "kg", "km", "mg", "ml", "kpa", "kwh", "kw", "watt", "%",
 }
 _URL_EMAIL_RE = re.compile(r"://|^www\.|^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# A number welded to a unit, a rate or a range of them: "250 ms", "34px",
+# "$0.4304/s", "900-450 ms", "10^5". Matched against the original spelling,
+# because single letters only count as units in lower case: "1.3m" is a
+# length, "3M" is a company.
+_MEASURE_UNIT = (
+    r"(?:ms|s|sec|secs|min|mins|h|hrs?|px|pt|em|rem|mm|cm|m|km|kb|mb|gb|tb|"
+    r"fps|hz|khz|mhz|ghz|k|x|%|tokens?|eur|usd|kg|g|mg|ml|l|kw|kwh|w|v)"
+)
+_MEASURE_RE = re.compile(
+    r"^[~<>=≤≥]*[$€£]?\d[\d.,^]*\s?" + _MEASURE_UNIT + r"?"
+    r"(?:\s?[-–—]\s?[$€£]?\d[\d.,]*\s?" + _MEASURE_UNIT + r"?)?"
+    r"(?:/(?:s|sec|min|h|hr|day|mo|month|yr|year|" + _MEASURE_UNIT + r"))?$"
+)
+# A count of ordinary things: "22 tests", "40 opponents", "450 ms floor". The
+# words after the number must all be lower case in the original, which is what
+# keeps "50 Cent" and "7 Wonders" out.
+_COUNT_RE = re.compile(r"^\d[\d.,^]*(?:\s?[-–]\s?\d[\d.,]*)?\s+[a-z][a-z/\- ]*$")
 _SALUTATIONS = (
     "sehr geehrte", "dear sir", "dear madam", "dear sir or madam",
     "mit freundlichen grüßen", "best regards", "kind regards",
@@ -482,6 +499,11 @@ def non_referent_reason(name: str) -> str | None:
         return "a placeholder or punctuation fragment"
     if any(text.startswith(s) for s in _SALUTATIONS):
         return "a salutation, not a referent"
+    original = " ".join((name or "").split()).strip()
+    if _MEASURE_RE.match(original):
+        return "an amount or measurement, not a referent"
+    if _COUNT_RE.match(original):
+        return "a count of things, not a referent"
     words = text.replace("/", " ").split()
     if words and re.match(r"^[^a-zäöüß]*\d", words[0]) and all(
         re.fullmatch(r"[\d\W]+", w) or w in _QUANTITY_UNITS for w in words
@@ -537,6 +559,71 @@ def judge_entity_referents(llm: LLM, names: list[str]) -> list[str]:
             if j in offered]
 
 
+#: What a name can be, asked of the decision provider for names the store has
+#: never seen. Roles and values are not made entities; topics still are, and
+#: earn hub status or not like anything else.
+SCREEN_CRITERIA = {
+    "named_thing": ("A specific person, organization, product, project, place, "
+                    "document, file, feature or other thing with a name of its "
+                    "own, that one could later ask questions about."),
+    "generic_topic": ("An ordinary noun or topic with no identity of its own, "
+                      "such as billing, content or conversation."),
+    "role": ("A role or function that someone or something holds, such as "
+             "creator, client, landlord or assistant."),
+    "value_or_fragment": ("A measurement, number, amount, count, date, path, "
+                          "quoted text, user-interface string, instruction or "
+                          "fragment of a sentence."),
+}
+#: Verdicts that keep a name from becoming an entity.
+SCREEN_SKIPS = frozenset({"role", "value_or_fragment"})
+#: Probability the provider must put on a skip verdict before it is believed.
+#: Measured in evals/entity_structure_benchmark.py; see docs/self-hosting.md.
+SCREEN_GATE = 0.80
+
+
+def screen_names(
+    decider: Decider | None, memory_content: str, names: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Ask what each name is, in the memory it came from.
+
+    Returns ``{normalized name: {"verdict", "probability"}}`` for the names the
+    provider answered. The name travels in the question and the memory is the
+    state, because a question that carries no information still gets a
+    confident-looking answer. Never raises, never blocks a write: no provider
+    or no answer means nothing is screened out.
+    """
+    if decider is None or not decider.available or not names:
+        return {}
+    questions = {
+        f"s{i}": Choice(instructions=f'In this memory, what is "{name}"?',
+                        criteria=SCREEN_CRITERIA)
+        for i, name in enumerate(names)
+    }
+    try:
+        answers = decider.decide(
+            "A memory from a personal long-term memory store: " + memory_content,
+            questions,
+        )
+    except Exception:  # a provider hiccup must never cost a write its entities
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for i, name in enumerate(names):
+        answer = answers[f"s{i}"]
+        if answer.available and answer.value in SCREEN_CRITERIA:
+            probability = (answer.probabilities or {}).get(answer.value, answer.confidence)
+            out[name.strip().lower()] = {
+                "verdict": answer.value, "probability": round(float(probability), 3)}
+    return out
+
+
+def screened_out(verdict: dict[str, Any] | None, gate: float = SCREEN_GATE) -> bool:
+    return bool(
+        verdict
+        and verdict.get("verdict") in SCREEN_SKIPS
+        and float(verdict.get("probability") or 0.0) >= gate
+    )
+
+
 def resolve_mentions(
     *,
     backend: MemoryBackend,
@@ -555,10 +642,21 @@ def resolve_mentions(
     ``attach=False`` when the caller will replace all mentions atomically."""
     types = types or {}
     resolved: dict[str, Entity] = {}
-    for surface in surfaces:
-        surface = surface.strip()
+    # A name the store has never seen is screened before it becomes an entity:
+    # mechanically first (free, certain), then one typed question per name. A
+    # name that already has an entity is left alone; upkeep reviews those.
+    cleaned = [s.strip() for s in surfaces if s and s.strip()]
+    unseen = [
+        s for s in dict.fromkeys(cleaned)
+        if not non_referent_reason(s)
+        and not backend.find_entity_candidates(s.lower(), scope)
+    ]
+    verdicts = screen_names(decider, memory_content, unseen)
+    for surface in cleaned:
         normalized = surface.lower()
         if not normalized or normalized in resolved:
+            continue
+        if non_referent_reason(surface) or screened_out(verdicts.get(normalized)):
             continue
 
         candidates = backend.find_entity_candidates(normalized, scope)
@@ -639,11 +737,20 @@ def propose_same_name_duplicates(
     predate a fix - or whose judgement once came back "different" - sit in the
     graph forever with nothing scheduled to look at them again. This gives
     maintenance a way to reconsider them as evidence accumulates.
+
+    A pair whose members live under different homes ("privacy policy" in two
+    projects) is two things by construction, so it is never raised: nobody can
+    answer that question, and nobody should be asked it.
     """
     groups: dict[str, list[Entity]] = {}
     for entity in backend.list_entities(scope, limit=10_000):
         if entity.merged_into is None:
             groups.setdefault(entity.normalized or entity.name.lower(), []).append(entity)
+
+    def home_of(entity: Entity) -> str | None:
+        home = (entity.metadata or {}).get("home")
+        return home.get("id") if isinstance(home, dict) else None
+
     created = 0
     for members in groups.values():
         if len(members) < 2:
@@ -652,6 +759,9 @@ def propose_same_name_duplicates(
         for other in members[1:]:
             if created >= limit:
                 return created
+            home_a, home_b = home_of(anchor), home_of(other)
+            if home_a and home_b and home_a != home_b:
+                continue
             if backend.find_proposal(anchor.id, other.id) is None:
                 backend.add_proposal(
                     MergeProposal(

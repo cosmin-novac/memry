@@ -1911,6 +1911,26 @@ class LocalBackend(MemoryBackend):
             )
             self._db.commit()
 
+    def set_entity_metadata(self, entity_id: str, metadata: dict[str, Any]) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE entities SET metadata = ? WHERE id = ?",
+                (json.dumps(metadata), entity_id),
+            )
+            self._db.commit()
+
+    def entity_memory_links(self, scope: Scope) -> list[tuple[str, str]]:
+        clause, params = _scope_clause(scope, prefix="e.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT DISTINCT em.entity_id, em.memory_id FROM entity_mentions em "
+                "JOIN entities e ON e.id = em.entity_id "
+                "JOIN memories m ON m.id = em.memory_id "
+                f"WHERE e.merged_into IS NULL AND m.invalid_at IS NULL AND {clause}",
+                params,
+            ).fetchall()
+        return [(row["entity_id"], row["memory_id"]) for row in rows]
+
     def entities_of_memory(self, memory_id: str) -> list[Entity]:
         with self._lock:
             rows = self._db.execute(

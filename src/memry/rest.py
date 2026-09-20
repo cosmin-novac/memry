@@ -694,7 +694,8 @@ function galaxyRead(){
     const types=Object.entries(node.typeCounts).map(([type,count])=>count+' '+type).join(', ');
     const heading=node.kind==='tag'?'#'+node.label:node.label+' · '+node.entityType;
     readEl.innerHTML='<b>'+esc(heading)+'</b> · '+node.count+' memor'+(node.count===1?'y':'ies')
-      +(types?' · '+types:'')+(activeMapKey===node.key?' · filtering':'');
+      +(types?' · '+types:'')+(node.part_count?' · '+node.part_count+' part'+(node.part_count===1?'':'s'):'')
+      +(activeMapKey===node.key?' · filtering':'');
     readEl.classList.add('on');
   }else readEl.classList.remove('on');
   const noun=G.mode==='entities'?'entities':'tags',linked=G.mode==='entities'?' linked':'';
@@ -932,6 +933,23 @@ function galaxyFrame(now){
       const ds=1.55+(((n.seed>>3)+i*37)%10)/15;
       ctx.fillStyle=hsla(c,0.9*A,13);
       drawMemoryMarker(ctx,satelliteTypes[i],x+(n.radius+7)*Math.cos(angle),y+(n.radius+7)*Math.sin(angle),ds);
+    }
+    if(n===satelliteFocus&&n.parts&&n.parts.length){
+      // The parts that belong to this planet, as labelled moons on one orbit.
+      const moons=n.parts.slice(0,12),orbit=n.radius+26;
+      ctx.strokeStyle=hsla(c,0.25*A,10);ctx.lineWidth=0.8;
+      ctx.beginPath();ctx.arc(x,y,orbit,0,Math.PI*2);ctx.stroke();
+      ctx.font='500 9px ui-sans-serif,system-ui';ctx.textBaseline='middle';
+      moons.forEach((moon,i)=>{
+        const angle=i/moons.length*Math.PI*2-Math.PI/2;
+        const mx=x+orbit*Math.cos(angle),my=y+orbit*Math.sin(angle);
+        ctx.fillStyle=hsla(c,0.95*A,14);
+        ctx.beginPath();ctx.arc(mx,my,2.6,0,Math.PI*2);ctx.fill();
+        const right=Math.cos(angle)>=0;
+        ctx.textAlign=right?'left':'right';ctx.fillStyle=TEXT;
+        const label=moon.label.length>22?moon.label.slice(0,21)+'...':moon.label;
+        ctx.fillText(label,mx+(right?6:-6),my);
+      });
     }
     if(activeMapKey===n.key){
       ctx.strokeStyle=hsla(c,0.95,18);ctx.lineWidth=1.3;
@@ -1348,6 +1366,8 @@ const PASS_WORDS={
   proposed:n=>`proposed ${n} merge${n===1?'':'s'}`,
   merged:n=>`merged ${n} ${n===1?'group':'groups'}`,
   judged:n=>`judged ${n} ${n===1?'group':'groups'}`,
+  homes_changed:n=>`filed ${n} ${n===1?'part':'parts'} under a home`,
+  screened:n=>`looked at ${n} ${n===1?'name':'names'}`,
   reviewed:n=>`reviewed ${n} ${n===1?'name':'names'}`,
   queued:n=>`left ${n} for you`,
   skipped:n=>`could not judge ${n}`,
@@ -1375,6 +1395,8 @@ const QUEUE_SECTIONS=[
    ask:'Memories that say the same thing. Merging replaces them with the text shown; the originals stay under Forgotten.'},
   {kind:'tag_split',label:'Tags',
    ask:'Two tags that look like one subject. Combining files everything under the one shown.'},
+  {kind:'role',label:'Roles',
+   ask:'Names that look like a role someone holds, such as creator or client. Accepting removes the name and, where one person clearly holds it, records that as a relation. Removed names can be restored under Forgotten.'},
   {kind:'entity_review',label:'Not an entity?',
    ask:'Names the model judged not to be a person, place or thing. Ticked names are removed, the rest are kept and not asked about again. Removing a name never touches the memories behind it.'},
 ];
@@ -1604,8 +1626,12 @@ async function loadEntities(){
     api('/api/v1/relations?limit=2000'),
     api('/api/v1/entities/proposals?limit=1000')]);
   knowledgeNames={};entities.forEach(entity=>knowledgeNames[entity.id]=entity.name);
-  const active=entities.filter(entity=>!entity.merged_into);
-  document.getElementById('entcount').textContent=active.length+' entities, '+relations.length+' relations';
+  const names=entities.filter(entity=>!entity.merged_into);
+  const active=showAllNames?names:names.filter(entity=>entity.hub);
+  document.getElementById('entcount').innerHTML=esc(active.length+(showAllNames?' names':' hubs')
+    +' of '+names.length+' names, '+relations.length+' relations')
+    +' <button class="act" onclick="toggleAllNames()" title="A name is a hub once it is a person, organization, project, product or place, or two memories mention it, or a relation involves it.">'
+    +(showAllNames?'hubs only':'show every name')+'</button>';
   const byType={};
   active.forEach(entity=>(byType[entity.entity_type||'untyped']??=[]).push(entity));
   entityGroups=byType;
@@ -1659,6 +1685,8 @@ function toggleEntityType(type){
   entityExpanded.has(type)?entityExpanded.delete(type):entityExpanded.add(type);
   renderEntityGroups();
 }
+let showAllNames=false;
+function toggleAllNames(){showAllNames=!showAllNames;loadEntities()}
 function renderEntityGroups(){
   const el=document.getElementById('entlist');
   const types=Object.keys(entityGroups).sort();
@@ -1668,7 +1696,7 @@ function renderEntityGroups(){
     const open=entityExpanded.has(type);
     const shown=open?all:all.slice(0,ENTITY_ROW_CAP);
     const hidden=all.length-shown.length;
-    const links=shown.map(e=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(e.id)})'>${esc(e.name)}</button>`).join(', ');
+    const links=shown.map(e=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(e.id)})'>${e.home?`<span class="cnt">${esc(e.home.name)} / </span>`:''}${esc(e.name)}</button>`).join(', ');
     let more='';
     if(hidden>0)more=` <button class="act" onclick='toggleEntityType(${JSON.stringify(type)})'>show ${hidden} more</button>`;
     else if(open&&all.length>ENTITY_ROW_CAP)more=` <button class="act" onclick='toggleEntityType(${JSON.stringify(type)})'>show less</button>`;
@@ -2487,6 +2515,14 @@ def create_app(
                 # is best at the specific tag level, so it stays an opt-in set by
                 # MEMRY_TAG_ABSTRACTION or the CLI, not a switch in the dashboard.
                 entry(
+                    "structure", "Entity structure",
+                    "Works out which names are hubs, files parts under the "
+                    "project, product or organization they keep appearing with, "
+                    "and merges names that are the same thing under the same "
+                    "home. Nothing is deleted.",
+                    interval_days=every, needs_llm=False,
+                ),
+                entry(
                     "durability", "How long facts stay relevant",
                     "Estimates whether each memory matters for days, months or "
                     "years, and forgetting uses that instead of one rate per "
@@ -2765,12 +2801,20 @@ def create_app(
     # -- entities ---------------------------------------------------------
     async def list_entities(request: Request) -> Response:
         q = request.query_params
+        user_id = _p(request).namespace(q.get("user_id"))
         entities = store.entities(
-            user_id=_p(request).namespace(q.get("user_id")),
+            user_id=user_id,
             include_merged=q.get("include_merged") == "true",
             limit=int(q.get("limit", "100")),
         )
-        return JSONResponse([e.model_dump() for e in entities])
+        # hub status and home are computed, so they ride along on the payload
+        structure = await run_in_threadpool(partial(store.entity_structure, user_id=user_id))
+        payload = []
+        for entity in entities:
+            info = structure.get(entity.id) or {}
+            payload.append({**entity.model_dump(), "hub": bool(info.get("hub")),
+                            "home": info.get("home"), "memories": info.get("memories", 0)})
+        return JSONResponse(payload)
 
     async def get_entity(request: Request) -> Response:
         detail = await run_in_threadpool(partial(

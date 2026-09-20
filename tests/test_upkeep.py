@@ -230,7 +230,7 @@ def test_status_carries_the_queue_and_the_pause_switch(client):
     assert info["queue"] == []
     assert info["paused"] is False
     keys = {p["key"] for p in info["passes"]}
-    assert keys == {"dedup_entities", "durability", "consolidation"}
+    assert keys == {"dedup_entities", "durability", "consolidation", "structure"}
     assert all(p["run_url"] == f"/api/v1/maintenance/run/{p['key']}" for p in info["passes"])
 
     assert client.post("/api/v1/maintenance/pause", json={"paused": True}).json() == {"paused": True}
