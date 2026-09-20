@@ -335,9 +335,8 @@ members.
 Upkeep runs on its own and asks only for what it will not decide: it lists the entity
 merges below the gate, the memory merges a model proposed, the tag pairs that look like one
 subject split in two, and the names the model judged not to be entities, each with a yes
-and a no. Everything else (entity self-healing, word-for-word duplicate consolidation,
-durability scoring when a decision provider is configured, and tag abstraction if you turn
-it on) runs on its interval, records what it changed, and can be paused with one switch.
+and a no. Everything else (entity self-healing, word-for-word duplicate consolidation, and
+durability scoring when a decision provider is configured) runs on its interval, records what it changed, and can be paused with one switch.
 `POST /api/v1/maintenance/run/<pass>` runs any pass now.
 
 ## Searching by tag and date

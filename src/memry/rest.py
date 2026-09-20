@@ -323,7 +323,6 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
     <dt>Decay</dt><dd>The slow drop in a memory's pull on results as it ages. Dated events fade fastest, standing rules barely at all.</dd>
     <dt>Consolidation</dt><dd>Merging several memories that say the same thing into one that keeps every detail. The originals become forgotten, not deleted.</dd>
     <dt>Merge proposal</dt><dd>Two entities that might be the same, waiting for you to say yes or no.</dd>
-    <dt>Synthetic tag</dt><dd>A broader tag Memry grouped others under, for browsing. Off by default, because searching under the narrower tag works better.</dd>
     <dt>Embedding</dt><dd>A memory turned into numbers so that similar meanings sit near each other. This is what makes "blood test" find "liver results".</dd>
     <dt>Distillation</dt><dd>Turning a raw saved message into separate facts. Usually happens moments after saving; a memory says "not distilled" if it is still waiting.</dd>
     <dt>Namespace</dt><dd>Whose memories these are. Yours are separate from every other account's.</dd>
@@ -2456,7 +2455,6 @@ def create_app(
         acceptable; this is the window into it.
         """
         user_id = _p(request).namespace(request.query_params.get("user_id"))
-        tcfg = store.config.tags
         every = store.config.dedup_interval_days
 
         def entry(key: str, label: str, detail: str, **extra: Any) -> dict[str, Any]:
@@ -2485,14 +2483,9 @@ def create_app(
                     "concept names are not things; those wait for you above.",
                     interval_days=every, needs_llm=False,
                 ),
-                entry(
-                    "tag_abstraction", "Tag abstraction",
-                    "Groups tags under broader parents for browsing. Off by "
-                    "default: measured retrieval is best at the specific tag "
-                    "level, not the broad one.",
-                    interval_days=tcfg.interval_days,
-                    last_run=store.last_tag_run(user_id), needs_llm=True,
-                ),
+                # Tag abstraction is deliberately not listed: measured retrieval
+                # is best at the specific tag level, so it stays an opt-in set by
+                # MEMRY_TAG_ABSTRACTION or the CLI, not a switch in the dashboard.
                 entry(
                     "durability", "How long facts stay relevant",
                     "Estimates whether each memory matters for days, months or "
