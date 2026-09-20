@@ -2630,9 +2630,8 @@ class MemoryStore:
             items.append({
                 "kind": "consolidation", "id": entry["id"],
                 "title": entry["merged_content"],
-                "detail": f"Would replace {len(memories)} memories that say the same thing: "
-                          + " · ".join(m.content for m in memories)
-                          + f". {entry['reason']}",
+                "detail": entry["reason"],
+                "replaces": [m.content for m in memories],
                 "accept": "merge", "decline": "keep all",
             })
         if len(live) != len(pending):

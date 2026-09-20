@@ -117,7 +117,16 @@ html.knowledge-open,body.knowledge-open{overflow:hidden}
 .tagrow .passlog.ran{border:0;padding:0;border-radius:0;font-size:.8rem;color:var(--semantic)}
 .tagrow .passlog.err{border:0;padding:0;border-radius:0;font-size:.8rem;color:var(--warn)}
 #upkeepwho{margin:0 0 .6rem}
-.fold{display:grid;grid-template-columns:repeat(auto-fill,minmax(14rem,1fr));gap:0 .8rem;max-height:16rem;overflow:auto;margin:.4rem 0;padding:.2rem .3rem;border:1px solid var(--line);border-radius:6px}
+.queue-tabs{margin:.2rem 0 .5rem}.queue-tabs .cnt{margin-left:.15rem}
+.queue-body{border:1px solid var(--line);border-radius:8px;padding:.1rem .7rem}
+.qrow{align-items:flex-start;gap:.6rem;padding:.55rem .1rem}.qrow .name{flex:1;min-width:0}.qrow .hint{margin:.15rem 0 0}
+.qrow button,.foldapply button{flex:none;padding:.3rem .7rem;font-size:.8rem;white-space:nowrap}
+.q-yes{border-color:var(--accent);color:var(--accent)}.q-no{color:var(--dim)}
+.qdetail{margin-top:.25rem}.qdetail summary{cursor:pointer;color:var(--dim);font-size:.78rem}.qdetail ul{margin:.25rem 0 .3rem 1rem;padding:0;font-size:.8rem;color:var(--dim)}
+.foldcard{display:flex;flex-direction:column;gap:.45rem;padding:.5rem 0}
+.foldbar{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}.foldbar input[type=search]{flex:1;min-width:8rem;max-width:22rem}
+.fold{display:grid;grid-template-columns:repeat(auto-fill,minmax(17rem,1fr));gap:0 1.2rem;max-height:22rem;overflow-y:auto;overflow-x:hidden;padding:.2rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+.foldpick-row{display:flex;align-items:center;gap:.5rem;min-width:0;padding:.28rem 0;border-bottom:1px solid var(--line);font-size:.8rem;color:var(--text);cursor:pointer}.foldpick-row input{width:auto;margin:0;flex:none}.foldpick-row span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .upkeep-auto{margin-top:1.2rem}.upkeep-auto summary{cursor:pointer;font-weight:600;font-size:.95rem;margin-bottom:.5rem}
 .tagrow{display:flex;align-items:center;gap:.5rem;padding:.32rem .1rem;border-bottom:1px solid var(--line)}
 .tagrow input[type=checkbox]{width:auto;flex:none}
@@ -1357,51 +1366,101 @@ function describePass(result){
   return parts.join(', ');
 }
 const whenText=iso=>iso?String(iso).slice(0,16).replace('T',' '):'';
-const QUEUE_KINDS={proposal:'people & things',consolidation:'duplicate memories',
-  entity_review:'not an entity?',tag_split:'tags'};
+// The queue is an inbox: one section at a time, one explanation per section,
+// and rows that carry only what the decision needs. The long list of names the
+// model judged is a checklist with one apply, never one row per name.
+const QUEUE_SECTIONS=[
+  {kind:'proposal',label:'People & things',
+   ask:'Two entities that might be the same one. Merging joins them; keeping them separate is remembered for good.'},
+  {kind:'consolidation',label:'Duplicate memories',
+   ask:'Memories that say the same thing. Merging replaces them with the text shown; the originals stay under Forgotten.'},
+  {kind:'tag_split',label:'Tags',
+   ask:'Two tags that look like one subject. Combining files everything under the one shown.'},
+  {kind:'entity_review',label:'Not an entity?',
+   ask:'Names the model judged not to be a person, place or thing. Ticked names are removed, the rest are kept and not asked about again. Removing a name never touches the memories behind it.'},
+];
+let lastQueue=[],queueTab=null;
 async function loadUpkeep(){
   const info=await api('/api/v1/maintenance');
-  renderUpkeepQueue(info.queue||[]);
+  lastQueue=info.queue||[];
+  renderUpkeepQueue(lastQueue);
   renderUpkeepPasses(info);
 }
 function upkeepCount(n){
   document.getElementById('ktab-maintenance').textContent=n?`Upkeep · ${n}`:'Upkeep';
 }
-// Past a handful, rows of one kind fold into a single card with a checklist:
-// a model that judged 177 names in one go must not become 177 decisions.
-const QUEUE_FOLD_AT=6;
-function queueRow(item){
-  return `<div class="tagrow"><span class="name">
-    <span class="cnt">${esc(QUEUE_KINDS[item.kind]||item.kind)}</span> <b>${esc(item.title)}</b>
-    <div class="hint">${esc(item.detail)}</div></span>
-    <button class="act" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"accept",this)'>${esc(item.accept)}</button>
-    <button class="act del" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"decline",this)'>${esc(item.decline)}</button></div>`;
-}
-function queueCard(kind,items){
-  const first=items[0];
-  return `<div class="tagrow" data-fold="${esc(kind)}"><span class="name">
-    <span class="cnt">${esc(QUEUE_KINDS[kind]||kind)}</span> <b>${items.length} to look at</b>
-    <div class="hint">${esc(first.detail)} Untick any to keep, then apply once.</div>
-    <div class="fold">${items.map(item=>`<label class="gx-type-option"><input type="checkbox" class="foldpick" value="${esc(item.id)}" checked><span>${esc(item.title)}</span></label>`).join('')}</div></span>
-    <button class="act" onclick='decideFolded(${JSON.stringify(kind)},this)'>${esc(first.accept)} ticked, keep the rest</button></div>`;
-}
+function showQueueTab(kind){queueTab=kind;renderUpkeepQueue(lastQueue)}
 function renderUpkeepQueue(queue){
   const el=document.getElementById('upkeepqueue');
   upkeepCount(queue.length);
   if(!queue.length){el.innerHTML='<div class="empty">Nothing needs you.</div>';return}
   const byKind={};
   for(const item of queue)(byKind[item.kind]??=[]).push(item);
-  const parts=[];
-  for(const kind of ['proposal','consolidation','tag_split','entity_review']){
-    const items=byKind[kind]||[];
-    if(!items.length)continue;
-    if(items.length>=QUEUE_FOLD_AT)parts.push(queueCard(kind,items));
-    else parts.push(...items.map(queueRow));
+  const sections=QUEUE_SECTIONS.filter(sec=>byKind[sec.kind]);
+  if(!sections.some(sec=>sec.kind===queueTab))queueTab=sections[0].kind;
+  const tabs=sections.map(sec=>`<button aria-pressed="${sec.kind===queueTab}" onclick='showQueueTab(${JSON.stringify(sec.kind)})'>${esc(sec.label)} <span class="cnt">${byKind[sec.kind].length}</span></button>`).join('');
+  const section=sections.find(sec=>sec.kind===queueTab),items=byKind[section.kind];
+  const body=section.kind==='entity_review'?queueChecklist(section,items):items.map(queueRow).join('');
+  el.innerHTML=`<div class="knowledge-tabs queue-tabs">${tabs}</div>
+    <p class="hint">${esc(section.ask)}</p><div class="queue-body">${body}</div>`;
+  const card=el.querySelector('.foldcard');if(card)foldChanged(card);
+}
+function queueRow(item){
+  const replaces=item.replaces&&item.replaces.length
+    ?`<details class="qdetail"><summary>the ${item.replaces.length} memories it replaces</summary><ul>${item.replaces.map(c=>`<li>${esc(c)}</li>`).join('')}</ul></details>`:'';
+  return `<div class="tagrow qrow"><span class="name"><b>${esc(item.title)}</b>
+    <div class="hint">${esc(item.detail)}</div>${replaces}</span>
+    <button class="q-yes" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"accept",this)'>${esc(item.accept)}</button>
+    <button class="q-no" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"decline",this)'>${esc(item.decline)}</button></div>`;
+}
+function queueChecklist(section,items){
+  const sorted=[...items].sort((a,b)=>a.title.localeCompare(b.title,undefined,{sensitivity:'base'}));
+  const first=items[0];
+  return `<div class="foldcard" data-fold="${esc(section.kind)}" data-accept="${esc(first.accept)}" data-decline="${esc(first.decline)}">
+    <div class="foldbar">
+      <input type="search" placeholder="filter ${items.length} names..." oninput="filterFold(this)" title="show only names containing this">
+      <button class="act" onclick="tickFold(this,true)">tick all shown</button>
+      <button class="act" onclick="tickFold(this,false)">untick all shown</button>
+      <span class="cnt foldcount"></span>
+    </div>
+    <div class="fold" onchange="foldChanged(this)">${sorted.map(item=>`<label class="foldpick-row" title="${esc(item.title)}"><input type="checkbox" class="foldpick" value="${esc(item.id)}" checked><span>${esc(item.title)}</span></label>`).join('')}</div>
+    <div class="foldbar foldapply"><button class="q-yes" onclick='decideFolded(${JSON.stringify(section.kind)},this)'></button></div></div>`;
+}
+function foldChanged(el){
+  const card=el.closest('.foldcard'),picks=[...card.querySelectorAll('.foldpick')];
+  const n=picks.filter(c=>c.checked).length,rest=picks.length-n;
+  card.querySelector('.foldcount').textContent=`${n} of ${picks.length} ticked`;
+  const button=card.querySelector('.foldapply button');
+  button.textContent=n?`${card.dataset.accept} ${n}`+(rest?`, ${card.dataset.decline} ${rest}`:'')
+    :`${card.dataset.decline} all ${picks.length}`;
+}
+function tickFold(button,on){
+  const card=button.closest('.foldcard');
+  card.querySelectorAll('.foldpick-row').forEach(row=>{if(!row.hidden)row.querySelector('.foldpick').checked=on});
+  foldChanged(card);
+}
+function filterFold(input){
+  const q=input.value.trim().toLowerCase();
+  input.closest('.foldcard').querySelectorAll('.foldpick-row').forEach(row=>{
+    row.hidden=!!q&&!row.textContent.toLowerCase().includes(q);
+  });
+}
+async function decideUpkeep(kind,id,decision,button){
+  const row=button.closest('.tagrow');
+  row.querySelectorAll('button').forEach(b=>b.disabled=true);
+  try{
+    await api('/api/v1/maintenance/decide',{method:'POST',body:JSON.stringify({kind,id,decision})});
+  }catch(error){
+    alert('That could not be applied; it may have changed meanwhile. The list has been refreshed.');
+    await loadUpkeep();return;
   }
-  el.innerHTML=parts.join('');
+  lastQueue=lastQueue.filter(item=>!(item.kind===kind&&item.id===id));
+  renderUpkeepQueue(lastQueue);
+  // merges and removals show up elsewhere without a reload
+  await Promise.all([loadTags(),loadEntities(),loadStats(),loadMapData()]);
 }
 async function decideFolded(kind,button){
-  const card=button.closest('.tagrow');
+  const card=button.closest('.foldcard');
   const picks=[...card.querySelectorAll('.foldpick')];
   const accept=picks.filter(c=>c.checked).map(c=>c.value);
   const decline=picks.filter(c=>!c.checked).map(c=>c.value);
@@ -1413,22 +1472,6 @@ async function decideFolded(kind,button){
     alert('Some of those could not be applied. The list has been refreshed.');
   }
   await Promise.all([loadUpkeep(),loadTags(),loadEntities(),loadStats(),loadMapData()]);
-}
-async function decideUpkeep(kind,id,decision,button){
-  const row=button.closest('.tagrow');
-  row.querySelectorAll('button').forEach(b=>b.disabled=true);
-  try{
-    await api('/api/v1/maintenance/decide',{method:'POST',body:JSON.stringify({kind,id,decision})});
-  }catch(error){
-    alert('That could not be applied; it may have changed meanwhile. The list has been refreshed.');
-    await loadUpkeep();return;
-  }
-  row.remove();
-  const left=document.querySelectorAll('#upkeepqueue .tagrow').length;
-  upkeepCount(left);
-  if(!left)document.getElementById('upkeepqueue').innerHTML='<div class="empty">Nothing needs you.</div>';
-  // merges and removals show up elsewhere without a reload
-  await Promise.all([loadTags(),loadEntities(),loadStats(),loadMapData()]);
 }
 function renderUpkeepPasses(info){
   const el=document.getElementById('upkeeplist');

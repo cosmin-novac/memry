@@ -214,7 +214,10 @@ def test_passes_run_on_their_interval_and_remember_what_they_did(store):
 # ------------------------------------------------------------------ REST
 @pytest.fixture
 def client():
-    s = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    # The app starts the scheduler, whose first cycle purges orphan entities
+    # while a test is still inserting them; keep that pass off here.
+    s = MemoryStore(Config(db_path=":memory:", dedup_entities=False),
+                    llm=NoneLLM(), embedder=HashEmbedder(64))
     app = create_app(s)
     with TestClient(app) as c:
         c.store = s
