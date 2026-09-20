@@ -250,8 +250,28 @@ class MemoryBackend(ABC):
         """Remove an entity and its mentions/relations/proposals. Memories stay."""
         return False
 
-    def purge_orphan_entities(self, scope: Scope) -> int:
-        """Delete active entities that nothing references. Returns the count.
+    def retire_entity(self, entity_id: str, reason: str = "removed") -> bool:
+        """Remove an entity after keeping a snapshot of everything removed.
+
+        The recoverable counterpart of ``delete_entity``, and what the store
+        uses: nothing the user can see disappears without a way back.
+        """
+        return False
+
+    def restore_entity(self, entity_id: str) -> bool:
+        """Undo a retirement. False when the id is not retired or is in use."""
+        return False
+
+    def list_retired_entities(
+        self, scope: Scope, *, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Retired entities newest first: id, name, type, reason, timestamp."""
+        return []
+
+    def purge_orphan_entities(
+        self, scope: Scope, *, reason: str = "nothing referenced it"
+    ) -> int:
+        """Retire active entities that nothing references. Returns the count.
 
         An entity with no mentions, no relations and no merge history is not
         evidence of anything; it is a record of an extraction that went nowhere.

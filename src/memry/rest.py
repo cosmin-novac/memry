@@ -366,6 +366,9 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 <section class="kpanel" id="kpanel-forgotten" hidden>
   <p class="hint">Deleting a memory hides it from search but keeps the record, so nothing is lost by accident. This is where those land. Permanent deletion is only possible from here, and only for memories that are already forgotten.</p>
   <div id="forgottenlist"></div>
+  <h2 style="font-size:.95rem;margin-top:1.2rem">Removed names</h2>
+  <p class="hint">Removing a person or thing leaves the memories alone and puts the name here. Restoring one brings back its aliases, and the mentions and relations whose memories are still around.</p>
+  <div id="retiredlist"></div>
 </section>
 <section class="kpanel" id="kpanel-maintenance" hidden>
   <h2 style="font-size:.95rem;margin-top:.2rem">Needs you</h2>
@@ -1321,7 +1324,7 @@ function showKnowledge(tab){
     document.getElementById('ktab-'+name).setAttribute('aria-pressed',name===tab);
   }
   if(tab==='maintenance')loadUpkeep();
-  if(tab==='forgotten')loadForgotten();
+  if(tab==='forgotten'){loadForgotten();loadRetiredEntities()}
 }
 
 // -- forgotten: deleted, but still recoverable until purged -----------------
@@ -1351,6 +1354,26 @@ async function purgeMemory(id){
     {method:'POST',body:'{}'});
   if(result.error){alert(result.error);return}
   await Promise.all([loadForgotten(),loadStats()]);
+}
+// -- removed names: entities are retired, never deleted outright ------------
+async function loadRetiredEntities(){
+  const rows=await api('/api/v1/entities/retired');
+  const el=document.getElementById('retiredlist');
+  if(!el)return;
+  if(!rows.length){el.innerHTML='<div class="empty">No removed names.</div>';return}
+  el.innerHTML=rows.map(row=>`<div class="tagrow"><span class="name">
+    ${esc(row.name)}
+    <div class="hint">${esc(row.entity_type||'no type')}
+      · removed ${esc((row.retired_at||'').slice(0,10))}${row.reason?' · '+esc(row.reason):''}</div></span>
+    <button class="act" title="bring this name back, with the evidence that still exists"
+      onclick='restoreEntity(${JSON.stringify(row.entity_id)})'>restore</button></div>`).join('');
+}
+async function restoreEntity(id){
+  const result=await api('/api/v1/entities/restore',
+    {method:'POST',body:JSON.stringify({ids:[id]})});
+  if(result.error){alert(result.error);return}
+  if(!result.restored){alert('That name could not be restored.');return}
+  await Promise.all([loadRetiredEntities(),loadEntities(),loadStats(),loadMapData()]);
 }
 
 // -- upkeep: runs on its own; the queue is what it will not decide for you --
@@ -2476,6 +2499,25 @@ def create_app(
         ))
         return JSONResponse({"removed": removed})
 
+    async def retired_entities_route(request: Request) -> Response:
+        """Names that were removed and are still recoverable."""
+        rows = await run_in_threadpool(partial(
+            store.retired_entities,
+            user_id=_p(request).namespace(request.query_params.get("user_id")),
+            limit=int(request.query_params.get("limit", 200)),
+        ))
+        return JSONResponse(rows)
+
+    async def restore_entities_route(request: Request) -> Response:
+        body = await request.json()
+        ids = [str(i) for i in body.get("ids", []) if i]
+        if not ids:
+            return JSONResponse({"error": "ids required"}, status_code=400)
+        restored = await run_in_threadpool(partial(
+            store.restore_entities, ids, owner_prefix=_p(request).prefix,
+        ))
+        return JSONResponse({"restored": restored})
+
     async def maintenance_status_route(request: Request) -> Response:
         """What the automatic passes are, when they last ran, and their settings.
 
@@ -3139,6 +3181,9 @@ def create_app(
         Route("/api/v1/maintenance/decide", guarded(maintenance_decide_route), methods=["POST"]),
         Route("/api/v1/maintenance/durability", guarded(durability_route), methods=["POST"]),
         Route("/api/v1/entities/remove", guarded(remove_entities_route), methods=["POST"]),
+        # before /{entity_id}, or "retired" is read as an id
+        Route("/api/v1/entities/retired", guarded(retired_entities_route), methods=["GET"]),
+        Route("/api/v1/entities/restore", guarded(restore_entities_route), methods=["POST"]),
         Route("/api/v1/relations", guarded(relations_route), methods=["GET"]),
         Route("/api/v1/relations/backfill", guarded(backfill_relations_route), methods=["POST"]),
         Route("/api/v1/entities/backfill-types", guarded(backfill_entity_types_route), methods=["POST"]),
