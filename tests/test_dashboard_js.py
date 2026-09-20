@@ -151,9 +151,9 @@ handleMapEntityTypeChange({target:{
 check(!mapEntityTypes.has('concept'),'checkbox updates selected entity types');
 check(redraws===1,'checkbox redraws map immediately');
 // A long tail: the twos leave the over-packed belt for the rim.
-const crowd=counts=>({memories:1,tags:counts.map((count,index)=>({
+const crowd=(counts,edges=[])=>({memories:1,tags:counts.map((count,index)=>({
   key:'tag:c'+index,label:'c'+index,kind:'tag',count,type_counts:{semantic:count}
-})),tag_edges:[],entities:[],entity_edges:[]});
+})),tag_edges:edges,entities:[],entity_edges:[]});
 const zones=graph=>graph.nodes.reduce((seen,node)=>{
   (seen[node.zone]??=new Set()).add(node.count);return seen},{});
 mapMode='tags';
@@ -167,9 +167,19 @@ check(!long.belt.has(2),'no two is left in the belt');
 const small=zones(buildGalaxy(crowd([12,7,5,4,3,3,2,2,1,1,1])));
 check(small.rim.has(1)&&!small.rim.has(2)&&small.belt.has(2),
   'a belt with room keeps its twos');
-// The belt must stay the denser ring, so it never empties into the rim.
-const twos=zones(buildGalaxy(crowd([200,1,...Array(60).fill(2),3,4])));
-check(twos.belt.has(2)&&!twos.rim.has(2),'a belt of twos is not emptied');"""
+// The belt must stay at least as dense as the rim, so it hands over a share of
+// its twos and keeps the rest: 62 in the belt against 1 on the rim leaves room
+// for 35 of them.
+const packed=buildGalaxy(crowd([200,1,...Array(60).fill(2),3,4]));
+const twosIn=zone=>packed.nodes.filter(node=>node.count===2&&node.zone===zone).length;
+check(twosIn('rim')===35,'the rim takes the twos that fit');
+check(twosIn('belt')===25,'the belt keeps the rest of its twos');
+// Least-linked first: the one two with edges is last in line and stays put.
+const linked=buildGalaxy(crowd([200,1,...Array(60).fill(2),3,4],[
+  {a:'tag:c11',b:'tag:c0',weight:1},{a:'tag:c11',b:'tag:c62',weight:1},
+  {a:'tag:c11',b:'tag:c63',weight:1}]));
+check(linked.byKey['tag:c11'].zone==='belt','a well-linked two keeps its place');
+check(linked.byKey['tag:c10'].zone==='rim','an unlinked two goes out to the rim');"""
     result = subprocess.run(
         ["node", "-"], input=contract, capture_output=True, text=True
     )

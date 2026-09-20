@@ -74,6 +74,16 @@ _DASHBOARD = """<!doctype html>
 :root{--bg:#0b0e14;--panel:#141a24;--line:#232c3b;--text:#dbe4f0;--dim:#8494ab;--accent:#5eead4;--warn:#f0a35e;--semantic:#5eead4;--procedural:#60a5fa;--episodic:#fbbf24;--working:#c084fc;font-size:15px}
 @media (prefers-color-scheme: light){:root{--bg:#f5f7fa;--panel:#ffffff;--line:#dde4ee;--text:#1a2333;--dim:#5c6b82;--accent:#0d9488;--warn:#b45309;--semantic:#0d9488;--procedural:#2563eb;--episodic:#b45309;--working:#7c3aed}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,Segoe UI,sans-serif}
+/* One scrollbar for the whole page, the pill below, on every box that scrolls
+   as well as on the page itself. Firefox has no scrollbar pseudo-elements and
+   gets the thin native bar instead, which Chromium would drop the pill for if
+   these two properties were set for it as well. */
+@supports not selector(::-webkit-scrollbar){*{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--dim) 45%,transparent) transparent}}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background-color:color-mix(in srgb,var(--dim) 40%,transparent);border-radius:99px;border:3px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background-color:color-mix(in srgb,var(--accent) 65%,transparent)}
+::-webkit-scrollbar-corner{background:transparent}
 main{max-width:900px;margin:0 auto;padding:2rem 1rem}
 h1{font-size:1.3rem;margin:.2rem 0 1rem}h1 span{color:var(--accent)}
 h1 .datalinks{float:right;font-size:.75rem;font-weight:400;color:var(--dim)}
@@ -228,13 +238,6 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
 #timemodal{padding:1.25rem 1rem}
 #timemodal .sheet{display:flex;flex-direction:column;height:calc(100vh - 2.5rem);height:calc(100dvh - 2.5rem)}
 .timeline{position:relative;flex:1;min-height:0;overflow-y:auto;padding:.1rem .5rem .1rem .2rem}
-/* Firefox has no scrollbar pseudo-elements; everyone else gets the pill below,
-   which Chromium would drop if these two properties were set for it as well. */
-@supports not selector(::-webkit-scrollbar){.timeline{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--dim) 45%,transparent) transparent}}
-.timeline::-webkit-scrollbar{width:10px}
-.timeline::-webkit-scrollbar-track{background:transparent}
-.timeline::-webkit-scrollbar-thumb{background-color:color-mix(in srgb,var(--dim) 40%,transparent);border-radius:99px;border:3px solid transparent;background-clip:padding-box}
-.timeline::-webkit-scrollbar-thumb:hover{background-color:color-mix(in srgb,var(--accent) 65%,transparent)}
 .timeline .tl-month{position:sticky;top:0;z-index:1;background:var(--panel);color:var(--dim);font-size:.72rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:.5rem .2rem .3rem}
 .timeline .tl-today{display:flex;align-items:center;gap:.5rem;color:var(--accent);font-size:.75rem;font-weight:700;padding:.4rem .2rem}
 .timeline .tl-today::after{content:"";flex:1;height:1px;background:var(--accent)}
@@ -671,20 +674,23 @@ function memoryMarkerTypes(typeCounts,limit){
 }
 // Where the rim ends. Two sigma below the mean is the starting point, but on a
 // store with a long tail that leaves only the one-memory entities out on the
-// rim while every two-memory one joins the clump in the belt. So let the rim
-// take the twos as well, but only when it helps: the belt has to be
-// over-packed to begin with, and it has to stay the denser of the two rings
-// afterwards, which keeps it from emptying itself into the rim. A small store,
-// whose belt was never full, keeps the plain two-sigma split.
+// rim while every two-memory one piles into the belt. So let the rim
+// take the twos as well, least-linked first, because a node with few links
+// belongs out at the edge and a well-connected one nearer the middle. Only as
+// many twos move as leave the belt at least as dense as the rim, so the crowd
+// is shared instead of handed over and neither ring becomes the clump. A belt
+// that was never over-packed is left alone: a small store keeps the plain
+// two-sigma split.
 const RIM_PROMOTE=2;
-function galaxyRimMax(counts,isCore,start){
-  if(start>=RIM_PROMOTE)return start;
-  const outer=counts.filter(count=>!isCore(count));
-  const rim=outer.filter(count=>count<=start).length,belt=outer.length-rim;
-  const moving=outer.filter(count=>count>start&&count<=RIM_PROMOTE).length;
-  if(!moving||belt<=PACK.belt)return start;
-  if((belt-moving)/PACK.belt<(rim+moving)/PACK.rim)return start;
-  return RIM_PROMOTE;
+function galaxyRimPromotions(source,isCore,start,degree){
+  if(start>=RIM_PROMOTE)return new Set();
+  const outer=source.filter(node=>!isCore(node.count));
+  const rim=outer.filter(node=>node.count<=start).length,belt=outer.length-rim;
+  if(belt<=PACK.belt)return new Set();
+  const movable=outer.filter(node=>node.count>start&&node.count<=RIM_PROMOTE)
+    .sort((a,b)=>(degree[a.key]||0)-(degree[b.key]||0)||a.label.localeCompare(b.label));
+  const room=Math.max(0,Math.floor((PACK.rim*belt-PACK.belt*rim)/(PACK.rim+PACK.belt)));
+  return new Set(movable.slice(0,room).map(node=>node.key));
 }
 function buildGalaxy(data){
   let source=mapMode==='entities'?data.entities:data.tags;
@@ -693,16 +699,26 @@ function buildGalaxy(data){
     source=source.filter(node=>mapEntityTypes.has(node.entity_type||'untyped'));
   }
   if(!source.length)return null;
+  const rawEdges=mapMode==='entities'?data.entity_edges:data.tag_edges;
+  // The rim needs to know how linked each node is before the zones are handed
+  // out, so the degrees are counted here rather than off the drawn edges.
+  const present=new Set(source.map(node=>node.key)),degree={};
+  rawEdges.forEach(edge=>{
+    if(!present.has(edge.a)||!present.has(edge.b))return;
+    degree[edge.a]=(degree[edge.a]||0)+1;degree[edge.b]=(degree[edge.b]||0)+1;
+  });
   const vals=source.map(node=>node.count);
   const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
   const sd=Math.sqrt(vals.reduce((a,c)=>a+(c-mean)**2,0)/vals.length);
   const coreMin=mean+2*sd,maxC=Math.max(...vals);
   const fb=!vals.some(count=>count>=coreMin);
   const isCore=count=>fb?count===maxC:count>=coreMin;
-  const rimMax=galaxyRimMax(vals,isCore,Math.max(1,mean-2*sd));
+  const rimStart=Math.max(1,mean-2*sd);
+  const promoted=galaxyRimPromotions(source,isCore,rimStart,degree);
   const ZF={core:1.0,belt:1.28,rim:1.55};
   const nodes=source.map(raw=>{
-    const zone=isCore(raw.count)?'core':(raw.count<=rimMax?'rim':'belt');
+    const zone=isCore(raw.count)?'core'
+      :((raw.count<=rimStart||promoted.has(raw.key))?'rim':'belt');
     return{...raw,typeCounts:raw.type_counts||{},zone,
       entityType:raw.entity_type||'untyped',
       satTypes:memoryMarkerTypes(raw.type_counts||{},Math.min(raw.count,10)),
@@ -710,7 +726,6 @@ function buildGalaxy(data){
       seed:hashCode(raw.key),h:0};
   }).sort((a,b)=>a.label.localeCompare(b.label));
   const index=new Map(nodes.map((node,i)=>[node.key,i]));
-  const rawEdges=mapMode==='entities'?data.entity_edges:data.tag_edges;
   const edges=rawEdges
     .filter(edge=>index.has(edge.a)&&index.has(edge.b))
     .map(edge=>({a:index.get(edge.a),b:index.get(edge.b),weight:Math.min(3,edge.weight)}))
