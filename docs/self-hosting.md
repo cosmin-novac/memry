@@ -351,6 +351,9 @@ earned it.
   person, organization, project, product or place that the provider did not call a value or
   a role. Without a provider, it is one of those five types, or a name two memories mention.
   Hub status is computed each time, so a phrase you mention again next month is a hub then.
+  The map asks for a little more: a planet is a hub that came up in at least two memories,
+  and a person is one from the first mention. On the store above the hubs alone were 1,424
+  planets, 610 of them things seen exactly once.
 - **A home** is the project or product a part belongs to, shown as
   `AI-Flow / privacy policy`. A stated `part_of` relation sets it. Otherwise one project or
   product has to appear in at least 70% of the part's memories, and a part seen once needs

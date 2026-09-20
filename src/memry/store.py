@@ -1308,10 +1308,13 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """Content-free aggregate graph over every active memory in scope.
 
-        The entity side shows hubs only. A part that has a home is not a planet
-        of its own: it rides along on its home as one of its ``parts``, which
-        is what keeps a store of three thousand names down to a few hundred
-        planets without hiding anything that was earned.
+        A planet is a hub that came up at least twice; a person is one from the
+        first mention. On a real store the hubs alone were still 1,424 planets,
+        610 of them things typed as a product or project and seen exactly once,
+        so the map asks for a second sighting and the list does not. A part
+        that has a home is not a planet of its own: it rides along on its home
+        as one of its ``parts``. Nothing is hidden for good, since all of this
+        is recomputed from the memories each time.
         """
         data = self.backend.knowledge_map(
             Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
@@ -1321,22 +1324,28 @@ class MemoryStore:
         by_id = {node.get("entity_id"): node for node in nodes}
         planets: list[dict[str, Any]] = []
         parts: dict[str, list[dict[str, Any]]] = {}
+        def is_planet(entity_id: str, entity_type: str | None) -> bool:
+            info = structure.get(entity_id)
+            return bool(info and info["hub"] and (
+                info["memories"] >= 2 or entity_type == "person"))
+
         for node in nodes:
             info = structure.get(node.get("entity_id"))
-            if not info or not info["hub"]:
+            if not info or info.get("screened_out"):
                 continue
             home = info["home"]
             if (
                 home and home["id"] in by_id
                 and node.get("entity_type") not in ANCHOR_TYPES
-                and structure.get(home["id"], {}).get("hub")
+                and is_planet(home["id"], by_id[home["id"]].get("entity_type"))
             ):
                 parts.setdefault(home["id"], []).append({
                     "entity_id": node["entity_id"], "label": node["label"],
                     "count": node["count"],
                 })
                 continue
-            planets.append(node)
+            if is_planet(node["entity_id"], node.get("entity_type")):
+                planets.append(node)
         for node in planets:
             mine = sorted(parts.get(node["entity_id"], []),
                           key=lambda part: (-part["count"], part["label"].lower()))
@@ -2599,9 +2608,15 @@ class MemoryStore:
             home = homes.get(node.id)
             why = hub_reason(node.entity_type, node.memories, node.relations,
                              screens.get(node.id))
+            screen = screens.get(node.id) or {}
             out[node.id] = {
                 "hub": bool(why),
                 "why": why,
+                "screened_out": bool(
+                    not screen.get("kept")
+                    and screen.get("verdict") in SCREEN_SKIPS
+                    and float(screen.get("probability") or 0.0) >= SCREEN_GATE
+                ),
                 "memories": node.memories,
                 "relations": node.relations,
                 "home": ({"id": home["id"], "name": names.get(home["id"], ""),
