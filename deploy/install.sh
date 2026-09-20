@@ -73,7 +73,7 @@ if ! grep -q '^MEMRY_API_KEY=' "$ENV_FILE"; then
     set_kv MEMRY_API_KEY "$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   fi
 fi
-for key in MEMRY_DOMAIN ANTHROPIC_API_KEY OPENAI_API_KEY MEMRY_LLM_MODEL MEMRY_TENANTS; do
+for key in MEMRY_DOMAIN ANTHROPIC_API_KEY OPENAI_API_KEY MEMRY_LLM_MODEL MEMRY_TENANTS \n           MEMRY_DECISION_PROVIDER MEMRY_DECISION_API_KEY MEMRY_DECISION_MODEL; do
   val="${!key:-}"
   [ -n "$val" ] && set_kv "$key" "$val"
 done

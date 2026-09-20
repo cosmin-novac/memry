@@ -18,6 +18,14 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MEMRY_LLM_MODEL: ${MEMRY_LLM_MODEL:-}
+      # Typed decisions (experimental): entity identity, durability, re-ranking.
+      # "jev" is TypeSafe's hosted model; "llm" reuses the text model above.
+      MEMRY_DECISION_PROVIDER: ${MEMRY_DECISION_PROVIDER:-}
+      MEMRY_DECISION_API_KEY: ${MEMRY_DECISION_API_KEY:-}
+      MEMRY_DECISION_MODEL: ${MEMRY_DECISION_MODEL:-}
+      MEMRY_DECISION_BASE_URL: ${MEMRY_DECISION_BASE_URL:-}
+      MEMRY_DECISION_MERGE_CONFIDENCE: ${MEMRY_DECISION_MERGE_CONFIDENCE:-}
+      MEMRY_DECISION_RERANK: ${MEMRY_DECISION_RERANK:-}
     restart: unless-stopped
 
 volumes:
