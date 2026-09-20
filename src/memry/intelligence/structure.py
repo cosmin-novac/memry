@@ -9,16 +9,28 @@ the queue with questions nobody can answer ("round 1 and Round 1?").
 Three rules, all computed from what the store already holds, none of which
 deletes anything:
 
-* **Hub status is earned.** A name is a hub when it is an anchor type, or two
-  memories mention it, or a relation involves it. Everything else stays a
-  phrase on its memory: searchable, linked, and promoted on second sighting
-  because the status is recomputed, never stored.
-* **Home is one level, and derived.** A part belongs to the project, product or
-  organization it keeps appearing with. An explicit ``part_of`` relation wins;
-  otherwise one anchor has to share most of the part's memories.
+* **Hub status is earned.** With a decision provider, a name is a hub when the
+  provider called it a named thing, or it is an anchor type the provider did
+  not call a value or a role. Without one, it is an anchor type or a name two
+  memories mention. Everything else stays a phrase on its memory: searchable,
+  linked, and never stored as "not a hub", so the answer changes as soon as
+  the evidence does.
+* **Home is one level, and derived.** A part belongs to the project or product
+  it keeps appearing with. A stated ``part_of`` relation wins, and is the only
+  way an organization becomes a home: a company co-occurs with everything its
+  owner does, which says nothing about what belongs to it.
+
 * **A shared name is read through home.** Same name under the same home is the
   same thing. Same name under different homes is two things and no question.
   People are never merged on a name alone.
+
+Each rule was scored against 360 names, 141 homes and 310 past merge decisions
+from a real store, labelled by an independent reader (see
+``evals/entity_structure_benchmark.py``). The first draft of the hub rule
+("anchor, or two memories, or a relation") was right about 52% of the names it
+promoted: recurrence finds topics like "billing", not things. Using the
+provider's verdict it is 72% at 98% recall. Homes from co-mention alone were
+68% right; restricted as described above, 86%.
 
 Everything here is pure: lists in, plans out. The store applies the plans, so
 a dry run is the same code with the last step left out.
@@ -34,6 +46,17 @@ from typing import Any, Iterable
 ANCHOR_TYPES = frozenset({"person", "organization", "project", "product", "place"})
 #: Types a part can belong to. A person or a place is never a home.
 HOME_TYPES = frozenset({"project", "product", "organization"})
+#: Types that can become a home from co-mention alone. An organization needs a
+#: stated relation: as a co-mentioned home it measured 47% right.
+COMENTION_HOME_TYPES = frozenset({"project", "product"})
+#: Verdicts of the name screen (intelligence/entities.py) that are not things.
+SCREEN_SKIPS = frozenset({"role", "value_or_fragment"})
+#: Probability a skip verdict needs before anything believes it: the write
+#: path, the upkeep queue and hub status all read this one number, so a name
+#: can never lose its place on a guess that raised no question for anyone.
+SCREEN_GATE = 0.80
+#: Probability on "named_thing" from which the verdict alone makes a hub.
+NAMED_THING_MIN = 0.6
 #: Predicates that state membership outright.
 PART_PREDICATES = frozenset({
     "part_of", "belongs_to", "feature_of", "component_of", "module_of",
@@ -59,18 +82,33 @@ class Node:
     created_at: str = ""
 
 
-def is_hub(entity_type: str | None, memories: int, relations: int) -> bool:
-    return (entity_type in ANCHOR_TYPES and memories >= 1) or memories >= 2 or relations >= 1
-
-
-def hub_reason(entity_type: str | None, memories: int, relations: int) -> str:
-    if entity_type in ANCHOR_TYPES and memories >= 1:
+def hub_reason(
+    entity_type: str | None, memories: int, relations: int,
+    screen: dict[str, Any] | None = None,
+) -> str:
+    """Why a name is a hub, in words; empty when it is not one."""
+    if memories < 1 and relations < 1:
+        return ""
+    verdict = (screen or {}).get("verdict")
+    if screen and screen.get("kept"):
+        return "kept by you"
+    probability = float((screen or {}).get("probability") or 0.0)
+    if verdict in SCREEN_SKIPS and probability >= SCREEN_GATE:
+        return ""
+    if verdict == "named_thing" and probability >= NAMED_THING_MIN:
+        return "a named thing"
+    if entity_type in ANCHOR_TYPES:
         return f"a {entity_type}"
-    if memories >= 2:
+    if (verdict is None or verdict in SCREEN_SKIPS) and memories >= 2:
         return f"in {memories} memories"
-    if relations >= 1:
-        return "in a relation"
     return ""
+
+
+def is_hub(
+    entity_type: str | None, memories: int, relations: int,
+    screen: dict[str, Any] | None = None,
+) -> bool:
+    return bool(hub_reason(entity_type, memories, relations, screen))
 
 
 def derive_homes(
@@ -128,9 +166,12 @@ def derive_homes(
         ranked = counts.most_common(2)
         top, shared = ranked[0]
         share = shared / len(memories)
-        if share < min_share:
+        if share < min_share or by_id[top].entity_type not in COMENTION_HOME_TYPES:
             continue
-        # two anchors tied for the top cannot both be home; leave it unhomed
+        # Two anchors tied for the top cannot both be home; leave it unhomed.
+        # This is also what keeps a part seen once honest: with one memory
+        # every count is 1, so any second anchor in it, a company included,
+        # is a tie, and that reading measured a coin toss (48% right).
         if len(ranked) > 1 and ranked[1][1] == shared:
             continue
         homes[node.id] = {"id": top, "share": round(share, 2), "source": "co-mention"}

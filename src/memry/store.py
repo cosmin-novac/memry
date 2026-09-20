@@ -2558,7 +2558,7 @@ class MemoryStore:
     # entity structure: hubs, homes and shared names (intelligence/structure.py)
     # ------------------------------------------------------------------
     #: Names screened per pass; one typed question each, asked in parallel.
-    SCREEN_BATCH = 300
+    SCREEN_BATCH = 1000
 
     def _structure_inputs(self, user_id: str | None):
         scope = Scope(user_id=user_id)
@@ -2590,15 +2590,18 @@ class MemoryStore:
         Computed on request and never stored, so a phrase seen a second time is
         a hub the next time anyone looks, and nothing has to be kept in step.
         """
-        _, nodes, links, triples = self._structure_inputs(user_id)
+        entities, nodes, links, triples = self._structure_inputs(user_id)
         homes = derive_homes(nodes, links, triples)
         names = {node.id: node.name for node in nodes}
+        screens = {e.id: (e.metadata or {}).get("screen") for e in entities}
         out: dict[str, dict[str, Any]] = {}
         for node in nodes:
             home = homes.get(node.id)
+            why = hub_reason(node.entity_type, node.memories, node.relations,
+                             screens.get(node.id))
             out[node.id] = {
-                "hub": is_hub(node.entity_type, node.memories, node.relations),
-                "why": hub_reason(node.entity_type, node.memories, node.relations),
+                "hub": bool(why),
+                "why": why,
                 "memories": node.memories,
                 "relations": node.relations,
                 "home": ({"id": home["id"], "name": names.get(home["id"], ""),
@@ -2667,8 +2670,9 @@ class MemoryStore:
         """Ask the decision provider what each not-yet-screened name is.
 
         The verdict is a note on the entity and nothing more: a name judged a
-        value or a role shows up under Upkeep for a yes or a no. Anchors are
-        not asked about, and neither is a name that was screened or kept.
+        value or a role shows up under Upkeep for a yes or a no, and a name
+        judged a named thing is a hub. A name already screened is not asked
+        about again.
         """
         outcome: dict[str, Any] = {"screened": 0, "queued": 0, "skipped": 0}
         if not self.decider.available:
@@ -2677,7 +2681,7 @@ class MemoryStore:
         scope = Scope(user_id=user_id)
         pending = [
             e for e in self.backend.list_entities(scope, limit=1_000_000)
-            if e.entity_type not in ANCHOR_TYPES and "screen" not in (e.metadata or {})
+            if "screen" not in (e.metadata or {})
         ][: limit or self.SCREEN_BATCH]
 
         def ask(entity: Entity):
@@ -3020,6 +3024,14 @@ class MemoryStore:
             entity = self.backend.get_entity(item_id)
             screen = (entity.metadata or {}).get("screen") if entity else None
             if isinstance(screen, dict) and _owned(entity, owner_prefix):
+                # the text-model review may have listed the same name earlier;
+                # one decision settles both
+                stale = self._upkeep_get("entity_review:pending", user_id, [])
+                if any(p["id"] == item_id for p in stale):
+                    self._upkeep_set(
+                        "entity_review:pending", user_id,
+                        [p for p in stale if p["id"] != item_id],
+                    )
                 if not accept:
                     metadata = dict(entity.metadata or {})
                     metadata["screen"] = {**screen, "kept": True}

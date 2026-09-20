@@ -150,6 +150,10 @@ people.
   `liver health`. The parent is not copied onto the child memories. Filtering by `health`
   expands through the hierarchy at query time. It is off by default and meant for
   browsing: a filter that names the specific tag retrieves better than its parent.
+- Entity structure decides which extracted names are hubs, files a part under the project
+  or product it keeps appearing with, and reads a shared name through that home. It is
+  computed from mentions and relations and deletes nothing; a removed name is retired and
+  can be restored under Knowledge > Forgotten.
 - Consolidation merges memories that record the same fact more than once. Grouping is
   geometric over the stored vectors; the merge itself is judged by an LLM and written to
   preserve every detail. Originals are superseded, never deleted. Word-for-word duplicates

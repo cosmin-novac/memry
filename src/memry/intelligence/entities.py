@@ -563,22 +563,31 @@ def judge_entity_referents(llm: LLM, names: list[str]) -> list[str]:
 #: never seen. Roles and values are not made entities; topics still are, and
 #: earn hub status or not like anything else.
 SCREEN_CRITERIA = {
+    # The wording was measured. A first draft listed "path" among the values
+    # and the provider dutifully screened out source files, repositories and
+    # street addresses; naming them as things took the harm from 6 names in
+    # 360 to none at every gate from 0.70 up.
     "named_thing": ("A specific person, organization, product, project, place, "
-                    "document, file, feature or other thing with a name of its "
-                    "own, that one could later ask questions about."),
-    "generic_topic": ("An ordinary noun or topic with no identity of its own, "
-                      "such as billing, content or conversation."),
+                    "street address, document, source file, folder, repository "
+                    "path, API endpoint, named feature or other thing that has "
+                    "a name or an identifier of its own, which one could later "
+                    "ask questions about."),
+    "generic_topic": ("An ordinary noun, activity or topic with no identity of "
+                      "its own, such as billing, content, conversation or "
+                      "syntax validation."),
     "role": ("A role or function that someone or something holds, such as "
              "creator, client, landlord or assistant."),
-    "value_or_fragment": ("A measurement, number, amount, count, date, path, "
-                          "quoted text, user-interface string, instruction or "
-                          "fragment of a sentence."),
+    "value_or_fragment": ("A measurement, number, price, amount, count, date, "
+                          "duration, quoted sentence, user-interface message, "
+                          "instruction, or a fragment of a sentence. Not a "
+                          "file, address or endpoint."),
 }
 #: Verdicts that keep a name from becoming an entity.
 SCREEN_SKIPS = frozenset({"role", "value_or_fragment"})
 #: Probability the provider must put on a skip verdict before it is believed.
 #: Measured in evals/entity_structure_benchmark.py; see docs/self-hosting.md.
-SCREEN_GATE = 0.80
+#: Lives with the structure rules, which read the same number for hub status.
+from .structure import SCREEN_GATE  # noqa: E402
 
 
 def screen_names(

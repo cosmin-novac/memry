@@ -339,6 +339,55 @@ and a no. Everything else (entity self-healing, word-for-word duplicate consolid
 durability scoring when a decision provider is configured) runs on its interval, records what it changed, and can be paused with one switch.
 `POST /api/v1/maintenance/run/<pass>` runs any pass now.
 
+### Hubs, homes and shared names
+
+An extractor turns far more phrases into entities than a store has things. On the store
+these rules were built on, 3,314 entities came out of 985 memories, and 2,073 of them
+appeared in exactly one memory. Memry keeps every one of them and shows you the ones that
+earned it.
+
+- **A hub** is a name the map and the People and things list show. With a decision
+  provider, a name is a hub when the provider called it a named thing, or when it is a
+  person, organization, project, product or place that the provider did not call a value or
+  a role. Without a provider, it is one of those five types, or a name two memories mention.
+  Hub status is computed each time, so a phrase you mention again next month is a hub then.
+- **A home** is the project or product a part belongs to, shown as
+  `AI-Flow / privacy policy`. A stated `part_of` relation sets it. Otherwise one project or
+  product has to appear in at least 70% of the part's memories, and a part seen once needs
+  that project to be the only project, product or organization in its memory. An
+  organization becomes a home only through a stated relation.
+- **A shared name** is read through home. Two entities with the same name under different
+  homes are never proposed for merging. Two with the same name and nothing setting them
+  apart are merged. Two people are never merged on a name alone.
+
+New names are screened before they become entities. Measurements and counts ("250 ms",
+"22 tests") are dropped by rule. With a decision provider, each new name gets one typed
+question in the memory it came from, and a name judged a value or a role with at least 0.80
+probability is not made an entity. The phrase stays on the memory. Names already in the
+store get the same question during upkeep, and the ones judged a value or a role wait under
+**Knowledge > Upkeep** for a yes or a no.
+
+An entity is never deleted. When you or a rule removes a name, Memry retires it, and
+**Knowledge > Forgotten > Removed names** lists it with the reason and a restore button.
+`POST /api/v1/maintenance/run/structure` with `{"dry_run": true}` returns every home and
+every merge the pass would make, and changes nothing.
+
+| Rule | Measured on | Result |
+|---|---|---|
+| Measurement and count rules | 360 labelled names | matched 12, none of them a real thing; 96 of 3,314 names store-wide |
+| Name screen at the 0.80 gate | 360 labelled names | screened out 31, none of them a real thing; clean from 0.70 up |
+| Hub rule using the provider's verdict | 360 labelled names | 72% of hubs are real things, and 98% of real things are hubs |
+| Hub rule, first draft: type, or two memories, or a relation | the same names | 52% and 88% |
+| Home, as shipped | 141 labelled homes | 86% correct |
+| Home from co-mention alone | the same homes | 68% correct, and 47% when the home is an organization |
+| Same name, not a person, nothing setting them apart | 78 past merge decisions | all 78 had been confirmed |
+
+An independent reader labelled the names and homes, all from one real store. Two first
+drafts failed the labels and were changed: recurrence turned out to find topics like
+"billing", and the first screening question listed "path" among the values, so the provider
+screened out source files and street addresses. `evals/entity_structure_benchmark.py` runs
+the same scoring on your own store.
+
 ## Searching by tag and date
 
 Beyond relevance search, both `search_memories`/`POST /api/v1/search` and

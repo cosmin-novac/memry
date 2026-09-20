@@ -1665,6 +1665,18 @@ async function loadEntities(){
     <button class="act" onclick='decideProposal(${JSON.stringify(proposal.id)},"confirm",this)'>merge</button>
     <button class="act del" onclick='decideProposal(${JSON.stringify(proposal.id)},"reject",this)'>keep separate</button></div>`).join(''):'<div class="empty">No open merge proposals.</div>';
 }
+// Where this entity belongs and what belongs to it. Both are worked out from
+// the memories, so there is nothing here to file by hand.
+function placeBlock(detail){
+  const lines=[];
+  if(detail.home)lines.push(`Part of <button class="entity-link" onclick='openEntity(${JSON.stringify(detail.home.id)})'>${esc(detail.home.name)}</button>`
+    +` <span class="cnt">${detail.home.source==='relation'?'stated in a memory':'appears with it in '+Math.round(detail.home.share*100)+'% of its memories'}</span>`);
+  if(detail.parts&&detail.parts.length)lines.push(`${detail.parts.length} part${detail.parts.length===1?'':'s'}: `
+    +detail.parts.slice(0,40).map(part=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(part.id)})'>${esc(part.name)}</button>`).join(', ')
+    +(detail.parts.length>40?` <span class="cnt">and ${detail.parts.length-40} more</span>`:''));
+  if(!detail.hub)lines.push('<span class="cnt">Not on the map: so far this is a phrase on its memories. That changes when the evidence does.</span>');
+  return lines.length?`<div class="hint">${lines.join('<br>')}</div>`:'';
+}
 function entityIdentityBlock(entity,aliases){
   return `<div class="description">${esc(entity.description||'No active evidence to summarize yet.')}</div>
     <div class="alias-list">${aliases.map(alias=>`<span>${esc(alias)}</span>`).join('')||'<span>No aliases yet.</span>'}</div>`;
@@ -1677,6 +1689,7 @@ async function openEntity(id){
   box.innerHTML=`<div class="detail"><h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button><span id="knowledgeentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''} <button class="act" onclick='renameEntity(${JSON.stringify(id)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button></h3>
     <div id="knowledgeentityidentity">${entityIdentityBlock(entity,aliases)}</div>
     <div class="bar"><input id="aliasinput" placeholder="add an alias"><button onclick='addAlias(${JSON.stringify(id)})' title="Add another name for this entity.">Add alias</button></div>
+    ${placeBlock(detail)}
     ${relationsBlock(id,detail)}
     <div class="hint">${detail.memories.length} active supporting memor${detail.memories.length===1?'y':'ies'}</div>
     ${detail.memories.map(memory=>`<div class="tagrow"><span class="name">${esc(memory.content)}</span><button class="act" onclick='showMemory(${JSON.stringify(memory.id)})'>open</button></div>`).join('')||'<div class="empty">No active supporting memories.</div>'}</div>`;
@@ -2599,12 +2612,24 @@ def create_app(
     async def maintenance_run_route(request: Request) -> Response:
         """Run one pass now, with the same code the scheduler runs."""
         key = request.path_params["key"]
+        body = await request.json() if await request.body() else {}
+        user_id = _p(request).namespace(body.get("user_id"))
+        if key == "screen":
+            # The name screen on its own: it notes a verdict on each entity and
+            # removes nothing, so it is safe to run apart from self-healing.
+            result = await run_in_threadpool(partial(
+                store.run_name_screen, user_id=user_id,
+                limit=int(body.get("limit") or 0) or None))
+            return JSONResponse(result)
         if key not in store._MAINTENANCE_KEYS:
             return JSONResponse({"error": "unknown pass"}, status_code=404)
-        body = await request.json() if await request.body() else {}
+        if key == "structure" and body.get("dry_run"):
+            # the whole plan, with nothing applied
+            result = await run_in_threadpool(partial(
+                store.run_structure_pass, user_id=user_id, dry_run=True))
+            return JSONResponse(result)
         result = await run_in_threadpool(partial(
-            store.run_upkeep_pass, key,
-            user_id=_p(request).namespace(body.get("user_id")),
+            store.run_upkeep_pass, key, user_id=user_id,
         ))
         return JSONResponse(result)
 
@@ -2858,6 +2883,21 @@ def create_app(
                             "home": info.get("home"), "memories": info.get("memories", 0)})
         return JSONResponse(payload)
 
+    def _entity_place(entity: Any) -> dict[str, Any]:
+        """Where an entity belongs and what belongs to it, from the structure
+        rules: computed, so it is never out of step with the evidence."""
+        structure = store.entity_structure(user_id=entity.user_id)
+        info = structure.get(entity.id) or {}
+        names = {e.id: e.name for e in store.entities(user_id=entity.user_id, limit=1_000_000)}
+        parts = sorted(
+            ({"id": other_id, "name": names.get(other_id, ""), "hub": other["hub"]}
+             for other_id, other in structure.items()
+             if (other.get("home") or {}).get("id") == entity.id),
+            key=lambda part: (not part["hub"], part["name"].lower()),
+        )
+        return {"home": info.get("home"), "hub": bool(info.get("hub")),
+                "why": info.get("why", ""), "parts": parts}
+
     async def get_entity(request: Request) -> Response:
         detail = await run_in_threadpool(partial(
             store.entity,
@@ -2874,6 +2914,7 @@ def create_app(
                 "memories": [_memory_payload(memory) for memory in detail["memories"]],
                 "relations": [r.model_dump() for r in detail.get("relations", [])],
                 "relation_names": detail.get("relation_names", {}),
+                **(await run_in_threadpool(partial(_entity_place, detail["entity"]))),
             }
         )
 

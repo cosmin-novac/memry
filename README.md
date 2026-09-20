@@ -183,7 +183,8 @@ memry serve --host 0.0.0.0 --port 8787
 
 The dashboard shows your memories with inline editing, filtered search, lossless JSON
 backup/restore, a unified Knowledge area, and a galaxy map aggregated over every active
-memory independently of the paginated detail list. The map groups by tag or entity;
+memory independently of the paginated detail list. The map groups by tag or entity, and on
+the entity side it shows hubs, with the parts of a project or product as moons on it;
 concept and other entity types are hidden by default and the type menu controls what is
 shown. Heavily-used groups gravitate to the gold core, the working set orbits in the teal
 belt, and one-off groups drift at the violet rim. Orbit-marker shapes distinguish semantic,
