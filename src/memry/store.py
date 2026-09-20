@@ -66,7 +66,7 @@ from .intelligence.extraction import (
     verbatim_candidates,
     verify_coverage,
 )
-from .intelligence.reconcile import reconcile_candidate
+from .intelligence.reconcile import CONFLICT_KEY, reconcile_candidate
 from .intelligence.structure import (
     ANCHOR_TYPES,
     Node,
@@ -93,6 +93,7 @@ from .models import (
     Scope,
     SearchResult,
     SyntheticTag,
+    clean_tags,
     Topic,
     TopicRelation,
     parse_ts,
@@ -229,6 +230,16 @@ def _forgetting_trigger(event: Any) -> str:
     return reason or f"Removed by {event.actor or 'the system'}, with no reason recorded."
 
 
+def _is_contradiction(event: MemoryEvent) -> bool:
+    """A SUPERSEDE that reconciliation made, as opposed to a merge of duplicates
+    or the distilling of a raw message, which record their own reasons."""
+    reason = event.reason or ""
+    return not (
+        reason.startswith("consolidated into")
+        or reason.startswith("distilled with its context")
+    )
+
+
 def _tag_run_key(user_id: str | None) -> str:
     """Meta key under which the last tag-abstraction run time is stamped."""
     return f"tag_abstraction:last_run:{user_id or ''}"
@@ -360,7 +371,7 @@ class MemoryStore:
                     content=text.strip(),
                     memory_type=memory_type,
                     importance=importance,
-                    categories=categories or [],
+                    categories=clean_tags(categories),
                 )
             ]
         elif self.llm.available:
@@ -452,7 +463,7 @@ class MemoryStore:
             agent_id=agent_id,
             run_id=run_id,
             importance=importance,
-            categories=categories or [],
+            categories=clean_tags(categories),
             metadata=pending_metadata,
             source_episode_ids=[episode.id],
             created_at=queued_at,
@@ -568,11 +579,14 @@ class MemoryStore:
                 episode_ids=episode_ids,
                 decider=self.decider,
                 retrieval_cfg=self.config.retrieval,
+                supersede_cfg=self.config.supersede,
                 prepare_update=lambda memory_id, final_content: (
                     self._reanalyze_edited_entities(memory_id, final_content, scope)
                 ),
             )
             actions.append(action)
+            if action.conflicts_with and action.memory_id:
+                self._queue_conflict(scope.user_id, action)
             if action.event != "NONE" and action.memory_id:
                 excluded.add(action.memory_id)
             # Entity mentions attach to the memory the action landed on
@@ -733,9 +747,7 @@ class MemoryStore:
             if not content:
                 skipped += 1
                 continue
-            categories = row.get("categories") or []
-            if isinstance(categories, str):
-                categories = [c.strip() for c in categories.split(",") if c.strip()]
+            categories = clean_tags(row.get("categories"))
             memory_type = row.get("memory_type", "semantic")
             if memory_type not in MEMORY_TYPES:
                 memory_type = "semantic"
@@ -1570,6 +1582,8 @@ class MemoryStore:
         old = self.backend.get_memory(memory_id)
         if not _owned(old, owner_prefix):
             return None
+        if categories is not None:
+            categories = clean_tags(categories)
         entity_update: dict[str, Any] = {}
         if content is not None and content != old.content:
             entity_update = self._reanalyze_edited_entities(
@@ -1687,8 +1701,8 @@ class MemoryStore:
             return False  # nothing to undo
         if memory.superseded_by:
             raise ValueError(
-                "this memory was replaced by another; restore is only for "
-                "deleted or decayed memories"
+                "this memory was replaced by another; if that was a mistake, "
+                "undo the replacement under Archive"
             )
         restored = self.backend.revalidate_memory(memory_id)
         if restored is None:
@@ -1702,6 +1716,173 @@ class MemoryStore:
                 actor="user",
             )
         )
+        return True
+
+    # -- contradictions -----------------------------------------------------
+    # A contradiction that was not allowed to replace anything waits under
+    # Upkeep; one that was allowed to is listed under Archive, where it can be
+    # undone. Between them no replacement is both silent and final.
+    def _queue_conflict(self, user_id: str | None, action: AddAction) -> None:
+        pending = self._upkeep_get("conflict:pending", user_id, [])
+        if any(entry["id"] == action.memory_id for entry in pending):
+            return
+        pending.append({
+            "id": action.memory_id,
+            "with": action.conflicts_with,
+            "reason": action.reason,
+        })
+        self._upkeep_set("conflict:pending", user_id, pending)
+
+    def _open_conflicts(
+        self, user_id: str | None
+    ) -> list[tuple[dict[str, Any], Memory, Memory]]:
+        """Queued contradictions whose two memories are both still in use."""
+        pending = self._upkeep_get("conflict:pending", user_id, [])
+        live: list[tuple[dict[str, Any], Memory, Memory]] = []
+        for entry in pending:
+            new = self.backend.get_memory(entry["id"])
+            old = self.backend.get_memory(entry["with"])
+            if new is None or old is None:
+                continue
+            if new.invalid_at is not None or old.invalid_at is not None:
+                # settled some other way: one of them was deleted or replaced
+                self._clear_conflict_mark(new)
+                continue
+            live.append((entry, new, old))
+        if len(live) != len(pending):
+            self._upkeep_set(
+                "conflict:pending", user_id, [entry for entry, _, _ in live]
+            )
+        return live
+
+    def _clear_conflict_mark(self, memory: Memory) -> None:
+        if CONFLICT_KEY not in (memory.metadata or {}):
+            return
+        metadata = dict(memory.metadata)
+        metadata.pop(CONFLICT_KEY, None)
+        self.backend.update_memory(memory.id, metadata=metadata, touch=False)
+
+    def _decide_conflict(
+        self, item_id: str, decision: str, *,
+        user_id: str | None, owner_prefix: str | None,
+    ) -> bool:
+        found = next(
+            (row for row in self._open_conflicts(user_id) if row[0]["id"] == item_id),
+            None,
+        )
+        if found is None:
+            return False
+        _, new, old = found
+        if not (_owned(new, owner_prefix) and _owned(old, owner_prefix)):
+            return False
+        if decision == "accept":  # the new one is right
+            self.backend.invalidate_memory(old.id, superseded_by=new.id)
+            self.backend.add_event(MemoryEvent(
+                memory_id=old.id, event="SUPERSEDE", old_content=old.content,
+                new_content=new.content, actor="user",
+                reason=f"you confirmed that memory {new.id} replaces it",
+            ))
+        elif decision == "decline":  # the old one is right
+            self.backend.invalidate_memory(new.id)
+            self.backend.add_event(MemoryEvent(
+                memory_id=new.id, event="DELETE", old_content=new.content,
+                actor="user",
+                reason=f"you judged it wrong: it contradicted memory {old.id}, "
+                       "which you kept",
+            ))
+        else:  # both are true
+            self.backend.add_event(MemoryEvent(
+                memory_id=new.id, event="NONE", new_content=new.content,
+                actor="user",
+                reason=f"you kept it beside memory {old.id}: both are true",
+            ))
+        self._clear_conflict_mark(new)
+        self._upkeep_set(
+            "conflict:pending", user_id,
+            [e for e in self._upkeep_get("conflict:pending", user_id, [])
+             if e["id"] != item_id],
+        )
+        return True
+
+    def replaced(
+        self, *, user_id: str | None = None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Memories a contradiction took out of use, newest first.
+
+        Only contradictions: a memory that was consolidated or distilled lives
+        on inside what replaced it, so there is nothing to undo. One that was
+        contradicted is the opposite case - the store stopped believing it on
+        one model's say-so - and that is the judgement worth a second look.
+        """
+        scope = Scope(user_id=user_id)
+        out: list[dict[str, Any]] = []
+        for memory in self.backend.list_memories(
+            scope, include_invalid=True, limit=1_000_000
+        ):
+            if memory.invalid_at is None or not memory.superseded_by:
+                continue
+            event = next(
+                (
+                    e for e in reversed(self.backend.history(memory.id))
+                    if e.event == "SUPERSEDE"
+                ),
+                None,
+            )
+            if event is None or not _is_contradiction(event):
+                continue
+            out.append({
+                "memory": memory,
+                "replaced_at": memory.invalid_at,
+                "replacement": self.backend.get_memory(memory.superseded_by),
+                "reason": event.reason,
+                "actor": event.actor,
+            })
+        out.sort(key=lambda row: row["replaced_at"] or "", reverse=True)
+        return out[:limit]
+
+    def undo_replacement(
+        self, memory_id: str, *, keep_new: bool = False,
+        owner_prefix: str | None = None,
+    ) -> bool:
+        """Bring back a memory that a contradiction replaced.
+
+        ``keep_new`` leaves the replacement in use as well, for when both turn
+        out to be true. Otherwise the replacement is forgotten - it goes to the
+        Archive like any deleted memory, so this is itself undoable.
+        """
+        memory = self.backend.get_memory(memory_id)
+        if not _owned(memory, owner_prefix):
+            return False
+        if memory.invalid_at is None or not memory.superseded_by:
+            return False
+        event = next(
+            (e for e in reversed(self.backend.history(memory_id))
+             if e.event == "SUPERSEDE"),
+            None,
+        )
+        if event is None or not _is_contradiction(event):
+            raise ValueError(
+                "this memory was merged into its replacement, not contradicted "
+                "by it; there is nothing to undo"
+            )
+        replacement = self.backend.get_memory(memory.superseded_by)
+        if self.backend.revalidate_memory(memory_id) is None:
+            return False
+        self.backend.add_event(MemoryEvent(
+            memory_id=memory_id, event="ADD", new_content=memory.content,
+            actor="user",
+            reason=f"you undid its replacement by memory {memory.superseded_by}",
+        ))
+        if (
+            not keep_new and replacement is not None
+            and replacement.invalid_at is None and _owned(replacement, owner_prefix)
+        ):
+            self.backend.invalidate_memory(replacement.id)
+            self.backend.add_event(MemoryEvent(
+                memory_id=replacement.id, event="DELETE",
+                old_content=replacement.content, actor="user",
+                reason=f"you judged it wrong: it had replaced memory {memory_id}",
+            ))
         return True
 
     def purge(self, memory_id: str, *, owner_prefix: str | None = None) -> bool:
@@ -2598,6 +2779,10 @@ class MemoryStore:
         remove = {r for r in remove if r}
         if not remove:
             return 0
+        if add is not None:
+            # The new name is a tag like any other, so it is held to the same
+            # shape; one that cleans away to nothing is a plain removal.
+            add = next(iter(clean_tags(add)), None)
         scope = Scope(user_id=user_id)
         indexed = self.backend.retag_topics(scope, remove, add)
         if indexed is not None:
@@ -3077,6 +3262,20 @@ class MemoryStore:
         if len(live) != len(pending):
             self._upkeep_set("consolidation:pending", user_id, live)
 
+        for entry, new, old in self._open_conflicts(user_id):
+            held = ((new.metadata or {}).get(CONFLICT_KEY) or {}).get("held")
+            items.append({
+                "kind": "conflict", "id": new.id,
+                "title": new.content,
+                "detail": "This contradicts a memory you already have."
+                          + (f" Memry kept both because {held}." if held else ""),
+                "replaces": [old.content],
+                "replaces_label": "the memory it contradicts",
+                "accept": "the new one is right",
+                "decline": "the old one is right",
+                "other": "both are true",
+            })
+
         for entry in self._upkeep_get("entity_review:pending", user_id, []):
             if self.backend.get_entity(entry["id"]) is None:
                 continue
@@ -3138,6 +3337,7 @@ class MemoryStore:
         waiting |= {p["id"] for p in self._upkeep_get("entity_review:pending", user_id, [])}
         return (
             len(self.merge_proposals(user_id=user_id, limit=1000))
+            + len(self._upkeep_get("conflict:pending", user_id, []))
             + len(self._upkeep_get("consolidation:pending", user_id, []))
             + len(waiting)
             + int(self._upkeep_get("tag_split:count", user_id, 0) or 0)
@@ -3147,8 +3347,15 @@ class MemoryStore:
         self, kind: str, item_id: str, decision: str, *,
         user_id: str | None = None, owner_prefix: str | None = None,
     ) -> bool:
-        """Clear one queue row. ``decision`` is "accept" or "decline"."""
+        """Clear one queue row. ``decision`` is "accept" or "decline"; a
+        contradiction also takes "other", for when both memories are true."""
         accept = decision == "accept"
+        if kind == "conflict":
+            return self._decide_conflict(
+                item_id, decision, user_id=user_id, owner_prefix=owner_prefix
+            )
+        if decision == "other":
+            return False
         if kind == "proposal":
             if accept:
                 return self.confirm_merge(item_id, owner_prefix=owner_prefix)

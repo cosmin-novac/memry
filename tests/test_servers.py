@@ -734,6 +734,48 @@ def test_superseded_memories_cannot_be_restored():
         assert "replaced" in response.json()["error"]
 
 
+def test_a_contradicted_memory_is_listed_and_its_replacement_undone():
+    """Unforget refuses these on purpose; this is the way back it points to."""
+    from memry.models import MemoryEvent
+
+    store = make_store()
+    with TestClient(create_app(store)) as client:
+        old_id = client.post("/api/v1/memories", json={
+            "content": "lives in Munich", "user_id": "u", "infer": False,
+        }).json()["actions"][0]["memory_id"]
+        new_id = client.post("/api/v1/memories", json={
+            "content": "lives in Amsterdam", "user_id": "u", "infer": False,
+        }).json()["actions"][0]["memory_id"]
+        store.backend.invalidate_memory(old_id, superseded_by=new_id)
+        store.backend.add_event(MemoryEvent(
+            memory_id=old_id, event="SUPERSEDE", old_content="lives in Munich",
+            new_content="lives in Amsterdam", reason="moved cities",
+        ))
+
+        rows = client.get("/api/v1/memories/replaced?user_id=u").json()
+        assert [(r["memory"]["id"], r["replacement"]["id"], r["reason"]) for r in rows] == [
+            (old_id, new_id, "moved cities")
+        ]
+
+        response = client.post(f"/api/v1/memories/{old_id}/undo-replacement", json={})
+        assert response.json() == {"restored": True}
+        active = client.get("/api/v1/memories?user_id=u").json()
+        assert [m["id"] for m in active] == [old_id]
+        assert client.get("/api/v1/memories/replaced?user_id=u").json() == []
+        forgotten = client.get("/api/v1/memories/forgotten?user_id=u").json()
+        assert [row["memory"]["id"] for row in forgotten] == [new_id]
+
+
+def test_the_queue_takes_a_third_answer_only_where_one_exists(client):
+    bad = client.post("/api/v1/maintenance/decide",
+                      json={"kind": "conflict", "id": "x", "decision": "maybe"})
+    assert bad.status_code == 400
+    # a well-formed "other" for a row that is not there is a conflict, not a 400
+    gone = client.post("/api/v1/maintenance/decide",
+                       json={"kind": "conflict", "id": "x", "decision": "other"})
+    assert gone.status_code == 409
+
+
 def test_maintenance_passes_can_be_switched_off_and_on(client):
     def automatic(key):
         passes = client.get("/api/v1/maintenance?user_id=u").json()["passes"]

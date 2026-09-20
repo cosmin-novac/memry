@@ -182,7 +182,7 @@ def test_related_pending_saves_are_extracted_as_one_context(tmp_path):
     assert "E2E tests cover final agent quality." in prompt
     assert "Shared context for these related inputs:\nAI-agent evaluation strategy" in prompt
     assert "Client-suggested tags" in prompt
-    assert "ai evaluation, regression testing" in prompt
+    assert '["ai evaluation", "regression testing"]' in prompt
     episode_ids = set(first.episode_ids + second.episode_ids)
     active = store.get_all(user_id="marcus", run_id="run-1")
     assert len(active) == 2

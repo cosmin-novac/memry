@@ -149,20 +149,21 @@ const rows=[
 ];
 const entries=timelineEntries(rows,'2026-09-20');
 const placed=entries.filter(entry=>entry.kind==='row');
-check(placed.map(entry=>entry.memory.id).join(',')==='past,soon,yearly',
-  'ascending, and only memories that can be placed');
+check(placed.map(entry=>entry.memory.id).join(',')==='yearly,soon,past',
+  'descending, and only memories that can be placed');
 check(placed.find(entry=>entry.memory.id==='yearly').at==='2027-03-03',
   'a recurring memory sits at its next occurrence');
 const shape=entries.map(entry=>entry.kind+':'
   +(entry.label||entry.at||'')).join('|');
-check(shape==='month:August 2026|row:2026-08-05|month:September 2026'
-  +'|today:2026-09-20|row:2026-09-25T09:30|month:March 2027|row:2027-03-03',
+check(shape==='month:March 2027|row:2027-03-03|month:September 2026'
+  +'|row:2026-09-25T09:30|today:2026-09-20|month:August 2026|row:2026-08-05',
   'month headings, the today line and the rows in order, got '+shape);
 const allPast=timelineEntries([rows[0]],'2026-09-20');
-check(allPast[allPast.length-1].kind==='today','a past-only timeline ends at today');
+check(allPast[0].kind==='month'&&allPast[1].kind==='today',
+  'a past-only timeline starts at today');
 const allAhead=timelineEntries([rows[2]],'2026-09-20');
-check(allAhead[0].kind==='month'&&allAhead[1].kind==='today',
-  'a future-only timeline starts at today');
+check(allAhead[allAhead.length-1].kind==='today',
+  'a future-only timeline ends at today');
 check(timelineEntries([],'2026-09-20').every(entry=>entry.kind!=='row'),
   'nothing dated, nothing placed');
 """

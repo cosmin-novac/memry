@@ -222,8 +222,19 @@ h1 .datalinks .menu[hidden]{display:none}
 h1 .datalinks .menu a,h1 .datalinks .menu button{display:block;width:100%;text-align:left;background:none;border:none;color:var(--text);font:inherit;font-size:.78rem;padding:.3rem .5rem;border-radius:6px;cursor:pointer;text-decoration:none}
 h1 .datalinks .menu a:hover,h1 .datalinks .menu button:hover{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent);border-color:transparent}
 h1 .datalinks .menu .account-links[hidden]{display:none}
-/* Timeline: one scrolling column, today in the middle of it. */
-.timeline{position:relative;max-height:min(66vh,38rem);overflow:auto;padding:.1rem .2rem}
+/* Timeline: one scrolling column, today in the middle of it. The sheet takes
+   nearly the whole viewport and the column is the part of it that scrolls, so
+   the heading and the close button stay put. */
+#timemodal{padding:1.25rem 1rem}
+#timemodal .sheet{display:flex;flex-direction:column;height:calc(100vh - 2.5rem);height:calc(100dvh - 2.5rem)}
+.timeline{position:relative;flex:1;min-height:0;overflow-y:auto;padding:.1rem .5rem .1rem .2rem}
+/* Firefox has no scrollbar pseudo-elements; everyone else gets the pill below,
+   which Chromium would drop if these two properties were set for it as well. */
+@supports not selector(::-webkit-scrollbar){.timeline{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--dim) 45%,transparent) transparent}}
+.timeline::-webkit-scrollbar{width:10px}
+.timeline::-webkit-scrollbar-track{background:transparent}
+.timeline::-webkit-scrollbar-thumb{background-color:color-mix(in srgb,var(--dim) 40%,transparent);border-radius:99px;border:3px solid transparent;background-clip:padding-box}
+.timeline::-webkit-scrollbar-thumb:hover{background-color:color-mix(in srgb,var(--accent) 65%,transparent)}
 .timeline .tl-month{position:sticky;top:0;z-index:1;background:var(--panel);color:var(--dim);font-size:.72rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:.5rem .2rem .3rem}
 .timeline .tl-today{display:flex;align-items:center;gap:.5rem;color:var(--accent);font-size:.75rem;font-weight:700;padding:.4rem .2rem}
 .timeline .tl-today::after{content:"";flex:1;height:1px;background:var(--accent)}
@@ -340,7 +351,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <dt>Entity type</dt><dd>What kind of thing it is: person, organization, project, product, place, event, document, code, or concept. Used to keep unrelated things with the same name apart, and to group the list - it does not change search ranking.</dd>
     <dt>Relation</dt><dd>A link between two entities, like "Ada works on Helios". Search follows these to reach answers that share no words with your question.</dd>
     <dt>Invalidated</dt><dd>A memory that is no longer treated as true, but is still on file. Happens when you delete it, or when something you said later contradicted it. It stops appearing in search; it does not stop existing.</dd>
-    <dt>Superseded</dt><dd>An invalidated memory that was replaced by a specific newer one - the old version of a fact you updated. It stays attached to its replacement as history, which is why it is not listed under Forgotten.</dd>
+    <dt>Superseded</dt><dd>An invalidated memory that was replaced by a specific newer one - the old version of a fact you updated. It stays attached to its replacement as history. When the replacement came from a contradiction it is listed under Archive, where you can undo it. Memry never replaces an important memory without asking you first.</dd>
     <dt>Forgotten</dt><dd>An invalidated memory that nothing replaced - you deleted it, or it faded out. These are listed on their own tab, where you can restore one or delete it permanently.</dd>
     <dt>Importance</dt><dd>How much weight a memory carries in results, from 0 to 1. Set when it is saved.</dd>
     <dt>Decay</dt><dd>The slow drop in a memory's pull on results as it ages. Dated events fade fastest, standing rules barely at all.</dd>
@@ -389,6 +400,9 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
 <section class="kpanel" id="kpanel-forgotten" hidden>
   <p class="hint">Deleting a memory hides it from search but keeps the record, so nothing is lost by accident. This is where those land. Permanent deletion is only possible from here, and only for memories that are already forgotten.</p>
   <div id="forgottenlist"></div>
+  <h2 style="font-size:.95rem;margin-top:1.2rem">Replaced by a newer memory</h2>
+  <p class="hint">When something new contradicts a memory, Memry takes the old one out of use and lists it here. That is a model's judgement, so it can be wrong. With undo you get the old memory back and the one that replaced it is forgotten. With keep both you get the old memory back and keep the new one too.</p>
+  <div id="replacedlist"></div>
   <h2 style="font-size:.95rem;margin-top:1.2rem">Removed names</h2>
   <p class="hint">Removing a person or thing leaves the memories alone and puts the name here. Restoring one brings back its aliases, and the mentions and relations whose memories are still around.</p>
   <div id="retiredlist"></div>
@@ -407,7 +421,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
 </div></div>
 <div class="modal" id="timemodal"><div class="sheet" style="width:min(96vw,46rem)">
 <h2><button class="x" onclick="closeTimeline()" title="close">x</button>Timeline</h2>
-<p class="hint">Every memory that says when the thing itself happens, oldest first. Today opens near the top, with what has passed above it.</p>
+<p class="hint">Every memory that says when the thing itself happens, newest first. Today opens near the top, with what is still ahead above it.</p>
 <div class="timeline" id="timelinebody"></div>
 </div></div>
 </main><script>
@@ -561,6 +575,9 @@ const MAX_IDLE_EDGES=400;
 // sprites, so a thousand planets cost drawImage calls rather than a thousand
 // gradients with blurred shadows.
 const LOD_NODES=400,LOD_FRAME_MS=32;
+// How many planets a ring carries before it reads as a clump. The rim is the
+// widest ring, so it takes the most.
+const PACK={core:4,belt:16,rim:22};
 const gSprites=new Map();let gBackdrop=null,gLastFrame=0;
 let mapData=null,mapEntityTypes=null;
 function knownEntityTypes(){
@@ -652,6 +669,23 @@ function memoryMarkerTypes(typeCounts,limit){
     return entries[entries.length-1][0];
   });
 }
+// Where the rim ends. Two sigma below the mean is the starting point, but on a
+// store with a long tail that leaves only the one-memory entities out on the
+// rim while every two-memory one joins the clump in the belt. So let the rim
+// take the twos as well, but only when it helps: the belt has to be
+// over-packed to begin with, and it has to stay the denser of the two rings
+// afterwards, which keeps it from emptying itself into the rim. A small store,
+// whose belt was never full, keeps the plain two-sigma split.
+const RIM_PROMOTE=2;
+function galaxyRimMax(counts,isCore,start){
+  if(start>=RIM_PROMOTE)return start;
+  const outer=counts.filter(count=>!isCore(count));
+  const rim=outer.filter(count=>count<=start).length,belt=outer.length-rim;
+  const moving=outer.filter(count=>count>start&&count<=RIM_PROMOTE).length;
+  if(!moving||belt<=PACK.belt)return start;
+  if((belt-moving)/PACK.belt<(rim+moving)/PACK.rim)return start;
+  return RIM_PROMOTE;
+}
 function buildGalaxy(data){
   let source=mapMode==='entities'?data.entities:data.tags;
   if(mapMode==='entities'){
@@ -662,11 +696,13 @@ function buildGalaxy(data){
   const vals=source.map(node=>node.count);
   const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
   const sd=Math.sqrt(vals.reduce((a,c)=>a+(c-mean)**2,0)/vals.length);
-  const coreMin=mean+2*sd,rimMax=Math.max(1,mean-2*sd),maxC=Math.max(...vals);
+  const coreMin=mean+2*sd,maxC=Math.max(...vals);
   const fb=!vals.some(count=>count>=coreMin);
+  const isCore=count=>fb?count===maxC:count>=coreMin;
+  const rimMax=galaxyRimMax(vals,isCore,Math.max(1,mean-2*sd));
   const ZF={core:1.0,belt:1.28,rim:1.55};
   const nodes=source.map(raw=>{
-    const zone=(fb?raw.count===maxC:raw.count>=coreMin)?'core':(raw.count<=rimMax?'rim':'belt');
+    const zone=isCore(raw.count)?'core':(raw.count<=rimMax?'rim':'belt');
     return{...raw,typeCounts:raw.type_counts||{},zone,
       entityType:raw.entity_type||'untyped',
       satTypes:memoryMarkerTypes(raw.type_counts||{},Math.min(raw.count,10)),
@@ -686,7 +722,7 @@ function buildGalaxy(data){
     (edgesByNode[a]??=[]).push(edge);(edgesByNode[b]??=[]).push(edge);
   });
   const BANDS={core:[0.02,0.16],belt:[0.30,0.62],rim:[0.66,0.99]};
-  const PHASE={core:0,belt:0.7,rim:1.4},PACK={core:4,belt:16,rim:22},GOLDEN=2.399963229728653;
+  const PHASE={core:0,belt:0.7,rim:1.4},GOLDEN=2.399963229728653;
   for(const zone of['core','belt','rim']){
     const ring=nodes.filter(node=>node.zone===zone);
     ring.sort((a,b)=>b.count-a.count||a.label.localeCompare(b.label));
@@ -1381,7 +1417,7 @@ function showKnowledge(tab){
     document.getElementById('ktab-'+name).setAttribute('aria-pressed',name===tab);
   }
   if(tab==='maintenance')loadUpkeep();
-  if(tab==='forgotten'){loadForgotten();loadRetiredEntities()}
+  if(tab==='forgotten'){loadForgotten();loadReplaced();loadRetiredEntities()}
 }
 
 // -- forgotten: deleted, but still recoverable until purged -----------------
@@ -1410,6 +1446,28 @@ async function purgeMemory(id){
     {method:'POST',body:'{}'});
   if(result.error){alert(result.error);return}
   await Promise.all([loadForgotten(),loadStats()]);
+}
+// -- replaced: a contradiction took these out of use, which can be undone ---
+async function loadReplaced(){
+  const el=document.getElementById('replacedlist');
+  if(!el)return;
+  const rows=await api('/api/v1/memories/replaced');
+  if(!rows.length){el.innerHTML='<div class="empty">Nothing was replaced.</div>';return}
+  el.innerHTML=rows.map(row=>`<div class="tagrow"><span class="name">
+    ${esc(row.memory.content)}
+    <div class="hint">replaced ${esc((row.replaced_at||'').slice(0,10))}${row.actor==='user'?' by you':''} with: ${esc(row.replacement?row.replacement.content:'a memory that no longer exists')}</div>
+    ${row.reason?`<div class="hint">${esc(row.reason)}</div>`:''}</span>
+    <button class="act" title="bring this memory back and forget the one that replaced it"
+      onclick='undoReplacement(${JSON.stringify(row.memory.id)},false)'>undo</button>
+    <button class="act" title="bring this memory back and keep the newer one too"
+      onclick='undoReplacement(${JSON.stringify(row.memory.id)},true)'>keep both</button></div>`).join('');
+}
+async function undoReplacement(id,keepNew){
+  const result=await api('/api/v1/memories/'+encodeURIComponent(id)+'/undo-replacement',
+    {method:'POST',body:JSON.stringify({keep_new:keepNew})});
+  if(result.error){alert(result.error);return}
+  await Promise.all([loadReplaced(),loadForgotten(),loadStats(),loadMapData()]);
+  loadAll();
 }
 // -- removed names: entities are retired, never deleted outright ------------
 async function loadRetiredEntities(){
@@ -1468,6 +1526,8 @@ const whenText=iso=>iso?String(iso).slice(0,16).replace('T',' '):'';
 // and rows that carry only what the decision needs. The long list of names the
 // model judged is a checklist with one apply, never one row per name.
 const QUEUE_SECTIONS=[
+  {kind:'conflict',label:'Contradictions',
+   ask:'Something new contradicts a memory you already have, and Memry did not replace it without asking you. Each row says why. Both memories are in use until you say which is right.'},
   {kind:'proposal',label:'Entities',
    ask:'Two entities that might be the same one. Merging joins them; keeping them separate is remembered for good.'},
   {kind:'consolidation',label:'Duplicate memories',
@@ -1514,11 +1574,12 @@ function renderUpkeepQueue(queue){
 }
 function queueRow(item){
   const replaces=item.replaces&&item.replaces.length
-    ?`<details class="qdetail"><summary>the ${item.replaces.length} memories it replaces</summary><ul>${item.replaces.map(c=>`<li>${esc(c)}</li>`).join('')}</ul></details>`:'';
+    ?`<details class="qdetail"${item.replaces_label?' open':''}><summary>${esc(item.replaces_label||`the ${item.replaces.length} memories it replaces`)}</summary><ul>${item.replaces.map(c=>`<li>${esc(c)}</li>`).join('')}</ul></details>`:'';
   return `<div class="tagrow qrow"><span class="name"><b>${esc(item.title)}</b>
     ${item.detail?`<div class="hint">${esc(item.detail)}</div>`:''}${replaces}</span>
     <button class="q-yes" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"accept",this)'>${esc(item.accept)}</button>
-    <button class="q-no" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"decline",this)'>${esc(item.decline)}</button></div>`;
+    <button class="q-no" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"decline",this)'>${esc(item.decline)}</button>
+    ${item.other?`<button class="q-no" onclick='decideUpkeep(${JSON.stringify(item.kind)},${JSON.stringify(item.id)},"other",this)'>${esc(item.other)}</button>`:''}</div>`;
 }
 function queueChecklist(section,items){
   const sorted=[...items].sort((a,b)=>a.title.localeCompare(b.title,undefined,{sensitivity:'base'}));
@@ -1565,6 +1626,7 @@ async function decideUpkeep(kind,id,decision,button){
   renderUpkeepQueue(lastQueue);
   // merges and removals show up elsewhere without a reload
   await Promise.all([loadTags(),loadEntities(),loadStats(),loadMapData()]);
+  if(kind==='conflict')loadAll();
 }
 async function decideFolded(kind,button){
   const card=button.closest('.foldcard');
@@ -1971,7 +2033,7 @@ function timelineEntries(rows,todayISO){
     const at=timelinePoint(m);
     if(at)dated.push({at:String(at),memory:m});
   }
-  dated.sort((a,b)=>a.at<b.at?-1:(a.at>b.at?1:0));
+  dated.sort((a,b)=>a.at<b.at?1:(a.at>b.at?-1:0));
   const out=[];
   let month='',todayPlaced=false;
   const openMonth=at=>{
@@ -1984,7 +2046,7 @@ function timelineEntries(rows,todayISO){
     todayPlaced=true;openMonth(today);out.push({kind:'today',at:today});
   };
   for(const item of dated){
-    if(item.at.slice(0,10)>=today)placeToday();
+    if(item.at.slice(0,10)<today)placeToday();
     openMonth(item.at);
     out.push({kind:'row',at:item.at,memory:item.memory});
   }
@@ -2016,7 +2078,7 @@ function renderTimeline(rows){
     entry.kind==='month'?`<div class="tl-month">${esc(entry.label)}</div>`
     :entry.kind==='today'?`<div class="tl-today" id="tl-today">Today · ${esc(entry.at)}</div>`
     :timelineRow(entry)).join('');
-  // Today near the top: what has passed is above it, what is coming below.
+  // Today near the top: what is coming is above it, what has passed below.
   const marker=document.getElementById('tl-today');
   if(marker)el.scrollTop=Math.max(0,marker.offsetTop-26);
 }
@@ -2578,6 +2640,42 @@ def create_app(
             return JSONResponse({"error": str(exc)}, status_code=409)
         return JSONResponse({"restored": restored})
 
+    async def replaced_memories(request: Request) -> Response:
+        rows = await run_in_threadpool(partial(
+            store.replaced,
+            user_id=_p(request).namespace(request.query_params.get("user_id")),
+            limit=int(request.query_params.get("limit", 200)),
+        ))
+        return JSONResponse([
+            {
+                "memory": _memory_payload(row["memory"]),
+                "replaced_at": row["replaced_at"],
+                "replacement": (
+                    _memory_payload(row["replacement"])
+                    if row["replacement"] is not None else None
+                ),
+                "reason": row["reason"],
+                "actor": row["actor"],
+            }
+            for row in rows
+        ])
+
+    async def undo_replacement(request: Request) -> Response:
+        _, error = _memory_or_error(request)
+        if error:
+            return error
+        body = await request.json() if await request.body() else {}
+        try:
+            restored = await run_in_threadpool(partial(
+                store.undo_replacement,
+                request.path_params["memory_id"],
+                keep_new=bool(body.get("keep_new", False)),
+                owner_prefix=_p(request).prefix,
+            ))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse({"restored": restored})
+
     async def purge_memory(request: Request) -> Response:
         """Permanently delete a memory that was already forgotten.
 
@@ -2868,7 +2966,7 @@ def create_app(
         raw_ids = body.get("ids") if isinstance(body.get("ids"), list) else [body.get("id")]
         ids = [str(i) for i in raw_ids if i]
         decision = str(body.get("decision") or "")
-        if decision not in ("accept", "decline") or not ids:
+        if decision not in ("accept", "decline", "other") or not ids:
             return JSONResponse({"error": "kind, id (or ids) and decision required"},
                                 status_code=400)
         user_id = _p(request).namespace(body.get("user_id"))
@@ -3430,6 +3528,8 @@ def create_app(
         Route("/api/v1/memories", guarded(create_memory), methods=["POST"]),
         # before /{memory_id}, or "forgotten" is read as an id and 404s
         Route("/api/v1/memories/forgotten", guarded(forgotten_memories), methods=["GET"]),
+        Route("/api/v1/memories/replaced", guarded(replaced_memories), methods=["GET"]),
+        Route("/api/v1/memories/{memory_id}/undo-replacement", guarded(undo_replacement), methods=["POST"]),
         Route("/api/v1/memories/{memory_id}/purge", guarded(purge_memory), methods=["POST"]),
         Route("/api/v1/memories/{memory_id}/unforget", guarded(unforget_memory), methods=["POST"]),
         Route("/api/v1/memories/{memory_id}", guarded(get_memory), methods=["GET"]),

@@ -149,7 +149,27 @@ handleMapEntityTypeChange({target:{
   dataset:{entityType:'concept'},checked:false
 }});
 check(!mapEntityTypes.has('concept'),'checkbox updates selected entity types');
-check(redraws===1,'checkbox redraws map immediately');"""
+check(redraws===1,'checkbox redraws map immediately');
+// A long tail: the twos leave the over-packed belt for the rim.
+const crowd=counts=>({memories:1,tags:counts.map((count,index)=>({
+  key:'tag:c'+index,label:'c'+index,kind:'tag',count,type_counts:{semantic:count}
+})),tag_edges:[],entities:[],entity_edges:[]});
+const zones=graph=>graph.nodes.reduce((seen,node)=>{
+  (seen[node.zone]??=new Set()).add(node.count);return seen},{});
+mapMode='tags';
+const tail=[200,...Array(20).fill(1),...Array(60).fill(2),...Array(40).fill(3),
+  ...Array(30).fill(5),...Array(20).fill(8)];
+const long=zones(buildGalaxy(crowd(tail)));
+check(long.rim.has(1)&&long.rim.has(2),'ones and twos sit on the rim');
+check(!long.rim.has(3)&&long.belt.has(3),'threes stay in the belt');
+check(!long.belt.has(2),'no two is left in the belt');
+// A small store never had a crowded belt, so it keeps the two-sigma split.
+const small=zones(buildGalaxy(crowd([12,7,5,4,3,3,2,2,1,1,1])));
+check(small.rim.has(1)&&!small.rim.has(2)&&small.belt.has(2),
+  'a belt with room keeps its twos');
+// The belt must stay the denser ring, so it never empties into the rim.
+const twos=zones(buildGalaxy(crowd([200,1,...Array(60).fill(2),3,4])));
+check(twos.belt.has(2)&&!twos.rim.has(2),'a belt of twos is not emptied');"""
     result = subprocess.run(
         ["node", "-"], input=contract, capture_output=True, text=True
     )
@@ -246,7 +266,8 @@ def test_forgotten_panel_lists_removed_names_with_a_way_back():
 
     assert 'id="retiredlist"' in html
     assert ">Removed names</h2>" in html
-    assert "if(tab==='forgotten'){loadForgotten();loadRetiredEntities()}" in source
+    assert ("if(tab==='forgotten'){loadForgotten();loadReplaced();"
+            "loadRetiredEntities()}") in source
     assert "async function loadRetiredEntities()" in source
     assert "api('/api/v1/entities/retired')" in source
     assert "async function restoreEntity(id)" in source

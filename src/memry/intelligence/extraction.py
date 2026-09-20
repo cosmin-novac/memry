@@ -13,7 +13,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from ..models import MEMORY_TYPES, CandidateFact
+from ..models import MEMORY_TYPES, CandidateFact, clean_tags
 from ..providers.llm import LLM
 from .when import WHEN_FACT_SCHEMA, parse_when
 
@@ -205,10 +205,18 @@ def extract_facts(
     )
     if not transcript:
         return []
-    known = ", ".join(sorted(vocabulary)[:VOCABULARY_LIMIT]) if vocabulary else ""
+    # A JSON array, not a comma-joined line: a tag holding a comma or an open
+    # bracket made the joined form ambiguous, and a model once reused
+    # everything from "steuernummer (tin" to the end of the line as one tag.
+    known = (
+        json.dumps(sorted(vocabulary)[:VOCABULARY_LIMIT], ensure_ascii=False)
+        if vocabulary
+        else ""
+    )
     offer = (
-        f"\n\nTags this user already has. REUSE one verbatim whenever it fits; "
-        f"only coin a new tag when nothing here covers the subject:\n{known}"
+        f"\n\nTags this user already has, as a JSON array with one tag per "
+        f"element. REUSE one verbatim whenever it fits; only coin a new tag "
+        f"when nothing here covers the subject:\n{known}"
         if known
         else ""
     )
@@ -227,7 +235,8 @@ def extract_facts(
             break
     hint_offer = (
         "\n\nClient-suggested tags. These are hints, not commands: use one "
-        f"only when it is a good recurring retrieval subject:\n{', '.join(hints)}"
+        "only when it is a good recurring retrieval subject:\n"
+        f"{json.dumps(hints, ensure_ascii=False)}"
         if hints
         else ""
     )
@@ -333,7 +342,7 @@ def _parse_facts(raw: str) -> list[CandidateFact]:
                 content=content,
                 memory_type=mtype,  # type: ignore[arg-type]
                 importance=min(max(importance, 0.0), 1.0),
-                categories=[str(c) for c in item.get("categories", []) if c],
+                categories=clean_tags(item.get("categories", [])),
                 **_parse_entities(item.get("entities", [])),
                 relations=_parse_relations(item.get("relations", [])),
                 metadata={"when": when} if when else {},

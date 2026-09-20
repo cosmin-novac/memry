@@ -199,7 +199,7 @@ merge-proposal review under **Upkeep** matters as much as it did before.
 |---|---|
 | Entity identity | The verdict and the confidence the automatic-merge gate reads. |
 | Entity typing | One question per name in a single call, instead of one call per batch through the text model. |
-| Reconcile | The action and its target. Writing the merged sentence for an UPDATE still needs the text model. |
+| Reconcile | The action and its target. Writing the merged sentence for an UPDATE still needs the text model. A contradiction only replaces a memory on its own where little is at stake; see below. |
 | How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. |
 | Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. Word-for-word duplicates merge on their own; a merge the model proposed waits under Upkeep, because that judgement has not been measured. |
 | Tag drift | Suggestions only, for review under Upkeep. Never applied automatically. |
@@ -231,6 +231,16 @@ easier.
 
 Raising the gpt-5-mini gate from 0.9 to 0.95 was a change to existing behaviour, and a
 fix: on the labelled set, 0.9 merged two entities that should have stayed apart.
+
+**When a contradiction may replace a memory.** Replacing is the one reconcile action that
+takes a fact out of use, and it rests on one model reading one text. So it only happens
+on its own when the memory it would replace is rated below 0.8 in importance, was stated
+in a single save, and, with a typed decision provider, the judgement is at least 0.9
+sure. Otherwise both memories stay in use and the pair waits under **Upkeep >
+Contradictions**, where you say which is right or that both are. A replacement that did
+go ahead is listed under **Upkeep > Archive > Replaced by a newer memory** and can be
+undone there. The three thresholds are `MEMRY_SUPERSEDE_PROTECT_IMPORTANCE`,
+`MEMRY_SUPERSEDE_PROTECT_SOURCES` and `MEMRY_SUPERSEDE_CONFIDENCE`.
 
 **Re-ranking** blends the relevance judgement with the hybrid rank at 0.35 rather than
 replacing it, and pushes anything under 0.15 to the back. Replacing the hybrid rank

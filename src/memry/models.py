@@ -11,6 +11,7 @@ Design principles (see docs/research/competitive-analysis.md):
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -21,6 +22,54 @@ MemoryType = Literal["semantic", "episodic", "procedural", "working"]
 EventType = Literal["ADD", "UPDATE", "DELETE", "SUPERSEDE", "NONE"]
 
 MEMORY_TYPES: tuple[str, ...] = ("semantic", "episodic", "procedural", "working")
+
+
+#: A tag is a short retrieval subject. Anything longer is a sentence or a list
+#: that was glued together, and is dropped rather than stored.
+TAG_MAX_LENGTH = 64
+
+_TAG_GROUP_RE = re.compile(r"\([^()]*\)|\[[^\[\]]*\]|\{[^{}]*\}")
+_TAG_OPEN_RE = re.compile(r"[(\[{]")
+_TAG_SPLIT_RE = re.compile(r"[,;\r\n]")
+
+
+def clean_tags(values: Any) -> list[str]:
+    """Tags as they may be stored: one subject each, no list syntax inside.
+
+    Tags travel as comma-separated text in several places (the dashboard
+    inputs, client arguments, the list a model is asked to reuse from), so a
+    tag that itself holds a comma or a bracket does not survive the trip. It
+    happened: "steuernummer (tin, koeln vingst)" was split into two tags, and
+    a model later read the dangling "steuernummer (tin" plus the fifteen tags
+    listed after it as one tag and "reused" that. So a bracketed aside is
+    removed, an unclosed bracket ends the tag, what is left is split on commas,
+    and anything still longer than a tag can be is dropped.
+    """
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        text = str(raw or "")
+        previous = None
+        while previous != text:  # nested asides come off from the inside out
+            previous = text
+            text = _TAG_GROUP_RE.sub(" ", text)
+        opened = _TAG_OPEN_RE.search(text)
+        if opened:
+            text = text[: opened.start()]
+        text = re.sub(r"[)\]}]", " ", text)
+        for part in _TAG_SPLIT_RE.split(text):
+            tag = " ".join(part.split())
+            if not tag or len(tag) > TAG_MAX_LENGTH:
+                continue
+            key = tag.casefold()
+            if key not in seen:
+                seen.add(key)
+                out.append(tag)
+    return out
 
 
 def new_id() -> str:
@@ -133,6 +182,9 @@ class AddAction(BaseModel):
     memory_id: str | None = None
     content: str | None = None
     reason: str | None = None
+    #: Set when the new memory contradicts this stored one and was kept beside
+    #: it instead of replacing it. A person settles it under Upkeep.
+    conflicts_with: str | None = None
 
 
 class AddResult(BaseModel):

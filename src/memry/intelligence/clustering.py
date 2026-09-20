@@ -10,6 +10,7 @@ synthetic cluster must contain enough existing topics to earn its place.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -194,10 +195,11 @@ def suggest_canonical_merges(
     obvious = obvious_canonical_merges(tags)
     if not llm.available:
         return obvious
-    listing = ", ".join(sorted(known))
+    listing = json.dumps(sorted(known), ensure_ascii=False)
     raw = llm.complete(
         CANONICALIZE_SYSTEM,
-        f"Tags: {listing}\n\nPropose the merge groups as JSON.",
+        f"Tags, as a JSON array with one tag per element: {listing}\n\n"
+        "Propose the merge groups as JSON.",
         json_schema=CANONICALIZE_SCHEMA,
     )
     data = parse_lenient_json(raw)

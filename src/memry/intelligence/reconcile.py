@@ -8,7 +8,10 @@ Decisions:
 - ADD      - genuinely new information -> new memory
 - UPDATE   - refines/extends an existing memory -> rewrite it in place
 - DELETE   - contradicts an existing memory -> invalidate old, add new,
-             link old.superseded_by -> new.id  (temporal supersede)
+             link old.superseded_by -> new.id  (temporal supersede).
+             Only where little is at stake: see ``held_back``. Otherwise both
+             stay in use, the new one marked as conflicting, and a person
+             decides under Upkeep.
 - NONE     - duplicate / already known -> skip
 
 Without an LLM, reconciliation degrades to exact-duplicate detection.
@@ -20,7 +23,7 @@ import re
 from typing import Any, Callable
 
 from ..backends.base import MemoryBackend
-from ..config import RetrievalConfig
+from ..config import RetrievalConfig, SupersedeConfig
 from ..models import (
     AddAction,
     CandidateFact,
@@ -124,6 +127,34 @@ def _decide_action(
     }
 
 
+#: Metadata key on a memory that was kept beside the one it contradicts.
+CONFLICT_KEY = "conflict"
+
+
+def held_back(
+    target: Memory, decision: dict[str, Any], cfg: SupersedeConfig
+) -> str | None:
+    """Why this replacement has to be asked about, or None when it may go ahead.
+
+    A contradiction is one model's reading of one text. That is enough to retire
+    a passing remark, and a wrong call there is undone from the review list. It
+    is not enough to retire what the store has the most reason to believe: a
+    memory rated important, or one that several separate saves have stated.
+    """
+    if target.importance >= cfg.protect_importance:
+        return (
+            f"the memory it would replace is rated important "
+            f"({target.importance:.2f})"
+        )
+    sources = len(target.source_episode_ids or [])
+    if sources >= cfg.protect_sources:
+        return f"the memory it would replace was stated in {sources} separate saves"
+    confidence = decision.get("confidence")
+    if isinstance(confidence, (int, float)) and confidence < cfg.confidence:
+        return f"the judgement was only {confidence:.2f} sure"
+    return None
+
+
 def reconcile_candidate(
     *,
     candidate: CandidateFact,
@@ -135,6 +166,7 @@ def reconcile_candidate(
     episode_ids: list[str],
     decider: Decider | None = None,
     retrieval_cfg: RetrievalConfig | None = None,
+    supersede_cfg: SupersedeConfig | None = None,
     prepare_update: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> AddAction:
     """Apply one candidate fact against the store and return what happened."""
@@ -219,6 +251,19 @@ def reconcile_candidate(
         return AddAction(event="UPDATE", memory_id=target.id, content=new_content, reason=reason)
 
     # ADD (possibly preceded by a supersede when action == DELETE)
+    held = (
+        held_back(target, decision, supersede_cfg or SupersedeConfig())
+        if action == "DELETE" and target is not None
+        else None
+    )
+    metadata = dict(candidate.metadata or {})
+    if held and target is not None:
+        metadata[CONFLICT_KEY] = {
+            "with": target.id,
+            "reason": reason or "contradicted by new information",
+            "held": held,
+            "at": utcnow(),
+        }
     new_memory = Memory(
         content=candidate.content,
         memory_type=candidate.memory_type,
@@ -228,7 +273,7 @@ def reconcile_candidate(
         importance=candidate.importance,
         categories=candidate.categories,
         entities=candidate.entities,
-        metadata=candidate.metadata,
+        metadata=metadata,
         source_episode_ids=episode_ids,
         created_at=utcnow(),
         updated_at=utcnow(),
@@ -242,9 +287,23 @@ def reconcile_candidate(
             memory_id=stored.id,
             event="ADD",
             new_content=stored.content,
-            reason=reason or "new information",
+            reason=(
+                f"kept beside memory {target.id}, which it contradicts, "
+                f"because {held}. {reason}".strip()
+                if held and target is not None
+                else reason or "new information"
+            ),
         )
     )
+
+    if held and target is not None:
+        return AddAction(
+            event="ADD",
+            memory_id=stored.id,
+            content=stored.content,
+            reason=f"conflicts with memory {target.id}; waiting for review ({held})",
+            conflicts_with=target.id,
+        )
 
     if action == "DELETE" and target is not None:
         backend.invalidate_memory(target.id, superseded_by=stored.id)

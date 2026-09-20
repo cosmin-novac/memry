@@ -129,6 +129,26 @@ class RetrievalConfig(BaseModel):
     relational_protect_top: int = 5
 
 
+class SupersedeConfig(BaseModel):
+    """When a contradiction may replace a stored memory without asking.
+
+    Replacing is the one reconcile action that takes a fact out of use, and it
+    rests on a single model judgement. It went wrong in the way that matters:
+    a document was misread as saying someone's wife was their mother, and that
+    "corrected" the true fact out of the store. So the judgement only acts on
+    its own where little is at stake. Everything else keeps both memories in
+    use and asks under Upkeep.
+    """
+
+    #: A memory at or above this importance is never replaced without asking.
+    protect_importance: float = 0.8
+    #: Nor is one that this many separate saves have stated.
+    protect_sources: int = 2
+    #: A typed decision below this confidence asks too. The prompt path
+    #: reports no confidence, so there only the two protections above apply.
+    confidence: float = 0.9
+
+
 class DecayConfig(BaseModel):
     enabled: bool = True
     half_life_days: float = 90.0
@@ -205,6 +225,7 @@ class Config(BaseModel):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     decay: DecayConfig = Field(default_factory=DecayConfig)
+    supersede: SupersedeConfig = Field(default_factory=SupersedeConfig)
     ann: AnnConfig = Field(default_factory=AnnConfig)
     tags: TagAbstractionConfig = Field(default_factory=TagAbstractionConfig)
 
@@ -316,6 +337,10 @@ def _from_env() -> dict[str, Any]:
     put("decision", "base_url", e("MEMRY_DECISION_BASE_URL"))
     put("decision", "auto_confirm_confidence", _float(e("MEMRY_DECISION_MERGE_CONFIDENCE")))
     put("decision", "rerank", _bool(e("MEMRY_DECISION_RERANK")))
+
+    put("supersede", "protect_importance", _float(e("MEMRY_SUPERSEDE_PROTECT_IMPORTANCE")))
+    put("supersede", "protect_sources", _int(e("MEMRY_SUPERSEDE_PROTECT_SOURCES")))
+    put("supersede", "confidence", _float(e("MEMRY_SUPERSEDE_CONFIDENCE")))
 
     put("embedding", "provider", e("MEMRY_EMBEDDING_PROVIDER"))
     put("embedding", "model", e("MEMRY_EMBEDDING_MODEL"))
