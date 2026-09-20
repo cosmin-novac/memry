@@ -1,6 +1,7 @@
 # <img src="docs/assets/memry-mark.svg" width="30" alt="" align="top"> Memry
 
-**The open, self-hostable memory layer for AI agents** - [memry.tech](https://memry.tech)
+**Memry is the long-term memory system for AI agents.** It is open source and you host it
+yourself - [memry.tech](https://memry.tech)
 
 ```
 pip install memry
@@ -12,6 +13,12 @@ Codex - durable long-term memory. It distills conversations into discrete facts,
 reconciles each new fact against what it already knows, and serves the result back as
 token-budgeted context. All knowledge state is a single SQLite file on your machine: no external vector
 database or queue service, no cloud account, and it works with zero API keys.
+
+A scratchpad or a `MEMORY.md` file is text your agent rereads at the start of every
+session. You keep it short by hand, and a line that is no longer true is still in the file
+until you delete it. Memry is a database that holds every fact your agents have saved and
+returns the few that fit the question. Every MCP client you connect reads and writes the
+same memory.
 
 ## Why Memry
 

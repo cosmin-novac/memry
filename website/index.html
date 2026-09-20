@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Memry - the open memory layer for AI agents</title>
-<meta name="description" content="Memry gives any AI agent long-term memory over MCP. Local-first, self-hostable, Apache-2.0. Extraction, reconciliation, temporal memory and audit trails in one SQLite file.">
+<title>Memry - the long-term memory system for AI agents</title>
+<meta name="description" content="Memry is the long-term memory system for AI agents. Any MCP client can save to it and search it. You host it yourself under Apache-2.0. It extracts facts, reconciles them, dates them and keeps an audit trail, all in one SQLite file.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50' fill='none' stroke='%2314b8a6' stroke-width='7' stroke-linecap='round'/%3E%3Ccircle cx='47' cy='10.5' r='4.5' fill='%2314b8a6'/%3E%3Ccircle cx='56' cy='20' r='3.2' fill='%2314b8a6' opacity='.85'/%3E%3Ccircle cx='57.5' cy='30' r='2.2' fill='%2314b8a6' opacity='.7'/%3E%3C/svg%3E">
 <style>
 :root{
@@ -191,9 +191,10 @@ footer a{color:var(--dim)}
     <div>
       <p class="eyebrow">Open source · Apache-2.0 · MCP-native</p>
       <h1>Your agent forgets everything.<br><em>Memry</em> doesn't.</h1>
-      <p class="sub">The self-hostable memory layer for AI agents. One
-        <code class="inlinecode">pip install</code>, one SQLite file, and shared memory
-        across Claude&nbsp;Code, Cursor, Codex, ChatGPT, or any MCP client.</p>
+      <p class="sub">Memry is the long-term memory system for AI agents. You install it
+        with one <code class="inlinecode">pip install</code> and it keeps everything in one
+        SQLite file. Claude&nbsp;Code, Cursor, Codex, ChatGPT and any other MCP client
+        share the same memory.</p>
       <div class="cta-row">
         <a class="btn primary" href="#selfhost">Self-host in 60 seconds</a>
         <a class="btn ghost" href="https://github.com/cosmin-novac/memry">Read the source</a>
@@ -261,6 +262,11 @@ footer a{color:var(--dim)}
       episodes <em>and</em> distills them into reconciled, contradiction-aware facts, so
       your agent remembers what's true now without losing the history of how it got
       there.</p>
+    <p class="lede">A scratchpad or a <code class="inlinecode">MEMORY.md</code> file is text
+      your agent rereads at the start of every session. You keep it short by hand, and a
+      line that is no longer true is still in the file until you delete it. Memry is a
+      database that holds every fact your agents have saved and returns the few that fit
+      the question.</p>
     <div class="pipeline">
       <div class="stage"><span class="num">01 · RECORD</span>
         <h3>Episodes first</h3>
