@@ -398,3 +398,40 @@ Beyond relevance search, both `search_memories`/`POST /api/v1/search` and
 `list_memories`/`GET /api/v1/memories` accept a `categories` (tag) filter and a `since`/
 `until` date window (`YYYY-MM-DD`, the `until` day inclusive). Pass an empty query with just
 a tag or date to browse rather than rank, e.g. "everything tagged `travel` since 2026-01-01".
+
+## When a memory happens
+
+`since`/`until` filter on the day a memory was recorded. A memory can also carry the time
+the fact itself happens, in `metadata["when"]`:
+
+```json
+{"start": "2026-10-03", "end": "2026-10-07", "recurrence": "yearly"}
+```
+
+`start` is `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM`, or `--MM-DD` for a yearly date whose year is
+unknown, which is how a birthday is stored. `end` and `recurrence` (`yearly`, `monthly`,
+`weekly`, `daily`) are optional.
+
+Extraction sets a `when` only for something that happened or will happen at a particular
+time: a meeting, a launch, a release, a purchase, a trip, an appointment, a deadline, a
+move, or a decision made on a date. A price observed on a day, a test log and a
+specification all carry dates without occurring, so a date in the text on its own does not
+produce a `when`.
+
+`search_memories`/`POST /api/v1/search` and `list_memories`/`GET /api/v1/memories` take
+`when_since`/`when_until` (`YYYY-MM-DD`, both days inclusive) beside `since`/`until`. They
+match on the occurrence time, and a memory without one never matches, which is what makes
+"what is on this weekend" answerable. A recurring `when` matches when any of its
+occurrences falls in the window. The REST memory payload carries `when` and the computed
+`next_occurrence`, and the dashboard memory card shows the same in a small chip.
+
+To read occurrence times out of memories saved before this existed:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/maintenance/run/when \
+  -H 'content-type: application/json' -d '{"dry_run": true, "limit": 20}'
+```
+
+A dry run writes nothing and returns what it would set. Without `dry_run` it stores each
+`when` it finds and marks the rest as checked, so a second run over the same memories
+spends nothing. The pass needs an LLM; without one it reports that and changes nothing.

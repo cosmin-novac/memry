@@ -15,6 +15,7 @@ from typing import Any
 
 from ..models import MEMORY_TYPES, CandidateFact
 from ..providers.llm import LLM
+from .when import WHEN_FACT_SCHEMA, parse_when
 
 # `document` and `code` were added after reviewing what a real store dumped into
 # "other": contracts, invoices and registration numbers on one side, files,
@@ -70,9 +71,11 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
                             "additionalProperties": False,
                         },
                     },
+                    "when": WHEN_FACT_SCHEMA,
                 },
                 "required": [
-                    "content", "type", "importance", "categories", "entities", "relations",
+                    "content", "type", "importance", "categories", "entities",
+                    "relations", "when",
                 ],
                 "additionalProperties": False,
             },
@@ -141,6 +144,22 @@ Rules:
   * too narrow - NEVER put a date, a measurement, or a one-off identifier in a
     tag ("2026-04-02 imaging", "paris sep 3-10 trip"). A tag used once is a tag
     that can never group anything. Tag the recurring concern, not the instance.
+- when: the time the fact itself happens, which is not the time it was saved.
+  Set it ONLY when the fact describes something that happened or will happen at
+  a particular time: a meeting, a launch, a release, a purchase, a trip, an
+  appointment, a deadline, a move, or a decision made on a date. Leave it null
+  for a state, a preference, a rule, a price, a measurement, a specification, an
+  implementation note or a test log, EVEN WHEN A DATE APPEARS IN THE TEXT - a
+  price observed on a day and a log written on a day both carry dates without
+  occurring. When you cannot tell, leave it null.
+  * "start": "YYYY-MM-DD", or "YYYY-MM-DDTHH:MM" when a clock time is stated,
+    or "--MM-DD" for a yearly date whose year is unknown or does not matter.
+  * "end": the same formats, only when the fact spans a period; null otherwise.
+  * "recurrence": "yearly", "monthly", "weekly" or "daily", only when the fact
+    says the thing repeats; null otherwise. A birthday or an anniversary is a
+    yearly recurrence on a person, not one event per year: write it as
+    {{"start": "--MM-DD", "end": null, "recurrence": "yearly"}}.
+  Resolve relative wording against today's date, exactly as you do in the text.
 - relations: for each fact, list typed edges BETWEEN two of its entities as
   {{"subject", "predicate", "object"}}. Subject and object MUST be entity
   strings from this fact's "entities". The predicate is a short snake_case verb
@@ -153,7 +172,8 @@ Rules:
 Respond with JSON only: {{"facts": [{{"content": str, "type": str,
 "importance": number, "categories": [str],
 "entities": [{{"name": str, "type": str}}],
-"relations": [{{"subject": str, "predicate": str, "object": str}}]}}]}}.
+"relations": [{{"subject": str, "predicate": str, "object": str}}],
+"when": {{"start": str|null, "end": str|null, "recurrence": str|null}}}}]}}.
 Return {{"facts": []}} if nothing is worth remembering."""
 
 
@@ -305,6 +325,9 @@ def _parse_facts(raw: str) -> list[CandidateFact]:
             importance = float(item.get("importance", 0.5))
         except (TypeError, ValueError):
             importance = 0.5
+        # An occurrence time rides along in metadata: additive, so a fact
+        # without one is stored exactly as before.
+        when = parse_when(item.get("when"))
         facts.append(
             CandidateFact(
                 content=content,
@@ -313,6 +336,7 @@ def _parse_facts(raw: str) -> list[CandidateFact]:
                 categories=[str(c) for c in item.get("categories", []) if c],
                 **_parse_entities(item.get("entities", [])),
                 relations=_parse_relations(item.get("relations", [])),
+                metadata={"when": when} if when else {},
             )
         )
     return facts

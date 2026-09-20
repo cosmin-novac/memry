@@ -390,6 +390,8 @@ def create_server(
         entity_id: str = "",
         since: str = "",
         until: str = "",
+        when_since: str = "",
+        when_until: str = "",
     ) -> Annotated[CallToolResult, SearchMemoriesOutput]:
         """Search long-term memory for what you already know. Call this at the
         start of a session AND whenever the conversation turns to a new topic,
@@ -399,6 +401,10 @@ def create_server(
         restrict to categories (comma-separated), an exact entity ID, and/or a
         date window with since/until (YYYY-MM-DD, e.g. since="2026-01-01"). Pass
         an empty query with just categories or a date to browse rather than rank.
+
+        when_since/when_until (YYYY-MM-DD) filter on when the thing itself
+        happens rather than when it was saved, which is what answers "what is on
+        this weekend"; only memories that carry an occurrence time match.
 
         PASS categories WHENEVER YOU KNOW THE SUBJECT. You are holding the
         conversation, so you know what it is about even when the user's words do
@@ -420,6 +426,8 @@ def create_server(
             entity_id=entity_id or None,
             since=since or None,
             until=until or None,
+            when_since=when_since or None,
+            when_until=when_until or None,
         )
         memory_rows = [_memory_row(r.memory, r.score) for r in results]
         return _tool_result(
@@ -474,15 +482,20 @@ def create_server(
         entity_id: str = "",
         since: str = "",
         until: str = "",
+        when_since: str = "",
+        when_until: str = "",
     ) -> Annotated[CallToolResult, ListMemoriesOutput]:
         """List memories, most recently updated first. Optionally filter by tag
         (categories, comma-separated), exact entity ID, and/or a date window
-        (since/until as YYYY-MM-DD) to browse what was recorded about a topic or in a period."""
+        (since/until as YYYY-MM-DD) to browse what was recorded about a topic or in a period.
+        when_since/when_until (YYYY-MM-DD) filter instead on when the thing
+        itself happens, and only reach memories that carry an occurrence time."""
         category_list = [c.strip() for c in categories.split(",") if c.strip()] or None
         memories = await _threaded(
             store.get_all, user_id=_uid(user_id), limit=limit,
             categories=category_list, entity_id=entity_id or None,
             since=since or None, until=until or None,
+            when_since=when_since or None, when_until=when_until or None,
         )
         memory_rows = [_memory_row(m) for m in memories]
         return _tool_result(

@@ -57,6 +57,7 @@ from starlette.routing import Mount, Route
 
 from .accounts import SESSION_TTL, AccountStore, default_auth_db_path
 from .enrichment import EnrichmentWorker
+from .intelligence.when import next_occurrence, parse_when
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
 from .oauth import MEMRY_SCOPE, MemryOAuthProvider
 from .principal import ADMIN, Principal
@@ -153,6 +154,7 @@ button.toggle.active{border-color:var(--accent);color:var(--accent)}
 .knowledge-tabs button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
 .kpanel[hidden]{display:none}.entity-link,.entity-chip{border:1px solid var(--line);background:none;color:var(--accent);border-radius:999px;padding:.05rem .45rem;font-size:.78rem}
 .entity-link{border:none;padding:.1rem .2rem}.entity-link:hover,.entity-chip:hover{border-color:var(--accent)}
+.when-chip{border-style:dashed;color:var(--dim)}
 .detail{border:1px solid var(--line);border-radius:9px;padding:.75rem;margin:.7rem 0;background:color-mix(in srgb,var(--bg) 35%,transparent)}
 .detail h3{margin:0 0 .35rem;font-size:1rem}.detail .description{line-height:1.45}.alias-list{display:flex;gap:.35rem;flex-wrap:wrap;margin:.4rem 0}.alias-list span{border:1px solid var(--line);border-radius:999px;padding:.05rem .45rem;font-size:.75rem;color:var(--dim)}
 #stats{color:var(--dim);font-size:.85rem;margin-bottom:1rem}
@@ -445,11 +447,32 @@ function memoryTypeBadge(m){
   const type=normalizedMemoryType(m);
   return `<span class="tag memory-type ${type}"><i class="type-symbol" aria-hidden="true"></i>${type}</span>`;
 }
+// When the fact itself happens, which is not the date the card already shows
+// (that one is when it was recorded).
+const WHEN_UNITS={yearly:'year',monthly:'month',weekly:'week',daily:'day'};
+function occursText(m){
+  const w=m.when;
+  if(!w||!w.start)return'';
+  const start=String(w.start).replace('T',' ');
+  const next=m.next_occurrence?', next '+m.next_occurrence:'';
+  if(w.recurrence){
+    const unit=WHEN_UNITS[w.recurrence]||w.recurrence;
+    if(w.recurrence==='daily')return'every day'+next;
+    const anchor=start.startsWith('--')?start.slice(2):start.slice(5);
+    return'every '+unit+' on '+anchor+next;
+  }
+  const span=w.end?start+' to '+String(w.end).replace('T',' '):start;
+  return(m.next_occurrence?'happens ':'happened ')+span;
+}
+function whenChip(m){
+  const text=occursText(m);
+  return text?`<span class="tag when-chip" title="when this happens, not when it was saved">${esc(text)}</span>`:'';
+}
 function viewCard(m){
   return `<div class="mem"><button class="del" title="forget" onclick="del('${m.id}')">✕</button>
    <button class="edit" title="edit" onclick="startEdit('${m.id}')">✎</button>
    <div>${esc(m.content)}</div>
-   <div class="meta">${memoryTypeBadge(m)}
+   <div class="meta">${memoryTypeBadge(m)}${whenChip(m)}
    ${(m.categories||[]).map(c=>`<button class="tag tagfilter" title="show everything tagged #${esc(String(c))}" onclick='filterByTag(${JSON.stringify(String(c))})'>#${esc(String(c))}</button>`).join('')}
    ${(m.entity_links||[]).map(entity=>`<button class="entity-chip" onclick='openEntity(${JSON.stringify(entity.id)})'>${esc(entity.name)}</button>`).join('')}
    <span>@${esc(m.user_id||'(no user)')}</span>
@@ -2240,6 +2263,13 @@ def create_app(
 
     def _memory_payload(memory) -> dict[str, Any]:
         data = memory.model_dump()
+        # Occurrence time, beside the record's own timestamps. `when` is what
+        # is stored; `next_occurrence` is the day it next falls on, which a
+        # client would otherwise have to work out from the recurrence itself.
+        when = parse_when((memory.metadata or {}).get("when"))
+        data["when"] = when
+        upcoming = next_occurrence(when) if when else None
+        data["next_occurrence"] = upcoming.isoformat() if upcoming else None
         data["entity_links"] = [
             {
                 "id": entity.id,
@@ -2266,6 +2296,8 @@ def create_app(
             entity_id=entity_id,
             since=q.get("since") or None,
             until=q.get("until") or None,
+            when_since=q.get("when_since") or None,
+            when_until=q.get("when_until") or None,
         )
         return JSONResponse([_memory_payload(memory) for memory in memories])
 
@@ -2637,6 +2669,17 @@ def create_app(
                 store.run_name_screen, user_id=user_id,
                 limit=int(body.get("limit") or 0) or None))
             return JSONResponse(result)
+        if key == "when":
+            # Not a scheduled pass: a one-time read of occurrence times out of
+            # memories that predate them, run by hand and resumable.
+            limit = body.get("limit")
+            result = await run_in_threadpool(partial(
+                store.backfill_when,
+                user_id=user_id,
+                dry_run=bool(body.get("dry_run")),
+                limit=int(limit) if limit else None,
+            ))
+            return JSONResponse(result)
         if key not in store._MAINTENANCE_KEYS:
             return JSONResponse({"error": "unknown pass"}, status_code=404)
         if key == "structure" and body.get("dry_run"):
@@ -2833,6 +2876,8 @@ def create_app(
             entity_id=entity_id,
             since=body.get("since") or None,
             until=body.get("until") or None,
+            when_since=body.get("when_since") or None,
+            when_until=body.get("when_until") or None,
         ))
         return JSONResponse(
             [
