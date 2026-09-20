@@ -93,7 +93,7 @@ def test_both_keys_pick_one_provider_for_everything(monkeypatch):
     cfg = Config.load()
     assert cfg.llm.provider == "openai"
     assert cfg.embedding.provider == "openai"
-    assert cfg.llm.resolved_model() == "gpt-5-mini"
+    assert cfg.llm.resolved_model() == "gpt-5.6-luna"
 
 
 def test_anthropic_still_wins_when_it_is_the_only_key(monkeypatch):

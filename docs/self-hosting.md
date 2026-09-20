@@ -221,7 +221,8 @@ so the gate has to sit high and little gets automated. Override with
 **A text model nobody has measured never merges on its own.** On the same 56 cases,
 gpt-5.6-luna got 52 verdicts safe, better than gpt-5-mini's 49, and put its worst wrong
 "same" at 0.98, above any threshold. There is no number that is safe for a model that
-has not been run against the labelled set, so for any text model other than gpt-5-mini
+has not been run against the labelled set, so for any text model other than gpt-5-mini,
+the OpenAI default gpt-5.6-luna included,
 every proposed merge waits for you under **Upkeep**. To measure your own
 model, run `evals/identity_benchmark.py llm --model <name>` and set the gate it reports
 with `MEMRY_DECISION_MERGE_CONFIDENCE`. A confident "different" still blocks an
@@ -286,7 +287,7 @@ For local single-machine use, prefer stdio (`memry mcp`) - no port, no auth surf
 |---|---|
 | Default Anthropic extraction | `ANTHROPIC_API_KEY` + `pip install "memry[anthropic]"` (defaults to the fast, lower-cost `claude-haiku-4-5`) |
 | Larger Anthropic model | `MEMRY_LLM_MODEL=claude-opus-4-8` (explicitly trades more latency and cost for extraction quality) |
-| OpenAI end-to-end | `OPENAI_API_KEY` (LLM `gpt-5-mini`, embeddings `text-embedding-3-small`) |
+| OpenAI end-to-end | `OPENAI_API_KEY` (LLM `gpt-5.6-luna`, embeddings `text-embedding-3-small`) |
 | Fully offline | `MEMRY_LLM_PROVIDER=ollama` + `MEMRY_EMBEDDING_PROVIDER=ollama` (e.g. `llama3.1`, `nomic-embed-text`) |
 | Zero keys, zero model downloads | nothing - verbatim writes + BM25/hash retrieval |
 
@@ -436,17 +437,19 @@ A dry run writes nothing and returns what it would set. Without `dry_run` it sto
 `when` it finds and marks the rest as checked, so a second run over the same memories
 spends nothing. The pass needs an LLM; without one it reports that and changes nothing.
 
-A date in a memory does not make it an event, and the text model is not trusted to tell the
-difference. Measured on 160 labelled memories from one store, 44 of them events: the text
-model alone gave a `when` to 61 memories and was right about 56% of them, because it dates
-work logs and price checks even when told not to. Memry runs two checks on every `when` it
-proposes, on the write path and in the backfill:
+A date in a memory does not make it an event, and how far a text model can be trusted to
+tell the difference depends on the model. Measured on 160 labelled memories from one store,
+44 of them events, with two checks Memry runs on every `when` a model proposes, on the
+write path and in the backfill:
 
-| Check | Precision | Events found |
+| | gpt-5.6-luna | gpt-5-mini |
 |---|---|---|
-| The text model alone | 56% | 77% |
-| Minus write dates read back (a `when` on the recording day, in a text naming no date) | 66% | 70% |
-| And the decision provider calls the memory an event, not a record | 90% | 64% |
+| The text model alone | 85% precise, 75% of events found | 56%, 77% |
+| Minus write dates read back (a `when` on the recording day, in a text naming no date) | 86%, 68% | 63%, 70% |
+| And the decision provider vetoes what it calls a record with 0.80 probability or more | 97%, 66% | 86%, 68% |
 
-A wrong `when` is worse than none, so Memry takes the last row when a decision provider is
-configured, and the middle row without one.
+gpt-5-mini dates work logs and price checks after being told not to, which is one reason
+gpt-5.6-luna is the OpenAI default; it also read the 160 memories four times faster. A wrong
+`when` is worse than none, so the veto applies whenever a decision provider is configured.
+Requiring the provider to say "event" was tried first and lost a fifth of the real events
+for no gain in precision.

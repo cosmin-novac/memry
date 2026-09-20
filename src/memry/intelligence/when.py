@@ -403,17 +403,20 @@ Set start to null for a memory that has no "when"."""
 # on its own
 # ----------------------------------------------------------------------
 #
-# Measured on 160 labelled memories of a real store, 44 of them events. The
-# text model alone gave a "when" to 61 memories and was right about 56% of
-# them: told in capitals that a work log with a date is not an event, it dated
-# work logs anyway. Two checks fix most of that.
+# Measured on 160 labelled memories of a real store, 44 of them events. How
+# much a text model can be trusted here depends on the model: gpt-5-mini gave a
+# "when" to 61 memories and was right about 56% of them, dating work logs after
+# being told in capitals not to; gpt-5.6-luna gave 39 and was right about 85%,
+# four times faster. Two checks sit on top of either.
 #
 # * A "when" equal to the day the memory was recorded, in a memory whose text
-#   names no date, is the write date read back: 14 cases, 3 of them events.
+#   names no date, is the write date read back.
 # * The decision provider is asked the one thing it is good at, whether the
-#   memory is an event or a record. Requiring its agreement took precision to
-#   90% at 64% recall. A wrong "when" is worse than none, so that trade is
-#   taken; without a provider only the first check applies (66%).
+#   memory is an event or a record, and holds a veto: a "when" is dropped when
+#   it calls the memory a record with at least 0.80 probability. Requiring an
+#   "event" verdict instead cost a fifth of the real events for nothing. With
+#   gpt-5.6-luna the veto gives 97% precision with 66% of events found (86% and
+#   68% without a provider); with gpt-5-mini, 86% and 68%.
 
 _NAMES_A_DATE = re.compile(
     r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\.\d{1,2}\.\d{2,4}|\d{1,2}/\d{1,2}/\d{2,4}"
@@ -435,8 +438,8 @@ EVENT_CRITERIA = {
                "result, a commit or a deployment log. It may carry a date, but "
                "nothing in it is an occasion."),
 }
-#: Probability on "event" the provider must give before a "when" is kept.
-EVENT_GATE = 0.5
+#: Probability on "record" from which the provider's veto drops a "when".
+RECORD_VETO = 0.80
 
 
 def is_write_date(when: Any, content: str, recorded_at: str | None) -> bool:
@@ -490,7 +493,7 @@ def confirm_whens(
         if not getattr(answer, "available", False):
             continue
         probability = (answer.probabilities or {}).get(answer.value, answer.confidence)
-        if answer.value != "event" or float(probability or 0.0) < EVENT_GATE:
+        if answer.value == "record" and float(probability or 0.0) >= RECORD_VETO:
             kept[index] = None
     return kept
 

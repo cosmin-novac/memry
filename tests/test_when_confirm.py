@@ -1,9 +1,10 @@
 """A proposed "when" is not believed on the text model's word alone.
 
-Measured on 160 labelled memories: the text model alone was right about 56% of
-the "when"s it gave, because it dates work logs. Dropping write dates read back
-and requiring the decision provider to call the memory an event took that to
-90%. These tests pin the two checks, not the numbers.
+Measured on 160 labelled memories: a text model dates work logs (gpt-5-mini was
+right about 56% of the "when"s it gave, gpt-5.6-luna about 85%). Dropping write
+dates read back, and letting the decision provider veto what it is sure is a
+record, takes gpt-5.6-luna to 97%. These tests pin the two checks, not the
+numbers.
 """
 
 from __future__ import annotations
@@ -50,18 +51,21 @@ def test_without_a_provider_only_the_write_date_check_applies():
     assert confirm_whens(None, items, [WHEN, {"start": "2026-10-03"}]) == [None, {"start": "2026-10-03"}]
 
 
-def test_the_provider_has_to_call_it_an_event():
+def test_the_provider_vetoes_what_it_is_sure_is_a_record():
     items = [{"content": "27 tests passed on 2026-09-11", "recorded_at": "2026-09-12"},
              {"content": "Product Hunt launch on 2026-10-03", "recorded_at": "2026-09-12"},
-             {"content": "Maybe a meetup on 2026-10-09", "recorded_at": "2026-09-12"},
+             {"content": "Reviewed the signup terms on 2026-10-09", "recorded_at": "2026-09-12"},
              {"content": "No date here", "recorded_at": "2026-09-12"}]
     found = [{"start": "2026-09-11"}, {"start": "2026-10-03"}, {"start": "2026-10-09"}, None]
+    # sure it is a record: dropped. An event: kept. A record it is not sure
+    # about: kept, because requiring an "event" verdict lost a fifth of the
+    # real events on the labelled set for no gain in precision.
     judge = EventJudge({"tests passed": ("record", 0.9), "Product Hunt": ("event", 0.8),
-                        "meetup": ("event", 0.3)})
+                        "signup terms": ("record", 0.6)})
 
     kept = confirm_whens(judge, items, found)
 
-    assert kept == [None, {"start": "2026-10-03"}, None, None]
+    assert kept == [None, {"start": "2026-10-03"}, {"start": "2026-10-09"}, None]
     assert len(judge.asked) == 3, "a memory with no proposed when is not asked about"
 
 

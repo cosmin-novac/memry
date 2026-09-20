@@ -31,9 +31,15 @@ EmbeddingProvider = Literal["openai", "ollama", "voyage", "hash", "none"]
 # the configured text model; "jev" uses TypeSafe's System One model.
 DecisionProvider = Literal["none", "llm", "jev"]
 
+#: The OpenAI default is gpt-5.6-luna. It judged entity identity better than
+#: gpt-5-mini on the labelled set (52 of 56 safe against 49) and is the only
+#: text model measured to make re-ranking better rather than worse. Its own
+#: confidence is not trustworthy, so without a decision provider it never
+#: merges entities on its own (see providers/decisions.py); every judgement a
+#: decision provider can make goes there instead.
 DEFAULT_LLM_MODELS: dict[str, str] = {
     "anthropic": "claude-haiku-4-5",
-    "openai": "gpt-5-mini",
+    "openai": "gpt-5.6-luna",
     "ollama": "llama3.1",
 }
 

@@ -294,7 +294,7 @@ Everything works with defaults. Override via env vars, `~/.memry/config.json`, o
 | `MEMRY_AUTH_DB_PATH` | next to `MEMRY_DB_PATH` as `auth.db` | accounts and OAuth; include it in every complete server backup |
 | `MEMRY_DEFAULT_USER` | `default` | user scope when the agent doesn't pass one |
 | `MEMRY_LLM_PROVIDER` | auto | `anthropic` \| `openai` \| `ollama` \| `none` - auto-detected from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. With both keys set, OpenAI wins so the LLM and the embeddings stay on one provider (Anthropic has no embeddings API); pin this to override |
-| `MEMRY_LLM_MODEL` | per provider | `claude-haiku-4-5` / `gpt-5-mini` / `llama3.1`; Haiku is the Anthropic default for lower save cost and enrichment latency |
+| `MEMRY_LLM_MODEL` | per provider | `claude-haiku-4-5` / `gpt-5.6-luna` / `llama3.1`; Haiku is the Anthropic default for lower save cost and enrichment latency |
 | `MEMRY_EMBEDDING_PROVIDER` | auto | `openai` \| `ollama` \| `voyage` \| `hash` \| `none` |
 | `MEMRY_API_KEY` | - | bearer token for the REST/MCP HTTP server |
 | `MEMRY_DECISION_PROVIDER` | `none` | `jev` \| `llm` \| `none` - who answers the typed questions below |
