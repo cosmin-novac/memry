@@ -296,8 +296,31 @@ Everything works with defaults. Override via env vars, `~/.memry/config.json`, o
 | `MEMRY_LLM_MODEL` | per provider | `claude-haiku-4-5` / `gpt-5-mini` / `llama3.1`; Haiku is the Anthropic default for lower save cost and enrichment latency |
 | `MEMRY_EMBEDDING_PROVIDER` | auto | `openai` \| `ollama` \| `voyage` \| `hash` \| `none` |
 | `MEMRY_API_KEY` | - | bearer token for the REST/MCP HTTP server |
+| `MEMRY_DECISION_PROVIDER` | `none` | `jev` \| `llm` \| `none` - who answers the typed questions below |
+| `MEMRY_DECISION_API_KEY` | - | TypeSafe API key when the provider is `jev` |
 
 Anthropic extraction requires the optional SDK: `pip install "memry[anthropic]"`.
+
+### Typed decisions with Jev (optional, experimental)
+
+Some of Memry's judgements are typed questions with a fixed set of answers: are these two
+entities the same one, how long will this fact stay worth remembering, do these memories
+say the same thing, which result answers the question best. By default the text model
+answers them, or nobody does. `MEMRY_DECISION_PROVIDER=jev` sends them to
+[TypeSafe Jev](https://typesafe.ai), a hosted model that answers typed questions directly
+and returns a probability per option.
+
+```bash
+export MEMRY_DECISION_PROVIDER=jev
+export MEMRY_DECISION_API_KEY=...   # TypeSafe API key
+```
+
+With Jev, entity self-healing merges duplicates on its own above 0.70 confidence, a gate
+measured on the labelled identity set in `evals/`; a text model nobody has measured never
+merges without asking. The upkeep pass scores how long each memory stays relevant, so each
+memory decays at its own pace, and search re-ranking is on. Extraction still needs a text
+model, and without a decision provider everything works as it did before. The measurements
+and the remaining settings are in [docs/self-hosting.md](docs/self-hosting.md#typed-decisions-experimental-off-by-default).
 
 ## Evaluation
 
