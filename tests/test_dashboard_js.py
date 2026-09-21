@@ -68,6 +68,15 @@ def test_map_uses_complete_aggregates_entity_types_and_rendering_bounds():
     assert '<details class="gx-types" id="mapEntityFilter">' in html
     assert '<summary id="mapEntitiesBtn"' in html
     assert '>Types</summary>' not in html
+    # the type filter sits over the map, so it has all three ways out
+    assert '<div class="gx-type-head"><span>Entity types</span>' in html
+    assert 'class="x" onclick="closeMapEntityFilter()"' in html
+    assert (
+        "function closeMapEntityFilter()"
+        "{document.getElementById('mapEntityFilter').open=false}" in source
+    )
+    assert "if(event.target.closest&&event.target.closest('.gx-types'))return" in source
+    assert "if(mapEntityFilterOpen()){closeMapEntityFilter();return}" in source
     assert 'aria-label="Memory type shapes"' in html
     assert "api('/api/v1/map')" in source
     assert "const MAX_IDLE_EDGES=400" in source

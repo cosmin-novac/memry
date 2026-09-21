@@ -208,6 +208,9 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-types{position:relative}.gx-types summary::-webkit-details-marker{display:none}
 .gx-type-menu{position:absolute;right:0;top:1.9rem;width:15rem;max-height:min(25rem,70vh);overflow:auto;background:color-mix(in srgb,var(--panel) 96%,transparent);border:1px solid var(--line);border-radius:9px;padding:.55rem;box-shadow:0 .7rem 2rem rgba(0,0,0,.28);backdrop-filter:blur(8px)}
 .gx-type-option{display:flex;align-items:center;gap:.45rem;padding:.22rem .1rem;color:var(--text);font-size:.75rem;white-space:nowrap}.gx-type-option input{width:auto;margin:0}.gx-type-option .cnt{margin-left:auto}
+.gx-type-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin:-.1rem 0 .45rem;padding-bottom:.45rem;border-bottom:1px solid var(--line);color:var(--dim);font-size:.72rem}
+.gx-type-head .x{background:none;border:none;padding:0 .1rem;color:var(--dim);font-size:.85rem;line-height:1;cursor:pointer}
+.gx-type-head .x:hover{color:var(--accent)}
 .gx-type-actions{display:flex;gap:.35rem;margin-top:.45rem;padding-top:.45rem;border-top:1px solid var(--line)}
 .gx-type-actions button{flex:1}
 .gx-read{position:absolute;top:.6rem;left:.6rem;z-index:3;font-size:.75rem;color:var(--dim);background:color-mix(in srgb,var(--panel) 60%,transparent);border:1px solid var(--line);border-radius:7px;padding:.32rem .6rem;backdrop-filter:blur(5px);max-width:62%;pointer-events:none;opacity:0;transition:opacity .15s}
@@ -285,6 +288,8 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
   <details class="gx-types" id="mapEntityFilter">
     <summary id="mapEntitiesBtn" onclick="setMapMode('entities')" title="Group memories by entity and choose which entity types appear.">Entities</summary>
     <div class="gx-type-menu">
+      <div class="gx-type-head"><span>Entity types</span>
+        <button type="button" class="x" onclick="closeMapEntityFilter()" title="close">x</button></div>
       <div id="mapEntityTypeOptions"></div>
       <div class="gx-type-actions">
         <button type="button" onclick="setMapEntityTypes('defaults')" title="Show all entity types except concept and other.">defaults</button>
@@ -2019,6 +2024,15 @@ document.addEventListener('click',event=>{
   if(event.target.closest&&event.target.closest('.menuwrap'))return;
   closeUserMenu();
 });
+// The type filter hangs over the map, so a click on the map behind it means
+// the person is done with it. Its own summary toggles it, hence .gx-types.
+function mapEntityFilterOpen(){return document.getElementById('mapEntityFilter').open}
+function closeMapEntityFilter(){document.getElementById('mapEntityFilter').open=false}
+document.addEventListener('click',event=>{
+  if(!mapEntityFilterOpen())return;
+  if(event.target.closest&&event.target.closest('.gx-types'))return;
+  closeMapEntityFilter();
+});
 
 // -- timeline: every memory that carries a time, in order around today ------
 const MONTH_NAMES=['January','February','March','April','May','June','July',
@@ -2120,6 +2134,7 @@ function openTimelineMemory(id){closeTimeline();showMemory(id)}
 window.addEventListener('keydown',event=>{
   if(event.key!=='Escape')return;
   if(userMenuOpen()){closeUserMenu();return}
+  if(mapEntityFilterOpen()){closeMapEntityFilter();return}
   if(document.getElementById('timemodal').classList.contains('on'))closeTimeline();
 });
 let serverInfo={};
