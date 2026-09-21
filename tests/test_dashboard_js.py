@@ -258,6 +258,11 @@ def test_selected_map_entity_shows_identity_and_cleanup_actions():
     assert source.count("${entityIdentityBlock(entity,aliases)}") == 2
     assert "function showMapEntityDetail(entityId)" in source
     assert "is duplicate of..." in source
+    # the picker stays folded until asked for, so the four actions read as a row
+    assert 'id="mapduplicatepicker" hidden' in source
+    assert "function toggleDuplicatePicker(button)" in source
+    assert 'id="mapaliasinput"' not in source
+    assert source.count('<div class="entity-actions">') == 2
     assert "function mergeMapEntity(entityId)" in source
     assert "api('/api/v1/entities/merge'" in source
     assert "function removeMapEntity(entityId)" in source

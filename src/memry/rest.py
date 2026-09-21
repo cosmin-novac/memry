@@ -223,12 +223,15 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-empty{position:absolute;inset:3rem 1rem 2rem;display:grid;place-items:center;color:var(--dim);font-size:.82rem;text-align:center;pointer-events:none}
 .gx-empty[hidden]{display:none}
 .map-entity-detail{margin:-.15rem 0 .8rem;padding:.75rem .85rem;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
-.map-entity-detail[hidden]{display:none}.map-entity-detail h3{margin:0 0 .35rem;font-size:1rem}.map-entity-actions{display:grid;grid-template-columns:minmax(10rem,1fr) auto auto;gap:.45rem;align-items:center;margin-top:.7rem;padding-top:.65rem;border-top:1px solid var(--line)}
-.map-entity-actions .danger{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
+.map-entity-detail[hidden]{display:none}.map-entity-detail h3{margin:0 0 .35rem;font-size:1rem}
 /* The three things you can do to a name, side by side under it. */
-.entity-actions{display:flex;flex-wrap:wrap;gap:.4rem;margin:.6rem 0 1rem}
+.entity-actions{display:flex;flex-wrap:wrap;gap:.4rem;margin:.7rem 0 1rem;padding-top:.65rem;border-top:1px solid var(--line)}
 .entity-actions .danger{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
-@media(max-width:44rem){.map-entity-actions{grid-template-columns:1fr}.map-entity-actions button{width:100%}}
+.entity-actions button[aria-pressed="true"]{color:var(--accent);border-color:var(--accent)}
+.entity-duplicate{display:flex;gap:.45rem;align-items:center;margin:-.6rem 0 1rem}
+.entity-duplicate[hidden]{display:none}
+.entity-duplicate select{flex:1;min-width:0}
+@media(max-width:44rem){.entity-duplicate{flex-wrap:wrap}.entity-duplicate select{flex:1 0 100%}}
 /* Header menu: the account name is the button, everything else sits under it. */
 h1 .datalinks .menuwrap{position:relative;display:inline-block}
 h1 .datalinks .menubtn{background:none;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:.22rem .55rem;font:inherit;font-size:.75rem;cursor:pointer}
@@ -1149,15 +1152,19 @@ async function showMapEntityDetail(entityId){
     const detail=await api('/api/v1/entities/'+encodeURIComponent(entityId));
     if(request!==mapEntityDetailRequest||activeMapKey!=='entity:'+entityId)return;
     const entity=detail.entity,aliases=detail.aliases||[];
-    panel.innerHTML=`<h3><span id="mapentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''} <button class="act" onclick='renameEntity(${JSON.stringify(entityId)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button></h3>
+    panel.innerHTML=`<h3><span id="mapentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
       <div id="mapentityidentity">${entityIdentityBlock(entity,aliases)}</div>
-      <div class="bar"><input id="mapaliasinput" placeholder="add an alias"><button onclick='addMapAlias(${JSON.stringify(entityId)})' title="Add another name for this entity.">Add alias</button></div>
-      <div class="map-entity-actions">
+      <div class="entity-actions">
+        <button class="act" onclick='renameEntity(${JSON.stringify(entityId)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button>
+        <button class="act" onclick='addMapAlias(${JSON.stringify(entityId)})' title="Add another name for this entity.">add alias</button>
+        <button class="act" onclick="toggleDuplicatePicker(this)" title="Say this is the same thing as another entity, and combine the two.">is duplicate of...</button>
+        <button class="act danger" onclick='removeMapEntity(${JSON.stringify(entityId)})' title="Remove this name; if more than one memory mentions it, it is kept as a tag on them.">not an entity</button>
+      </div>
+      <div class="entity-duplicate" id="mapduplicatepicker" hidden>
         <select id="mapduplicatetarget" onchange="document.getElementById('mapduplicatebtn').disabled=!this.value" title="Choose the entity this is a duplicate of.">
-          <option value="">is duplicate of...</option>${mapEntityTargetOptions(entityId)}
+          <option value="">pick the one it duplicates...</option>${mapEntityTargetOptions(entityId)}
         </select>
         <button id="mapduplicatebtn" disabled onclick='mergeMapEntity(${JSON.stringify(entityId)})' title="Combine this entity into the selected entity; memories are preserved.">Combine</button>
-        <button class="danger" onclick='removeMapEntity(${JSON.stringify(entityId)})' title="Remove this derived entity; if it has multiple memories, keep its name as a tag.">Not an entity</button>
       </div>`;
     syncMapEntityDetailVisibility();
   }catch(error){
@@ -1193,10 +1200,21 @@ async function renameEntity(entityId){
   await loadEntities();
 }
 async function addMapAlias(entityId){
-  const input=document.getElementById('mapaliasinput'),alias=input.value.trim();if(!alias)return;
+  const current=(mapData?.entities||[]).find(node=>node.entity_id===entityId)?.label
+    ||knowledgeNames[entityId]||'this entity';
+  const alias=(prompt('Another name for "'+current+'":')||'').trim();if(!alias)return;
   const result=await api('/api/v1/entities/'+encodeURIComponent(entityId)+'/aliases',{method:'POST',body:JSON.stringify({alias})});
-  input.value='';syncEntityIdentity(entityId,result);
+  if(result.error){alert(result.error);return}
+  syncEntityIdentity(entityId,result);
   await loadEntities();
+}
+// The list of every other entity is long and only wanted once you have decided
+// this name is a duplicate, so it stays folded until the button asks for it.
+function toggleDuplicatePicker(button){
+  const picker=document.getElementById('mapduplicatepicker');
+  picker.hidden=!picker.hidden;
+  button.setAttribute('aria-pressed',String(!picker.hidden));
+  if(!picker.hidden)document.getElementById('mapduplicatetarget').focus();
 }
 async function refreshAfterMapEntityCleanup(){
   clearMapEntityDetail();activeMapKey=null;
