@@ -3092,9 +3092,16 @@ class MemoryStore:
         return self._upkeep_get(f"last:{key}", user_id, None)
 
     def run_upkeep_pass(
-        self, key: str, *, user_id: str | None = None, record: bool = True
+        self, key: str, *, user_id: str | None = None, record: bool = True,
+        at: datetime | None = None,
     ) -> dict[str, Any]:
-        """Run one pass now, with the same code the scheduler uses."""
+        """Run one pass now, with the same code the scheduler uses.
+
+        ``at`` is the tick the scheduler is working through, which is what the
+        run is stamped with. Stamping the wall clock instead put the next run
+        due at a different time than the tick that triggered it.
+        """
+        stamp = at.isoformat(timespec="seconds") if at is not None else utcnow()
         if key == "dedup_entities":
             self.merge_obvious_topics(user_id=user_id)
             result = self.resolve_entities(user_id=user_id)
@@ -3104,7 +3111,7 @@ class MemoryStore:
                 result.update(self.run_name_screen(user_id=user_id))
             elif self.llm.available:
                 result.update(self.run_entity_review(user_id=user_id))
-            self.backend.set_meta(_dedup_run_key(user_id), utcnow())
+            self.backend.set_meta(_dedup_run_key(user_id), stamp)
         elif key == "structure":
             result = self.run_structure_pass(user_id=user_id)
         elif key == "tag_abstraction":
@@ -3113,11 +3120,11 @@ class MemoryStore:
             result = self.score_memory_durability(user_id=user_id)
         elif key == "consolidation":
             result = self.run_consolidation_pass(user_id=user_id)
-            self.backend.set_meta(_consolidation_run_key(user_id), utcnow())
+            self.backend.set_meta(_consolidation_run_key(user_id), stamp)
         else:
             raise ValueError(f"unknown pass: {key}")
         if record:
-            self._upkeep_set(f"last:{key}", user_id, {"at": utcnow(), "result": result})
+            self._upkeep_set(f"last:{key}", user_id, {"at": stamp, "result": result})
         return result
 
     def run_upkeep_cycle(
@@ -3135,25 +3142,30 @@ class MemoryStore:
         every = self.config.dedup_interval_days
         dedup_due = _due(self.backend.get_meta(_dedup_run_key(user_id)), every, now)
         if self.maintenance_enabled("structure") and dedup_due:
-            ran["structure"] = self.run_upkeep_pass("structure", user_id=user_id)
+            ran["structure"] = self.run_upkeep_pass(
+                "structure", user_id=user_id, at=now)
         if self.maintenance_enabled("dedup_entities") and dedup_due:
-            ran["dedup_entities"] = self.run_upkeep_pass("dedup_entities", user_id=user_id)
+            ran["dedup_entities"] = self.run_upkeep_pass(
+                "dedup_entities", user_id=user_id, at=now)
         if (
             self.maintenance_enabled("tag_abstraction") and self.llm.available
             and _due(self.last_tag_run(user_id), self.config.tags.interval_days, now)
         ):
-            ran["tag_abstraction"] = self.run_upkeep_pass("tag_abstraction", user_id=user_id)
+            ran["tag_abstraction"] = self.run_upkeep_pass(
+                "tag_abstraction", user_id=user_id, at=now)
         if (
             self.maintenance_enabled("consolidation") and self.llm.available
             and _due(self.backend.get_meta(_consolidation_run_key(user_id)), every, now)
         ):
-            ran["consolidation"] = self.run_upkeep_pass("consolidation", user_id=user_id)
+            ran["consolidation"] = self.run_upkeep_pass(
+                "consolidation", user_id=user_id, at=now)
         if self.maintenance_enabled("durability") and self.decider.available:
             # Cheap when nothing is unscored, so it runs every tick; only a
             # tick that scored something is worth remembering as a run.
             result = self.run_upkeep_pass("durability", user_id=user_id, record=False)
             if result.get("scored"):
-                self._upkeep_set("last:durability", user_id, {"at": utcnow(), "result": result})
+                self._upkeep_set("last:durability", user_id,
+                                 {"at": now.isoformat(timespec="seconds"), "result": result})
                 ran["durability"] = result
         return ran
 

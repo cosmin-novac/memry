@@ -225,6 +225,9 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .map-entity-detail{margin:-.15rem 0 .8rem;padding:.75rem .85rem;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
 .map-entity-detail[hidden]{display:none}.map-entity-detail h3{margin:0 0 .35rem;font-size:1rem}.map-entity-actions{display:grid;grid-template-columns:minmax(10rem,1fr) auto auto;gap:.45rem;align-items:center;margin-top:.7rem;padding-top:.65rem;border-top:1px solid var(--line)}
 .map-entity-actions .danger{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
+/* The three things you can do to a name, side by side under it. */
+.entity-actions{display:flex;flex-wrap:wrap;gap:.4rem;margin:.6rem 0 1rem}
+.entity-actions .danger{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}
 @media(max-width:44rem){.map-entity-actions{grid-template-columns:1fr}.map-entity-actions button{width:100%}}
 /* Header menu: the account name is the button, everything else sits under it. */
 h1 .datalinks .menuwrap{position:relative;display:inline-block}
@@ -1212,12 +1215,7 @@ async function mergeMapEntity(entityId){
 }
 async function removeMapEntity(entityId){
   const node=(mapData?.entities||[]).find(candidate=>candidate.entity_id===entityId);
-  const entityName=node?.label||'this entity';
-  const fallback=(node?.count||0)>1
-    ?` Its name will be kept as a tag on ${node.count} memories.`
-    :' Its memories will stay untouched.';
-  if(!confirm(`Mark ${entityName} as not an entity?${fallback}`))return;
-  await api('/api/v1/entities/remove',{method:'POST',body:JSON.stringify({ids:[entityId],preserve_as_tag:true})});
+  if(!await confirmNotAnEntity(entityId,node?.label||'this entity',node?.count||0))return;
   await refreshAfterMapEntityCleanup();
 }
 async function applyMapNodeFilter(node){
@@ -1831,9 +1829,13 @@ async function openEntity(id){
   const box=document.getElementById('entitydetail');box.dataset.entityId=id;box.innerHTML='<div class="hint">loading entity...</div>';
   const detail=await api('/api/v1/entities/'+encodeURIComponent(id));
   const entity=detail.entity,aliases=detail.aliases||[];
-  box.innerHTML=`<div class="detail"><h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button><span id="knowledgeentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''} <button class="act" onclick='renameEntity(${JSON.stringify(id)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button></h3>
+  box.innerHTML=`<div class="detail"><h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button><span id="knowledgeentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
     <div id="knowledgeentityidentity">${entityIdentityBlock(entity,aliases)}</div>
-    <div class="bar"><input id="aliasinput" placeholder="add an alias"><button onclick='addAlias(${JSON.stringify(id)})' title="Add another name for this entity.">Add alias</button></div>
+    <div class="entity-actions">
+      <button class="act" onclick='renameEntity(${JSON.stringify(id)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button>
+      <button class="act" onclick='addAlias(${JSON.stringify(id)})' title="Add another name for this entity.">add alias</button>
+      <button class="act danger" onclick='removeEntity(${JSON.stringify(id)},${JSON.stringify(entity.name)},${detail.memories.length})' title="Remove this name; if more than one memory mentions it, it is kept as a tag on them.">not an entity</button>
+    </div>
     ${placeBlock(detail)}
     ${relationsBlock(id,detail)}
     <div class="hint">${detail.memories.length} active supporting memor${detail.memories.length===1?'y':'ies'}</div>
@@ -1887,11 +1889,32 @@ function renderEntityGroups(){
       <span class="cnt">${all.length}</span></div>`;
   }).join('');
 }
+// A button rather than a field, so rename, add alias and not an entity read as
+// the three things you can do to a name. Rename asks the same way.
 async function addAlias(id){
-  const input=document.getElementById('aliasinput'),alias=input.value.trim();if(!alias)return;
+  const alias=(prompt('Another name for "'+(knowledgeNames[id]||'this entity')+'":')||'').trim();
+  if(!alias)return;
   const result=await api('/api/v1/entities/'+encodeURIComponent(id)+'/aliases',{method:'POST',body:JSON.stringify({alias})});
-  input.value='';syncEntityIdentity(id,result);
+  if(result.error){alert(result.error);return}
+  syncEntityIdentity(id,result);
   await loadEntities();
+}
+// "Not an entity" from the list, where the map's copy of the counts is not
+// loaded; the name and its supporting memories come from the open panel.
+async function removeEntity(id,name,memories){
+  if(!await confirmNotAnEntity(id,name,memories))return;
+  closeEntity();
+  await Promise.all([loadEntities(),loadStats(),loadMapData()]);
+}
+async function confirmNotAnEntity(entityId,name,memories){
+  const fallback=memories>1
+    ?` Its name will be kept as a tag on ${memories} memories.`
+    :' Its memories will stay untouched.';
+  if(!confirm(`Mark ${name} as not an entity?${fallback}`))return false;
+  const result=await api('/api/v1/entities/remove',
+    {method:'POST',body:JSON.stringify({ids:[entityId],preserve_as_tag:true})});
+  if(result.error){alert(result.error);return false}
+  return true;
 }
 async function decideProposal(id,decision,button){
   if(button)button.disabled=true;

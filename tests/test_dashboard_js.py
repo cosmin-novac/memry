@@ -267,6 +267,15 @@ def test_selected_map_entity_shows_identity_and_cleanup_actions():
     assert "Its memories will stay untouched." in source
     assert "function renameEntity(entityId)" in source
     assert "{method:'PATCH',body:JSON.stringify({name})}" in source
+    # the three things you can do to a name sit side by side under it, and both
+    # panels ask the same question before retiring one
+    assert '<div class="entity-actions">' in source
+    for label in (">rename</button>", ">add alias</button>", ">not an entity</button>"):
+        assert label in source, label
+    assert 'id="aliasinput"' not in source, "the knowledge panel asks, like rename"
+    assert "async function removeEntity(id,name,memories)" in source
+    assert source.count("async function confirmNotAnEntity(") == 1
+    assert source.count("preserve_as_tag:true") == 1
     map_alias = source.split("async function addMapAlias(entityId){", 1)[1].split(
         "async function refreshAfterMapEntityCleanup", 1,
     )[0]
