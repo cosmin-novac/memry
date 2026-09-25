@@ -1210,11 +1210,12 @@ async function addMapAlias(entityId){
 }
 // The list of every other entity is long and only wanted once you have decided
 // this name is a duplicate, so it stays folded until the button asks for it.
-function toggleDuplicatePicker(button){
-  const picker=document.getElementById('mapduplicatepicker');
+// ``panel`` is the id prefix: "map" under the map, "knowledge" on the entities page.
+function toggleDuplicatePicker(button,panel='map'){
+  const picker=document.getElementById(panel+'duplicatepicker');
   picker.hidden=!picker.hidden;
   button.setAttribute('aria-pressed',String(!picker.hidden));
-  if(!picker.hidden)document.getElementById('mapduplicatetarget').focus();
+  if(!picker.hidden)document.getElementById(panel+'duplicatetarget').focus();
 }
 async function refreshAfterMapEntityCleanup(){
   clearMapEntityDetail();activeMapKey=null;
@@ -1852,7 +1853,14 @@ async function openEntity(id){
     <div class="entity-actions">
       <button class="act" onclick='renameEntity(${JSON.stringify(id)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button>
       <button class="act" onclick='addAlias(${JSON.stringify(id)})' title="Add another name for this entity.">add alias</button>
-      <button class="act danger" onclick='removeEntity(${JSON.stringify(id)},${JSON.stringify(entity.name)},${detail.memories.length})' title="Remove this name; if more than one memory mentions it, it is kept as a tag on them.">not an entity</button>
+      <button class="act" onclick='toggleKnowledgeDuplicatePicker(this,${JSON.stringify(id)})' title="Say this is the same thing as another entity, and combine the two.">is duplicate of...</button>
+      <button class="act danger" onclick='removeEntity(${JSON.stringify(id)},${detail.memories.length})' title="Remove this name; if more than one memory mentions it, it is kept as a tag on them.">not an entity</button>
+    </div>
+    <div class="entity-duplicate" id="knowledgeduplicatepicker" data-memories="${detail.memories.length}" hidden>
+      <select id="knowledgeduplicatetarget" onchange="document.getElementById('knowledgeduplicatebtn').disabled=!this.value" title="Choose the entity this is a duplicate of.">
+        <option value="">pick the one it duplicates...</option>
+      </select>
+      <button id="knowledgeduplicatebtn" disabled onclick='mergeKnowledgeEntity(${JSON.stringify(id)})' title="Combine this entity into the selected entity; memories are preserved.">Combine</button>
     </div>
     ${placeBlock(detail)}
     ${relationsBlock(id,detail)}
@@ -1878,6 +1886,50 @@ function relationsBlock(id,detail){
   return `<div class="hint">${rels.length} relation${rels.length===1?'':'s'}</div>${rows}`;
 }
 function closeEntity(){const box=document.getElementById('entitydetail');box.innerHTML='';delete box.dataset.entityId}
+// Every other name on the entities page, so the one this duplicates can be
+// picked. A duplicate usually has the same name as the one it duplicates, so
+// each row also says its type and how many memories mention it: that is what
+// tells two "Jonas" apart. The busier of two same-named rows comes first.
+function knowledgeEntityTargetOptions(entities,entityId){
+  return entities
+    .filter(entity=>entity.id!==entityId&&!entity.merged_into)
+    .sort((a,b)=>a.name.localeCompare(b.name)||(b.memories||0)-(a.memories||0))
+    .map(entity=>{
+      const count=entity.memories||0;
+      return `<option value="${esc(entity.id)}" data-name="${esc(entity.name)}" data-memories="${count}">${esc(entity.name)} · ${esc(entity.entity_type||'untyped')} · ${count} memor${count===1?'y':'ies'}</option>`;
+    })
+    .join('');
+}
+// The list is only fetched the first time the button is pressed for this entity.
+async function toggleKnowledgeDuplicatePicker(button,entityId){
+  const select=document.getElementById('knowledgeduplicatetarget');
+  if(!select.dataset.loaded){
+    select.dataset.loaded='1';
+    try{
+      const entities=await api('/api/v1/entities?limit=100000');
+      select.insertAdjacentHTML('beforeend',knowledgeEntityTargetOptions(entities,entityId));
+    }catch(error){delete select.dataset.loaded;alert('Could not load the list of entities.');return}
+  }
+  toggleDuplicatePicker(button,'knowledge');
+}
+// This entity is folded into the chosen one, which then opens, so what the
+// two became is on screen straight away: its memories and its aliases now
+// include this one's.
+async function mergeKnowledgeEntity(entityId){
+  const select=document.getElementById('knowledgeduplicatetarget');
+  const targetId=select.value;if(!targetId)return;
+  const name=document.getElementById('knowledgeentityname').textContent;
+  const target=select.selectedOptions[0].dataset;
+  // Two same-named records are the usual case, so each side says how many
+  // memories it has: "Combine Jonas into Jonas?" does not say which is which.
+  const memories=n=>`${n} memor${Number(n)===1?'y':'ies'}`;
+  const own=document.getElementById('knowledgeduplicatepicker').dataset.memories;
+  if(!confirm(`Combine ${name} (${memories(own)}) into ${target.name} (${memories(target.memories)})? Memories and aliases will be preserved.`))return;
+  const result=await api('/api/v1/entities/merge',{method:'POST',body:JSON.stringify({keep_id:targetId,merge_id:entityId})});
+  if(result.error){alert(result.error);return}
+  await Promise.all([loadEntities(),loadStats(),loadMapData()]);
+  await openEntity(targetId);
+}
 // A type like "concept" can hold hundreds of entities. Listing them all turns
 // the tab into one long scroll, so each type is capped until asked to expand.
 const ENTITY_ROW_CAP=12;
@@ -1918,8 +1970,11 @@ async function addAlias(id){
   await loadEntities();
 }
 // "Not an entity" from the list, where the map's copy of the counts is not
-// loaded; the name and its supporting memories come from the open panel.
-async function removeEntity(id,name,memories){
+// loaded; the name and its supporting memories come from the open panel. The
+// name is read off the page: passed through the single-quoted onclick, a name
+// like O'Brien ended the attribute early and the button did nothing.
+async function removeEntity(id,memories){
+  const name=document.getElementById('knowledgeentityname').textContent;
   if(!await confirmNotAnEntity(id,name,memories))return;
   closeEntity();
   await Promise.all([loadEntities(),loadStats(),loadMapData()]);

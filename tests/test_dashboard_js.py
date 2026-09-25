@@ -260,7 +260,7 @@ def test_selected_map_entity_shows_identity_and_cleanup_actions():
     assert "is duplicate of..." in source
     # the picker stays folded until asked for, so the four actions read as a row
     assert 'id="mapduplicatepicker" hidden' in source
-    assert "function toggleDuplicatePicker(button)" in source
+    assert "function toggleDuplicatePicker(button,panel='map')" in source
     assert 'id="mapaliasinput"' not in source
     assert source.count('<div class="entity-actions">') == 2
     assert "function mergeMapEntity(entityId)" in source
@@ -278,7 +278,9 @@ def test_selected_map_entity_shows_identity_and_cleanup_actions():
     for label in (">rename</button>", ">add alias</button>", ">not an entity</button>"):
         assert label in source, label
     assert 'id="aliasinput"' not in source, "the knowledge panel asks, like rename"
-    assert "async function removeEntity(id,name,memories)" in source
+    assert "async function removeEntity(id,memories)" in source
+    # a name like O'Brien inside the single-quoted onclick ended it early
+    assert "JSON.stringify(entity.name)" not in source
     assert source.count("async function confirmNotAnEntity(") == 1
     assert source.count("preserve_as_tag:true") == 1
     map_alias = source.split("async function addMapAlias(entityId){", 1)[1].split(
@@ -414,3 +416,85 @@ def test_every_onclick_handler_is_defined(tmp_path):
     called |= set(re.findall(r"on(?:click|change|input)='(\w+)\(", html))
     missing = sorted(name for name in called if name not in defined)
     assert not missing, f"markup calls handlers that no longer exist: {missing}"
+
+
+def test_the_entities_page_can_declare_a_selected_entity_a_duplicate():
+    """The map panel could say "this is a duplicate of...", the entities page
+    could not, so a duplicate found while browsing the list had to be hunted
+    down again on the map."""
+    source = "\n".join(_scripts(_dashboard_html()))
+    panel = source[source.index("async function openEntity(id)") : source.index("function relationsBlock(")]
+
+    assert "toggleKnowledgeDuplicatePicker(this," in panel
+    assert ">is duplicate of...</button>" in panel
+    # folded until asked for, and nothing to combine until a target is picked
+    assert 'id="knowledgeduplicatepicker" data-memories="${detail.memories.length}" hidden' in panel
+    assert 'id="knowledgeduplicatebtn" disabled' in panel
+    # the name reaches the merge from the page, not through a quoted attribute
+    assert "mergeKnowledgeEntity(${JSON.stringify(id)})'" in panel
+
+
+def test_duplicate_picker_on_the_entities_page_merges_this_into_the_chosen_one():
+    source = "\n".join(_scripts(_dashboard_html()))
+    esc_start = source.index("function esc(s)")
+    esc_line = source[esc_start : source.index("\n", esc_start)]
+    picker = source[
+        source.index("function knowledgeEntityTargetOptions(") : source.index("const ENTITY_ROW_CAP")
+    ]
+    contract = esc_line + "\n" + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+const entities=[
+  {id:'self',name:'Jonas',entity_type:'person',memories:2},
+  {id:'quiet',name:'Jonas',entity_type:'person',memories:1},
+  {id:'busy',name:'Jonas',entity_type:'person',memories:9},
+  {id:'gone',name:'Ada',entity_type:'person',memories:4,merged_into:'x'},
+  {id:'tag',name:'<b>Ada</b>',entity_type:null,memories:0},
+];
+""" + picker + r"""
+const html=knowledgeEntityTargetOptions(entities,'self');
+const values=[...html.matchAll(/value="([^"]+)"/g)].map(m=>m[1]);
+check(!values.includes('self'),'an entity cannot duplicate itself');
+check(!values.includes('gone'),'an already-merged entity is not offered');
+check(values.join()==='tag,busy,quiet','same names sort busiest first: '+values.join());
+check(html.includes('Jonas · person · 9 memories'),'type and count tell twins apart');
+check(html.includes('1 memory<'),'singular');
+check(html.includes('&lt;b&gt;Ada&lt;/b&gt; · untyped · 0 memories'),'names are escaped, no type reads untyped');
+
+// mergeKnowledgeEntity: posts keep=target merge=this, then opens the target
+let posted=null,opened=null,confirmed=true,alerted=null,reloaded=0;
+const nodes={
+  knowledgeduplicatetarget:{value:'busy',selectedOptions:[{dataset:{name:'Jonas',memories:'9'}}]},
+  knowledgeentityname:{textContent:'Jonas'},
+  knowledgeduplicatepicker:{dataset:{memories:'1'}},
+};
+const document={getElementById:id=>nodes[id]};
+let asked=null;
+const confirm=m=>{asked=m;return confirmed};
+const alert=m=>alerted=m;
+let reply={merged:true};
+const api=async(path,opts)=>{posted={path,body:JSON.parse(opts.body)};return reply};
+const loadEntities=async()=>reloaded++,loadStats=async()=>reloaded++,loadMapData=async()=>reloaded++;
+const openEntity=async id=>opened=id;
+(async()=>{
+  await mergeKnowledgeEntity('self');
+  check(posted.path==='/api/v1/entities/merge','uses the merge endpoint');
+  check(posted.body.keep_id==='busy'&&posted.body.merge_id==='self','this one folds into the chosen one');
+  check(opened==='busy'&&reloaded===3,'lists refresh and the result opens');
+  check(asked==='Combine Jonas (1 memory) into Jonas (9 memories)? Memories and aliases will be preserved.',
+        'the confirm says which Jonas is which: '+asked);
+
+  posted=null;opened=null;confirmed=false;
+  await mergeKnowledgeEntity('self');
+  check(posted===null&&opened===null,'cancelling the confirm does nothing');
+
+  confirmed=true;reply={error:'not found'};
+  await mergeKnowledgeEntity('self');
+  check(alerted==='not found'&&opened===null,'an error is shown and nothing opens');
+
+  nodes.knowledgeduplicatetarget.value='';posted=null;
+  await mergeKnowledgeEntity('self');
+  check(posted===null,'nothing is sent before a target is picked');
+})().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+    result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
