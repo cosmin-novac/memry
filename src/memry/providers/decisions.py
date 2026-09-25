@@ -173,6 +173,14 @@ class Decider(ABC):
     #: turned off. Only Jev earned that: 190 ms a search for better recall.
     reranks_by_default: bool = False
 
+    #: Whether an open merge proposal is compared again as soon as a new
+    #: memory mentions either side of it. New evidence is the only thing that
+    #: can change the answer, so that is when to ask again. The question is
+    #: asked inside a save, so this is on only for a provider that answers in
+    #: a fraction of a second. Pairs under other providers wait for the weekly
+    #: self-healing pass.
+    rejudges_on_new_evidence: bool = False
+
     #: Whether re-ranking may be turned on at all. A provider that was not
     #: measured to beat no re-ranking cannot be talked into it: through
     #: gpt-5-mini the same work scored below the baseline at ten seconds a
@@ -319,6 +327,9 @@ class JevDecider(Decider):
     # at 190 ms against the 9.7 s gpt-5-mini takes to score below the baseline.
     reranks_by_default = True
     may_rerank = True
+    # An identity question took a median 211 ms, against 2.5 s through a text
+    # model, so asking again inside a save costs little.
+    rejudges_on_new_evidence = True
 
     def __init__(self, cfg: DecisionConfig) -> None:
         self.cfg = cfg

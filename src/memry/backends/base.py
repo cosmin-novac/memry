@@ -107,6 +107,14 @@ class MemoryBackend(ABC):
         entity_id: str | None = None,
     ) -> list[Memory]: ...
 
+    def update_proposal_judgement(
+        self, proposal_id: str, *, confidence: float, reason: str | None
+    ) -> None:
+        """Record the latest comparison on an open proposal, so the list shows
+        the provider's latest answer instead of its first. A backend that
+        cannot store the latest answer keeps the first."""
+        return None
+
     def count_memories(self, owner_prefix: str | None = None) -> dict[str, int]:
         """Active, invalidated and forgotten memory counts, optionally for one owner.
 
