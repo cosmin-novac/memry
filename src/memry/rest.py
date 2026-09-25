@@ -34,7 +34,7 @@ import html
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from functools import partial
 from typing import Any
 from urllib.parse import parse_qs
@@ -448,6 +448,11 @@ async function api(path, opts={}){
   return r.json();
 }
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+// A value passed to a handler inside a single-quoted onclick='...'.
+// JSON.stringify alone is not enough there: an apostrophe in a tag like
+// "mum's health" ended the attribute, so the button did nothing and threw.
+// Escaped for the attribute, the browser decodes it back before the call runs.
+function jsArg(v){return esc(JSON.stringify(v)).replace(/'/g,'&#39;')}
 // Add form is opt-in, map is opt-out; the choice sticks per browser.
 const panels={add:localStorage.getItem('memry_show_add')==='1',
               map:localStorage.getItem('memry_show_map')!=='0',
@@ -534,7 +539,7 @@ function viewCard(m){
    <button class="edit" title="edit" onclick="startEdit('${m.id}')">✎</button>
    <div>${esc(m.content)}</div>
    <div class="meta">${memoryTypeBadge(m)}${whenChip(m)}
-   ${(m.categories||[]).map(c=>`<button class="tag tagfilter" title="show everything tagged #${esc(String(c))}" onclick='filterByTag(${JSON.stringify(String(c))})'>#${esc(String(c))}</button>`).join('')}
+   ${(m.categories||[]).map(c=>`<button class="tag tagfilter" title="show everything tagged #${esc(String(c))}" onclick='filterByTag(${jsArg(String(c))})'>#${esc(String(c))}</button>`).join('')}
    ${(m.entity_links||[]).map(entity=>`<button class="entity-chip" onclick='openEntity(${JSON.stringify(entity.id)})'>${esc(entity.name)}</button>`).join('')}
    <span>@${esc(m.user_id||'(no user)')}</span>
    <span>imp ${(m.importance??0.5).toFixed(2)}</span>
@@ -1210,11 +1215,12 @@ async function addMapAlias(entityId){
 }
 // The list of every other entity is long and only wanted once you have decided
 // this name is a duplicate, so it stays folded until the button asks for it.
-function toggleDuplicatePicker(button){
-  const picker=document.getElementById('mapduplicatepicker');
+// ``panel`` is the id prefix: "map" under the map, "knowledge" on the entities page.
+function toggleDuplicatePicker(button,panel='map'){
+  const picker=document.getElementById(panel+'duplicatepicker');
   picker.hidden=!picker.hidden;
   button.setAttribute('aria-pressed',String(!picker.hidden));
-  if(!picker.hidden)document.getElementById('mapduplicatetarget').focus();
+  if(!picker.hidden)document.getElementById(panel+'duplicatetarget').focus();
 }
 async function refreshAfterMapEntityCleanup(){
   clearMapEntityDetail();activeMapKey=null;
@@ -1766,8 +1772,8 @@ function renderTags(){
     <input type="checkbox" value="${esc(topic.category)}" onchange="updateSel()">
     <span class="name"><b>${esc(topic.category)}</b> <span class="cnt">${topic.count}</span>
       ${topic.synthetic?'<span class="syn">synthetic parent</span>':''}</span>
-    <button class="act" title="rename this tag everywhere" onclick='renameTag(${JSON.stringify(topic.category)})'>rename</button>
-    <button class="act del" title="delete this tag from all memories" onclick='deleteTag(${JSON.stringify(topic.category)})'>delete</button>
+    <button class="act" title="rename this tag everywhere" onclick='renameTag(${jsArg(topic.category)})'>rename</button>
+    <button class="act del" title="delete this tag from all memories" onclick='deleteTag(${jsArg(topic.category)})'>delete</button>
   </div>`).join('');
   updateSel();
 }
@@ -1796,7 +1802,7 @@ async function suggestMerges(){
   if(!groups.length){box.innerHTML='<div class="hint">Obvious plural/format duplicates were merged automatically. No other variants found.</div>';return}
   box.innerHTML=groups.map((group,index)=>`<div class="tagrow" id="sg${index}">
     <span class="name">merge <b>${group.variants.map(esc).join('</b>, <b>')}</b> into <b>${esc(group.canonical)}</b></span>
-    <button class="act" onclick='applyMerge(${JSON.stringify(group)},${index})'>apply</button>
+    <button class="act" onclick='applyMerge(${jsArg(group)},${index})'>apply</button>
     <button class="act del" onclick="document.getElementById('sg${index}').remove()">dismiss</button>
   </div>`).join('');
 }
@@ -1846,13 +1852,23 @@ async function openEntity(id){
   setKnowledgeOpen(true);showKnowledge('entities');
   const box=document.getElementById('entitydetail');box.dataset.entityId=id;box.innerHTML='<div class="hint">loading entity...</div>';
   const detail=await api('/api/v1/entities/'+encodeURIComponent(id));
+  // Clicking one entity and then another before the first had loaded let the
+  // slower reply win, so the panel showed the one you had moved away from.
+  if(box.dataset.entityId!==id)return;
   const entity=detail.entity,aliases=detail.aliases||[];
   box.innerHTML=`<div class="detail"><h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button><span id="knowledgeentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
     <div id="knowledgeentityidentity">${entityIdentityBlock(entity,aliases)}</div>
     <div class="entity-actions">
       <button class="act" onclick='renameEntity(${JSON.stringify(id)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button>
       <button class="act" onclick='addAlias(${JSON.stringify(id)})' title="Add another name for this entity.">add alias</button>
-      <button class="act danger" onclick='removeEntity(${JSON.stringify(id)},${JSON.stringify(entity.name)},${detail.memories.length})' title="Remove this name; if more than one memory mentions it, it is kept as a tag on them.">not an entity</button>
+      <button class="act" onclick='toggleKnowledgeDuplicatePicker(this,${JSON.stringify(id)})' title="Say this is the same thing as another entity, and combine the two.">is duplicate of...</button>
+      <button class="act danger" onclick='removeEntity(${JSON.stringify(id)},${detail.memories.length})' title="Remove this name; if more than one memory mentions it, it is kept as a tag on them.">not an entity</button>
+    </div>
+    <div class="entity-duplicate" id="knowledgeduplicatepicker" data-memories="${detail.memories.length}" hidden>
+      <select id="knowledgeduplicatetarget" onchange="document.getElementById('knowledgeduplicatebtn').disabled=!this.value" title="Choose the entity this is a duplicate of.">
+        <option value="">pick the one it duplicates...</option>
+      </select>
+      <button id="knowledgeduplicatebtn" disabled onclick='mergeKnowledgeEntity(${JSON.stringify(id)})' title="Combine this entity into the selected entity; memories are preserved.">Combine</button>
     </div>
     ${placeBlock(detail)}
     ${relationsBlock(id,detail)}
@@ -1878,6 +1894,50 @@ function relationsBlock(id,detail){
   return `<div class="hint">${rels.length} relation${rels.length===1?'':'s'}</div>${rows}`;
 }
 function closeEntity(){const box=document.getElementById('entitydetail');box.innerHTML='';delete box.dataset.entityId}
+// Every other name on the entities page, so the one this duplicates can be
+// picked. A duplicate usually has the same name as the one it duplicates, so
+// each row also says its type and how many memories mention it: that is what
+// tells two "Jonas" apart. The busier of two same-named rows comes first.
+function knowledgeEntityTargetOptions(entities,entityId){
+  return entities
+    .filter(entity=>entity.id!==entityId&&!entity.merged_into)
+    .sort((a,b)=>a.name.localeCompare(b.name)||(b.memories||0)-(a.memories||0))
+    .map(entity=>{
+      const count=entity.memories||0;
+      return `<option value="${esc(entity.id)}" data-name="${esc(entity.name)}" data-memories="${count}">${esc(entity.name)} · ${esc(entity.entity_type||'untyped')} · ${count} memor${count===1?'y':'ies'}</option>`;
+    })
+    .join('');
+}
+// The list is only fetched the first time the button is pressed for this entity.
+async function toggleKnowledgeDuplicatePicker(button,entityId){
+  const select=document.getElementById('knowledgeduplicatetarget');
+  if(!select.dataset.loaded){
+    select.dataset.loaded='1';
+    try{
+      const entities=await api('/api/v1/entities?limit=100000');
+      select.insertAdjacentHTML('beforeend',knowledgeEntityTargetOptions(entities,entityId));
+    }catch(error){delete select.dataset.loaded;alert('Could not load the list of entities.');return}
+  }
+  toggleDuplicatePicker(button,'knowledge');
+}
+// This entity is folded into the chosen one, which then opens, so what the
+// two became is on screen straight away: its memories and its aliases now
+// include this one's.
+async function mergeKnowledgeEntity(entityId){
+  const select=document.getElementById('knowledgeduplicatetarget');
+  const targetId=select.value;if(!targetId)return;
+  const name=document.getElementById('knowledgeentityname').textContent;
+  const target=select.selectedOptions[0].dataset;
+  // Two same-named records are the usual case, so each side says how many
+  // memories it has: "Combine Jonas into Jonas?" does not say which is which.
+  const memories=n=>`${n} memor${Number(n)===1?'y':'ies'}`;
+  const own=document.getElementById('knowledgeduplicatepicker').dataset.memories;
+  if(!confirm(`Combine ${name} (${memories(own)}) into ${target.name} (${memories(target.memories)})? Memories and aliases will be preserved.`))return;
+  const result=await api('/api/v1/entities/merge',{method:'POST',body:JSON.stringify({keep_id:targetId,merge_id:entityId})});
+  if(result.error){alert(result.error);return}
+  await Promise.all([loadEntities(),loadStats(),loadMapData()]);
+  await openEntity(targetId);
+}
 // A type like "concept" can hold hundreds of entities. Listing them all turns
 // the tab into one long scroll, so each type is capped until asked to expand.
 const ENTITY_ROW_CAP=12;
@@ -1899,8 +1959,8 @@ function renderEntityGroups(){
     const hidden=all.length-shown.length;
     const links=shown.map(e=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(e.id)})'>${e.home?`<span class="cnt">${esc(e.home.name)} / </span>`:''}${esc(e.name)}</button>`).join(', ');
     let more='';
-    if(hidden>0)more=` <button class="act" onclick='toggleEntityType(${JSON.stringify(type)})'>show ${hidden} more</button>`;
-    else if(open&&all.length>ENTITY_ROW_CAP)more=` <button class="act" onclick='toggleEntityType(${JSON.stringify(type)})'>show less</button>`;
+    if(hidden>0)more=` <button class="act" onclick='toggleEntityType(${jsArg(type)})'>show ${hidden} more</button>`;
+    else if(open&&all.length>ENTITY_ROW_CAP)more=` <button class="act" onclick='toggleEntityType(${jsArg(type)})'>show less</button>`;
     return `<div class="tagrow">
       <span class="syn entity-type">${esc(type)}</span>
       <span class="name">${links}${more}</span>
@@ -1918,8 +1978,11 @@ async function addAlias(id){
   await loadEntities();
 }
 // "Not an entity" from the list, where the map's copy of the counts is not
-// loaded; the name and its supporting memories come from the open panel.
-async function removeEntity(id,name,memories){
+// loaded; the name and its supporting memories come from the open panel. The
+// name is read off the page: passed through the single-quoted onclick, a name
+// like O'Brien ended the attribute early and the button did nothing.
+async function removeEntity(id,memories){
+  const name=document.getElementById('knowledgeentityname').textContent;
   if(!await confirmNotAnEntity(id,name,memories))return;
   closeEntity();
   await Promise.all([loadEntities(),loadStats(),loadMapData()]);
@@ -2974,7 +3037,7 @@ def create_app(
             "llm_available": store.llm.available,
             "decider": store.decider.name,
             "decider_available": store.decider.available,
-            "merge_gate": store.stats()["merge_gate"],
+            "merge_gate": store.merge_gate(),
             "embedding_model": store.embedder.model_id,
             "tag_health": health,
             "entity_junk": await run_in_threadpool(partial(
@@ -3240,24 +3303,20 @@ def create_app(
         data = await run_in_threadpool(store.stats)
         principal = _p(request)
         if principal.prefix is not None:
-            everything = await run_in_threadpool(
-                partial(store.get_all, include_invalid=True, limit=100_000)
+            # Counted for this account in the store. Loading every account's
+            # memories to count one's own was slow, and wrong past 100,000.
+            mine = await run_in_threadpool(
+                partial(store.count_memories, owner_prefix=principal.prefix)
             )
-            mine = [
-                m for m in everything
-                if principal.owns(m.user_id)
-            ]
             # Server-wide facts (which models are configured) are not another
             # account's data, and the About panel needs them; omitting them was
             # what rendered "llm undefined" in the dashboard.
             data = {
                 "backend": data.get("backend"),
                 "tenant": principal.name,
-                "active_memories": sum(1 for m in mine if m.invalid_at is None),
-                "invalidated_memories": sum(1 for m in mine if m.invalid_at is not None),
-                "forgotten_memories": sum(
-                    1 for m in mine if m.invalid_at is not None and not m.superseded_by
-                ),
+                "active_memories": mine["active"],
+                "invalidated_memories": mine["invalidated"],
+                "forgotten_memories": mine["forgotten"],
                 "llm": data.get("llm"),
                 "embedder": data.get("embedder"),
                 "merge_gate": data.get("merge_gate"),

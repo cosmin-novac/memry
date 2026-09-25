@@ -21,7 +21,7 @@ import re
 from typing import Any
 
 from ..backends.base import MemoryBackend
-from ..models import Entity, EntityMention, MergeProposal, Scope, utcnow
+from ..models import Entity, EntityMention, MergeProposal, Scope
 from ..providers.decisions import (
     MEASURED_MERGE_GATES,
     Answer,

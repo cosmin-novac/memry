@@ -72,7 +72,6 @@ from .intelligence.structure import (
     Node,
     derive_homes,
     hub_reason,
-    is_hub,
     same_name_plan,
 )
 from .intelligence.when import confirm_whens, extract_when, overlaps as when_overlaps
@@ -3486,15 +3485,27 @@ class MemoryStore:
                 # The merge gate in force right now, so the About panel can say
                 # whether merges happen on their own and above what. Above 1.0
                 # means never: the model answering has not been measured.
-                "merge_gate": _gate(self.decider, self.llm),
+                "merge_gate": self.merge_gate(),
                 # "invalidated" lumps together deleted memories and old versions
                 # of updated ones. Only the first kind is recoverable, and only
                 # that kind is what the Forgotten tab lists, so report it apart.
-                "forgotten_memories": len(self.forgotten(limit=1_000_000)),
+                # Counted, not listed: building the Forgotten list walked every
+                # memory and looked up each removed one's history, on every call.
+                "forgotten_memories": self.backend.count_memories()["forgotten"],
                 "generated_at": utcnow(),
             }
         )
         return data
+
+    def merge_gate(self) -> float:
+        """The automatic-merge gate in force: the provider's own while it can
+        answer, else the text model's. Above 1.0 means merges never happen on
+        their own."""
+        return _gate(self.decider, self.llm)
+
+    def count_memories(self, *, owner_prefix: str | None = None) -> dict[str, int]:
+        """Active, invalidated and forgotten counts; see ``MemoryBackend.count_memories``."""
+        return self.backend.count_memories(owner_prefix)
 
     def reset(self) -> None:
         self.backend.reset()

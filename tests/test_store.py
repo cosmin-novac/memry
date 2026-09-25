@@ -327,3 +327,20 @@ def test_malformed_reconcile_decision_falls_back_to_add(store, fake_llm):
     result = store.add("The dog is called Rex", user_id="ada")
     assert result.actions[0].event == "ADD"
     assert len(store.get_all(user_id="ada")) == 2
+
+
+def test_stats_counts_forgotten_memories_without_listing_them(verbatim_store):
+    """The Forgotten tab count must match the Forgotten tab: deleted memories
+    count, replaced ones are history. It is counted, not built as a list."""
+    from memry.models import Memory
+
+    backend = verbatim_store.backend
+    kept = backend.insert_memory(Memory(content="Ada lives in Amsterdam", user_id="ada"))
+    gone = backend.insert_memory(Memory(content="Ada lives in Utrecht", user_id="ada"))
+    verbatim_store.delete(gone.id)
+    old = backend.insert_memory(Memory(content="Ada works at Northwind", user_id="ada"))
+    backend.invalidate_memory(old.id, superseded_by=kept.id)
+
+    stats = verbatim_store.stats()
+    assert stats["forgotten_memories"] == len(verbatim_store.forgotten(user_id="ada")) == 1
+    assert stats["invalidated_memories"] == 2

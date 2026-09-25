@@ -2543,6 +2543,28 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
 
+    def count_memories(self, owner_prefix: str | None = None) -> dict[str, int]:
+        """See ``MemoryBackend.count_memories``: the same answer, counted in SQL
+        rather than by loading every memory on the server."""
+        if owner_prefix is None:
+            where, params = "1=1", ()
+        elif owner_prefix.endswith("::"):
+            # substr, not LIKE: an account name may contain % or _.
+            where, params = "substr(user_id, 1, ?) = ?", (len(owner_prefix), owner_prefix)
+        else:
+            where, params = "user_id = ?", (owner_prefix,)
+        with self._lock:
+            active, invalidated, forgotten = self._db.execute(
+                "SELECT "
+                "COALESCE(SUM(invalid_at IS NULL), 0), "
+                "COALESCE(SUM(invalid_at IS NOT NULL), 0), "
+                "COALESCE(SUM(invalid_at IS NOT NULL "
+                "AND (superseded_by IS NULL OR superseded_by = '')), 0) "
+                f"FROM memories WHERE {where}",
+                params,
+            ).fetchone()
+        return {"active": active, "invalidated": invalidated, "forgotten": forgotten}
+
     def stats(self) -> dict[str, Any]:
         with self._lock:
             active = self._db.execute(

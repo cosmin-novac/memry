@@ -107,6 +107,38 @@ class MemoryBackend(ABC):
         entity_id: str | None = None,
     ) -> list[Memory]: ...
 
+    def count_memories(self, owner_prefix: str | None = None) -> dict[str, int]:
+        """Active, invalidated and forgotten memory counts, optionally for one owner.
+
+        ``owner_prefix`` follows ``Principal.prefix``: None is every memory, a
+        value ending in ``::`` is a tenant prefix, anything else one exact
+        namespace. Forgotten means removed with nothing standing in for it
+        (``superseded_by`` empty), which is what the Forgotten tab lists.
+
+        This default walks every memory so any backend gets a correct answer;
+        a backend that can count in its store should override it.
+        """
+        def owned(user_id: str | None) -> bool:
+            if owner_prefix is None:
+                return True
+            if not user_id:
+                return False
+            if owner_prefix.endswith("::"):
+                return user_id.startswith(owner_prefix)
+            return user_id == owner_prefix
+
+        counts = {"active": 0, "invalidated": 0, "forgotten": 0}
+        for memory in self.list_memories(Scope(), include_invalid=True, limit=10**12):
+            if not owned(memory.user_id):
+                continue
+            if memory.invalid_at is None:
+                counts["active"] += 1
+            else:
+                counts["invalidated"] += 1
+                if not memory.superseded_by:
+                    counts["forgotten"] += 1
+        return counts
+
     def knowledge_map(self, scope: Scope) -> dict[str, Any]:
         """Aggregate active knowledge for visualization without exposing content.
 

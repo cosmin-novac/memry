@@ -154,3 +154,47 @@ def test_stats_and_reset():
     assert stats["invalidated_memories"] == 1
     b.reset()
     assert b.stats()["active_memories"] == 0
+
+
+def test_count_memories_counts_what_a_walk_of_every_memory_would():
+    """Stats used to load every memory, and in account mode every account's
+    memories up to 100,000, just to count them. The SQL count must give the
+    same answer as that walk for every kind of owner, including account names
+    with the characters LIKE treats as wildcards."""
+    from memry.backends.base import MemoryBackend
+
+    backend = make_backend()
+    owners = ["ada::default", "ada::work", "bob::default", "a_b::x", "axb::y",
+              "100%::z", "1000::z", "exact-user", None]
+    for i, owner in enumerate(owners):
+        kept = backend.insert_memory(Memory(content=f"kept {i}", user_id=owner))
+        deleted = backend.insert_memory(Memory(content=f"deleted {i}", user_id=owner))
+        replaced = backend.insert_memory(Memory(content=f"replaced {i}", user_id=owner))
+        backend.invalidate_memory(deleted.id)                          # forgotten
+        backend.invalidate_memory(replaced.id, superseded_by=kept.id)  # history, not forgotten
+        if i % 2:
+            backend.insert_memory(Memory(content=f"extra {i}", user_id=owner))
+
+    everything = backend.list_memories(Scope(), include_invalid=True, limit=10_000)
+
+    def walk(prefix):
+        def owned(user_id):
+            if prefix is None:
+                return True
+            if not user_id:
+                return False
+            return user_id.startswith(prefix) if prefix.endswith("::") else user_id == prefix
+        mine = [m for m in everything if owned(m.user_id)]
+        return {"active": sum(m.invalid_at is None for m in mine),
+                "invalidated": sum(m.invalid_at is not None for m in mine),
+                "forgotten": sum(m.invalid_at is not None and not m.superseded_by for m in mine)}
+
+    for prefix in (None, "ada::", "bob::", "a_b::", "100%::", "exact-user", "nobody::", "ada"):
+        expected = walk(prefix)
+        assert backend.count_memories(prefix) == expected, prefix
+        assert MemoryBackend.count_memories(backend, prefix) == expected, prefix
+
+    # its own kept and extra memory; LIKE 'a_b::%' would also count axb::y
+    assert backend.count_memories("a_b::")["active"] == 2
+    # likewise LIKE '100%::%' would also count 1000::z
+    assert backend.count_memories("100%::")["active"] == 2
