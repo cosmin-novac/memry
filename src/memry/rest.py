@@ -57,7 +57,6 @@ from starlette.routing import Mount, Route
 
 from .accounts import SESSION_TTL, AccountStore, default_auth_db_path
 from .enrichment import EnrichmentWorker
-from .intelligence.entities import describe_proposal
 from .intelligence.when import next_occurrence, parse_when
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
 from .oauth import MEMRY_SCOPE, MemryOAuthProvider
@@ -407,9 +406,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
       <div class="tagbar"><span class="sel" id="entcount"></span>
         <button onclick="backfillTypes()" title="classify entities that have no type yet">Backfill types</button></div>
       <div id="entlist"></div>
-      <h2 style="font-size:.95rem;margin-top:1.1rem">Merge proposals</h2>
-      <div class="hint">Pairs that Memry could not decide on its own. Each pair is compared again once a week, and with Jev also whenever a new memory contains either name.</div>
-      <div id="proplist"></div>
+      <h2 style="font-size:.95rem;margin-top:1.1rem">Merge proposals</h2><div id="proplist"></div>
     </div>
     <aside class="entity-side" id="entitydetail"></aside>
   </div>
@@ -1830,8 +1827,7 @@ async function loadEntities(){
   entityGroups=byType;
   renderEntityGroups();
   document.getElementById('proplist').innerHTML=proposals.length?proposals.map(proposal=>`<div class="tagrow"><span class="name">
-    <b>${esc(knowledgeNames[proposal.entity_a]||proposal.entity_a)}</b> and <b>${esc(knowledgeNames[proposal.entity_b]||proposal.entity_b)}</b>
-    <span class="cnt">${esc(proposal.summary||proposal.reason||'identity is uncertain')}</span></span>
+    <b>${esc(knowledgeNames[proposal.entity_a]||proposal.entity_a)}</b> and <b>${esc(knowledgeNames[proposal.entity_b]||proposal.entity_b)}</b></span>
     <button class="act" onclick='decideProposal(${JSON.stringify(proposal.id)},"confirm",this)'>merge</button>
     <button class="act del" onclick='decideProposal(${JSON.stringify(proposal.id)},"reject",this)'>keep separate</button></div>`).join(''):'<div class="empty">No open merge proposals.</div>';
 }
@@ -3449,12 +3445,7 @@ def create_app(
             status=q.get("status", "proposed"),
             limit=int(q.get("limit", "100")),
         )
-        gate = store.merge_gate()
-        # "summary" gives the provider's confidence and the merge gate. The
-        # stored reason alone ("jev: same") read like a verdict Memry ignored.
-        return JSONResponse([
-            {**p.model_dump(), "summary": describe_proposal(p, gate)} for p in proposals
-        ])
+        return JSONResponse([p.model_dump() for p in proposals])
 
     def _proposal_guard(request: Request):
         proposal = store.backend.get_proposal(request.path_params["proposal_id"])

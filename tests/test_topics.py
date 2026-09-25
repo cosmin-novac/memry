@@ -180,3 +180,76 @@ def test_existing_plural_topics_are_merged_by_maintenance(verbatim_store):
     assert verbatim_store.categories(user_id="ada") == [
         {"category": "project", "count": 2}
     ]
+
+
+# ---------------------------------------- one subject written two ways
+def test_a_company_tag_with_its_legal_form_joins_the_one_without(verbatim_store):
+    verbatim_store.add("Invoices go to one inbox", user_id="ada", infer=False,
+                       categories=["fundation"])
+    verbatim_store.add("Liability insurance renewed", user_id="ada", infer=False,
+                       categories=["fundation gmbh"])
+    assert verbatim_store.categories(user_id="ada") == [
+        {"category": "fundation", "count": 2}
+    ]
+
+
+def test_a_domain_tag_joins_its_name_only_when_the_store_knows_the_name(verbatim_store):
+    from memry.models import Entity
+
+    store = verbatim_store
+    store.add("Bildy makes pictures", user_id="ada", infer=False, categories=["bildy"])
+    store.add("Terms use German law", user_id="ada", infer=False, categories=["bildy.ai"])
+    assert {c["category"] for c in store.categories(user_id="ada")} == {"bildy", "bildy.ai"}
+
+    store.backend.insert_entity(Entity(name="Bildy", normalized="bildy",
+                                       entity_type="product", user_id="ada"))
+    store.merge_obvious_topics(user_id="ada")
+    assert store.categories(user_id="ada") == [{"category": "bildy", "count": 2}]
+
+
+def test_the_rules_leave_real_tags_that_are_one_letter_apart_alone():
+    """From a real store of 417 tags: a rule on "one letter apart" would merge
+    three pairs that are different subjects."""
+    from memry.intelligence.clustering import obvious_canonical_merges, swapped_letter_typos
+
+    tags = [{"category": name, "count": count} for name, count in (
+        ("finance", 22), ("yfinance", 1), ("memory", 6), ("memry", 13),
+        ("preference", 20), ("reference", 3), ("cologne", 11), ("colonge", 1),
+        ("three.js", 15), ("character.ai", 2), ("character", 9),
+    )]
+    assert obvious_canonical_merges(tags) == []
+    assert swapped_letter_typos(tags) == [("colonge", "cologne")]
+
+
+def _tag_judge(same: bool):
+    from memry.providers.decisions import Answer, Answers, NoneDecider
+
+    class Judge(NoneDecider):
+        name = "stub"
+        available = True
+
+        def decide(self, state, questions):
+            return Answers({key: Answer(1.0 if same else 0.0, {}, 0.9, True)
+                            for key in questions})
+
+    return Judge()
+
+
+def test_a_swapped_letter_typo_merges_when_the_judge_agrees(verbatim_store):
+    store = verbatim_store
+    store.decider = _tag_judge(same=True)
+    for i in range(5):
+        store.add(f"Office fact {i}", user_id="ada", infer=False, categories=["cologne"])
+    store.add("Mother's flat", user_id="ada", infer=False, categories=["colonge"])
+    store.merge_obvious_topics(user_id="ada")
+    assert store.categories(user_id="ada") == [{"category": "cologne", "count": 6}]
+
+
+def test_a_swapped_letter_pair_stays_when_the_judge_disagrees(verbatim_store):
+    store = verbatim_store
+    store.decider = _tag_judge(same=False)
+    for i in range(5):
+        store.add(f"Study {i}", user_id="ada", infer=False, categories=["causal"])
+    store.add("Friday dress code", user_id="ada", infer=False, categories=["casual"])
+    store.merge_obvious_topics(user_id="ada")
+    assert {c["category"] for c in store.categories(user_id="ada")} == {"causal", "casual"}

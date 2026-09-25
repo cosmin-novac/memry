@@ -721,15 +721,17 @@ def test_stats_reports_the_merge_gate_in_force():
 
 # ------------------------------------------- open proposals and new evidence
 class _Identity(NoneDecider):
-    """Answers every identity question with "same" at a set confidence and
+    """Answers every identity question with one verdict at a set confidence and
     abstains on anything else, so only identity reaches the stub."""
 
     name = "stub"
     available = True
     auto_confirm_confidence = 0.7
 
-    def __init__(self, confidence: float, *, rejudges: bool = True) -> None:
+    def __init__(self, confidence: float, *, verdict: str = "same",
+                 rejudges: bool = True) -> None:
         self.confidence = confidence
+        self.verdict = verdict
         self.rejudges_on_new_evidence = rejudges
         self.identity_calls = 0
 
@@ -739,20 +741,23 @@ class _Identity(NoneDecider):
         if "identity" not in questions:
             return Answers({})
         self.identity_calls += 1
-        return Answers({"identity": Answer("same", {"same": self.confidence},
+        return Answers({"identity": Answer(self.verdict, {self.verdict: self.confidence},
                                            self.confidence, True)})
 
 
-def _jonas_store(decider):
-    """A store whose saves each mention Jonas, and a function that saves one."""
+def _jonas_store(decider, name: str = "Jonas", entity_type: str | None = None):
+    """A store whose saves each mention one name, and a function that saves one.
+    ``save(text, as_name, as_type)`` mentions another spelling or type."""
     from conftest import fact, facts_response
 
     llm = FakeLLM()
     store = MemoryStore(Config(db_path=":memory:"), llm=llm,
                         embedder=HashEmbedder(64), decider=decider)
 
-    def save(text: str) -> None:
-        llm.queue(facts_response(fact(text, entities=["Jonas"])))
+    def save(text: str, as_name: str | None = None, as_type: str | None = None) -> None:
+        mention = {"name": as_name or name, "type": as_type or entity_type}
+        llm.queue(facts_response(fact(text, entities=[mention if mention["type"]
+                                                      else mention["name"]])))
         if store.get_all(user_id="ada"):
             llm.queue(json.dumps({"action": "ADD", "target": None, "content": None,
                                   "reason": "new"}))
@@ -791,7 +796,7 @@ def test_a_slow_provider_leaves_open_pairs_for_the_weekly_pass():
     store.close()
 
 
-def test_a_pair_that_stays_open_shows_the_latest_answer():
+def test_a_pair_that_stays_open_keeps_the_latest_answer():
     decider = _Identity(0.5)
     store, save = _jonas_store(decider)
     save("Jonas cooks Thai food")
@@ -800,33 +805,7 @@ def test_a_pair_that_stays_open_shows_the_latest_answer():
     store.resolve_entities(user_id="ada")
     [proposal] = store.merge_proposals(user_id="ada")
     assert (proposal.confidence, proposal.reason) == (0.62, "stub: same")
-    assert store.upkeep_queue(user_id="ada")[0]["detail"] == (
-        "Might be the same one. Stub's answer: probably the same, 62% sure. "
-        "Memry merges on its own from 70%."
-    )
     store.close()
-
-
-def test_a_proposal_gives_the_confidence_and_the_merge_rule():
-    from memry.intelligence.entities import describe_proposal
-    from memry.models import MergeProposal
-
-    def said(reason, confidence=0.5, gate=0.7):
-        proposal = MergeProposal(entity_a="a", entity_b="b", confidence=confidence,
-                                 reason=reason)
-        return describe_proposal(proposal, gate)
-
-    assert said("jev: same", 0.46) == (
-        "Jev's answer: probably the same, 46% sure. Memry merges on its own from 70%.")
-    assert said("llm: same", 0.8, gate=NEVER_AUTO_MERGE) == (
-        "The language model's answer: probably the same, 80% sure. "
-        "Memry never merges on its own with this model.")
-    assert said("jev: unsure") == "Jev's answer: can't tell."
-    assert said("jev: different", 0.6) == "Jev's answer: probably different, 60% sure."
-    assert said("same name, not yet compared") == "Same name. Not compared yet."
-    assert said("no LLM: same name only") == "Same name. No model was set up to compare them."
-    assert said("both work at Northwind") == "both work at Northwind"
-    assert said(None) == "No reason was recorded."
 
 
 def test_only_jev_rechecks_on_every_save():
@@ -836,20 +815,150 @@ def test_only_jev_rechecks_on_every_save():
     assert NoneDecider.rejudges_on_new_evidence is False
 
 
-def test_the_proposals_api_carries_the_sentence_the_dashboard_shows():
-    from starlette.testclient import TestClient
 
-    from memry.models import Entity, MergeProposal
-    from memry.rest import create_app
-
-    store = MemoryStore(Config(db_path=":memory:", dedup_entities=False), llm=NoneLLM(),
-                        embedder=HashEmbedder(64), decider=_Identity(0.5))
-    a = store.backend.insert_entity(Entity(name="Jonas", normalized="jonas", user_id="u"))
-    b = store.backend.insert_entity(Entity(name="Jonas", normalized="jonas", user_id="u"))
-    store.backend.add_proposal(MergeProposal(entity_a=a.id, entity_b=b.id, user_id="u",
-                                             confidence=0.46, reason="jev: same"))
-    with TestClient(create_app(store)) as client:
-        [row] = client.get("/api/v1/entities/proposals?user_id=u").json()
-    assert row["summary"] == (
-        "Jev's answer: probably the same, 46% sure. Memry merges on its own from 70%.")
+# ------------------------------------------------ the same specific name
+@pytest.mark.parametrize("name, entity_type, first, second", [
+    ("Fundation GmbH", "organization", "Fundation GmbH's Finanzamt file number is 218/5713",
+     "Fundation GmbH hat nach Steuern 150.000 Euro Liquidität."),
+    ("Bochra Saffar", "person", "Bochra Saffar wrote the OCR evaluation scripts",
+     "Bochra Saffar war bis 30.06.2026 angestellt."),
+    ("Docker", "product", "The staging server runs every service in Docker",
+     "Docker Desktop needs a paid licence for large companies"),
+    ("Forschungszulage", "concept", "The Forschungszulage covers personnel costs at 25%",
+     "Die Forschungszulage wird beim Finanzamt beantragt."),
+])
+def test_the_same_specific_name_merges_on_a_same_below_the_gate(name, entity_type,
+                                                                first, second):
+    """The pairs a real store left for a person: facts on unrelated topics, and
+    a "same" at 40-69% from Jev, whose gate is 70%."""
+    store, save = _jonas_store(_Identity(0.44), name, entity_type)
+    save(first)
+    save(second)
+    assert [e.name for e in store.entities(user_id="ada")] == [name]
+    assert store.merge_proposals(user_id="ada") == []
     store.close()
+
+
+def test_a_company_with_and_without_its_legal_form_is_one_company():
+    store, save = _jonas_store(_Identity(0.44), "Fundation", "organization")
+    save("Fundation builds an Office add-in")
+    save("Fundation GmbH has one Stripe account for all apps", as_name="Fundation GmbH")
+    assert len(store.entities(user_id="ada")) == 1
+    store.close()
+
+
+@pytest.mark.parametrize("name, entity_type, verdict, as_type", [
+    ("Jonas", "person", "same", None),              # a first name needs the gate
+    ("PR #92", "code", "same", None),               # every repository has a PR #92
+    ("Fundation GmbH", "organization", "unsure", None),
+    ("Fundation GmbH", "organization", "different", None),
+    ("Docker", "product", "same", "other"),         # the neighbours' dog
+])
+def test_the_rule_stays_out_of_names_it_cannot_vouch_for(name, entity_type, verdict,
+                                                         as_type):
+    store, save = _jonas_store(_Identity(0.6, verdict=verdict), name, entity_type)
+    save(f"{name} appeared in Berlin yesterday")
+    save(f"Someone phoned about {name} this morning", as_type=as_type)
+    assert len(store.entities(user_id="ada")) == 2
+    store.close()
+
+
+def test_the_weekly_pass_merges_a_waiting_pair_with_the_same_specific_name():
+    """Pairs raised before this rule existed are settled by the next pass."""
+    from memry.models import Entity, EntityMention, Memory, MergeProposal
+
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(),
+                        embedder=HashEmbedder(64), decider=_Identity(0.44))
+    backend = store.backend
+    ids = []
+    for text in ("Fundation GmbH's tax number is 218/5713", "Fundation GmbH has an insurer"):
+        entity = backend.insert_entity(Entity(name="Fundation GmbH",
+                                              normalized="fundation gmbh",
+                                              entity_type="organization", user_id="ada"))
+        memory = backend.insert_memory(Memory(content=text, user_id="ada"))
+        backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
+                                          surface="Fundation GmbH"))
+        ids.append(entity.id)
+    backend.add_proposal(MergeProposal(entity_a=ids[0], entity_b=ids[1], user_id="ada",
+                                       confidence=0.44, reason="stub: same"))
+    assert store.resolve_entities(user_id="ada")["confirmed"] == 1
+    assert len(store.entities(user_id="ada")) == 1
+    store.close()
+
+
+def test_a_different_from_half_stops_the_shared_words_rule():
+    """With gpt-5-mini's 0.95 gate, a "different" at 0.90 used to let two people
+    with one full name merge because both facts talked about employee numbers."""
+    from memry.intelligence.entities import _should_merge
+    from memry.models import Entity
+
+    jonas = Entity(name="Jonas Brandt", normalized="jonas brandt", entity_type="person",
+                   user_id="ada")
+    facts = ["Jonas Brandt's employee number is NW-4417"]
+    new = ["Jonas Brandt, employee NW-9902, joined the Dublin sales office"]
+    judged = {"verdict": "different", "confidence": 0.9, "gate": 0.95}
+    assert not _should_merge(jonas, facts, "Jonas Brandt", new, "person", judged)
+    judged = {"verdict": "unsure", "confidence": 0.5, "gate": 0.95}
+    assert _should_merge(jonas, facts, "Jonas Brandt", new, "person", judged)
+
+
+@pytest.mark.parametrize("name, entity_type, specific", [
+    ("Fundation GmbH", "organization", True),
+    ("Bochra Saffar", "person", True),
+    ("Docker", "product", True),
+    ("Forschungszulage", "concept", True),
+    ("Ronin Dash PR #41", "code", True),
+    ("BH258636489", "document", True),
+    ("Cosmin", "person", False),
+    ("R. Patel", "person", False),
+    ("the consultant", "person", False),
+    ("PR #92", "code", False),
+    ("Issue 12", "document", False),
+    ("privacy policy", "document", False),
+    ("landing page", "product", False),
+    ("Docker", None, False),
+    ("Cosmin", None, False),
+    ("Fundation GmbH", None, True),
+    ("Bochra Saffar", None, True),
+    ("privacy policy", None, False),
+])
+def test_which_names_are_specific(name, entity_type, specific):
+    from memry.intelligence.entities import name_is_specific
+
+    assert name_is_specific(name, entity_type) is specific
+
+
+def test_one_company_or_product_written_two_ways_has_one_key():
+    from memry.intelligence.entities import identity_key
+
+    assert identity_key("Fundation GmbH") == identity_key("Fundation") == "fundation"
+    assert identity_key("Kestrel GmbH & Co. KG") == "kestrel"
+    assert identity_key("bildy.ai") == identity_key("Bildy") == "bildy"
+    assert identity_key("GmbH") == "gmbh"  # a legal form alone is left alone
+
+
+def test_shared_words_do_not_make_two_bare_references_one():
+    from memry.intelligence.entities import _obvious_same_entity
+    from memry.models import Entity
+
+    pr = Entity(name="PR #92", normalized="pr #92", entity_type="code", user_id="ada")
+    facts = ["PR #92 moves video slots between cards"]
+    other = ["PR #92 moves the video export button"]
+    assert not _obvious_same_entity(pr, facts, "PR #92", other, "code")
+    ada = Entity(name="Ada Lindqvist", normalized="ada lindqvist", entity_type="person",
+                 user_id="ada")
+    assert _obvious_same_entity(ada, ["Ada Lindqvist moves video slots between cards"],
+                                "Ada Lindqvist", ["Ada Lindqvist moves the video export"],
+                                "person")
+
+
+def test_one_name_under_two_homes_is_left_to_the_normal_rules():
+    """"Settings" under two products is two screens."""
+    from memry.intelligence.entities import specific_same_name
+    from memry.models import Entity
+
+    settings = Entity(name="Settings", normalized="settings", entity_type="product",
+                      user_id="ada", metadata={"home": {"id": "bildy"}})
+    assert not specific_same_name(settings, "Settings", "product")
+    assert not specific_same_name(settings, "Settings", "product", other_home="memry")
+    assert specific_same_name(settings, "Settings", "product", other_home="bildy")

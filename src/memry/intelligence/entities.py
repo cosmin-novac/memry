@@ -238,6 +238,8 @@ def _obvious_same_entity(
     existing_name = _name_words(existing.name)
     if len(existing_name) < 2 or existing_name != _name_words(other_name):
         return False
+    if _BARE_REFERENCE_RE.match(existing.name.strip()):
+        return False  # "PR #92" is two words, and every repository has one
     if existing.entity_type and other_type and existing.entity_type != other_type:
         return False
     left = _context_words(" ".join(existing_facts), existing_name)
@@ -250,6 +252,190 @@ def _obvious_same_entity(
     return bool(shared) and max(map(len, shared)) >= 6 and (
         len(shared) / min(len(left), len(right)) >= 0.12
     )
+
+# Legal forms name the same company whether or not they are written out:
+# "Fundation" and "Fundation GmbH" are one company.
+_LEGAL_FORMS = frozenset({
+    "gmbh", "mbh", "ug", "haftungsbeschränkt", "haftungsbeschrankt", "ag", "se",
+    "kg", "kgaa", "ohg", "gbr", "ev", "inc", "ltd", "llc", "llp", "plc", "corp",
+    "corporation", "limited", "sa", "sarl", "sas", "srl", "spa", "bv", "nv", "ab",
+    "oy", "aps", "pty", "co",
+})
+_TLDS = ("ai", "app", "co", "com", "de", "dev", "eu", "io", "me", "net", "org", "so", "xyz")
+_DOMAIN_RE = re.compile(rf"^([\w-]+)\.(?:{'|'.join(_TLDS)})$", re.I)
+# How the legal forms above are written after a name, for looking up the other
+# spelling of a company in the store.
+_WRITTEN_LEGAL_FORMS = (
+    "gmbh", "ug", "ug (haftungsbeschränkt)", "ag", "se", "kg", "gmbh & co. kg",
+    "e.v.", "inc", "inc.", "ltd", "ltd.", "llc", "plc", "corp", "corp.", "bv", "sa",
+)
+# A name that starts like this describes a role, not a thing with a name.
+_GENERIC_LEADS = frozenset({
+    "the", "a", "an", "my", "our", "your", "his", "her", "their", "this", "that",
+    "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "mein",
+    "meine", "unser", "unsere",
+})
+# A number that is only unique inside something the name leaves out: every
+# repository has a PR #92, every tracker an issue 12.
+_BARE_REFERENCE_RE = re.compile(
+    r"^\W*(?:pr|pull request|mr|issue|ticket|bug|task|step|phase|stage|room|"
+    r"version|v|release|sprint|chapter|section|page|table|figure|fig|item|order|"
+    r"case|no|nr|number|nummer)?\W*#?\s*\d+[\w.]*\W*$",
+    re.I,
+)
+# Types whose names are proper names. A document or a piece of code is usually
+# named by what it is ("privacy policy", "config.py"), and every project has one.
+_NAMED_TYPES = frozenset({
+    "person", "organization", "project", "product", "place", "event", "concept",
+})
+
+
+def identity_key(name: str) -> str:
+    """The name with its legal form and web domain taken off, for comparing
+    two spellings of one company or product: "Fundation GmbH" and "Fundation"
+    give "fundation", "bildy.ai" and "Bildy" give "bildy"."""
+    raw = (name or "").strip()
+    domain = _DOMAIN_RE.match(raw)
+    if domain:
+        raw = domain.group(1)
+    words = list(_name_words(raw))
+    while len(words) > 1 and words[-1] in _LEGAL_FORMS:
+        words.pop()
+    return " ".join(words)
+
+
+def identity_variants(name: str) -> list[str]:
+    """Other lowercased spellings of the same company or product, with the
+    legal form or web domain written out or left off, to look up in the store.
+
+    Entities are found by their exact lowercased name, so "Fundation" never
+    met "Fundation GmbH" and the two were never compared.
+    """
+    raw = (name or "").strip()
+    domain = _DOMAIN_RE.match(raw)
+    tokens = (domain.group(1) if domain else raw).split()
+    while len(tokens) > 1 and set(_name_words(tokens[-1])) <= _LEGAL_FORMS:
+        tokens.pop()
+    base = " ".join(tokens).lower()
+    if not base:
+        return []
+    variants = {base, *(f"{base} {form}" for form in _WRITTEN_LEGAL_FORMS)}
+    if len(tokens) == 1:
+        variants |= {f"{base}.{tld}" for tld in _TLDS}
+    variants.discard(raw.lower())
+    return sorted(variants)
+
+
+def name_is_specific(name: str, entity_type: str | None) -> bool:
+    """Whether two mentions of exactly this name are, as a rule, one thing.
+
+    True for a full personal name, a company, a product, a project, a place or
+    a named programme ("Bochra Saffar", "Fundation GmbH", "Docker",
+    "Forschungszulage"), and for a document or code reference that carries its
+    own number ("Ronin Dash PR #41"). False for a first name on its own, a role
+    ("the consultant"), an initial ("R. Patel"), a number that needs its
+    repository or tracker ("PR #92"), a description in lowercase ("landing
+    page") and a single word of unknown type.
+    """
+    raw = (name or "").strip()
+    words = _name_words(raw)
+    if not words or words[0] in _GENERIC_LEADS or _BARE_REFERENCE_RE.match(raw):
+        return False
+    if entity_type in ("document", "code"):
+        # A reference with its namespace ("Ronin Dash PR #41") or a long
+        # number ("BH258636489") names one thing; "config.py" does not.
+        return any(ch.isdigit() for ch in raw) and (
+            len(words) >= 3 or re.search(r"\d{4,}", raw) is not None
+        )
+    full_words = sum(len(word) > 1 for word in words)
+    if entity_type in (None, "other"):
+        # Untyped: a legal form makes a company, and two capitalised words make
+        # a full name or a named thing. One word alone could be a first name.
+        return (len(words) > 1 and words[-1] in _LEGAL_FORMS) or (
+            full_words >= 2 and any(ch.isupper() for ch in raw)
+        )
+    if entity_type not in _NAMED_TYPES:
+        return False
+    # Lowercase words are a description ("landing page"), not a name.
+    if not any(ch.isupper() or ch.isdigit() for ch in raw) and not _DOMAIN_RE.match(raw):
+        return False
+    if entity_type == "person":
+        return full_words >= 2
+    return True
+
+
+def _home_id(entity: Entity) -> str | None:
+    home = (entity.metadata or {}).get("home")
+    return home.get("id") if isinstance(home, dict) else None
+
+
+def specific_same_name(
+    existing: Entity,
+    other_name: str,
+    other_type: str | None = None,
+    other_home: str | None = None,
+) -> bool:
+    """Two mentions whose names match exactly (legal form and domain aside),
+    whose names are specific, whose known types agree and whose homes agree.
+
+    A new mention has no home yet, so an existing entity with a home is left to
+    the normal rules: "Settings" under two products is two things.
+    """
+    key = identity_key(existing.name)
+    if not key or key != identity_key(other_name):
+        return False
+    if existing.entity_type and other_type and existing.entity_type != other_type:
+        return False
+    if _home_id(existing) != other_home:
+        return False
+    entity_type = existing.entity_type or other_type
+    return name_is_specific(existing.name, entity_type) and name_is_specific(
+        other_name, entity_type
+    )
+
+
+#: No rule merges two mentions after a "different" at this confidence or
+#: higher. The bar used to be the provider's merge gate, 0.95 for gpt-5-mini,
+#: so two people with one full name and a "different" at 0.90 were merged
+#: because both facts mentioned employee numbers (identity_v1 case d12).
+DIFFERENT_VETO = 0.5
+
+
+def _should_merge(
+    existing: Entity,
+    existing_facts: list[str],
+    other_name: str,
+    other_facts: list[str],
+    other_type: str | None,
+    judgment: dict[str, Any],
+    other_home: str | None = None,
+) -> bool:
+    """Whether two mentions are one thing, given the judge's answer.
+
+    A "same" at the provider's gate merges. After a "different" from 0.5
+    nothing merges. Otherwise two rules merge without a sure "same":
+
+    * a full name with shared context words (``_obvious_same_entity``);
+    * the same specific name (``specific_same_name``) with a "same" at any
+      confidence. Facts about a company's insurance and its tax number share no
+      words, and asked whether they are clearly the same company, Jev answered
+      "same" at 38-69% on a real store, under its 70% gate. On 101 labelled
+      cases, over two runs, this rule took gpt-5-mini from 9-11 to 43-44 of 51
+      correct merges and added no wrong one. Merging on anything short of
+      "different" added 3-4 wrong ones, most of them "unsure" on two people
+      who share a full name. See evals/identity_policy_benchmark.py.
+    """
+    verdict, confidence = judgment["verdict"], judgment["confidence"]
+    if verdict == "same" and confidence >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE):
+        return True
+    if verdict == "different" and confidence >= DIFFERENT_VETO:
+        return False
+    if _obvious_same_entity(existing, existing_facts, other_name, other_facts, other_type):
+        return True
+    return verdict == "same" and specific_same_name(
+        existing, other_name, other_type, other_home
+    )
+
 
 IDENTITY_QUESTION = Choice(
     instructions=(
@@ -669,6 +855,12 @@ def resolve_mentions(
             continue
 
         candidates = backend.find_entity_candidates(normalized, scope)
+        found = {candidate.id for candidate in candidates}
+        candidates += [
+            entity
+            for entity in backend.find_entities_by_aliases(identity_variants(surface), scope)
+            if entity.id not in found
+        ]
         target: Entity | None = None
         proposals: list[tuple[Entity, dict[str, Any]]] = []
         for candidate in candidates:
@@ -684,22 +876,8 @@ def resolve_mentions(
             judgment = _judge(
                 llm, candidate, facts, memory_content, surface, decider
             )
-            high_conflict = (
-                judgment["verdict"] == "different"
-                and judgment["confidence"] >= _conflict_bar(judgment)
-            )
-            if (
-                judgment["verdict"] == "same"
-                and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
-            ) or (
-                not high_conflict
-                and _obvious_same_entity(
-                    candidate,
-                    facts,
-                    surface,
-                    [memory_content],
-                    types.get(normalized),
-                )
+            if _should_merge(
+                candidate, facts, surface, [memory_content], types.get(normalized), judgment
             ):
                 target = candidate
                 break
@@ -754,7 +932,8 @@ def propose_same_name_duplicates(
     groups: dict[str, list[Entity]] = {}
     for entity in backend.list_entities(scope, limit=10_000):
         if entity.merged_into is None:
-            groups.setdefault(entity.normalized or entity.name.lower(), []).append(entity)
+            key = identity_key(entity.name) or entity.normalized or entity.name.lower()
+            groups.setdefault(key, []).append(entity)
 
     def home_of(entity: Entity) -> str | None:
         home = (entity.metadata or {}).get("home")
@@ -853,19 +1032,9 @@ def resolve_open_proposals(
             judgment["verdict"] == "different"
             and judgment["confidence"] >= _conflict_bar(judgment)
         )
-        obvious = _obvious_same_entity(
-            entity_a,
-            facts_a,
-            entity_b.name,
-            facts_b,
-            entity_b.entity_type,
-        )
-        should_merge = auto_confirm and (
-            (
-                judgment["verdict"] == "same"
-                and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
-            )
-            or (obvious and not high_conflict)
+        should_merge = auto_confirm and _should_merge(
+            entity_a, facts_a, entity_b.name, facts_b, entity_b.entity_type,
+            judgment, other_home=_home_id(entity_b),
         )
         if should_merge and backend.merge_entities(entity_a.id, entity_b.id):
             backend.set_proposal_status(proposal.id, "confirmed")
@@ -881,35 +1050,3 @@ def resolve_open_proposals(
             )
             outcome["kept"] += 1
     return outcome
-
-
-_PROVIDER_NAMES = {"jev": "Jev", "llm": "The language model"}
-
-
-def describe_proposal(proposal: MergeProposal, gate: float) -> str:
-    """One plain sentence on why a pair is still waiting for a person.
-
-    The stored reason was only "jev: same", which read as a verdict Memry had
-    ignored. A "same" is only left open when its confidence is below the merge
-    gate, so the sentence includes both numbers.
-    """
-    reason = (proposal.reason or "").strip()
-    pct = round(proposal.confidence * 100)
-    provider, _, verdict = reason.partition(": ")
-    if verdict in ("same", "unsure", "different") and provider:
-        who = _PROVIDER_NAMES.get(provider, provider.capitalize())
-        if verdict == "unsure":
-            return f"{who}'s answer: can't tell."
-        if verdict == "different":
-            return f"{who}'s answer: probably different, {pct}% sure."
-        rule = ("Memry never merges on its own with this model."
-                if gate > 1 else
-                f"Memry merges on its own from {round(gate * 100)}%.")
-        return f"{who}'s answer: probably the same, {pct}% sure. {rule}"
-    if reason == "same name, not yet compared":
-        return "Same name. Not compared yet."
-    if reason == "no LLM: same name only":
-        return "Same name. No model was set up to compare them."
-    if reason == "unparseable judgment":
-        return "The model's answer could not be read."
-    return reason or "No reason was recorded."

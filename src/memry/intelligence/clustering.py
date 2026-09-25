@@ -121,16 +121,78 @@ def _singular_topic_word(word: str) -> str:
     return word
 
 
-def _obvious_topic_key(value: str) -> str:
-    words = [word for word in _TOPIC_SEPARATOR_RE.split(value.casefold().strip()) if word]
+# A company is one subject whether or not its legal form is written: on a real
+# store "fundation gmbh" (13 memories) sat beside "fundation" (31).
+_TOPIC_LEGAL_FORMS = frozenset({
+    "gmbh", "ug", "ag", "se", "kg", "inc", "ltd", "llc", "plc", "corp",
+})
+_TOPIC_TLDS = frozenset({
+    "ai", "app", "co", "com", "de", "dev", "eu", "io", "me", "net", "org", "so", "xyz",
+})
+_TOPIC_DOMAIN_RE = re.compile(r"^([a-z0-9-]+)[.\s]([a-z]+)$")
+
+
+def _obvious_topic_key(value: str, names: set[str] | frozenset[str] = frozenset()) -> str:
+    """The form two tags share when they are one subject written two ways.
+
+    ``names`` are the companies, products and projects the store knows. A
+    domain ("bildy.ai", "bildy ai") only joins its name when the name is one of
+    them: "character.ai" is not the tag "character".
+    """
+    value = value.casefold().strip()
+    domain = _TOPIC_DOMAIN_RE.match(value)
+    if domain and domain.group(2) in _TOPIC_TLDS and domain.group(1) in names:
+        return domain.group(1)
+    words = [word for word in _TOPIC_SEPARATOR_RE.split(value.replace(".", " ")) if word]
+    while len(words) > 1 and words[-1] in _TOPIC_LEGAL_FORMS:
+        words.pop()
     if not words:
         return ""
     words[-1] = _singular_topic_word(words[-1])
     return " ".join(words)
 
 
-def obvious_canonical_merges(tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Find deterministic formatting and singular/plural duplicates.
+def domain_name(value: str) -> str | None:
+    """The name in a tag written as a web domain ("bildy" in "bildy.ai" or
+    "bildy ai"), so a caller looks up only those names in the store."""
+    domain = _TOPIC_DOMAIN_RE.match(value.casefold().strip())
+    return domain.group(1) if domain and domain.group(2) in _TOPIC_TLDS else None
+
+
+def _one_swap_apart(a: str, b: str) -> bool:
+    if len(a) != len(b):
+        return False
+    diff = [i for i in range(len(a)) if a[i] != b[i]]
+    return (len(diff) == 2 and diff[1] == diff[0] + 1
+            and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+
+
+def swapped_letter_typos(tags: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """``(typo, tag)`` pairs where the typo swaps two neighbouring letters of a
+    tag used at least five times as often, and the typo is used at most twice.
+
+    On a real store of 417 tags, "one letter apart" found five pairs and three
+    were different subjects: "finance" and "yfinance", "memory" and "memry",
+    "preference" and "reference". A swap found one pair, "colonge" and
+    "cologne", and it was a typo. Words that are swaps of each other ("casual",
+    "causal") still exist, so a caller confirms each pair before merging.
+    """
+    counts = {str(t["category"]).strip().casefold(): int(t.get("count") or 0) for t in tags}
+    pairs = []
+    for rare, rare_count in counts.items():
+        if len(rare) < 6 or rare_count > 2:
+            continue
+        for common, common_count in counts.items():
+            if common_count >= 5 * max(rare_count, 1) and _one_swap_apart(rare, common):
+                pairs.append((rare, common))
+    return sorted(pairs)
+
+
+def obvious_canonical_merges(
+    tags: list[dict[str, Any]], names: set[str] | frozenset[str] = frozenset()
+) -> list[dict[str, Any]]:
+    """Find deterministic formatting, singular/plural, legal-form and domain
+    duplicates.
 
     A key is only actionable when two real stored labels map to it, so a lone
     word is never rewritten by a speculative inflection rule.
@@ -139,7 +201,7 @@ def obvious_canonical_merges(tags: list[dict[str, Any]]) -> list[dict[str, Any]]
     known.discard("")
     grouped: dict[str, list[str]] = {}
     for topic in sorted(known):
-        key = _obvious_topic_key(topic)
+        key = _obvious_topic_key(topic, names)
         if key:
             grouped.setdefault(key, []).append(topic)
     merges: list[dict[str, Any]] = []

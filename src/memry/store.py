@@ -33,9 +33,11 @@ from .backends.local import LocalBackend
 from .config import Config
 from .intelligence.clustering import (
     judge_tag_pairs,
+    domain_name,
     obvious_canonical_merges,
     propose_synthetic_tags,
     semantic_duplicate_tags,
+    swapped_letter_typos,
     suggest_canonical_merges,
 )
 from .intelligence.consolidate import judge_group, representative, similarity_groups
@@ -49,7 +51,7 @@ from .intelligence.decay import (
 from .intelligence.entities import (
     _gate,
     classify_entity_types,
-    describe_proposal,
+    identity_key,
     judge_entity_referents,
     non_referent_reason,
     screen_names,
@@ -521,8 +523,9 @@ class MemoryStore:
             topic.normalized
             for topic in self.backend.list_topics(scope, limit=100_000)
         }
+        labels = existing | incoming
         groups = obvious_canonical_merges(
-            [{"category": topic} for topic in existing | incoming]
+            [{"category": topic} for topic in labels], self._tag_names(scope, labels)
         )
         replacements: dict[str, str] = {}
         for group in groups:
@@ -2559,13 +2562,32 @@ class MemoryStore:
         categories = self.categories(
             user_id=user_id, agent_id=agent_id, run_id=run_id
         )
-        groups = obvious_canonical_merges(categories)
+        labels = {str(tag["category"]).strip().casefold() for tag in categories}
+        groups = obvious_canonical_merges(categories, self._tag_names(scope, labels))
+        # A swapped-letter pair is only a typo when the judge agrees: "casual"
+        # and "causal" are both words.
+        typos = swapped_letter_typos(categories)
+        if typos:
+            groups += [{"canonical": common, "variants": [common, typo]}
+                       for typo, common in judge_tag_pairs(self.decider, typos)]
         changed = 0
         for group in groups:
             remove = set(group["variants"]) - {group["canonical"]}
             result = self.backend.retag_topics(scope, remove, group["canonical"])
             changed += result or 0
         return {"groups_merged": len(groups), "memories_changed": changed}
+
+    def _tag_names(self, scope: Scope, labels: set[str]) -> set[str]:
+        """The companies, products and projects among the names in tags written
+        as a domain ("bildy" for "bildy.ai"). A domain tag joins only those."""
+        names = sorted({name for name in map(domain_name, labels) if name})
+        if not names:
+            return set()
+        return {
+            identity_key(entity.name)
+            for entity in self.backend.find_entities_by_aliases(names, scope)
+            if entity.entity_type in ("organization", "product", "project")
+        }
 
     def consolidate_memories(
         self,
@@ -3305,8 +3327,6 @@ class MemoryStore:
             items.append({
                 "kind": "proposal", "id": proposal.id,
                 "title": f"{entity_name(proposal.entity_a)} and {entity_name(proposal.entity_b)}",
-                "detail": "Might be the same one. "
-                          + describe_proposal(proposal, self.merge_gate()),
                 "accept": "merge", "decline": "keep separate",
             })
 
