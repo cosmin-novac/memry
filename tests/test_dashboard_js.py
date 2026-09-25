@@ -498,3 +498,60 @@ const openEntity=async id=>opened=id;
 """
     result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_free_text_passed_through_a_single_quoted_onclick_survives_an_apostrophe():
+    """A tag like "mum's health" ended onclick='filterByTag("mum's health")'
+    at the apostrophe, so its chip, rename, delete and merge buttons did
+    nothing. jsArg escapes for the attribute; the browser decodes it back."""
+    source = "\n".join(_scripts(_dashboard_html()))
+    helpers = "\n".join(
+        source[source.index(name) : source.index("\n", source.index(name))]
+        for name in ("function esc(s)", "function jsArg(v)")
+    )
+    contract = helpers + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+// what the HTML parser does to an attribute value before the handler runs
+const decode=s=>s.replace(/&#39;/g,"'").replace(/&quot;/g,'"').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
+for(const value of ["mum's health",'say "hi"','<b>&amp;</b>',"it's & <that>",
+                    {canonical:"it's",variants:["it's","its"]},["O'Brien"]]){
+  const out=jsArg(value);
+  check(!out.includes("'"),'no raw apostrophe may reach the attribute: '+out);
+  check(JSON.stringify(JSON.parse(decode(out)))===JSON.stringify(value),'round trip: '+out);
+}
+"""
+    result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    for call in ("filterByTag(${jsArg(String(c))})", "renameTag(${jsArg(topic.category)})",
+                 "deleteTag(${jsArg(topic.category)})", "applyMerge(${jsArg(group)},${index})",
+                 "toggleEntityType(${jsArg(type)})"):
+        assert call in source, call
+    for unsafe in ("JSON.stringify(String(c))", "JSON.stringify(topic.category)",
+                   "JSON.stringify(group)", "JSON.stringify(type)", "JSON.stringify(entity.name)"):
+        assert unsafe not in source, unsafe
+
+
+def test_the_entity_panel_shows_the_entity_clicked_last_not_the_one_answered_last():
+    source = "\n".join(_scripts(_dashboard_html()))
+    esc_start = source.index("function esc(s)")
+    helpers = source[esc_start : source.index("\n", source.index("function jsArg(v)"))]
+    panel = source[source.index("function placeBlock(") : source.index("function closeEntity(")]
+    contract = helpers + "\n" + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+const box={dataset:{},innerHTML:''};
+const document={getElementById:id=>id==='entitydetail'?box:null};
+const setKnowledgeOpen=()=>{},showKnowledge=()=>{};
+const pending={};
+const api=path=>new Promise(resolve=>{pending[path.split('/').pop()]=resolve});
+const reply=name=>({entity:{name,description:name+' facts'},aliases:[],memories:[],relations:[],relation_names:{},hub:true});
+""" + panel + r"""
+(async()=>{
+  const first=openEntity('slow'),second=openEntity('fast');
+  pending.fast(reply('Fast'));await second;
+  pending.slow(reply('Slow'));await first;
+  check(box.dataset.entityId==='fast','the last click is the open entity');
+  check(box.innerHTML.includes('Fast')&&!box.innerHTML.includes('Slow'),'and it is what the panel shows');
+})().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+    result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
