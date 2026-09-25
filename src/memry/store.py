@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any
 
@@ -48,6 +49,7 @@ from .intelligence.decay import (
 from .intelligence.entities import (
     _gate,
     classify_entity_types,
+    describe_proposal,
     judge_entity_referents,
     non_referent_reason,
     screen_names,
@@ -314,6 +316,12 @@ class MemoryStore:
         # so a store that configures nothing behaves exactly as before.
         self.decider = decider or build_decider(self.config.decision, self.llm)
         self.embedder = embedder or build_embedder(self.config.embedding)
+        # One lock per pass and namespace. The scheduler and "run now" can
+        # start the same pass at once, and two runs each read the queue, add
+        # to their own copy and write it back, so one run's additions were
+        # lost and every group was sent to the model twice.
+        self._pass_locks: dict[tuple[str, str | None], threading.RLock] = {}
+        self._pass_locks_guard = threading.Lock()
 
     # ------------------------------------------------------------------
     # write path
@@ -591,6 +599,9 @@ class MemoryStore:
             # Entity mentions attach to the memory the action landed on
             # (conservative disambiguation; see intelligence/entities.py).
             if action.event not in ("NONE", "UPDATE") and action.memory_id and candidate.entities:
+                # Pairs already waiting before this memory arrived; any the
+                # memory mentions get compared again below, with its evidence.
+                open_before = self._open_proposals_to_recheck(scope)
                 resolved = resolve_mentions(
                     backend=self.backend,
                     llm=self.llm,
@@ -604,7 +615,47 @@ class MemoryStore:
                 self._resolve_relations(
                     candidate.relations, resolved, scope, action.memory_id
                 )
+                self._recheck_proposals(
+                    scope, open_before, {entity.id for entity in resolved.values()}
+                )
         return actions
+
+    def _open_proposals_to_recheck(self, scope: Scope) -> list[MergeProposal]:
+        """Open proposals a save may compare again, or none when the provider
+        is too slow to ask inside a save."""
+        if not (self.decider.rejudges_on_new_evidence and self.decider.available):
+            return []
+        return self.backend.list_proposals(scope, status="proposed", limit=1000)
+
+    def _recheck_proposals(
+        self, scope: Scope, open_before: list[MergeProposal], entity_ids: set[str]
+    ) -> None:
+        """Compare again every pair a new memory just added evidence to.
+
+        New evidence is the only thing that can make an unsure pair sure, so a
+        pair is asked again when it gets some, not only on the weekly pass. A
+        pair raised by this same save was judged moments ago and is left alone.
+        A failure here must never fail the save.
+        """
+        touched = {
+            proposal.id for proposal in open_before
+            if proposal.entity_a in entity_ids or proposal.entity_b in entity_ids
+        }
+        if not touched:
+            return
+        try:
+            outcome = resolve_open_proposals(
+                backend=self.backend, llm=self.llm, decider=self.decider,
+                scope=scope, proposal_ids=touched,
+            )
+        except Exception as exc:  # a provider hiccup must not fail a save
+            log.warning("re-checking merge proposals after a save failed: %s", exc)
+            return
+        log.info(
+            "new evidence on %d open merge proposal(s): merged %d, kept apart %d, "
+            "still open %d", len(touched), outcome["confirmed"], outcome["rejected"],
+            outcome["kept"],
+        )
 
     def _resolve_relations(
         self,
@@ -3090,6 +3141,10 @@ class MemoryStore:
         """When a pass last ran for this namespace and what it reported."""
         return self._upkeep_get(f"last:{key}", user_id, None)
 
+    def _pass_lock(self, key: str, user_id: str | None) -> threading.RLock:
+        with self._pass_locks_guard:
+            return self._pass_locks.setdefault((key, user_id), threading.RLock())
+
     def run_upkeep_pass(
         self, key: str, *, user_id: str | None = None, record: bool = True,
         at: datetime | None = None,
@@ -3100,31 +3155,32 @@ class MemoryStore:
         run is stamped with. Stamping the wall clock instead put the next run
         due at a different time than the tick that triggered it.
         """
-        stamp = at.isoformat(timespec="seconds") if at is not None else utcnow()
-        if key == "dedup_entities":
-            self.merge_obvious_topics(user_id=user_id)
-            result = self.resolve_entities(user_id=user_id)
-            # A calibrated provider judges names one by one in their memory; the
-            # text model's batch review is the fallback when there is none.
-            if self.decider.available:
-                result.update(self.run_name_screen(user_id=user_id))
-            elif self.llm.available:
-                result.update(self.run_entity_review(user_id=user_id))
-            self.backend.set_meta(_dedup_run_key(user_id), stamp)
-        elif key == "structure":
-            result = self.run_structure_pass(user_id=user_id)
-        elif key == "tag_abstraction":
-            result = self.abstract_tags(user_id=user_id)
-        elif key == "durability":
-            result = self.score_memory_durability(user_id=user_id)
-        elif key == "consolidation":
-            result = self.run_consolidation_pass(user_id=user_id)
-            self.backend.set_meta(_consolidation_run_key(user_id), stamp)
-        else:
-            raise ValueError(f"unknown pass: {key}")
-        if record:
-            self._upkeep_set(f"last:{key}", user_id, {"at": stamp, "result": result})
-        return result
+        with self._pass_lock(key, user_id):
+            stamp = at.isoformat(timespec="seconds") if at is not None else utcnow()
+            if key == "dedup_entities":
+                self.merge_obvious_topics(user_id=user_id)
+                result = self.resolve_entities(user_id=user_id)
+                # A calibrated provider judges names one by one in their memory; the
+                # text model's batch review is the fallback when there is none.
+                if self.decider.available:
+                    result.update(self.run_name_screen(user_id=user_id))
+                elif self.llm.available:
+                    result.update(self.run_entity_review(user_id=user_id))
+                self.backend.set_meta(_dedup_run_key(user_id), stamp)
+            elif key == "structure":
+                result = self.run_structure_pass(user_id=user_id)
+            elif key == "tag_abstraction":
+                result = self.abstract_tags(user_id=user_id)
+            elif key == "durability":
+                result = self.score_memory_durability(user_id=user_id)
+            elif key == "consolidation":
+                result = self.run_consolidation_pass(user_id=user_id)
+                self.backend.set_meta(_consolidation_run_key(user_id), stamp)
+            else:
+                raise ValueError(f"unknown pass: {key}")
+            if record:
+                self._upkeep_set(f"last:{key}", user_id, {"at": stamp, "result": result})
+            return result
 
     def run_upkeep_cycle(
         self, *, user_id: str | None = None, now: datetime | None = None
@@ -3176,45 +3232,46 @@ class MemoryStore:
         those merges wait for a person under Upkeep. Every judged group is
         remembered, so the model is asked about each one once.
         """
-        seen_lists = self._upkeep_get("consolidation:seen", user_id, [])
-        seen = {frozenset(ids) for ids in seen_lists}
-        result = self.consolidate_memories(
-            user_id=user_id, threshold=self.UPKEEP_CONSOLIDATION_THRESHOLD,
-            apply=False, exclude=seen,
-        )
-        pending = self._upkeep_get("consolidation:pending", user_id, [])
-        known = {frozenset(entry["memory_ids"]) for entry in pending}
-        outcome = {"scanned": result["scanned"], "judged": 0, "merged": 0, "queued": 0}
-        for group in result["groups"]:
-            ids = frozenset(group["memory_ids"])
-            seen_lists.append(sorted(ids))
-            outcome["judged"] += 1
-            if not group["same_fact"]:
-                continue
-            if group["reason"] == "identical text":
-                memories = [
-                    m for m in (self.backend.get_memory(i) for i in ids)
-                    if m is not None and m.invalid_at is None
-                ]
-                if len(memories) >= 2:
-                    self._merge_group(memories, group["merged_content"], user_id=user_id)
-                    outcome["merged"] += 1
-                continue
-            if ids in known:
-                continue
-            pending.append({
-                "id": _group_id(ids),
-                "memory_ids": sorted(ids),
-                "contents": group["contents"],
-                "merged_content": group["merged_content"],
-                "reason": group["reason"],
-                "found_at": utcnow(),
-            })
-            known.add(ids)
-            outcome["queued"] += 1
-        self._upkeep_set("consolidation:seen", user_id, seen_lists[-self.UPKEEP_SEEN_LIMIT:])
-        self._upkeep_set("consolidation:pending", user_id, pending)
-        return outcome
+        with self._pass_lock("consolidation", user_id):
+            seen_lists = self._upkeep_get("consolidation:seen", user_id, [])
+            seen = {frozenset(ids) for ids in seen_lists}
+            result = self.consolidate_memories(
+                user_id=user_id, threshold=self.UPKEEP_CONSOLIDATION_THRESHOLD,
+                apply=False, exclude=seen,
+            )
+            pending = self._upkeep_get("consolidation:pending", user_id, [])
+            known = {frozenset(entry["memory_ids"]) for entry in pending}
+            outcome = {"scanned": result["scanned"], "judged": 0, "merged": 0, "queued": 0}
+            for group in result["groups"]:
+                ids = frozenset(group["memory_ids"])
+                seen_lists.append(sorted(ids))
+                outcome["judged"] += 1
+                if not group["same_fact"]:
+                    continue
+                if group["reason"] == "identical text":
+                    memories = [
+                        m for m in (self.backend.get_memory(i) for i in ids)
+                        if m is not None and m.invalid_at is None
+                    ]
+                    if len(memories) >= 2:
+                        self._merge_group(memories, group["merged_content"], user_id=user_id)
+                        outcome["merged"] += 1
+                    continue
+                if ids in known:
+                    continue
+                pending.append({
+                    "id": _group_id(ids),
+                    "memory_ids": sorted(ids),
+                    "contents": group["contents"],
+                    "merged_content": group["merged_content"],
+                    "reason": group["reason"],
+                    "found_at": utcnow(),
+                })
+                known.add(ids)
+                outcome["queued"] += 1
+            self._upkeep_set("consolidation:seen", user_id, seen_lists[-self.UPKEEP_SEEN_LIMIT:])
+            self._upkeep_set("consolidation:pending", user_id, pending)
+            return outcome
 
     def run_entity_review(self, *, user_id: str | None = None) -> dict[str, Any]:
         """Ask the model which concept names are not things; queue its verdicts.
@@ -3249,7 +3306,7 @@ class MemoryStore:
                 "kind": "proposal", "id": proposal.id,
                 "title": f"{entity_name(proposal.entity_a)} and {entity_name(proposal.entity_b)}",
                 "detail": "Might be the same one. "
-                          + (proposal.reason or "The evidence did not settle it."),
+                          + describe_proposal(proposal, self.merge_gate()),
                 "accept": "merge", "decline": "keep separate",
             })
 

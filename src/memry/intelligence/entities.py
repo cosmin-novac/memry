@@ -792,14 +792,22 @@ def resolve_open_proposals(
     decider: Decider | None = None,
     scope: Scope,
     auto_confirm: bool = True,
+    proposal_ids: set[str] | None = None,
 ) -> dict[str, int]:
     """Resolve obvious/stale proposals and re-judge the remaining pairs.
 
     Entity IDs are first followed through merge history, making maintenance safe
     for proposals created before another merge changed either endpoint.
+    ``proposal_ids`` limits the pass to those proposals, for the re-check a save
+    runs when a new memory mentions one side of a pair.
+
+    A pair that stays open keeps the latest answer, so the list shows how sure
+    the provider is now, not how sure it was when the pair was first raised.
     """
     outcome = {"confirmed": 0, "rejected": 0, "kept": 0}
     for proposal in backend.list_proposals(scope, status="proposed", limit=1000):
+        if proposal_ids is not None and proposal.id not in proposal_ids:
+            continue
         entity_a_id = backend.resolve_entity_id(proposal.entity_a)
         entity_b_id = backend.resolve_entity_id(proposal.entity_b)
         if entity_a_id is None or entity_b_id is None:
@@ -866,5 +874,42 @@ def resolve_open_proposals(
             backend.set_proposal_status(proposal.id, "rejected")
             outcome["rejected"] += 1
         else:
+            backend.update_proposal_judgement(
+                proposal.id,
+                confidence=judgment["confidence"],
+                reason=judgment.get("reason"),
+            )
             outcome["kept"] += 1
     return outcome
+
+
+_PROVIDER_NAMES = {"jev": "Jev", "llm": "The language model"}
+
+
+def describe_proposal(proposal: MergeProposal, gate: float) -> str:
+    """One plain sentence on why a pair is still waiting for a person.
+
+    The stored reason was only "jev: same", which read as a verdict Memry had
+    ignored. A "same" is only left open when its confidence is below the merge
+    gate, so the sentence includes both numbers.
+    """
+    reason = (proposal.reason or "").strip()
+    pct = round(proposal.confidence * 100)
+    provider, _, verdict = reason.partition(": ")
+    if verdict in ("same", "unsure", "different") and provider:
+        who = _PROVIDER_NAMES.get(provider, provider.capitalize())
+        if verdict == "unsure":
+            return f"{who}'s answer: can't tell."
+        if verdict == "different":
+            return f"{who}'s answer: probably different, {pct}% sure."
+        rule = ("Memry never merges on its own with this model."
+                if gate > 1 else
+                f"Memry merges on its own from {round(gate * 100)}%.")
+        return f"{who}'s answer: probably the same, {pct}% sure. {rule}"
+    if reason == "same name, not yet compared":
+        return "Same name. Not compared yet."
+    if reason == "no LLM: same name only":
+        return "Same name. No model was set up to compare them."
+    if reason == "unparseable judgment":
+        return "The model's answer could not be read."
+    return reason or "No reason was recorded."

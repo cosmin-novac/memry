@@ -717,3 +717,139 @@ def test_stats_reports_the_merge_gate_in_force():
     jev.decider.auto_confirm_confidence = 0.7
     assert jev.stats()["merge_gate"] == 0.7      # the provider's own, while it answers
     jev.close()
+
+
+# ------------------------------------------- open proposals and new evidence
+class _Identity(NoneDecider):
+    """Answers every identity question with "same" at a set confidence and
+    abstains on anything else, so only identity reaches the stub."""
+
+    name = "stub"
+    available = True
+    auto_confirm_confidence = 0.7
+
+    def __init__(self, confidence: float, *, rejudges: bool = True) -> None:
+        self.confidence = confidence
+        self.rejudges_on_new_evidence = rejudges
+        self.identity_calls = 0
+
+    def decide(self, state, questions):
+        from memry.providers.decisions import Answers
+
+        if "identity" not in questions:
+            return Answers({})
+        self.identity_calls += 1
+        return Answers({"identity": Answer("same", {"same": self.confidence},
+                                           self.confidence, True)})
+
+
+def _jonas_store(decider):
+    """A store whose saves each mention Jonas, and a function that saves one."""
+    from conftest import fact, facts_response
+
+    llm = FakeLLM()
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm,
+                        embedder=HashEmbedder(64), decider=decider)
+
+    def save(text: str) -> None:
+        llm.queue(facts_response(fact(text, entities=["Jonas"])))
+        if store.get_all(user_id="ada"):
+            llm.queue(json.dumps({"action": "ADD", "target": None, "content": None,
+                                  "reason": "new"}))
+        store.add(text, user_id="ada")
+
+    return store, save
+
+
+def test_a_same_below_the_gate_waits_and_merges_once_new_evidence_clears_it():
+    decider = _Identity(0.5)
+    store, save = _jonas_store(decider)
+    save("Jonas cooks Thai food")
+    save("Jonas reviewed the design doc")
+    [proposal] = store.merge_proposals(user_id="ada")
+    assert (proposal.confidence, proposal.reason) == (0.5, "stub: same")
+    assert len(store.entities(user_id="ada")) == 2
+    assert decider.identity_calls == 1, "a pair raised by this save is not asked about again"
+
+    decider.confidence = 0.9
+    save("Jonas booked the Thai restaurant for Friday")
+    assert len(store.entities(user_id="ada")) == 1
+    assert store.merge_proposals(user_id="ada") == []
+    store.close()
+
+
+def test_a_slow_provider_leaves_open_pairs_for_the_weekly_pass():
+    decider = _Identity(0.5, rejudges=False)
+    store, save = _jonas_store(decider)
+    save("Jonas cooks Thai food")
+    save("Jonas reviewed the design doc")
+    decider.confidence = 0.9
+    save("Jonas booked the Thai restaurant for Friday")
+    assert len(store.entities(user_id="ada")) == 2
+    [proposal] = store.merge_proposals(user_id="ada")
+    assert proposal.confidence == 0.5
+    store.close()
+
+
+def test_a_pair_that_stays_open_shows_the_latest_answer():
+    decider = _Identity(0.5)
+    store, save = _jonas_store(decider)
+    save("Jonas cooks Thai food")
+    save("Jonas reviewed the design doc")
+    decider.confidence = 0.62
+    store.resolve_entities(user_id="ada")
+    [proposal] = store.merge_proposals(user_id="ada")
+    assert (proposal.confidence, proposal.reason) == (0.62, "stub: same")
+    assert store.upkeep_queue(user_id="ada")[0]["detail"] == (
+        "Might be the same one. Stub's answer: probably the same, 62% sure. "
+        "Memry merges on its own from 70%."
+    )
+    store.close()
+
+
+def test_a_proposal_gives_the_confidence_and_the_merge_rule():
+    from memry.intelligence.entities import describe_proposal
+    from memry.models import MergeProposal
+
+    def said(reason, confidence=0.5, gate=0.7):
+        proposal = MergeProposal(entity_a="a", entity_b="b", confidence=confidence,
+                                 reason=reason)
+        return describe_proposal(proposal, gate)
+
+    assert said("jev: same", 0.46) == (
+        "Jev's answer: probably the same, 46% sure. Memry merges on its own from 70%.")
+    assert said("llm: same", 0.8, gate=NEVER_AUTO_MERGE) == (
+        "The language model's answer: probably the same, 80% sure. "
+        "Memry never merges on its own with this model.")
+    assert said("jev: unsure") == "Jev's answer: can't tell."
+    assert said("jev: different", 0.6) == "Jev's answer: probably different, 60% sure."
+    assert said("same name, not yet compared") == "Same name. Not compared yet."
+    assert said("no LLM: same name only") == "Same name. No model was set up to compare them."
+    assert said("both work at Northwind") == "both work at Northwind"
+    assert said(None) == "No reason was recorded."
+
+
+def test_only_jev_rechecks_on_every_save():
+    """211 ms a question is cheap enough to ask on a save; 2.5 s is not."""
+    assert JevDecider.rejudges_on_new_evidence is True
+    assert LLMDecider.rejudges_on_new_evidence is False
+    assert NoneDecider.rejudges_on_new_evidence is False
+
+
+def test_the_proposals_api_carries_the_sentence_the_dashboard_shows():
+    from starlette.testclient import TestClient
+
+    from memry.models import Entity, MergeProposal
+    from memry.rest import create_app
+
+    store = MemoryStore(Config(db_path=":memory:", dedup_entities=False), llm=NoneLLM(),
+                        embedder=HashEmbedder(64), decider=_Identity(0.5))
+    a = store.backend.insert_entity(Entity(name="Jonas", normalized="jonas", user_id="u"))
+    b = store.backend.insert_entity(Entity(name="Jonas", normalized="jonas", user_id="u"))
+    store.backend.add_proposal(MergeProposal(entity_a=a.id, entity_b=b.id, user_id="u",
+                                             confidence=0.46, reason="jev: same"))
+    with TestClient(create_app(store)) as client:
+        [row] = client.get("/api/v1/entities/proposals?user_id=u").json()
+    assert row["summary"] == (
+        "Jev's answer: probably the same, 46% sure. Memry merges on its own from 70%.")
+    store.close()

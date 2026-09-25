@@ -225,6 +225,26 @@ def client():
     s.close()
 
 
+def test_the_scheduler_leaves_an_empty_store_alone():
+    """A cycle for user None covers every user at once. The scheduler used it
+    when the store was empty, and a memory saved while that cycle waited for a
+    thread was then compared with other users' memories."""
+    import threading
+    import time
+
+    s = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    asked = threading.Event()
+    listed = s.backend.distinct_user_ids
+    s.backend.distinct_user_ids = lambda: (asked.set(), listed())[1]
+    cycles = []
+    s.run_upkeep_cycle = lambda *, user_id=None, now=None: cycles.append(user_id) or {}
+    with TestClient(create_app(s)):
+        assert asked.wait(5)
+        time.sleep(0.2)
+    assert cycles == []
+    s.close()
+
+
 def test_status_carries_the_queue_and_the_pause_switch(client):
     info = client.get("/api/v1/maintenance?user_id=u").json()
     assert info["queue"] == []
@@ -300,6 +320,34 @@ def test_the_badge_count_is_cheap_and_matches_the_queue(client):
     assert client.get("/api/v1/maintenance/count?user_id=u").json() == {"count": 1}
     assert len(s.llm.calls) == calls, "counting asks no model anything"
     assert len(client.get("/api/v1/maintenance?user_id=u").json()["queue"]) == 1
+
+
+def test_two_runs_of_one_pass_take_turns(store):
+    """The scheduler starts a pass at boot while "run now" can start the same
+    one. Run side by side, each read the queue, added to its own copy and wrote
+    it back, so one run's additions were lost and the model was asked twice."""
+    import threading
+    import time
+
+    class SlowLLM(FakeLLM):
+        def complete(self, *args, **kwargs):
+            time.sleep(0.3)
+            return super().complete(*args, **kwargs)
+
+    _seed(store, "User is Marcus Vandenberg", "The user's name is Marc.")
+    store.llm = SlowLLM([_verdict(True, "User is Marcus Vandenberg (Marc)."),
+                         _verdict(True, "User is Marcus Vandenberg (Marc).")])
+    runs = [threading.Thread(target=store.run_consolidation_pass, kwargs={"user_id": "ada"}),
+            threading.Thread(target=store.run_upkeep_pass, args=("consolidation",),
+                             kwargs={"user_id": "ada"})]
+    runs[0].start()
+    time.sleep(0.05)
+    runs[1].start()
+    for run in runs:
+        run.join()
+
+    assert len(store.llm.calls) == 1
+    assert len(store._upkeep_get("consolidation:pending", "ada", [])) == 1
 
 
 def test_the_button_is_upkeep_and_the_tabs_open_on_what_needs_you(client):

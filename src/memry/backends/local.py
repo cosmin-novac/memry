@@ -2284,6 +2284,17 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [self._row_to_proposal(r) for r in rows]
 
+    def update_proposal_judgement(
+        self, proposal_id: str, *, confidence: float, reason: str | None
+    ) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE entity_proposals SET confidence = ?, reason = ? "
+                "WHERE id = ? AND status = 'proposed'",
+                (confidence, reason, proposal_id),
+            )
+            self._db.commit()
+
     def set_proposal_status(self, proposal_id: str, status: str) -> MergeProposal | None:
         with self._lock:
             cur = self._db.execute(
