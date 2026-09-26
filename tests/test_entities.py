@@ -276,46 +276,6 @@ def test_entity_description_is_in_reconstructed_context(verbatim_store):
     assert "Marcus is a good student" in context.text
     assert memory.id in context.memory_ids
 
-def test_full_name_with_overlapping_context_reuses_entity_without_llm(verbatim_store):
-    from memry.intelligence.entities import resolve_mentions
-    from memry.models import Memory, Scope
-
-    backend = verbatim_store.backend
-    scope = Scope(user_id="ada")
-    first = backend.insert_memory(
-        Memory(content="Marcus Vandenberg invests in Bitcoin.", user_id="ada")
-    )
-    resolve_mentions(
-        backend=backend,
-        llm=verbatim_store.llm,
-        scope=scope,
-        memory_id=first.id,
-        memory_content=first.content,
-        surfaces=["Marcus Vandenberg"],
-        types={"marcus vandenberg": "person"},
-    )
-    second = backend.insert_memory(
-        Memory(content="Marcus Vandenberg increased his Bitcoin investment.", user_id="ada")
-    )
-    resolve_mentions(
-        backend=backend,
-        llm=verbatim_store.llm,
-        scope=scope,
-        memory_id=second.id,
-        memory_content=second.content,
-        surfaces=["Marcus Vandenberg"],
-        types={"marcus vandenberg": "person"},
-    )
-
-    entities = verbatim_store.entities(user_id="ada")
-    assert len(entities) == 1
-    assert {memory.id for memory in backend.entity_memories(entities[0].id)} == {
-        first.id,
-        second.id,
-    }
-    assert verbatim_store.merge_proposals(user_id="ada") == []
-
-
 def test_same_full_name_without_shared_context_stays_separate(verbatim_store):
     from memry.intelligence.entities import resolve_mentions
     from memry.models import Memory, Scope
@@ -339,44 +299,6 @@ def test_same_full_name_without_shared_context_stays_separate(verbatim_store):
 
     assert len(verbatim_store.entities(user_id="ada")) == 2
     assert len(verbatim_store.merge_proposals(user_id="ada")) == 1
-
-
-def test_maintenance_auto_confirms_obvious_full_name_pair(verbatim_store):
-    from memry.models import Entity, EntityMention, Memory, MergeProposal
-
-    backend = verbatim_store.backend
-    first = backend.insert_entity(
-        Entity(name="Marcus Vandenberg", entity_type="person", user_id="ada")
-    )
-    second = backend.insert_entity(
-        Entity(name="Marcus Vandenberg", entity_type="person", user_id="ada")
-    )
-    first_memory = backend.insert_memory(
-        Memory(content="Marcus Vandenberg holds Bitcoin.", user_id="ada")
-    )
-    second_memory = backend.insert_memory(
-        Memory(content="Marcus Vandenberg tracks his Bitcoin investment.", user_id="ada")
-    )
-    backend.add_mention(
-        EntityMention(entity_id=first.id, memory_id=first_memory.id, surface=first.name)
-    )
-    backend.add_mention(
-        EntityMention(entity_id=second.id, memory_id=second_memory.id, surface=second.name)
-    )
-    proposal = backend.add_proposal(
-        MergeProposal(entity_a=first.id, entity_b=second.id, user_id="ada")
-    )
-
-    assert verbatim_store.resolve_entities(user_id="ada") == {
-        "confirmed": 1,
-        "rejected": 0,
-        "kept": 0,
-        "proposed": 0,
-        "purged": 0,
-        "junk_removed": 0,
-    }
-    assert len(verbatim_store.entities(user_id="ada")) == 1
-    assert backend.get_proposal(proposal.id).status == "confirmed"
 
 
 def test_confirm_merge_follows_already_merged_endpoint(verbatim_store):

@@ -18,7 +18,7 @@ prior merge chains and auto-confirms only deterministic or high-confidence match
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 from ..backends.base import MemoryBackend
 from ..models import Entity, EntityMention, MergeProposal, Scope
@@ -31,6 +31,15 @@ from ..providers.decisions import (
 )
 from ..providers.llm import LLM
 from .extraction import parse_lenient_json
+from .identity import (
+    NameIndex,
+    Profile,
+    compare,
+    judges_pairs,
+    name_vectors,
+    pair_reason,
+    parallel,
+)
 
 IDENTITY_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -154,46 +163,6 @@ def synthesize_entity_description(
     return fallback
 
 
-_NAME_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
-_CONTEXT_STOPWORDS = {
-    "about", "after", "again", "also", "and", "are", "been", "before",
-    "being", "but", "can", "does", "existing", "fact", "for", "from",
-    "had", "has", "have", "into", "its", "new", "not", "person", "same",
-    "that", "the", "their", "them", "then", "they", "this", "user", "was",
-    "were", "with", "work", "works", "would",
-}
-
-
-def _name_words(value: str) -> tuple[str, ...]:
-    return tuple(_NAME_WORD_RE.findall(value.casefold()))
-
-
-def _context_stem(token: str) -> str:
-    if len(token) > 6 and token.endswith("ing"):
-        token = token[:-3]
-        if len(token) > 3 and token[-1] == token[-2]:
-            token = token[:-1]
-    elif len(token) > 5 and token.endswith("ied"):
-        token = token[:-3] + "y"
-    elif len(token) > 5 and token.endswith("ed"):
-        token = token[:-2]
-    elif len(token) > 5 and token.endswith("ies"):
-        token = token[:-3] + "y"
-    elif len(token) > 4 and token.endswith("s") and not token.endswith(("ss", "us")):
-        token = token[:-1]
-    return token
-
-
-def _context_words(value: str, name_words: tuple[str, ...]) -> set[str]:
-    return {
-        stem
-        for raw in _NAME_WORD_RE.findall(value.casefold())
-        if raw not in name_words and raw not in _CONTEXT_STOPWORDS and len(raw) >= 3
-        for stem in [_context_stem(raw)]
-        if len(stem) >= 3 and stem not in _CONTEXT_STOPWORDS
-    }
-
-
 def _same_name_and_no_evidence(
     existing: Entity,
     existing_facts: list[str],
@@ -221,219 +190,11 @@ def _same_name_and_no_evidence(
     return not existing_facts and not (existing.description or "").strip()
 
 
-def _obvious_same_entity(
-    existing: Entity,
-    existing_facts: list[str],
-    other_name: str,
-    other_facts: list[str],
-    other_type: str | None = None,
-) -> bool:
-    """Deterministic high-confidence identity match.
-
-    Exact multi-part names are not enough by themselves. They become an automatic
-    match when the two evidence sets also share meaningful context and their known
-    types do not conflict. This catches repeated first+last-name memories without
-    conflating unrelated people who happen to share a common full name.
-    """
-    existing_name = _name_words(existing.name)
-    if len(existing_name) < 2 or existing_name != _name_words(other_name):
-        return False
-    if _BARE_REFERENCE_RE.match(existing.name.strip()):
-        return False  # "PR #92" is two words, and every repository has one
-    if existing.entity_type and other_type and existing.entity_type != other_type:
-        return False
-    left = _context_words(" ".join(existing_facts), existing_name)
-    right = _context_words(" ".join(other_facts), existing_name)
-    if not left or not right:
-        return False
-    shared = left & right
-    if len(shared) >= 2:
-        return True
-    return bool(shared) and max(map(len, shared)) >= 6 and (
-        len(shared) / min(len(left), len(right)) >= 0.12
-    )
-
-# Legal forms name the same company whether or not they are written out:
-# "Fundation" and "Fundation GmbH" are one company.
-_LEGAL_FORMS = frozenset({
-    "gmbh", "mbh", "ug", "haftungsbeschränkt", "haftungsbeschrankt", "ag", "se",
-    "kg", "kgaa", "ohg", "gbr", "ev", "inc", "ltd", "llc", "llp", "plc", "corp",
-    "corporation", "limited", "sa", "sarl", "sas", "srl", "spa", "bv", "nv", "ab",
-    "oy", "aps", "pty", "co",
-})
-_TLDS = ("ai", "app", "co", "com", "de", "dev", "eu", "io", "me", "net", "org", "so", "xyz")
-_DOMAIN_RE = re.compile(rf"^([\w-]+)\.(?:{'|'.join(_TLDS)})$", re.I)
-# How the legal forms above are written after a name, for looking up the other
-# spelling of a company in the store.
-_WRITTEN_LEGAL_FORMS = (
-    "gmbh", "ug", "ug (haftungsbeschränkt)", "ag", "se", "kg", "gmbh & co. kg",
-    "e.v.", "inc", "inc.", "ltd", "ltd.", "llc", "plc", "corp", "corp.", "bv", "sa",
-)
-# A name that starts like this describes a role, not a thing with a name.
-_GENERIC_LEADS = frozenset({
-    "the", "a", "an", "my", "our", "your", "his", "her", "their", "this", "that",
-    "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "mein",
-    "meine", "unser", "unsere",
-})
-# A number that is only unique inside something the name leaves out: every
-# repository has a PR #92, every tracker an issue 12.
-_BARE_REFERENCE_RE = re.compile(
-    r"^\W*(?:pr|pull request|mr|issue|ticket|bug|task|step|phase|stage|room|"
-    r"version|v|release|sprint|chapter|section|page|table|figure|fig|item|order|"
-    r"case|no|nr|number|nummer)?\W*#?\s*\d+[\w.]*\W*$",
-    re.I,
-)
-# Types whose names are proper names. A document or a piece of code is usually
-# named by what it is ("privacy policy", "config.py"), and every project has one.
-_NAMED_TYPES = frozenset({
-    "person", "organization", "project", "product", "place", "event", "concept",
-})
-
-
-def identity_key(name: str) -> str:
-    """The name with its legal form and web domain taken off, for comparing
-    two spellings of one company or product: "Fundation GmbH" and "Fundation"
-    give "fundation", "bildy.ai" and "Bildy" give "bildy"."""
-    raw = (name or "").strip()
-    domain = _DOMAIN_RE.match(raw)
-    if domain:
-        raw = domain.group(1)
-    words = list(_name_words(raw))
-    while len(words) > 1 and words[-1] in _LEGAL_FORMS:
-        words.pop()
-    return " ".join(words)
-
-
-def identity_variants(name: str) -> list[str]:
-    """Other lowercased spellings of the same company or product, with the
-    legal form or web domain written out or left off, to look up in the store.
-
-    Entities are found by their exact lowercased name, so "Fundation" never
-    met "Fundation GmbH" and the two were never compared.
-    """
-    raw = (name or "").strip()
-    domain = _DOMAIN_RE.match(raw)
-    tokens = (domain.group(1) if domain else raw).split()
-    while len(tokens) > 1 and set(_name_words(tokens[-1])) <= _LEGAL_FORMS:
-        tokens.pop()
-    base = " ".join(tokens).lower()
-    if not base:
-        return []
-    variants = {base, *(f"{base} {form}" for form in _WRITTEN_LEGAL_FORMS)}
-    if len(tokens) == 1:
-        variants |= {f"{base}.{tld}" for tld in _TLDS}
-    variants.discard(raw.lower())
-    return sorted(variants)
-
-
-def name_is_specific(name: str, entity_type: str | None) -> bool:
-    """Whether two mentions of exactly this name are, as a rule, one thing.
-
-    True for a full personal name, a company, a product, a project, a place or
-    a named programme ("Bochra Saffar", "Fundation GmbH", "Docker",
-    "Forschungszulage"), and for a document or code reference that carries its
-    own number ("Ronin Dash PR #41"). False for a first name on its own, a role
-    ("the consultant"), an initial ("R. Patel"), a number that needs its
-    repository or tracker ("PR #92"), a description in lowercase ("landing
-    page") and a single word of unknown type.
-    """
-    raw = (name or "").strip()
-    words = _name_words(raw)
-    if not words or words[0] in _GENERIC_LEADS or _BARE_REFERENCE_RE.match(raw):
-        return False
-    if entity_type in ("document", "code"):
-        # A reference with its namespace ("Ronin Dash PR #41") or a long
-        # number ("BH258636489") names one thing; "config.py" does not.
-        return any(ch.isdigit() for ch in raw) and (
-            len(words) >= 3 or re.search(r"\d{4,}", raw) is not None
-        )
-    full_words = sum(len(word) > 1 for word in words)
-    if entity_type in (None, "other"):
-        # Untyped: a legal form makes a company, and two capitalised words make
-        # a full name or a named thing. One word alone could be a first name.
-        return (len(words) > 1 and words[-1] in _LEGAL_FORMS) or (
-            full_words >= 2 and any(ch.isupper() for ch in raw)
-        )
-    if entity_type not in _NAMED_TYPES:
-        return False
-    # Lowercase words are a description ("landing page"), not a name.
-    if not any(ch.isupper() or ch.isdigit() for ch in raw) and not _DOMAIN_RE.match(raw):
-        return False
-    if entity_type == "person":
-        return full_words >= 2
-    return True
-
-
-def _home_id(entity: Entity) -> str | None:
-    home = (entity.metadata or {}).get("home")
-    return home.get("id") if isinstance(home, dict) else None
-
-
-def specific_same_name(
-    existing: Entity,
-    other_name: str,
-    other_type: str | None = None,
-    other_home: str | None = None,
-) -> bool:
-    """Two mentions whose names match exactly (legal form and domain aside),
-    whose names are specific, whose known types agree and whose homes agree.
-
-    A new mention has no home yet, so an existing entity with a home is left to
-    the normal rules: "Settings" under two products is two things.
-    """
-    key = identity_key(existing.name)
-    if not key or key != identity_key(other_name):
-        return False
-    if existing.entity_type and other_type and existing.entity_type != other_type:
-        return False
-    if _home_id(existing) != other_home:
-        return False
-    entity_type = existing.entity_type or other_type
-    return name_is_specific(existing.name, entity_type) and name_is_specific(
-        other_name, entity_type
-    )
-
-
-#: No rule merges two mentions after a "different" at this confidence or
-#: higher. The bar used to be the provider's merge gate, 0.95 for gpt-5-mini,
-#: so two people with one full name and a "different" at 0.90 were merged
-#: because both facts mentioned employee numbers (identity_v1 case d12).
-DIFFERENT_VETO = 0.5
-
-
-def _should_merge(
-    existing: Entity,
-    existing_facts: list[str],
-    other_name: str,
-    other_facts: list[str],
-    other_type: str | None,
-    judgment: dict[str, Any],
-    other_home: str | None = None,
-) -> bool:
-    """Whether two mentions are one thing, given the judge's answer.
-
-    A "same" at the provider's gate merges. After a "different" from 0.5
-    nothing merges. Otherwise two rules merge without a sure "same":
-
-    * a full name with shared context words (``_obvious_same_entity``);
-    * the same specific name (``specific_same_name``) with a "same" at any
-      confidence. Facts about a company's insurance and its tax number share no
-      words, and asked whether they are clearly the same company, Jev answered
-      "same" at 38-69% on a real store, under its 70% gate. On 101 labelled
-      cases, over two runs, this rule took gpt-5-mini from 9-11 to 43-44 of 51
-      correct merges and added no wrong one. Merging on anything short of
-      "different" added 3-4 wrong ones, most of them "unsure" on two people
-      who share a full name. See evals/identity_policy_benchmark.py.
-    """
-    verdict, confidence = judgment["verdict"], judgment["confidence"]
-    if verdict == "same" and confidence >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE):
-        return True
-    if verdict == "different" and confidence >= DIFFERENT_VETO:
-        return False
-    if _obvious_same_entity(existing, existing_facts, other_name, other_facts, other_type):
-        return True
-    return verdict == "same" and specific_same_name(
-        existing, other_name, other_type, other_home
+def _merges_on_gate(judgment: dict[str, Any]) -> bool:
+    """Without a calibrated judge, only a "same" at the provider's gate merges."""
+    return (
+        judgment["verdict"] == "same"
+        and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
     )
 
 
@@ -834,7 +595,13 @@ def resolve_mentions(
     """Attach a memory's entity mentions, creating/reusing entities per the
     conservative policy. Returns a map of normalized surface -> entity, so the
     caller can resolve relation triples to the entities they linked to. Pass
-    ``attach=False`` when the caller will replace all mentions atomically."""
+    ``attach=False`` when the caller will replace all mentions atomically.
+
+    With a calibrated judge (``identity.judges_pairs``) each candidate is
+    decided by ``identity.compare``: merge, keep apart, or wait for evidence.
+    A pair that waits is recorded so a later save or the weekly pass can
+    compare it again; nobody is asked. Without one, a "same" at the provider's
+    gate merges and anything short of "different" is recorded for a person."""
     types = types or {}
     resolved: dict[str, Entity] = {}
     # A name the store has never seen is screened before it becomes an entity:
@@ -847,6 +614,10 @@ def resolve_mentions(
         and not backend.find_entity_candidates(s.lower(), scope)
     ]
     verdicts = screen_names(decider, memory_content, unseen)
+    # A calibrated judge also compares names that are not spelled the same
+    # ("Fundation" and "Fundation GmbH"); without one, only exact names meet.
+    judge = decider if judges_pairs(decider) else None
+    index: NameIndex | None = None
     for surface in cleaned:
         normalized = surface.lower()
         if not normalized or normalized in resolved:
@@ -855,14 +626,13 @@ def resolve_mentions(
             continue
 
         candidates = backend.find_entity_candidates(normalized, scope)
-        found = {candidate.id for candidate in candidates}
-        candidates += [
-            entity
-            for entity in backend.find_entities_by_aliases(identity_variants(surface), scope)
-            if entity.id not in found
-        ]
+        if judge is not None:
+            if index is None:
+                index = NameIndex(backend.list_entities(scope, limit=100_000))
+            candidates += index.candidates(surface, exclude={c.id for c in candidates})
         target: Entity | None = None
-        proposals: list[tuple[Entity, dict[str, Any]]] = []
+        proposals: list[tuple[Entity, float, str | None]] = []
+        mention = Profile(surface, types.get(normalized), [memory_content])
         for candidate in candidates:
             facts = [m.content for m in backend.entity_memories(candidate.id, limit=5)]
             # An identically-named record with no evidence at all cannot be a
@@ -873,16 +643,26 @@ def resolve_mentions(
             ):
                 target = candidate
                 break
+            if judge is not None:
+                probabilities, action = compare(judge, backend, candidate, mention)
+                if action == "merge":
+                    target = candidate
+                    break
+                if action == "wait":
+                    proposals.append((
+                        candidate,
+                        probabilities["same"] if probabilities else 0.5,
+                        pair_reason(judge, probabilities) if probabilities else None,
+                    ))
+                continue
             judgment = _judge(
                 llm, candidate, facts, memory_content, surface, decider
             )
-            if _should_merge(
-                candidate, facts, surface, [memory_content], types.get(normalized), judgment
-            ):
+            if _merges_on_gate(judgment):
                 target = candidate
                 break
             if judgment["verdict"] in ("same", "unsure"):
-                proposals.append((candidate, judgment))
+                proposals.append((candidate, judgment["confidence"], judgment.get("reason")))
 
         if target is None:
             target = backend.insert_entity(
@@ -895,15 +675,15 @@ def resolve_mentions(
                     run_id=scope.run_id,
                 )
             )
-            for candidate, judgment in proposals:
+            for candidate, confidence, reason in proposals:
                 if backend.find_proposal(candidate.id, target.id) is None:
                     backend.add_proposal(
                         MergeProposal(
                             entity_a=candidate.id,
                             entity_b=target.id,
                             user_id=scope.user_id,
-                            confidence=judgment["confidence"],
-                            reason=judgment.get("reason"),
+                            confidence=confidence,
+                            reason=reason,
                         )
                     )
 
@@ -916,51 +696,58 @@ def resolve_mentions(
 
 
 def propose_same_name_duplicates(
-    *, backend: MemoryBackend, scope: Scope, limit: int = 50
+    *,
+    backend: MemoryBackend,
+    scope: Scope,
+    limit: int = 50,
+    decider: Decider | None = None,
+    embed: Callable[[list[str]], list[list[float]]] | None = None,
 ) -> int:
-    """Raise proposals for active entities that share a normalized name.
+    """Raise pairs of existing entities for the identity judge to compare.
 
-    Proposals are otherwise only ever created at write time, so duplicates that
-    predate a fix - or whose judgement once came back "different" - sit in the
-    graph forever with nothing scheduled to look at them again. This gives
-    maintenance a way to reconsider them as evidence accumulates.
-
-    A pair whose members live under different homes ("privacy policy" in two
-    projects) is two things by construction, so it is never raised: nobody can
-    answer that question, and nobody should be asked it.
+    Pairs are otherwise only raised at write time, so duplicates that predate a
+    fix sit in the graph with nothing scheduled to look at them again. With a
+    calibrated judge, every name is paired with the names worth comparing
+    (``identity.NameIndex``: a rare shared word, a similar spelling, an
+    acronym, or a name close in meaning when ``embed`` is a semantic embedder),
+    and pairs already decided either way are not raised again. Without one,
+    only identical names are paired, and a pair whose members live under
+    different homes ("privacy policy" in two projects) is left alone, since no
+    judge could answer it and no person should be asked.
     """
-    groups: dict[str, list[Entity]] = {}
-    for entity in backend.list_entities(scope, limit=10_000):
-        if entity.merged_into is None:
-            key = identity_key(entity.name) or entity.normalized or entity.name.lower()
-            groups.setdefault(key, []).append(entity)
+    entities = [e for e in backend.list_entities(scope, limit=10_000) if e.merged_into is None]
+    pairs: list[tuple[Entity, Entity]] = []
+    if judges_pairs(decider):
+        index = NameIndex(entities, name_vectors(embed, entities))
+        vectors = index.vectors
+        for entity in entities:
+            for other in index.candidates(entity.name, vector=vectors.get(entity.id)):
+                if entity.id < other.id:
+                    pairs.append((entity, other))
+    else:
+        groups: dict[str, list[Entity]] = {}
+        for entity in entities:
+            groups.setdefault(entity.normalized or entity.name.lower(), []).append(entity)
 
-    def home_of(entity: Entity) -> str | None:
-        home = (entity.metadata or {}).get("home")
-        return home.get("id") if isinstance(home, dict) else None
+        def home_of(entity: Entity) -> str | None:
+            home = (entity.metadata or {}).get("home")
+            return home.get("id") if isinstance(home, dict) else None
 
+        for members in groups.values():
+            for other in members[1:]:
+                home_a, home_b = home_of(members[0]), home_of(other)
+                if not (home_a and home_b and home_a != home_b):
+                    pairs.append((members[0], other))
     created = 0
-    for members in groups.values():
-        if len(members) < 2:
-            continue
-        anchor = members[0]
-        for other in members[1:]:
-            if created >= limit:
-                return created
-            home_a, home_b = home_of(anchor), home_of(other)
-            if home_a and home_b and home_a != home_b:
-                continue
-            if backend.find_proposal(anchor.id, other.id) is None:
-                backend.add_proposal(
-                    MergeProposal(
-                        entity_a=anchor.id,
-                        entity_b=other.id,
-                        user_id=scope.user_id,
-                        confidence=0.5,
-                        reason="same name, not yet compared",
-                    )
-                )
-                created += 1
+    for a, b in pairs:
+        if created >= limit:
+            break
+        if backend.find_proposal(a.id, b.id) is None:
+            backend.add_proposal(MergeProposal(
+                entity_a=a.id, entity_b=b.id, user_id=scope.user_id,
+                confidence=0.5, reason="not yet compared",
+            ))
+            created += 1
     return created
 
 
@@ -982,8 +769,11 @@ def resolve_open_proposals(
 
     A pair that stays open keeps the latest answer, so the list shows how sure
     the provider is now, not how sure it was when the pair was first raised.
+    With a calibrated judge every pair goes through ``identity.compare``.
     """
     outcome = {"confirmed": 0, "rejected": 0, "kept": 0}
+    judge = decider if judges_pairs(decider) else None
+    pending: list[tuple[MergeProposal, Entity, Entity]] = []
     for proposal in backend.list_proposals(scope, status="proposed", limit=1000):
         if proposal_ids is not None and proposal.id not in proposal_ids:
             continue
@@ -1020,6 +810,9 @@ def resolve_open_proposals(
                 backend.set_proposal_status(proposal.id, "confirmed")
                 outcome["confirmed"] += 1
                 continue
+        if judge is not None:
+            pending.append((proposal, entity_a, entity_b))
+            continue
         judgment = _judge(
             llm,
             entity_a,
@@ -1032,11 +825,9 @@ def resolve_open_proposals(
             judgment["verdict"] == "different"
             and judgment["confidence"] >= _conflict_bar(judgment)
         )
-        should_merge = auto_confirm and _should_merge(
-            entity_a, facts_a, entity_b.name, facts_b, entity_b.entity_type,
-            judgment, other_home=_home_id(entity_b),
-        )
-        if should_merge and backend.merge_entities(entity_a.id, entity_b.id):
+        if auto_confirm and _merges_on_gate(judgment) and backend.merge_entities(
+            entity_a.id, entity_b.id
+        ):
             backend.set_proposal_status(proposal.id, "confirmed")
             outcome["confirmed"] += 1
         elif high_conflict:
@@ -1048,5 +839,22 @@ def resolve_open_proposals(
                 confidence=judgment["confidence"],
                 reason=judgment.get("reason"),
             )
+            outcome["kept"] += 1
+    # The judge's calls are independent, so they run side by side; the store
+    # is changed one pair at a time afterwards.
+    decided = parallel(lambda item: compare(judge, backend, item[1], item[2]), pending)
+    for (proposal, entity_a, entity_b), (probabilities, action) in zip(pending, decided):
+        if action == "merge" and auto_confirm and backend.merge_entities(entity_a.id, entity_b.id):
+            backend.set_proposal_status(proposal.id, "confirmed")
+            outcome["confirmed"] += 1
+        elif action == "apart":
+            backend.set_proposal_status(proposal.id, "rejected")
+            outcome["rejected"] += 1
+        else:
+            if probabilities is not None:
+                backend.update_proposal_judgement(
+                    proposal.id, confidence=probabilities["same"],
+                    reason=pair_reason(judge, probabilities),
+                )
             outcome["kept"] += 1
     return outcome

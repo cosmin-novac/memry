@@ -33,11 +33,9 @@ from .backends.local import LocalBackend
 from .config import Config
 from .intelligence.clustering import (
     judge_tag_pairs,
-    domain_name,
     obvious_canonical_merges,
     propose_synthetic_tags,
     semantic_duplicate_tags,
-    swapped_letter_typos,
     suggest_canonical_merges,
 )
 from .intelligence.consolidate import judge_group, representative, similarity_groups
@@ -51,7 +49,6 @@ from .intelligence.decay import (
 from .intelligence.entities import (
     _gate,
     classify_entity_types,
-    identity_key,
     judge_entity_referents,
     non_referent_reason,
     screen_names,
@@ -63,6 +60,7 @@ from .intelligence.entities import (
     synthesize_entity_description,
 )
 from .intelligence.graph_retrieval import detect_query_entities, relational_memory_ids
+from .intelligence.identity import judges_pairs
 from .intelligence.extraction import (
     VOCABULARY_LIMIT,
     extract_facts,
@@ -523,9 +521,8 @@ class MemoryStore:
             topic.normalized
             for topic in self.backend.list_topics(scope, limit=100_000)
         }
-        labels = existing | incoming
         groups = obvious_canonical_merges(
-            [{"category": topic} for topic in labels], self._tag_names(scope, labels)
+            [{"category": topic} for topic in existing | incoming]
         )
         replacements: dict[str, str] = {}
         for group in groups:
@@ -2448,10 +2445,17 @@ class MemoryStore:
         accumulate forever: a real store reached 206 such rows out of 519.
         """
         scope = Scope(user_id=user_id)
-        # Surface same-name duplicates first: proposals are otherwise only made
-        # at write time, so anything already duplicated has nothing scheduled to
-        # look at it again and would sit there for good.
-        proposed = propose_same_name_duplicates(backend=self.backend, scope=scope)
+        # Surface duplicates first: proposals are otherwise only made at write
+        # time, so anything already duplicated has nothing scheduled to look at
+        # it again and would sit there for good. Names close in meaning only
+        # count with a semantic embedder: hash vectors put "Köln" nowhere near
+        # "Cologne".
+        semantic = self.embedder.dimensions and self.embedder.name != "hash"
+        proposed = propose_same_name_duplicates(
+            backend=self.backend, scope=scope, decider=self.decider,
+            embed=self.embedder.embed if semantic else None,
+            limit=300 if self.decider.calibrated and self.decider.available else 50,
+        )
         outcome = resolve_open_proposals(
             backend=self.backend, llm=self.llm, decider=self.decider, scope=scope
         )
@@ -2562,32 +2566,13 @@ class MemoryStore:
         categories = self.categories(
             user_id=user_id, agent_id=agent_id, run_id=run_id
         )
-        labels = {str(tag["category"]).strip().casefold() for tag in categories}
-        groups = obvious_canonical_merges(categories, self._tag_names(scope, labels))
-        # A swapped-letter pair is only a typo when the judge agrees: "casual"
-        # and "causal" are both words.
-        typos = swapped_letter_typos(categories)
-        if typos:
-            groups += [{"canonical": common, "variants": [common, typo]}
-                       for typo, common in judge_tag_pairs(self.decider, typos)]
+        groups = obvious_canonical_merges(categories)
         changed = 0
         for group in groups:
             remove = set(group["variants"]) - {group["canonical"]}
             result = self.backend.retag_topics(scope, remove, group["canonical"])
             changed += result or 0
         return {"groups_merged": len(groups), "memories_changed": changed}
-
-    def _tag_names(self, scope: Scope, labels: set[str]) -> set[str]:
-        """The companies, products and projects among the names in tags written
-        as a domain ("bildy" for "bildy.ai"). A domain tag joins only those."""
-        names = sorted({name for name in map(domain_name, labels) if name})
-        if not names:
-            return set()
-        return {
-            identity_key(entity.name)
-            for entity in self.backend.find_entities_by_aliases(names, scope)
-            if entity.entity_type in ("organization", "product", "project")
-        }
 
     def consolidate_memories(
         self,
@@ -3323,7 +3308,7 @@ class MemoryStore:
             entity = self.backend.get_entity(entity_id)
             return entity.name if entity is not None else entity_id
 
-        for proposal in self.merge_proposals(user_id=user_id, limit=1000):
+        for proposal in self._proposals_for_a_person(user_id):
             items.append({
                 "kind": "proposal", "id": proposal.id,
                 "title": f"{entity_name(proposal.entity_a)} and {entity_name(proposal.entity_b)}",
@@ -3414,6 +3399,14 @@ class MemoryStore:
             self._upkeep_set("tag_split:count", user_id, splits_listed)
         return items
 
+    def _proposals_for_a_person(self, user_id: str | None) -> list[MergeProposal]:
+        """Entity pairs Upkeep asks a person about. With a calibrated judge,
+        none: a pair it could not settle waits for new evidence and is
+        compared again, since a person would be guessing from the same facts."""
+        if judges_pairs(self.decider):
+            return []
+        return self.merge_proposals(user_id=user_id, limit=1000)
+
     def upkeep_count(self, *, user_id: str | None = None) -> int:
         """How many rows wait under Upkeep, without asking a model anything.
 
@@ -3424,7 +3417,7 @@ class MemoryStore:
         waiting = {entity.id for entity, _ in self._screen_rows(user_id)}
         waiting |= {p["id"] for p in self._upkeep_get("entity_review:pending", user_id, [])}
         return (
-            len(self.merge_proposals(user_id=user_id, limit=1000))
+            len(self._proposals_for_a_person(user_id))
             + len(self._upkeep_get("conflict:pending", user_id, []))
             + len(self._upkeep_get("consolidation:pending", user_id, []))
             + len(waiting)

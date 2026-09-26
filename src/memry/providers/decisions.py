@@ -173,6 +173,20 @@ class Decider(ABC):
     #: turned off. Only Jev earned that: 190 ms a search for better recall.
     reranks_by_default: bool = False
 
+    #: Whether the answers carry probabilities the provider computed, rather
+    #: than a number a text model reports about itself. Only then does Memry
+    #: decide entity pairs on them (intelligence/identity.py): gpt-5-mini
+    #: reported 0.9 on its wrong answers too.
+    calibrated: bool = False
+
+    #: P(same), averaged over both orders of the pair question, from which two
+    #: entities merge without a person. Measured per provider; unmeasured
+    #: providers never merge on their own.
+    pair_merge_probability: float = NEVER_AUTO_MERGE
+
+    #: P(different) from which a pair is kept apart for good.
+    pair_apart_probability: float = 0.5
+
     #: Whether an open merge proposal is compared again as soon as a new
     #: memory mentions either side of it. New evidence is the only thing that
     #: can change the answer, so that is when to ask again. The question is
@@ -330,6 +344,11 @@ class JevDecider(Decider):
     # An identity question took a median 211 ms, against 2.5 s through a text
     # model, so asking again inside a save costs little.
     rejudges_on_new_evidence = True
+    # Measured over 156 labelled pairs, three runs, both orders averaged: from
+    # 0.95 no wrong merge, 58-59 of 81 true pairs merged; no pair of two
+    # different things scored above 0.79 (evals/identity_resolution_benchmark.py).
+    calibrated = True
+    pair_merge_probability = 0.95
 
     def __init__(self, cfg: DecisionConfig) -> None:
         self.cfg = cfg
@@ -442,4 +461,6 @@ def build_decider(cfg: DecisionConfig, llm: LLM) -> Decider:
     if cfg.auto_confirm_confidence is not None:
         decider.auto_confirm_confidence = cfg.auto_confirm_confidence
         decider.fallback_gate = cfg.auto_confirm_confidence
+    if cfg.pair_merge_probability is not None and decider.calibrated:
+        decider.pair_merge_probability = cfg.pair_merge_probability
     return decider
