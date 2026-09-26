@@ -534,6 +534,17 @@ def compare(
     pool_a = backend.entity_memories(a.id, limit=PAIR_POOL)
     pool_b = ([b.memory] if isinstance(b, Mention)
               else backend.entity_memories(b.id, limit=PAIR_POOL))
+    # A memory that names both entries says nothing about whether they are one
+    # thing: the extractor listed two names for it. Shown on both sides it
+    # read as the same fact twice, and "Michaela Neumann" merged with
+    # "Dr. Neumann", named in one note, at P(same) 1.0. It is left out.
+    shared = {m.id for m in pool_a} & {m.id for m in pool_b}
+    if shared:
+        pool_a = [m for m in pool_a if m.id not in shared]
+        pool_b = [m for m in pool_b if m.id not in shared]
+        owed = rounds(compared, min(len(pool_a), len(pool_b)))
+        if not owed:
+            return Verdict(None, "wait", compared)
     vectors = backend.vectors_of([m.id for m in pool_a + pool_b])
     ids_a, ids_b = [m.id for m in pool_a], [m.id for m in pool_b]
     verdict = Verdict(None, "wait", compared)

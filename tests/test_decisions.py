@@ -1195,3 +1195,23 @@ def test_a_comparison_merges_on_the_bar_for_its_step():
     answer = {"same": 0.9, "different": 0.05, "unsure": 0.05}
     assert decide_pair(answer, judge, 1) == "wait"
     assert decide_pair(answer, judge, 3) == "merge"
+
+
+def test_a_memory_naming_both_entities_is_not_evidence_they_are_one():
+    """Two entities whose only memory is one note naming both were compared on
+    that note twice and merged at P(same) 1.0."""
+    from memry.models import Entity, EntityMention, Memory
+
+    judge = _PairJudge(lambda state: (0.99, 0.0))
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64),
+                        decider=judge)
+    note = store.backend.insert_memory(Memory(
+        content="The user met Michaela Neumann and wrote down Dr. Neumann's advice", user_id="ada"))
+    for name in ("Michaela Neumann", "Dr. Neumann"):
+        entity = store.backend.insert_entity(Entity(name=name, normalized=name.lower(),
+                                                    entity_type="person", user_id="ada"))
+        store.backend.add_mention(EntityMention(entity_id=entity.id, memory_id=note.id, surface=name))
+    store.resolve_entities(user_id="ada")
+    assert len(store.entities(user_id="ada")) == 2
+    assert judge.states == []
+    store.close()
