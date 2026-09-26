@@ -184,6 +184,11 @@ class Decider(ABC):
     #: providers never merge on their own.
     pair_merge_probability: float = NEVER_AUTO_MERGE
 
+    #: The same bar per step of the comparison funnel (memories on the pair's
+    #: smaller side, ``identity.PAIR_STEPS``), for a provider whose P(same)
+    #: was measured to mean more with more evidence. None: one bar for all.
+    pair_merge_by_step: dict[int, float] | None = None
+
     #: P(different) from which a pair is kept apart for good.
     pair_apart_probability: float = 0.5
 
@@ -197,6 +202,13 @@ class Decider(ABC):
     #: a fraction of a second. Pairs under other providers wait for the weekly
     #: self-healing pass.
     rejudges_on_new_evidence: bool = False
+
+    def pair_merge_threshold(self, step: int) -> float:
+        """The P(same) from which a pair compared at this funnel step merges."""
+        if not self.pair_merge_by_step:
+            return self.pair_merge_probability
+        reached = [s for s in self.pair_merge_by_step if s <= step]
+        return self.pair_merge_by_step[max(reached)] if reached else self.pair_merge_probability
 
     #: Whether re-ranking may be turned on at all. A provider that was not
     #: measured to beat no re-ranking cannot be talked into it: through
@@ -352,6 +364,12 @@ class JevDecider(Decider):
     # different things scored above 0.79 (evals/identity_resolution_benchmark.py).
     calibrated = True
     pair_merge_probability = 0.95
+    # Per step of the funnel: the lowest P(same) that kept wrong merges at or
+    # under 2% of merges, measured on 12,795 comparisons of a new name against
+    # the entity it may belong to (synthetic stores with exact labels). One
+    # memory needs 0.96, three 0.85, eight 0.79: with more evidence Jev's
+    # number is too cautious, by about half.
+    pair_merge_by_step = {1: 0.96, 3: 0.85, 10: 0.80, 50: 0.80}
     # 379 candidate tag pairs from a real store, 10 memories per tag, two runs:
     # nothing wrong from 0.55, the highest pair of two subjects at 0.46.
     tag_merge_probability = 0.55
@@ -468,5 +486,7 @@ def build_decider(cfg: DecisionConfig, llm: LLM) -> Decider:
         decider.auto_confirm_confidence = cfg.auto_confirm_confidence
         decider.fallback_gate = cfg.auto_confirm_confidence
     if cfg.pair_merge_probability is not None and decider.calibrated:
+        # A deployment's own bar applies at every step.
         decider.pair_merge_probability = cfg.pair_merge_probability
+        decider.pair_merge_by_step = None
     return decider

@@ -21,12 +21,14 @@ run to 0.95 in the next, and with the first wording tried, swapping the two
 entities left no safe threshold at all. Measured with Jev over the 156 pairs
 in ``evals/identity_resolution_benchmark.py``, five runs:
 
-* a pair merges from P(same) = 0.95. That merged 57-59 of 81 true pairs and no
-  wrong one. No pair of two different things scored above 0.79; the pairs
-  between 0.79 and 0.95 that are not true pairs are ones nobody could settle
-  from the facts ("PR #92" twice with no repository, "R. Patel" twice). A
-  deployment can lower it (``DecisionConfig.pair_merge_probability``): at
-  0.85, 73-74 true pairs merged, and so did 4 of those unsettleable pairs;
+* a pair merges from a P(same) that falls with the evidence: the provider's
+  ``pair_merge_by_step``, per step of the funnel below. On 12,795 comparisons
+  of a new name against the entity it may belong to (synthetic stores with
+  exact labels), keeping wrong merges at or under 2% of merges needed 0.96
+  with one memory on the smaller side, 0.85 with three and 0.79 with eight.
+  At one memory Jev's P(same) is close to the real share; with more it is too
+  cautious, by about half. A deployment can set one bar for all steps
+  (``DecisionConfig.pair_merge_probability``);
 * a pair is kept apart from P(different) = 0.5, once its smaller side has 10
   memories (``APART_STEP``); before, it waits. No true pair scored above 0.43;
 * anything else waits, and nobody is asked. A waiting pair is compared again
@@ -489,9 +491,10 @@ def judge_pair(decider: Decider, a: Profile, b: Profile) -> dict[str, float] | N
     }
 
 
-def decide_pair(probabilities: dict[str, float], decider: Decider) -> str:
-    """"merge", "apart" or "wait", on the provider's measured thresholds."""
-    if probabilities["same"] >= decider.pair_merge_probability:
+def decide_pair(probabilities: dict[str, float], decider: Decider, step: int = 1) -> str:
+    """"merge", "apart" or "wait", on the provider's measured thresholds for a
+    comparison at this funnel step."""
+    if probabilities["same"] >= decider.pair_merge_threshold(step):
         return "merge"
     if probabilities["different"] >= decider.pair_apart_probability:
         return "apart"
@@ -541,7 +544,7 @@ def compare(
         )
         if probabilities is None:
             break
-        verdict = Verdict(probabilities, decide_pair(probabilities, decider), step)
+        verdict = Verdict(probabilities, decide_pair(probabilities, decider, step), step)
         if verdict.action == "apart" and step < APART_STEP:
             verdict.action = "wait"
         if verdict.action != "wait":

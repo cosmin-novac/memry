@@ -1171,3 +1171,27 @@ def test_the_weekly_pass_compares_two_entities_that_carry_one_name():
     assert store.resolve_entities(user_id="ada")["confirmed"] == 1
     assert len(store.entities(user_id="ada")) == 1
     store.close()
+
+
+def test_the_merge_bar_falls_as_the_smaller_side_gains_memories():
+    """Measured: at one memory Jev's P(same) is close to exact, with more it is
+    too cautious, so the P(same) a merge needs falls with evidence."""
+    jev = build_decider(DecisionConfig(provider="jev", api_key="k"), FakeLLM())
+    bars = [jev.pair_merge_threshold(step) for step in (1, 2, 3, 9, 10, 50, 200)]
+    assert bars == sorted(bars, reverse=True) and bars[0] > bars[-1]
+    assert jev.pair_merge_threshold(2) == jev.pair_merge_threshold(1)
+    fixed = build_decider(DecisionConfig(provider="jev", api_key="k", pair_merge_probability=0.9),
+                          FakeLLM())
+    assert {fixed.pair_merge_threshold(step) for step in (1, 3, 10, 50)} == {0.9}
+
+
+def test_a_comparison_merges_on_the_bar_for_its_step():
+    from memry.intelligence.identity import decide_pair
+
+    class Stepped(_PairJudge):
+        pair_merge_by_step = {1: 0.96, 3: 0.85}
+
+    judge = Stepped(lambda state: (0.9, 0.0))
+    answer = {"same": 0.9, "different": 0.05, "unsure": 0.05}
+    assert decide_pair(answer, judge, 1) == "wait"
+    assert decide_pair(answer, judge, 3) == "merge"
