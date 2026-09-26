@@ -987,3 +987,10 @@ def test_the_pair_merge_threshold_can_be_set_per_deployment():
     assert jev.pair_merge_probability == 0.85
     text = build_decider(DecisionConfig(provider="llm", pair_merge_probability=0.85), FakeLLM())
     assert text.pair_merge_probability == NEVER_AUTO_MERGE  # a text model is not calibrated
+
+
+def test_a_typo_that_swaps_two_letters_is_compared():
+    from memry.intelligence.identity import edit_similarity
+
+    assert edit_similarity("colonge", "cologne") > 0.8
+    assert [e.name for e in _index("Cologne", "Berlin").candidates("Colonge")] == ["Cologne"]

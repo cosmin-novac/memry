@@ -60,7 +60,7 @@ from .intelligence.entities import (
     synthesize_entity_description,
 )
 from .intelligence.graph_retrieval import detect_query_entities, relational_memory_ids
-from .intelligence.identity import judges_pairs
+from .intelligence.identity import judged_tag_merges, judges_pairs, name_vectors
 from .intelligence.extraction import (
     VOCABULARY_LIMIT,
     extract_facts,
@@ -2561,7 +2561,8 @@ class MemoryStore:
         agent_id: str | None = None,
         run_id: str | None = None,
     ) -> dict[str, Any]:
-        """Automatically collapse deterministic formatting/plural duplicates."""
+        """Collapse formatting and plural duplicates, then, with a calibrated
+        judge, the tags it puts at its tag merge threshold (identity.py)."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         categories = self.categories(
             user_id=user_id, agent_id=agent_id, run_id=run_id
@@ -2572,7 +2573,38 @@ class MemoryStore:
             remove = set(group["variants"]) - {group["canonical"]}
             result = self.backend.retag_topics(scope, remove, group["canonical"])
             changed += result or 0
-        return {"groups_merged": len(groups), "memories_changed": changed}
+        judged: list[dict[str, Any]] = []
+        if judges_pairs(self.decider):
+            tags = self.categories(user_id=user_id, agent_id=agent_id, run_id=run_id)
+            judged = judged_tag_merges(
+                self.decider, tags, self._entities_named(scope, tags), self._tag_vectors(tags)
+            )
+            for group in judged:
+                remove = set(group["variants"]) - {group["canonical"]}
+                changed += self.backend.retag_topics(scope, remove, group["canonical"]) or 0
+        return {"groups_merged": len(groups) + len(judged), "memories_changed": changed}
+
+    def _entities_named(
+        self, scope: Scope, tags: list[dict[str, Any]]
+    ) -> dict[str, tuple[str, str | None]]:
+        """For each tag that is also the name of an entity: that entity's name
+        and type, as evidence of what the tag means."""
+        labels = {str(t["category"]).strip().casefold() for t in tags}
+        named: dict[str, tuple[str, str | None]] = {}
+        for entity in self.backend.find_entities_by_aliases(sorted(labels), scope, limit=10_000):
+            label = entity.name.strip().casefold()
+            if label in labels:
+                named[label] = (entity.name, entity.entity_type)
+        return named
+
+    def _tag_vectors(self, tags: list[dict[str, Any]]):
+        if not self.embedder.dimensions or self.embedder.name == "hash":
+            return None
+        labels = [str(t["category"]).strip().casefold() for t in tags]
+        vectors = name_vectors(self.embedder.embed, [
+            Entity(id=label, name=label, user_id=None) for label in labels
+        ])
+        return vectors
 
     def consolidate_memories(
         self,

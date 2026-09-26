@@ -180,3 +180,70 @@ def test_existing_plural_topics_are_merged_by_maintenance(verbatim_store):
     assert verbatim_store.categories(user_id="ada") == [
         {"category": "project", "count": 2}
     ]
+
+
+# ------------------------------------------- tags decided by a calibrated judge
+def _tag_judge(same: float):
+    from memry.providers.decisions import Answer, Answers, NoneDecider
+
+    class Judge(NoneDecider):
+        name = "stub"
+        available = True
+        calibrated = True
+        tag_merge_probability = 0.80
+
+        def __init__(self):
+            self.states = []
+
+        def decide(self, state, questions):
+            if "tag" not in questions:
+                return Answers({})
+            self.states.append(state)
+            return Answers({"tag": Answer("same" if same >= 0.5 else "different",
+                                          {"same": same, "different": 1 - same}, 0.9, True)})
+
+    return Judge()
+
+
+def _tagged(store, tag, times):
+    for i in range(times):
+        store.add(f"{tag} fact {i}", user_id="ada", infer=False, categories=[tag])
+
+
+def test_a_judged_tag_pair_merges_into_the_more_used_tag(verbatim_store):
+    verbatim_store.decider = _tag_judge(0.9)
+    _tagged(verbatim_store, "quality assurance", 5)
+    _tagged(verbatim_store, "qa", 1)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert verbatim_store.categories(user_id="ada") == [
+        {"category": "quality assurance", "count": 6}]
+
+
+def test_a_tag_pair_under_the_threshold_stays(verbatim_store):
+    verbatim_store.decider = _tag_judge(0.7)
+    _tagged(verbatim_store, "quality assurance", 5)
+    _tagged(verbatim_store, "qa", 1)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(verbatim_store.categories(user_id="ada")) == 2
+
+
+def test_without_a_calibrated_judge_only_formatting_merges(verbatim_store):
+    _tagged(verbatim_store, "quality assurance", 5)
+    _tagged(verbatim_store, "qa", 1)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(verbatim_store.categories(user_id="ada")) == 2
+
+
+def test_the_judge_is_told_which_tags_name_an_entity(verbatim_store):
+    """Without it "memry" read as a typo of "memory"."""
+    from memry.models import Entity
+
+    judge = _tag_judge(0.1)
+    verbatim_store.decider = judge
+    verbatim_store.backend.insert_entity(Entity(name="Memry", normalized="memry",
+                                                entity_type="product", user_id="ada"))
+    _tagged(verbatim_store, "memory", 5)
+    _tagged(verbatim_store, "memry", 5)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert judge.states and all('a product named "Memry"' in s for s in judge.states)
+    assert len(verbatim_store.categories(user_id="ada")) == 2

@@ -3,7 +3,8 @@
 Two stages, and neither lists forms of names.
 
 **Finding pairs.** Two entity names are worth a question when they share a word
-that is rare among the store's own entity names, when they are spelled alike,
+that is rare among the store's own entity names, when they are spelled alike
+(shared letter trigrams, or a small edit distance for a typo),
 when one is the initial letters of the other, or when a semantic embedder puts
 the two names close together. Rarity comes from the store: a word such as
 "GmbH", "Ltd" or "Dr." that many names carry stops counting on its own, and
@@ -84,6 +85,10 @@ RARE_WORD_SHARE = 0.02
 #: Character-trigram overlap from which two names count as spelled alike
 #: ("OpenAI" and "Open AI", "PostgreSQL" and "Postgres").
 SPELLING_SIMILARITY = 0.5
+#: Share of characters that may change, by edit distance, for two names to
+#: count as spelled alike ("colonge" and "cologne"). Trigrams miss a typo that
+#: swaps two letters, since the swap breaks the trigrams around it.
+EDIT_SIMILARITY = 0.8
 #: Cosine between name embeddings from which two names count as close in
 #: meaning ("Köln" and "Cologne" scored 0.68, unrelated names rarely 0.6).
 MEANING_SIMILARITY = 0.6
@@ -109,6 +114,24 @@ def name_tokens(name: str) -> list[str]:
 def _grams(name: str) -> set[str]:
     compact = "".join(name_tokens(name))
     return {compact[i:i + 3] for i in range(len(compact) - 2)} or {compact}
+
+
+def edit_similarity(a: str, b: str) -> float:
+    """1 minus the optimal-string-alignment distance over the longer length,
+    on the names' letters and digits only."""
+    a, b = "".join(name_tokens(a)), "".join(name_tokens(b))
+    if not a or not b:
+        return 0.0
+    rows = [list(range(len(b) + 1))]
+    for i in range(1, len(a) + 1):
+        row = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            row[j] = min(rows[-1][j] + 1, row[j - 1] + 1,
+                         rows[-1][j - 1] + (a[i - 1] != b[j - 1]))
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                row[j] = min(row[j], rows[-2][j - 2] + 1)
+        rows = rows[-1:] + [row]
+    return 1 - rows[-1][-1] / max(len(a), len(b))
 
 
 def is_acronym_of(short: str, long: str) -> bool:
@@ -177,6 +200,8 @@ class NameIndex:
             similarity = shared / len(grams | self._grams[eid])
             if similarity >= SPELLING_SIMILARITY:
                 score[eid] += 1.0 + similarity
+            elif edit_similarity(name, self.entities[eid].name) >= EDIT_SIMILARITY:
+                score[eid] += 1.0
         if len(tokens) == 1:
             for eid, entity in self.entities.items():
                 if is_acronym_of(name, entity.name):
@@ -329,3 +354,103 @@ def parallel(fn: Callable[[Any], Any], items: list[Any], workers: int = 8) -> li
         return [fn(item) for item in items]
     with ThreadPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(fn, items))
+
+
+# -- tags ------------------------------------------------------------------
+TAG_QUESTION = Choice(
+    instructions=(
+        "Two tags that file memories in one person's memory store. Do tag A and tag B "
+        "name the same subject, so that every memory filed under one belongs under "
+        "the other?"
+    ),
+    criteria={
+        "same": (
+            "One subject: the same tag written differently (spelling, typo, format, "
+            "singular or plural, abbreviation, acronym, translation, legal form or web "
+            "domain) or a synonym."
+        ),
+        "different": (
+            "Two subjects: unrelated subjects, related subjects, or one tag is a part, "
+            "kind, aspect or detail of the other, as \"insurance\" and \"insurance "
+            "contract\"."
+        ),
+    },
+)
+
+
+def tag_state(a: str, b: str, counts: dict[str, int],
+              known: dict[str, tuple[str, str | None]]) -> str:
+    """Both tags with how often each is used and, where the store has an entity
+    of that name, what the entity is. Without that, "memry" read as a typo of
+    "memory" at P(same) 0.98; with "This store has a product named Memry" it
+    fell to 0.63."""
+    def side(label: str, tag: str) -> str:
+        line = f'TAG {label}: "{tag}" (on {counts.get(tag, 0)} memories)'
+        if tag in known:
+            name, kind = known[tag]
+            line += f'\nThis store has a {kind or "thing"} named "{name}".'
+        return line
+
+    return ("Two tags from one person's long-term memory store.\n\n"
+            + side("A", a) + "\n\n" + side("B", b))
+
+
+def judge_tag_pair(decider: Decider, a: str, b: str, counts: dict[str, int],
+                   known: dict[str, tuple[str, str | None]]) -> float | None:
+    """P(same subject), averaged over both orders."""
+    def ask(state: str):
+        return decider.decide(state, {"tag": TAG_QUESTION})["tag"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        answers = list(pool.map(ask, (tag_state(a, b, counts, known),
+                                      tag_state(b, a, counts, known))))
+    if not all(answer.available and answer.probabilities for answer in answers):
+        return None
+    return sum(answer.probabilities.get("same", 0.0) for answer in answers) / 2
+
+
+def judged_tag_merges(
+    decider: Decider,
+    tags: list[dict[str, Any]],
+    known: dict[str, tuple[str, str | None]],
+    vectors: dict[str, np.ndarray] | None = None,
+    limit: int = 400,
+) -> list[dict[str, Any]]:
+    """Groups of tags the judge puts at ``decider.tag_merge_probability`` or
+    higher, each kept under its most used tag.
+
+    Measured on the 379 candidate pairs of a real 417-tag store, two runs: from
+    0.80 it merged "bildy ai" and "bildy.ai", "qa" and "quality assurance",
+    "steuer" and "tax", and no pair of two subjects. Most pairs a person calls
+    one subject stay below ("fundation" and "fundation gmbh" at 0.45), so the
+    judge adds merges without deciding every pair.
+    """
+    counts = {str(t["category"]).strip().casefold(): int(t.get("count") or 0) for t in tags}
+    labels = sorted(counts)
+    nodes = [Entity(id=label, name=label, user_id=None) for label in labels]
+    index = NameIndex(nodes, vectors)
+    pairs = sorted({
+        tuple(sorted((label, other.name)))
+        for label in labels
+        for other in index.candidates(label, vector=(vectors or {}).get(label))
+    })[:limit]
+    scores = parallel(lambda pair: judge_tag_pair(decider, *pair, counts, known), pairs)
+    parent = {label: label for label in labels}
+
+    def root(label: str) -> str:
+        while parent[label] != label:
+            parent[label] = parent[parent[label]]
+            label = parent[label]
+        return label
+
+    for (a, b), score in zip(pairs, scores):
+        if score is not None and score >= decider.tag_merge_probability:
+            parent[root(a)] = root(b)
+    groups: dict[str, list[str]] = defaultdict(list)
+    for label in labels:
+        groups[root(label)].append(label)
+    return [
+        {"canonical": max(members, key=lambda t: (counts[t], -len(t))), "variants": sorted(members),
+         "reason": f"{decider.name}: same subject"}
+        for members in groups.values() if len(members) > 1
+    ]

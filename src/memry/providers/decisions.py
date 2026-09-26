@@ -187,6 +187,9 @@ class Decider(ABC):
     #: P(different) from which a pair is kept apart for good.
     pair_apart_probability: float = 0.5
 
+    #: P(same subject), averaged over both orders, from which two tags merge.
+    tag_merge_probability: float = NEVER_AUTO_MERGE
+
     #: Whether an open merge proposal is compared again as soon as a new
     #: memory mentions either side of it. New evidence is the only thing that
     #: can change the answer, so that is when to ask again. The question is
@@ -349,6 +352,9 @@ class JevDecider(Decider):
     # different things scored above 0.79 (evals/identity_resolution_benchmark.py).
     calibrated = True
     pair_merge_probability = 0.95
+    # 379 candidate tag pairs from a real store, two runs: nothing wrong from
+    # 0.80, the highest pair of two subjects at 0.64 ("memory" and "memry").
+    tag_merge_probability = 0.80
 
     def __init__(self, cfg: DecisionConfig) -> None:
         self.cfg = cfg
