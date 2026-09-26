@@ -646,11 +646,18 @@ def resolve_mentions(
         if non_referent_reason(surface) or screened_out(verdicts.get(normalized)):
             continue
 
-        candidates = backend.find_entity_candidates(normalized, lookup)
+        # Two names the extractor listed for one memory are two entities: an
+        # entity just resolved from this memory is not a candidate. Compared
+        # with it, the name showed the same memory on both sides and merged
+        # ("Michaela Neumann" and "Dr. Neumann" named in one note).
+        taken = {entity.id for entity in resolved.values()}
+        candidates = [c for c in backend.find_entity_candidates(normalized, lookup)
+                      if c.id not in taken]
         if judge is not None:
             if index is None:
                 index = NameIndex(backend.list_entities(lookup, limit=100_000))
-            candidates += index.candidates(surface, exclude={c.id for c in candidates})
+            candidates += index.candidates(
+                surface, exclude={c.id for c in candidates} | taken)
         target: Entity | None = None
         proposals: list[MergeProposal] = []
         mention = Mention(surface, types.get(normalized),
