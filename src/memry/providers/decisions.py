@@ -365,11 +365,13 @@ class JevDecider(Decider):
     calibrated = True
     pair_merge_probability = 0.95
     # Per step of the funnel: the lowest P(same) that kept wrong merges at or
-    # under 2% of merges, measured on 12,795 comparisons of a new name against
-    # the entity it may belong to (synthetic stores with exact labels). One
-    # memory needs 0.96, three 0.85, eight 0.79: with more evidence Jev's
-    # number is too cautious, by about half.
-    pair_merge_by_step = {1: 0.96, 3: 0.85, 10: 0.80, 50: 0.80}
+    # under 2% of merges, the stricter of two sets of synthetic stores with
+    # exact labels (18,885 comparisons of a new name against the entity it may
+    # belong to, 1 to 50 memories on its side). One memory: 2% was not reached
+    # in one set, 0.97 gave 1.7% and 3.0%; three: 0.85 and 0.96; eight: 0.79
+    # and 0.84; fifteen to thirty: 0.78-0.79. Waiting costs little, since the
+    # pair is compared again at the next step.
+    pair_merge_by_step = {1: 0.97, 3: 0.96, 10: 0.85, 50: 0.80}
     # 379 candidate tag pairs from a real store, 10 memories per tag, two runs:
     # nothing wrong from 0.55, the highest pair of two subjects at 0.46.
     tag_merge_probability = 0.55

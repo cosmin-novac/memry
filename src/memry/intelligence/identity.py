@@ -22,12 +22,13 @@ entities left no safe threshold at all. Measured with Jev over the 156 pairs
 in ``evals/identity_resolution_benchmark.py``, five runs:
 
 * a pair merges from a P(same) that falls with the evidence: the provider's
-  ``pair_merge_by_step``, per step of the funnel below. On 12,795 comparisons
+  ``pair_merge_by_step``, per step of the funnel below. On 18,885 comparisons
   of a new name against the entity it may belong to (synthetic stores with
-  exact labels), keeping wrong merges at or under 2% of merges needed 0.96
-  with one memory on the smaller side, 0.85 with three and 0.79 with eight.
-  At one memory Jev's P(same) is close to the real share; with more it is too
-  cautious, by about half. A deployment can set one bar for all steps
+  exact labels), keeping wrong merges at or under 2% of merges needed about
+  0.97 with one memory on the smaller side, 0.85-0.96 with three, 0.79-0.84
+  with eight and 0.78-0.79 with fifteen to thirty. At one memory Jev's
+  P(same) is close to the real share; with more it is too cautious, by about
+  half. A deployment can set one bar for all steps
   (``DecisionConfig.pair_merge_probability``);
 * a pair is kept apart from P(different) = 0.5, once its smaller side has 10
   memories (``APART_STEP``); before, it waits. No true pair scored above 0.43;
