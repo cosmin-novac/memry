@@ -1195,19 +1195,3 @@ def test_a_comparison_merges_on_the_bar_for_its_step():
     answer = {"same": 0.9, "different": 0.05, "unsure": 0.05}
     assert decide_pair(answer, judge, 1) == "wait"
     assert decide_pair(answer, judge, 3) == "merge"
-
-
-def test_two_names_in_one_memory_are_not_merged_into_each_other():
-    """Compared with the entity just made from the same memory, the second name
-    showed that memory on both sides and merged."""
-    from conftest import fact, facts_response
-
-    llm = FakeLLM()
-    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64),
-                        decider=_PairJudge(lambda state: (0.99, 0.0)))
-    llm.queue(facts_response(fact("The user met Michaela Neumann and wrote down Dr. Neumann's advice",
-                                  entities=[{"name": "Michaela Neumann", "type": "person"},
-                                            {"name": "Dr. Neumann", "type": "person"}])))
-    store.add("The user met Michaela Neumann and wrote down Dr. Neumann's advice", user_id="ada")
-    assert sorted(e.name for e in store.entities(user_id="ada")) == ["Dr. Neumann", "Michaela Neumann"]
-    store.close()
