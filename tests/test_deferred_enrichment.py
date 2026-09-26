@@ -187,6 +187,19 @@ def test_related_pending_saves_are_extracted_as_one_context(tmp_path):
     active = store.get_all(user_id="marcus", run_id="run-1")
     assert len(active) == 2
     assert all(set(memory.source_episode_ids) == episode_ids for memory in active)
+    # the facts keep the label: the identity judge is shown it, and it groups a
+    # conversation's memories when the client sent no session id
+    assert {m.metadata.get("context") for m in active} == {"AI-agent evaluation strategy"}
+    store.close()
+
+
+def test_a_direct_save_keeps_its_context_label(tmp_path):
+    llm = FakeLLM([facts_response(fact("The kitchen needs new sockets."))])
+    store = _store(str(tmp_path / "memry.db"), llm)
+    store.add("The kitchen needs new sockets.", user_id="ada",
+              metadata={"context": "kitchen renovation"})
+    [memory] = store.get_all(user_id="ada")
+    assert memory.metadata["context"] == "kitchen renovation"
     store.close()
 
 def test_same_scope_burst_coalesces_without_explicit_context(tmp_path):

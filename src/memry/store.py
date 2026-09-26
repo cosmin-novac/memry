@@ -121,6 +121,15 @@ def _ingestion_context(metadata: dict[str, Any] | None) -> str:
     return " ".join(str((metadata or {}).get("context") or "").split())[:200]
 
 
+def _keep_context(candidates: list[CandidateFact], context: str) -> None:
+    """Facts extracted from a save keep the save's context label. The identity
+    judge is shown it with each fact, and it tells which memories came from one
+    conversation when the client sent no session id."""
+    if context:
+        for candidate in candidates:
+            candidate.metadata.setdefault("context", context)
+
+
 def _client_tag_hints(
     metadata: dict[str, Any] | None,
     categories: list[str] | None = None,
@@ -418,6 +427,7 @@ class MemoryStore:
         else:
             candidates = self._pending_verbatim(messages)
 
+        _keep_context(candidates, _ingestion_context(metadata))
         actions = self._apply_candidates(candidates, scope, episode_ids)
 
         # Post-write audit: extraction is lossy and non-deterministic, and a
@@ -1155,6 +1165,7 @@ class MemoryStore:
                 warnings=["no facts extracted; memories kept verbatim"],
             )
 
+        _keep_context(candidates, context)
         actions = self._apply_candidates(
             candidates,
             first_scope,
