@@ -119,6 +119,16 @@ PAIR_POOL = 200
 #: entity mostly do not, and they left the judge unsure: "Fundation" against
 #: "Fundation GmbH" scored 0.76 with 3 recent facts per side and 0.59 with 10.
 RECENT_SHARE = 0.3
+#: A pair with the store owner in it is kept apart only from this step on;
+#: before, "apart" waits. With a few memories the owner reads as someone the
+#: named person is not: on a real store, the owner (1 or 3 memories) against
+#: "Cosmin Novac" gave P(different) 0.90-0.95, and at 10 memories P(same) 0.99.
+#: Other people stayed at P(different) 0.85-0.99 at every step.
+OWNER_APART_STEP = 10
+#: People compared with the store owner on their memories alone, besides the
+#: ones whose names are worth comparing: an account named "admin", or none,
+#: shares no name with the owner's.
+OWNER_CANDIDATES = 3
 
 
 def pair_step(count: int) -> int:
@@ -272,12 +282,10 @@ class NameIndex:
             cosine = self._matrix @ vector
             for i in np.flatnonzero(cosine >= MEANING_SIMILARITY):
                 score[self._vector_ids[i]] += float(cosine[i])
-        folded = _fold(name).strip()
-        ranked = sorted(
-            (eid for eid in score
-             if eid not in excluded and _fold(self.entities[eid].name).strip() != folded),
-            key=lambda eid: -score[eid],
-        )
+        # Identical names are candidates too: two entities that carry one name
+        # are the likeliest duplicates. The caller excludes the entity itself.
+        ranked = sorted((eid for eid in score if eid not in excluded),
+                        key=lambda eid: -score[eid])
         return [self.entities[eid] for eid in ranked[:limit]]
 
 
@@ -491,12 +499,14 @@ def compare(
     compared at step ``compared`` (0: never). Nothing is asked when it has
     reached no new step. Otherwise it is compared with 10 memories per side,
     and, when that leaves it waiting and its smaller side has 50 memories,
-    once more with 50.
+    once more with 50. A pair with the store owner in it waits instead of
+    being kept apart before ``OWNER_APART_STEP``.
 
     ``b`` is an entity, or a mention a save has not attached yet.
     """
     count_b = 1 if isinstance(b, Mention) else backend.count_entity_memories(b.id)
     owed = rounds(compared, min(backend.count_entity_memories(a.id), count_b))
+    owner = is_owner(a) or is_owner(b)
     if not owed:
         return Verdict(None, "wait", compared)
     pool_a = backend.entity_memories(a.id, limit=PAIR_POOL)
@@ -514,9 +524,61 @@ def compare(
         if probabilities is None:
             break
         verdict = Verdict(probabilities, decide_pair(probabilities, decider), step)
+        if verdict.action == "apart" and step < OWNER_APART_STEP and owner:
+            verdict.action = "wait"
         if verdict.action != "wait":
             break
     return verdict
+
+
+def is_owner(entity: Entity | Mention) -> bool:
+    return isinstance(entity, Entity) and bool((entity.metadata or {}).get("owner"))
+
+
+def merge_pair(backend: MemoryBackend, a: Entity, b: Entity) -> bool:
+    """Fold one entity of a pair the judge merged into the other. The store
+    owner is folded into the person it was found to be, who keeps their name
+    and becomes the owner."""
+    keep, drop = (b, a) if is_owner(a) else (a, b)
+    if not backend.merge_entities(keep.id, drop.id):
+        return False
+    if is_owner(drop):
+        kept = backend.get_entity(keep.id) or keep
+        backend.set_entity_metadata(kept.id, {**(kept.metadata or {}), "owner": True})
+    return True
+
+
+def closest_people(
+    backend: MemoryBackend, scope: Any, owner: Entity, entities: Iterable[Entity],
+    limit: int = OWNER_CANDIDATES,
+) -> list[Entity]:
+    """The people whose memories are closest, on average, to the owner's."""
+    members: dict[str, list[str]] = defaultdict(list)
+    for entity_id, memory_id in backend.entity_memory_links(scope):
+        members[entity_id].append(memory_id)
+    people = [e for e in entities if e.entity_type == "person" and e.id != owner.id
+              and not is_owner(e) and members.get(e.id)]
+    if not members.get(owner.id) or not people:
+        return []
+    vectors = backend.vectors_of(sorted({m for e in [owner, *people] for m in members[e.id]}))
+
+    def centroid(entity: Entity) -> np.ndarray | None:
+        rows = _unit_rows(vectors, members[entity.id])
+        if rows is None:
+            return None
+        mean = rows.mean(axis=0)
+        norm = np.linalg.norm(mean)
+        return mean / norm if norm else None
+
+    center = centroid(owner)
+    if center is None:
+        return []
+    scored = []
+    for person in people:
+        other = centroid(person)
+        if other is not None and other.shape == center.shape:
+            scored.append((float(other @ center), person))
+    return [person for _, person in sorted(scored, key=lambda item: -item[0])[:limit]]
 
 
 def pair_reason(decider: Decider, probabilities: dict[str, float]) -> str:
@@ -669,7 +731,8 @@ def judged_tag_merges(
         for pair in {
             tuple(sorted((label, other.name)))
             for label in labels
-            for other in index.candidates(label, vector=(vectors or {}).get(label))
+            for other in index.candidates(label, vector=(vectors or {}).get(label),
+                                          exclude={label})
         }
     }
     live = {tag_pair_key(*pair) for pair in step}

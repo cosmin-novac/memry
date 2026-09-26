@@ -34,8 +34,10 @@ from .extraction import parse_lenient_json
 from .identity import (
     Mention,
     NameIndex,
+    closest_people,
     compare,
     judges_pairs,
+    merge_pair,
     name_vectors,
     pair_reason,
     parallel,
@@ -591,11 +593,15 @@ def resolve_mentions(
     surfaces: list[str],
     types: dict[str, str] | None = None,
     attach: bool = True,
+    owner: Entity | None = None,
 ) -> dict[str, Entity]:
     """Attach a memory's entity mentions, creating/reusing entities per the
     conservative policy. Returns a map of normalized surface -> entity, so the
     caller can resolve relation triples to the entities they linked to. Pass
     ``attach=False`` when the caller will replace all mentions atomically.
+
+    ``owner`` is the store owner's entity. The extractor was told to list the
+    owner under that entity's name, so that name attaches to it directly.
 
     With a calibrated judge (``identity.judges_pairs``) each candidate is
     decided by ``identity.compare``: merge, keep apart, or wait for evidence.
@@ -613,9 +619,11 @@ def resolve_mentions(
     # mechanically first (free, certain), then one typed question per name. A
     # name that already has an entity is left alone; upkeep reviews those.
     cleaned = [s.strip() for s in surfaces if s and s.strip()]
+    owner_name = owner.name.strip().casefold() if owner is not None else None
     unseen = [
         s for s in dict.fromkeys(cleaned)
-        if not non_referent_reason(s)
+        if s.casefold() != owner_name
+        and not non_referent_reason(s)
         and not backend.find_entity_candidates(s.lower(), lookup)
     ]
     verdicts = screen_names(decider, memory_content, unseen)
@@ -627,6 +635,13 @@ def resolve_mentions(
     for surface in cleaned:
         normalized = surface.lower()
         if not normalized or normalized in resolved:
+            continue
+        if owner is not None and surface.casefold() == owner_name:
+            if attach:
+                backend.add_mention(
+                    EntityMention(entity_id=owner.id, memory_id=memory_id, surface=surface)
+                )
+            resolved[normalized] = owner
             continue
         if non_referent_reason(surface) or screened_out(verdicts.get(normalized)):
             continue
@@ -707,6 +722,7 @@ def propose_same_name_duplicates(
     limit: int = 50,
     decider: Decider | None = None,
     embed: Callable[[list[str]], list[list[float]]] | None = None,
+    owner: Entity | None = None,
 ) -> int:
     """Raise pairs of existing entities for the identity judge to compare.
 
@@ -715,7 +731,9 @@ def propose_same_name_duplicates(
     calibrated judge, every name is paired with the names worth comparing
     (``identity.NameIndex``: a rare shared word, a similar spelling, an
     acronym, or a name close in meaning when ``embed`` is a semantic embedder),
-    and pairs already decided either way are not raised again. Without one,
+    and pairs already decided either way are not raised again. The store
+    ``owner`` is also paired with the people whose memories are closest to its
+    own (``identity.closest_people``), since its name may be no name. Without one,
     only identical names are paired, and a pair whose members live under
     different homes ("privacy policy" in two projects) is left alone, since no
     judge could answer it and no person should be asked.
@@ -726,9 +744,13 @@ def propose_same_name_duplicates(
         index = NameIndex(entities, name_vectors(embed, entities))
         vectors = index.vectors
         for entity in entities:
-            for other in index.candidates(entity.name, vector=vectors.get(entity.id)):
+            for other in index.candidates(entity.name, vector=vectors.get(entity.id),
+                                          exclude={entity.id}):
                 if entity.id < other.id:
                     pairs.append((entity, other))
+        if owner is not None:
+            pairs[:0] = [(owner, person)
+                         for person in closest_people(backend, scope, owner, entities)]
     else:
         groups: dict[str, list[Entity]] = {}
         for entity in entities:
@@ -832,8 +854,8 @@ def resolve_open_proposals(
             judgment["verdict"] == "different"
             and judgment["confidence"] >= _conflict_bar(judgment)
         )
-        if auto_confirm and _merges_on_gate(judgment) and backend.merge_entities(
-            entity_a.id, entity_b.id
+        if auto_confirm and _merges_on_gate(judgment) and merge_pair(
+            backend, entity_a, entity_b
         ):
             backend.set_proposal_status(proposal.id, "confirmed")
             outcome["confirmed"] += 1
@@ -854,7 +876,7 @@ def resolve_open_proposals(
     )
     for (proposal, entity_a, entity_b), verdict in zip(pending, decided):
         if (verdict.action == "merge" and auto_confirm
-                and backend.merge_entities(entity_a.id, entity_b.id)):
+                and merge_pair(backend, entity_a, entity_b)):
             backend.set_proposal_status(proposal.id, "confirmed")
             outcome["confirmed"] += 1
         elif verdict.action == "apart":

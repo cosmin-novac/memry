@@ -2262,6 +2262,13 @@ class LocalBackend(MemoryBackend):
                 "WHERE entity_a = entity_b AND status = 'proposed'",
                 (changed_at,),
             )
+            # The merged entity carries both sides' memories now: its open
+            # pairs start the comparison funnel again on that evidence.
+            self._db.execute(
+                "UPDATE entity_proposals SET compared_step = 0 "
+                "WHERE status = 'proposed' AND (entity_a = ? OR entity_b = ?)",
+                (keep_root, keep_root),
+            )
             self._db.execute(
                 "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
                 "WHERE id = ?",

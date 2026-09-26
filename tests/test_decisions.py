@@ -1159,3 +1159,13 @@ def test_one_name_saved_in_two_sessions_is_one_entity():
         store.add(text, user_id="ada", run_id=run)
     assert len(store.entities(user_id="ada")) == 1
     store.close()
+
+
+def test_the_weekly_pass_compares_two_entities_that_carry_one_name():
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64),
+                        decider=_PairJudge(lambda state: (0.99, 0.0)))
+    _entity_with(store, "Fundation GmbH", ["Fundation GmbH's tax number is 218/5713"])
+    _entity_with(store, "Fundation GmbH", ["Fundation GmbH has 150,000 euros in cash"])
+    assert store.resolve_entities(user_id="ada")["confirmed"] == 1
+    assert len(store.entities(user_id="ada")) == 1
+    store.close()

@@ -394,6 +394,7 @@ class MemoryStore:
                     ),
                     context=_ingestion_context(metadata),
                     tag_hints=_client_tag_hints(metadata, categories),
+                    owner=self.owner_name(scope.user_id),
                 )
                 self._confirm_candidate_whens(candidates)
             except Exception as exc:
@@ -611,6 +612,7 @@ class MemoryStore:
                     memory_content=action.content or candidate.content,
                     surfaces=candidate.entities,
                     types=candidate.entity_types,
+                    owner=self._owner_for(scope, candidate.entities),
                 )
                 self._resolve_relations(
                     candidate.relations, resolved, scope, action.memory_id
@@ -726,7 +728,8 @@ class MemoryStore:
             return {"entities": surfaces, "mentions": mentions}
         try:
             candidates = extract_facts(
-                self.llm, [{"role": "user", "content": content}]
+                self.llm, [{"role": "user", "content": content}],
+                owner=self.owner_name(scope.user_id),
             )
             surfaces = []
             types: dict[str, str] = {}
@@ -748,6 +751,7 @@ class MemoryStore:
                 surfaces=surfaces,
                 types=types,
                 attach=False,
+                owner=self._owner_for(scope, surfaces),
             )
         except Exception as exc:
             raise ValueError(
@@ -1123,6 +1127,7 @@ class MemoryStore:
             ),
             context=context or None,
             tag_hints=tag_hints,
+            owner=self.owner_name(first_scope.user_id),
         )
         self._confirm_candidate_whens(candidates)
         if not candidates:
@@ -2439,6 +2444,57 @@ class MemoryStore:
             return False
         return self.backend.merge_entities(keep_root, merge_root)
 
+    # -- the store owner ----------------------------------------------------
+    def set_owner_name(self, user_id: str | None, name: str) -> None:
+        """Record the name of the person a namespace belongs to, from their
+        account. The owner entity starts with it; the identity judge may later
+        find the owner to be a named person in the store, whose name it keeps.
+        """
+        name = " ".join(str(name or "").split())[:80]
+        if name and self._upkeep_get("owner_name", user_id, None) != name:
+            self._upkeep_set("owner_name", user_id, name)
+
+    def owner_entity(self, user_id: str | None) -> Entity | None:
+        """The entity of the person this namespace belongs to, once a memory
+        has mentioned them. Followed through merges: the entity the owner was
+        merged into is the owner now."""
+        pointer = self._upkeep_get("owner_entity", user_id, None)
+        root = self.backend.resolve_entity_id(pointer) if pointer else None
+        entity = self.backend.get_entity(root) if root else None
+        if entity is None:
+            return None
+        if root != pointer:
+            self._upkeep_set("owner_entity", user_id, root)
+        if not (entity.metadata or {}).get("owner"):
+            metadata = {**(entity.metadata or {}), "owner": True}
+            self.backend.set_entity_metadata(entity.id, metadata)
+            entity = entity.model_copy(update={"metadata": metadata})
+        return entity
+
+    def owner_name(self, user_id: str | None) -> str:
+        """The name the extractor lists the owner under: the owner entity's,
+        else the account's, else "the user"."""
+        entity = self.owner_entity(user_id)
+        if entity is not None:
+            return entity.name
+        return self._upkeep_get("owner_name", user_id, None) or "the user"
+
+    def _owner_for(self, scope: Scope, surfaces: list[str]) -> Entity | None:
+        """The owner entity, created when these extracted names first include
+        the owner's. It belongs to the whole namespace, not to one run."""
+        owner = self.owner_entity(scope.user_id)
+        if owner is not None:
+            return owner
+        name = self.owner_name(scope.user_id)
+        if not any(str(s).strip().casefold() == name.casefold() for s in surfaces):
+            return None
+        owner = self.backend.insert_entity(Entity(
+            name=name, normalized=name.lower(), entity_type="person",
+            user_id=scope.user_id, metadata={"owner": True},
+        ))
+        self._upkeep_set("owner_entity", scope.user_id, owner.id)
+        return owner
+
     def resolve_entities(self, *, user_id: str | None = None) -> dict[str, int]:
         """Re-judge open proposals with accumulated evidence; auto-confirm only
         clear, high-confidence matches. Everything ambiguous stays proposed.
@@ -2458,6 +2514,7 @@ class MemoryStore:
             backend=self.backend, scope=scope, decider=self.decider,
             embed=self.embedder.embed if semantic else None,
             limit=300 if self.decider.calibrated and self.decider.available else 50,
+            owner=self.owner_entity(user_id),
         )
         outcome = resolve_open_proposals(
             backend=self.backend, llm=self.llm, decider=self.decider, scope=scope
@@ -3123,9 +3180,11 @@ class MemoryStore:
             outcome["skipped"] = -1
             return outcome
         scope = Scope(user_id=user_id)
+        # The store owner is a person by construction, whatever its name
+        # ("the user" until the judge finds who it is).
         pending = [
             e for e in self.backend.list_entities(scope, limit=1_000_000)
-            if "screen" not in (e.metadata or {})
+            if "screen" not in (e.metadata or {}) and not (e.metadata or {}).get("owner")
         ][: limit or self.SCREEN_BATCH]
 
         def ask(entity: Entity):

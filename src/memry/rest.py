@@ -2437,8 +2437,10 @@ def create_app(
     def _unauthorized() -> JSONResponse:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
+    owners_named: set[tuple[str, str]] = set()
+
     def _account_principal(account) -> Principal:
-        return Principal(
+        principal = Principal(
             name=account.name,
             default_user=default_user,
             admin=account.is_admin,
@@ -2448,6 +2450,11 @@ def create_app(
                 else f"{account.name}::{default_user}"
             ),
         )
+        # The account's name is where the store owner's entity name starts.
+        if (principal.fixed_user, account.name) not in owners_named:
+            store.set_owner_name(principal.fixed_user, account.name)
+            owners_named.add((principal.fixed_user, account.name))
+        return principal
 
     def resolve_principal(token: str) -> Principal | None:
         """Map a bearer token to who it acts as, or None to reject it.

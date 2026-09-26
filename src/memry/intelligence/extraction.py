@@ -188,8 +188,13 @@ def extract_facts(
     vocabulary: list[str] | None = None,
     context: str | None = None,
     tag_hints: list[str] | None = None,
+    owner: str | None = None,
 ) -> list[CandidateFact]:
     """LLM extraction (phase 1). Raises if the LLM is unavailable.
+
+    ``owner`` is the entity name of the person the store belongs to. Facts
+    about that person are listed under it, so they collect on one entity that
+    the identity judge can later find to be a named person in the store.
 
     ``vocabulary`` is the tags this namespace already uses. Offering them is
     what keeps tagging convergent: extraction that cannot see the existing
@@ -240,9 +245,18 @@ def extract_facts(
         if hints
         else ""
     )
+    owner_name = " ".join(str(owner or "").split())[:80]
+    owner_offer = (
+        f"\n\nThe person these memories belong to (the user) is the entity "
+        f"{json.dumps(owner_name, ensure_ascii=False)}. Whenever a fact is about "
+        "that person, list that name among its entities, spelled exactly so, "
+        "with type person."
+        if owner_name
+        else ""
+    )
     raw = llm.complete(
         EXTRACTION_SYSTEM.format(today=now.date().isoformat()),
-        f"Conversation:\n{transcript}{context_offer}{offer}{hint_offer}"
+        f"Conversation:\n{transcript}{context_offer}{owner_offer}{offer}{hint_offer}"
         "\n\nExtract the facts as JSON.",
         json_schema=EXTRACTION_SCHEMA,
     )
