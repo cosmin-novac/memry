@@ -902,6 +902,24 @@ def test_a_known_name_attaches_unless_the_judge_says_it_is_another(
     store.close()
 
 
+def test_one_memory_naming_an_entity_two_ways_makes_no_second_entity():
+    """The memory names "Fundation" and "Fundation GmbH". "Fundation" merges
+    into "Fundation GmbH" first; "Fundation GmbH" then joins it too, instead
+    of becoming a second "Fundation GmbH" with nothing left to compare."""
+    from conftest import fact, facts_response
+
+    store, save, _ = _judged_store(lambda state: (0.99, 0.0))
+    save("Fundation GmbH's Finanzamt file number is 218/5713")
+    llm = store.llm
+    llm.queue(facts_response(fact("Fundation (Fundation GmbH) has 150,000 euros in cash", entities=[
+        {"name": "Fundation", "type": "organization"},
+        {"name": "Fundation GmbH", "type": "organization"}])))
+    llm.queue(json.dumps({"action": "ADD", "target": None, "content": None, "reason": "new"}))
+    store.add("Fundation (Fundation GmbH) has 150,000 euros in cash", user_id="ada")
+    assert [e.name for e in store.entities(user_id="ada")] == ["Fundation GmbH"]
+    store.close()
+
+
 def test_a_known_name_joins_the_likeliest_of_its_entities():
     """Two "Fundation GmbH" entities: the mention about Cologne joins the one
     whose memories are about Cologne, and no proposal is left behind."""

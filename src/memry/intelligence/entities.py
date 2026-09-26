@@ -667,7 +667,17 @@ def resolve_mentions(
         # as new one-memory entities in a replayed store, which never gained
         # the evidence to be compared again.
         likely: list[tuple[float, Entity]] = []
+        # The memory may already belong to an entity of this name through
+        # another of its names ("Google" merged into "Google LLC" a moment
+        # ago, then "Google LLC" itself): nothing is left to compare, and a
+        # second "Google LLC" was made.
+        holding = {e.id for e in resolved.values()} & same_name
+        if holding:
+            candidates = [c for c in candidates if c.id in holding][:1]
         for candidate in candidates:
+            if holding:
+                target = candidate
+                break
             if likely and candidate.id not in same_name:
                 break  # a known name found its entity; no need to try others
             facts = [m.content for m in backend.entity_memories(candidate.id, limit=5)]
