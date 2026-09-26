@@ -246,6 +246,22 @@ class NameIndex:
             np.vstack([vectors[eid] for eid in self._vector_ids]) if self._vector_ids else None
         )
 
+    def named_in(self, text: str, limit: int = 60) -> list[Entity]:
+        """Entities with a name word that appears in ``text`` and is rare among
+        the store's names, most shared words first: the ones a text about
+        "Fundation" may be naming, such as "Fundation GmbH"."""
+        shared: Counter[str] = Counter()
+        tokens = set(name_tokens(text))
+        for token in tokens:
+            if len(token) >= 3 and self._counts.get(token, 0) <= self._rare_at:
+                shared.update(self._by_token.get(token, ()))
+        short = [t for t in tokens if 2 <= len(t) <= 6]
+        for eid, entity in self.entities.items():
+            if eid not in shared and any(is_acronym_of(t, entity.name) for t in short):
+                shared[eid] += 1
+        ranked = sorted(shared, key=lambda eid: -shared[eid])
+        return [self.entities[eid] for eid in ranked[:limit]]
+
     def candidates(
         self,
         name: str,

@@ -60,7 +60,13 @@ from .intelligence.entities import (
     synthesize_entity_description,
 )
 from .intelligence.graph_retrieval import detect_query_entities, relational_memory_ids
-from .intelligence.identity import TAG_EXAMPLES, judged_tag_merges, judges_pairs, name_vectors
+from .intelligence.identity import (
+    TAG_EXAMPLES,
+    NameIndex,
+    judged_tag_merges,
+    judges_pairs,
+    name_vectors,
+)
 from .intelligence.extraction import (
     VOCABULARY_LIMIT,
     extract_facts,
@@ -395,6 +401,10 @@ class MemoryStore:
                     context=_ingestion_context(metadata),
                     tag_hints=_client_tag_hints(metadata, categories),
                     owner=self.owner_name(scope.user_id),
+                    entity_names=self._entity_vocabulary(
+                        scope,
+                        "\n".join(str(m.get("content") or "") for m in messages),
+                    ),
                 )
                 self._confirm_candidate_whens(candidates)
             except Exception as exc:
@@ -730,6 +740,7 @@ class MemoryStore:
             candidates = extract_facts(
                 self.llm, [{"role": "user", "content": content}],
                 owner=self.owner_name(scope.user_id),
+                entity_names=self._entity_vocabulary(scope, content),
             )
             surfaces = []
             types: dict[str, str] = {}
@@ -1128,6 +1139,9 @@ class MemoryStore:
             context=context or None,
             tag_hints=tag_hints,
             owner=self.owner_name(first_scope.user_id),
+            entity_names=self._entity_vocabulary(
+                first_scope, "\n".join(memory.content for memory in active)
+            ),
         )
         self._confirm_candidate_whens(candidates)
         if not candidates:
@@ -1503,6 +1517,24 @@ class MemoryStore:
             {"category": c, "count": n}
             for c, n in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
         ]
+
+    def _entity_vocabulary(self, scope: Scope, text: str) -> list[tuple[str, str | None]]:
+        """Existing entities a text may be naming, offered to extraction as
+        (name, type) so it writes their names as stored. On 11 texts that
+        named a stored entity another way ("bildy.ai", "AWS", "Prof. Olsen"),
+        extraction wrote the stored name 11 times with the offer and once
+        without; on 7 texts about a new thing with a look-alike name ("Kestrel
+        Capital", "Priya Sharma") it used a stored name 0 times either way.
+        """
+        if not text.strip():
+            return []
+        lookup = Scope(user_id=scope.user_id) if scope.user_id is not None else scope
+        try:
+            entities = self.backend.list_entities(lookup, limit=100_000)
+        except Exception:
+            return []
+        named = NameIndex(entities).named_in(text)
+        return [(e.name, e.entity_type) for e in named if not (e.metadata or {}).get("owner")]
 
     def _tag_vocabulary(
         self, scope: Scope, text: str = "", limit: int = VOCABULARY_LIMIT

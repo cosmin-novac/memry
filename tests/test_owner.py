@@ -177,3 +177,14 @@ def test_the_name_screen_leaves_the_owner_alone():
     store.run_name_screen(user_id="ada")
     assert asked == []
     store.close()
+
+
+def test_the_extractor_is_offered_the_stored_names_a_text_may_mean():
+    store, save, llm, _ = _store()
+    for name in ("Fundation GmbH", "Amazon Web Services", "Raluca Novac"):
+        _entity_with(store, name, [f"{name} is in the store"])
+    save("Fundation paid the AWS bill", "Fundation")
+    prompt = _extraction_prompts(llm)[-1]
+    offered = json.loads(prompt.split("does:\n")[1].split("\n\n")[0])
+    assert {e["name"] for e in offered} == {"Fundation GmbH", "Amazon Web Services"}
+    store.close()
