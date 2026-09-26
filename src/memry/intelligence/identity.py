@@ -357,17 +357,24 @@ def parallel(fn: Callable[[Any], Any], items: list[Any], workers: int = 8) -> li
 
 
 # -- tags ------------------------------------------------------------------
+#: Most recent memories shown per tag. Measured on 379 candidate pairs from a
+#: real store: with the names alone "memry" read as a typo of "memory" (0.98);
+#: with two example memories "colonge" fell to 0.20 because one example cannot
+#: show what a tag is used for; with 10 no pair of two subjects scored above
+#: 0.46, and 25 were no better.
+TAG_EXAMPLES = 10
+
 TAG_QUESTION = Choice(
     instructions=(
-        "Two tags that file memories in one person's memory store. Do tag A and tag B "
-        "name the same subject, so that every memory filed under one belongs under "
-        "the other?"
+        "Two tags that file memories in one person's memory store, each shown with "
+        "memories filed under it. Do tag A and tag B name the same subject, so that "
+        "every memory filed under one belongs under the other?"
     ),
     criteria={
         "same": (
             "One subject: the same tag written differently (spelling, typo, format, "
             "singular or plural, abbreviation, acronym, translation, legal form or web "
-            "domain) or a synonym."
+            "domain) or a synonym, and the memories under both are about that subject."
         ),
         "different": (
             "Two subjects: unrelated subjects, related subjects, or one tag is a part, "
@@ -379,31 +386,34 @@ TAG_QUESTION = Choice(
 
 
 def tag_state(a: str, b: str, counts: dict[str, int],
-              known: dict[str, tuple[str, str | None]]) -> str:
-    """Both tags with how often each is used and, where the store has an entity
-    of that name, what the entity is. Without that, "memry" read as a typo of
-    "memory" at P(same) 0.98; with "This store has a product named Memry" it
-    fell to 0.63."""
+              known: dict[str, tuple[str, str | None]],
+              examples: dict[str, list[str]]) -> str:
+    """Both tags with how often each is used, the entity of that name where the
+    store has one, and the memories most recently filed under each."""
     def side(label: str, tag: str) -> str:
-        line = f'TAG {label}: "{tag}" (on {counts.get(tag, 0)} memories)'
+        lines = [f'TAG {label}: "{tag}" (on {counts.get(tag, 0)} memories)']
         if tag in known:
             name, kind = known[tag]
-            line += f'\nThis store has a {kind or "thing"} named "{name}".'
-        return line
+            lines.append(f'This store has a {kind or "thing"} named "{name}".')
+        shown = examples.get(tag, [])[:TAG_EXAMPLES]
+        lines.append(f"The {len(shown)} most recent memories filed under it:")
+        lines += [f"- {content}" for content in shown]
+        return "\n".join(lines)
 
     return ("Two tags from one person's long-term memory store.\n\n"
             + side("A", a) + "\n\n" + side("B", b))
 
 
 def judge_tag_pair(decider: Decider, a: str, b: str, counts: dict[str, int],
-                   known: dict[str, tuple[str, str | None]]) -> float | None:
+                   known: dict[str, tuple[str, str | None]],
+                   examples: dict[str, list[str]]) -> float | None:
     """P(same subject), averaged over both orders."""
     def ask(state: str):
         return decider.decide(state, {"tag": TAG_QUESTION})["tag"]
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        answers = list(pool.map(ask, (tag_state(a, b, counts, known),
-                                      tag_state(b, a, counts, known))))
+        answers = list(pool.map(ask, (tag_state(a, b, counts, known, examples),
+                                      tag_state(b, a, counts, known, examples))))
     if not all(answer.available and answer.probabilities for answer in answers):
         return None
     return sum(answer.probabilities.get("same", 0.0) for answer in answers) / 2
@@ -413,17 +423,20 @@ def judged_tag_merges(
     decider: Decider,
     tags: list[dict[str, Any]],
     known: dict[str, tuple[str, str | None]],
+    memories_of: Callable[[str], list[str]],
     vectors: dict[str, np.ndarray] | None = None,
     limit: int = 400,
 ) -> list[dict[str, Any]]:
     """Groups of tags the judge puts at ``decider.tag_merge_probability`` or
-    higher, each kept under its most used tag.
+    higher, each kept under its most used tag. ``memories_of(tag)`` returns the
+    tag's most recent memories, most recent first.
 
-    Measured on the 379 candidate pairs of a real 417-tag store, two runs: from
-    0.80 it merged "bildy ai" and "bildy.ai", "qa" and "quality assurance",
-    "steuer" and "tax", and no pair of two subjects. Most pairs a person calls
-    one subject stay below ("fundation" and "fundation gmbh" at 0.45), so the
-    judge adds merges without deciding every pair.
+    Measured on the 379 candidate pairs of a real 417-tag store, 10 memories per
+    tag, two runs: from 0.55 it merged 7-9 of the 16 pairs I labelled one
+    subject ("fundation" and "fundation gmbh" at 0.86-0.88, "bildy" and
+    "bildy.ai", "steuer" and "tax", "cologne" and "colonge") and none of the
+    41 borderline or 322 two-subject pairs; the highest two-subject pair was
+    "restart" and "shutdown" at 0.46.
     """
     counts = {str(t["category"]).strip().casefold(): int(t.get("count") or 0) for t in tags}
     labels = sorted(counts)
@@ -434,7 +447,10 @@ def judged_tag_merges(
         for label in labels
         for other in index.candidates(label, vector=(vectors or {}).get(label))
     })[:limit]
-    scores = parallel(lambda pair: judge_tag_pair(decider, *pair, counts, known), pairs)
+    examples = {tag: memories_of(tag) for tag in sorted({t for pair in pairs for t in pair})}
+    scores = parallel(
+        lambda pair: judge_tag_pair(decider, *pair, counts, known, examples), pairs
+    )
     parent = {label: label for label in labels}
 
     def root(label: str) -> str:

@@ -60,7 +60,7 @@ from .intelligence.entities import (
     synthesize_entity_description,
 )
 from .intelligence.graph_retrieval import detect_query_entities, relational_memory_ids
-from .intelligence.identity import judged_tag_merges, judges_pairs, name_vectors
+from .intelligence.identity import TAG_EXAMPLES, judged_tag_merges, judges_pairs, name_vectors
 from .intelligence.extraction import (
     VOCABULARY_LIMIT,
     extract_facts,
@@ -2577,7 +2577,11 @@ class MemoryStore:
         if judges_pairs(self.decider):
             tags = self.categories(user_id=user_id, agent_id=agent_id, run_id=run_id)
             judged = judged_tag_merges(
-                self.decider, tags, self._entities_named(scope, tags), self._tag_vectors(tags)
+                self.decider, tags, self._entities_named(scope, tags),
+                lambda tag: [m.content for m in self.get_all(
+                    user_id=user_id, agent_id=agent_id, run_id=run_id,
+                    categories=[tag], limit=TAG_EXAMPLES)],
+                self._tag_vectors(tags),
             )
             for group in judged:
                 remove = set(group["variants"]) - {group["canonical"]}

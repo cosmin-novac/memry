@@ -190,7 +190,7 @@ def _tag_judge(same: float):
         name = "stub"
         available = True
         calibrated = True
-        tag_merge_probability = 0.80
+        tag_merge_probability = 0.55
 
         def __init__(self):
             self.states = []
@@ -220,7 +220,7 @@ def test_a_judged_tag_pair_merges_into_the_more_used_tag(verbatim_store):
 
 
 def test_a_tag_pair_under_the_threshold_stays(verbatim_store):
-    verbatim_store.decider = _tag_judge(0.7)
+    verbatim_store.decider = _tag_judge(0.5)
     _tagged(verbatim_store, "quality assurance", 5)
     _tagged(verbatim_store, "qa", 1)
     verbatim_store.merge_obvious_topics(user_id="ada")
@@ -246,4 +246,5 @@ def test_the_judge_is_told_which_tags_name_an_entity(verbatim_store):
     _tagged(verbatim_store, "memry", 5)
     verbatim_store.merge_obvious_topics(user_id="ada")
     assert judge.states and all('a product named "Memry"' in s for s in judge.states)
+    assert all("memry fact 4" in s and "memory fact 4" in s for s in judge.states)
     assert len(verbatim_store.categories(user_id="ada")) == 2

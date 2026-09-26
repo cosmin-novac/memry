@@ -352,9 +352,9 @@ class JevDecider(Decider):
     # different things scored above 0.79 (evals/identity_resolution_benchmark.py).
     calibrated = True
     pair_merge_probability = 0.95
-    # 379 candidate tag pairs from a real store, two runs: nothing wrong from
-    # 0.80, the highest pair of two subjects at 0.64 ("memory" and "memry").
-    tag_merge_probability = 0.80
+    # 379 candidate tag pairs from a real store, 10 memories per tag, two runs:
+    # nothing wrong from 0.55, the highest pair of two subjects at 0.46.
+    tag_merge_probability = 0.55
 
     def __init__(self, cfg: DecisionConfig) -> None:
         self.cfg = cfg
