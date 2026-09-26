@@ -178,7 +178,8 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
 2. **Save time (`resolve_mentions`).** Each extracted name is looked up across the whole
    namespace (not only the save's session): entities with that name or alias, plus up to
    five from the name index (a rare shared word, similar spelling, a typo, initials, a
-   name close in meaning with a semantic embedder). The owner's name attaches to the owner
+   name close in meaning with a semantic embedder). Initials may skip the words a name
+   writes in lower case ("ICAM" and "Ilustre Colegio de la Abogacía de Madrid"). The owner's name attaches to the owner
    entity without a comparison. Every other candidate is compared with the new memory.
    A name the store already has joins the entity of that name with the highest P(same),
    unless the judge says "different" at 0.5 or more; the merge bar does not apply. (Held
@@ -200,13 +201,25 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    50 memories). Keep apart for good when P(different) reaches 0.5, but only from 10
    memories on. Anything else waits, and nobody is asked.
 5. **The funnel.** A waiting pair is compared again only when its smaller side reaches
-   3, 10 and 50 memories, and never after that: at most four comparisons. With Jev this
-   check runs on every save that mentions either side; it costs nothing unless a step
-   was reached. A merge restarts the funnel for the merged entity's open pairs.
+   3, 10 and 50 memories, and never after that. With Jev this check runs on every save
+   that mentions either side; it costs nothing unless a step was reached. A merge
+   restarts the funnel for the merged entity's open pairs.
+   **Conversation step (step 2).** A pair still waiting after the first comparison,
+   with a side of fewer than 3 memories, is compared once more with up to 5 other
+   memories from the conversations that saved that side's memories (same session, or
+   the same client and context label, within 3 hours), closest in meaning, leaving out
+   any memory that names either side. It runs only once those memories are an hour old,
+   so a conversation still adding memories is not judged on part of them, and it is
+   skipped (counted as done) when there is nothing to add. It uses the first step's bar
+   until it is measured on its own.
 6. **The weekly pass (`resolve_entities`, upkeep key `dedup_entities`).** It raises new
    pairs from the name index over all entities (identical names included) and pairs the
-   owner with the three people whose memories are closest to its own, then compares every
-   open pair that reached a new step. When the owner merges with a person, the person
+   owner with the three people whose memories are closest to its own. Names that only
+   share a word written in capitals ("PR #42" and "the Dutch address PR") are looked at
+   by the judge on the two names alone first, up to 10 per name and 20 names per pass;
+   a pair it rules out (P(different) of 0.9 or more, provisional) is recorded as
+   rejected and not looked at again. Then it compares every open pair that reached a
+   new step. When the owner merges with a person, the person
    keeps the name and becomes the owner. It also removes orphan entities.
 7. **Descriptions** are built from up to 50 memories when an entity is opened or recalled
    into context, not on the save path.

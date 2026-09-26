@@ -32,6 +32,7 @@ from ..providers.decisions import (
 from ..providers.llm import LLM
 from .extraction import parse_lenient_json
 from .identity import (
+    NAME_CHECKS_PER_PASS,
     Mention,
     NameIndex,
     closest_people,
@@ -41,6 +42,7 @@ from .identity import (
     name_vectors,
     pair_reason,
     parallel,
+    worth_comparing,
 )
 
 IDENTITY_SCHEMA: dict[str, Any] = {
@@ -765,11 +767,38 @@ def propose_same_name_duplicates(
     if judges_pairs(decider):
         index = NameIndex(entities, name_vectors(embed, entities))
         vectors = index.vectors
+        looked: set[frozenset[str]] = set()
+        checks = 0
         for entity in entities:
-            for other in index.candidates(entity.name, vector=vectors.get(entity.id),
-                                          exclude={entity.id}):
+            found = index.candidates(entity.name, vector=vectors.get(entity.id),
+                                     exclude={entity.id})
+            for other in found:
                 if entity.id < other.id:
                     pairs.append((entity, other))
+            # Names that only share a word in capitals ("PR #42" and "the Dutch
+            # address PR"): the judge looks at the two names first, and a pair
+            # it rules out is recorded, so it is not looked at again.
+            if checks >= NAME_CHECKS_PER_PASS:
+                continue
+            loose = [
+                other for other in index.loose_candidates(
+                    entity.name, exclude={entity.id, *(o.id for o in found)})
+                if frozenset((entity.id, other.id)) not in looked
+                and backend.find_proposal(entity.id, other.id) is None
+            ]
+            if not loose:
+                continue
+            checks += 1
+            looked.update(frozenset((entity.id, other.id)) for other in loose)
+            kept, ruled_out = worth_comparing(decider, entity, loose)
+            pairs += [(entity, other) for other in kept]
+            for other, different in ruled_out:
+                backend.add_proposal(MergeProposal(
+                    entity_a=entity.id, entity_b=other.id, user_id=scope.user_id,
+                    confidence=round(1 - different, 3), status="rejected",
+                    reason=f"the names alone rule it out: P(different) {different:.2f}",
+                    decided_at=utcnow(),
+                ))
         if owner is not None:
             pairs[:0] = [(owner, person)
                          for person in closest_people(backend, scope, owner, entities)]
@@ -909,6 +938,11 @@ def resolve_open_proposals(
                 backend.update_proposal_judgement(
                     proposal.id, confidence=verdict.probabilities["same"],
                     reason=pair_reason(judge, verdict.probabilities),
+                    compared_step=verdict.step,
+                )
+            elif verdict.step != proposal.compared_step:  # a step with nothing to ask
+                backend.update_proposal_judgement(
+                    proposal.id, confidence=proposal.confidence, reason=proposal.reason,
                     compared_step=verdict.step,
                 )
             outcome["kept"] += 1

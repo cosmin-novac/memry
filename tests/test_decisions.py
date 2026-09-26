@@ -1101,10 +1101,155 @@ def test_an_acronym_holds_the_first_letter_of_every_word():
 
     for short, long in (("AWS", "Amazon Web Services"), ("KfW", "Kreditanstalt für Wiederaufbau"),
                         ("BSFZ", "Bescheinigungsstelle Forschungszulage"),
-                        ("GTM", "Google Tag Manager"), ("qa", "quality assurance")):
+                        ("GTM", "Google Tag Manager"), ("qa", "quality assurance"),
+                        ("ICAM", "Ilustre Colegio de la Abogacía de Madrid")):
         assert is_acronym_of(short, long), short
     assert not is_acronym_of("action", "ai applications")  # no second "a"
     assert not is_acronym_of("api", "ai applications")
+    assert not is_acronym_of("icm", "Ilustre Colegio de la Abogacía de Madrid")  # no "A"
+
+
+def _conversation(store, entity, texts, *, run_id="chat-1", hours_ago=2.0):
+    """Memories saved in one conversation ``hours_ago``; the first names
+    ``entity`` (when given), the others name nothing."""
+    from datetime import datetime, timedelta, timezone
+
+    from memry.models import EntityMention, Memory
+
+    at = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
+    saved = []
+    for i, text in enumerate(texts):
+        memory = store.backend.insert_memory(Memory(
+            content=text, user_id="ada", run_id=run_id, created_at=at, updated_at=at))
+        if i == 0 and entity is not None:
+            store.backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
+                                                    surface=entity.name))
+        saved.append(memory)
+    return saved
+
+
+def _waiting_pair(store, hours_ago=2.0, others=("The user is renovating the kitchen",)):
+    from memry.models import Entity, MergeProposal
+
+    weber = _entity_with(store, "Johnny Weber",
+                         [f"Johnny Weber rewired the kitchen socket {i}" for i in range(12)], "person")
+    johnny = store.backend.insert_entity(Entity(
+        name="Johnny", normalized="johnny", entity_type="person", user_id="ada"))
+    _conversation(store, johnny, ["Johnny comes on Tuesday", *others], hours_ago=hours_ago)
+    store.backend.add_proposal(MergeProposal(
+        entity_a=weber.id, entity_b=johnny.id, user_id="ada", compared_step=1))
+    return weber, johnny
+
+
+def _kitchen(state):
+    return (0.99, 0.0) if "renovating the kitchen" in state else (0.8, 0.1)
+
+
+def test_a_thin_waiting_pair_is_compared_once_more_with_its_conversation():
+    """"Johnny" (1 memory) waited against "Johnny Weber" at the first step. Once
+    the conversation that saved it is over, the pair is compared once more with
+    that conversation's other memories, and merges on them."""
+    store, _, judge = _judged_store(_kitchen)
+    _waiting_pair(store)
+    assert store.resolve_entities(user_id="ada")["confirmed"] == 1
+    [state, _] = judge.states
+    assert "Other memories from the same conversations" in state
+    assert "The user is renovating the kitchen" in state
+    assert [e.name for e in store.entities(user_id="ada")] == ["Johnny Weber"]
+    store.close()
+
+
+def test_a_conversation_still_going_is_not_used_yet():
+    store, _, judge = _judged_store(_kitchen)
+    _waiting_pair(store, hours_ago=0.2)
+    store.resolve_entities(user_id="ada")
+    assert judge.states == []
+    [proposal] = store.merge_proposals(user_id="ada")
+    assert proposal.compared_step == 1  # still owed
+    store.close()
+
+
+def test_the_conversation_step_is_asked_once_and_shows_no_memory_naming_either_side():
+    from memry.models import EntityMention, Scope
+
+    store, _, judge = _judged_store(lambda state: (0.8, 0.1))
+    weber, _ = _waiting_pair(store, others=("The user is renovating the kitchen",
+                                            "Johnny Weber sent the invoice"))
+    naming = [m for m in store.backend.list_memories(Scope(user_id="ada"), limit=100)
+              if m.content == "Johnny Weber sent the invoice"][0]
+    store.backend.add_mention(EntityMention(entity_id=weber.id, memory_id=naming.id,
+                                            surface="Johnny Weber"))
+    store.resolve_entities(user_id="ada")
+    assert len(judge.states) == 2
+    assert all("renovating the kitchen" in s for s in judge.states)
+    assert not any(s.count("Johnny Weber sent the invoice") > 1 for s in judge.states)
+    assert [p.compared_step for p in store.merge_proposals(user_id="ada")] == [2]
+    store.resolve_entities(user_id="ada")
+    assert len(judge.states) == 2  # not asked again
+    store.close()
+
+
+def test_the_conversation_step_with_nothing_to_add_asks_nothing():
+    store, _, judge = _judged_store(_kitchen)
+    _waiting_pair(store, others=())
+    store.resolve_entities(user_id="ada")
+    assert judge.states == []
+    assert [p.compared_step for p in store.merge_proposals(user_id="ada")] == [2]
+    store.close()
+
+
+def test_words_written_in_capitals():
+    from memry.intelligence.identity import upper_words
+
+    assert upper_words("PR #42") == {"pr"}
+    assert upper_words("the Dutch address PR") == {"pr"}
+    assert upper_words("ICAM") == {"icam"}
+    assert upper_words("Fundation GmbH") == set()
+    assert upper_words("A") == set()
+
+
+def test_names_sharing_a_word_in_capitals_are_looked_at_before_they_are_compared():
+    """"PR #42" shares only "PR" with "the Dutch address PR" and with "PR #43".
+    The judge looks at the names first: "PR #43" is ruled out and recorded, so
+    it is not looked at again; the other pair is compared on its memories."""
+    from memry.providers.decisions import Answers
+
+    class _NameJudge(_PairJudge):
+        def __init__(self):
+            super().__init__(lambda state: (0.5, 0.2))
+            self.looks: list[tuple[str, str]] = []
+
+        def decide(self, state, questions):
+            if "pair" in questions:
+                return super().decide(state, questions)
+            out = {}
+            for key, question in questions.items():
+                if not key.startswith("n"):
+                    continue
+                self.looks.append((state, question.instructions))
+                both = state + question.instructions
+                different = 0.97 if "#42" in both and "#43" in both else 0.1
+                out[key] = Answer("different" if different > 0.5 else "possible",
+                                  {"different": different, "possible": 1 - different}, 0.9, True)
+            return Answers(out)
+
+    judge = _NameJudge()
+    store, _ = _jonas_store(judge, "PR #42", "code")
+    _entity_with(store, "PR #42", ["PR #42 changes the Dutch address form"], "code")
+    _entity_with(store, "the Dutch address PR", ["The Dutch address PR was reviewed by María"], "code")
+    _entity_with(store, "PR #43", ["PR #43 updates the footer"], "code")
+    store.resolve_entities(user_id="ada")
+    compared = {frozenset(_names(state)) for state in judge.states}
+    assert frozenset({"PR #42", "the Dutch address PR"}) in compared
+    assert frozenset({"PR #42", "PR #43"}) not in compared
+    from memry.models import Scope
+
+    [ruled_out] = store.backend.list_proposals(Scope(user_id="ada"), status="rejected")
+    assert "names alone" in ruled_out.reason
+    looks = len(judge.looks)
+    store.resolve_entities(user_id="ada")
+    assert len(judge.looks) == looks  # nothing new to look at
+    store.close()
 
 
 def test_names_close_in_meaning_are_compared_when_there_are_vectors():

@@ -13,6 +13,7 @@ import json
 import re
 import sqlite3
 import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1635,6 +1636,34 @@ class LocalBackend(MemoryBackend):
                 (r["id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows
             )
         return out
+
+    def session_memories(
+        self, memory: Memory, *, hours: float = 3.0, limit: int = 50
+    ) -> list[Memory]:
+        context = (memory.metadata or {}).get("context")
+        if memory.run_id:
+            same, params = "run_id = ?", [memory.run_id]
+        elif memory.agent_id and context:
+            same, params = "agent_id = ? AND json_extract(metadata, '$.context') = ?", [
+                memory.agent_id, context]
+        else:
+            return []
+        try:
+            at = datetime.fromisoformat(memory.created_at)
+        except (TypeError, ValueError):
+            return []
+        window = timedelta(hours=hours)
+        owner = "user_id IS NULL" if memory.user_id is None else "user_id = ?"
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {_MEMORY_COLS} FROM memories WHERE {owner} AND id != ? "
+                f"AND invalid_at IS NULL AND {same} AND created_at BETWEEN ? AND ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (*([] if memory.user_id is None else [memory.user_id]), memory.id, *params,
+                 (at - window).isoformat(timespec="seconds"),
+                 (at + window).isoformat(timespec="seconds"), limit),
+            ).fetchall()
+        return [_row_to_memory(r) for r in rows]
 
     @staticmethod
     def _row_to_entity(row: sqlite3.Row) -> Entity:

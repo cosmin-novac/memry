@@ -487,6 +487,14 @@ class MemoryBackend(ABC):
         """The stored embedding of each of these memories that has one."""
         return {}
 
+    def session_memories(
+        self, memory: Memory, *, hours: float = 3.0, limit: int = 50
+    ) -> list[Memory]:
+        """Other active memories saved in the same conversation as ``memory``,
+        within ``hours`` of it: the same session, or without one the same client
+        and context label. A backend that cannot tell returns none."""
+        return []
+
     def add_proposal(self, proposal: MergeProposal) -> MergeProposal:
         return proposal
 

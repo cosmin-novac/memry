@@ -56,6 +56,7 @@ import unicodedata
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
 import numpy as np
@@ -106,6 +107,15 @@ EDIT_SIMILARITY = 0.8
 MEANING_SIMILARITY = 0.6
 #: Most candidates compared for one name, best first.
 CANDIDATES_PER_NAME = 5
+#: Most names looked at for one name on a shared word written in capitals
+#: ("PR" in "PR #42" and "the Dutch address PR"), and most of those looks per
+#: weekly pass. Such a word pairs too many names to compare them all: the judge
+#: first rules out, on the two names alone, the ones that cannot be one thing.
+LOOSE_PER_NAME = 10
+NAME_CHECKS_PER_PASS = 20
+#: P(different) from which the judge's look at two names alone rules the pair
+#: out. Provisional: not measured yet.
+NAME_CHECK_SKIP = 0.9
 #: The comparison funnel. A pair is compared when it is found, and again only
 #: when its smaller side reaches the next of these memory counts; after the
 #: last, never. The smaller side is shown whole (up to ``memories_shown``), so
@@ -131,6 +141,21 @@ RECENT_SHARE = 0.3
 #: P(same) 0.99. Keeping apart from the first step lost that pair for good;
 #: from step 10 no true pair was lost, for 74-76 comparisons instead of 45-47.
 APART_STEP = 10
+#: A step between the first two of ``PAIR_STEPS``. A pair still waiting after
+#: its first comparison, with a side of fewer than ``PAIR_STEPS[1]`` memories,
+#: is compared once more with other memories from the conversations that saved
+#: that side's ("the user is renovating the kitchen" beside "Johnny comes on
+#: Tuesday"). It is merged on the bar of the first step until this step has
+#: been measured on its own.
+CONTEXT_STEP = 2
+#: Memories from the same conversations shown per side with few memories.
+CONTEXT_MEMORIES = 5
+#: How old that side's newest memory must be before its conversation counts
+#: as over. Memories a conversation is still adding would be missing.
+CONTEXT_QUIET_HOURS = 1.0
+#: Memories within this many hours of a memory, in its session (or, without
+#: one, with its client and context label), count as the same conversation.
+SESSION_HOURS = 3.0
 #: People compared with the store owner on their memories alone, besides the
 #: ones whose names are worth comparing: an account named "admin", or none,
 #: shares no name with the owner's.
@@ -173,6 +198,13 @@ def name_tokens(name: str) -> list[str]:
     return re.findall(r"[^\W_]+", _fold(name or ""))
 
 
+def upper_words(name: str) -> set[str]:
+    """The words a name writes in capitals, 2 to 6 letters long ("PR",
+    "ICAM", "AB"): identifiers that several names of one thing may share."""
+    return {_fold(w) for w in re.findall(r"[^\W\d_]+", name or "")
+            if 2 <= len(w) <= 6 and w.isupper()}
+
+
 def _grams(name: str) -> set[str]:
     compact = "".join(name_tokens(name))
     return {compact[i:i + 3] for i in range(len(compact) - 2)} or {compact}
@@ -202,18 +234,24 @@ def is_acronym_of(short: str, long: str) -> bool:
     of ``long`` in order: "AWS" and "Amazon Web Services", "BSFZ" and
     "Bescheinigungsstelle Forschungszulage", "KfW" and "Kreditanstalt für
     Wiederaufbau". Without the second condition "action" counted as an
-    acronym of "ai applications"."""
+    acronym of "ai applications". In a name that capitalizes its words, the
+    words written in lower case ("de", "la", "für") may be left out: "ICAM" and
+    "Ilustre Colegio de la Abogacía de Madrid"."""
     parts, words = name_tokens(short), name_tokens(long)
     if len(parts) != 1 or len(words) < 2:
         return False
+    written = re.findall(r"[^\W_]+", long)
+    needed = [w for w, as_written in zip(words, written) if not as_written[:1].islower()]
+    if len(written) != len(words) or not needed:
+        needed = words
     letters, text = parts[0], "".join(words)
-    if not (2 <= len(letters) <= 6) or len(letters) < len(words) or letters[0] != text[0]:
+    if not (2 <= len(letters) <= 6) or len(letters) < len(needed) or letters[0] != text[0]:
         return False
     rest = iter(text)
     if not all(letter in rest for letter in letters):
         return False
     rest = iter(letters)
-    return all(word[0] in rest for word in words)
+    return all(word[0] in rest for word in needed)
 
 
 class NameIndex:
@@ -247,6 +285,10 @@ class NameIndex:
             if len(tokens) == 1:
                 self._short.append(eid)
         self._counts = counts
+        self._by_upper: dict[str, set[str]] = defaultdict(set)
+        for eid, entity in self.entities.items():
+            for word in upper_words(entity.name):
+                self._by_upper[word].add(eid)
         self._vector_ids = [eid for eid in self.entities if vectors and eid in vectors]
         self._matrix = (
             np.vstack([vectors[eid] for eid in self._vector_ids]) if self._vector_ids else None
@@ -310,6 +352,71 @@ class NameIndex:
                         key=lambda eid: -score[eid])
         return [self.entities[eid] for eid in ranked[:limit]]
 
+    def loose_candidates(
+        self, name: str, *, exclude: Iterable[str] = (), limit: int = LOOSE_PER_NAME
+    ) -> list[Entity]:
+        """Entities whose names share a word written in capitals with ``name``
+        ("PR #42" and "the Dutch address PR"): the rarest word first, then the
+        most recently updated. Too loose to compare on without a look at the
+        names first (``worth_comparing``); the caller excludes what
+        ``candidates`` found."""
+        excluded = set(exclude)
+        found: list[str] = []
+        for word in sorted(upper_words(name), key=lambda w: len(self._by_upper.get(w, ()))):
+            members = sorted(self._by_upper.get(word, ()),
+                             key=lambda eid: self.entities[eid].updated_at or "", reverse=True)
+            found += [eid for eid in members if eid not in excluded and eid not in found]
+        return [self.entities[eid] for eid in found[:limit]]
+
+
+NAME_CHECK_CRITERIA = {
+    "possible": (
+        "It could: one name may be another way of writing or describing the "
+        "other (shorter or longer, an abbreviation, a translation, a description "
+        "of the thing), and nothing in the two names rules out one thing."
+    ),
+    "different": (
+        "It cannot: the names carry different numbers, identifiers, people, "
+        "organizations or places, or share only a common word or abbreviation "
+        "such as a legal form."
+    ),
+}
+
+
+def worth_comparing(
+    decider: Decider, entity: Entity, others: list[Entity]
+) -> tuple[list[Entity], list[tuple[Entity, float]]]:
+    """Look at names alone before comparing on memories: one question per name
+    in ``others``, in one call. Returns the names worth comparing with
+    ``entity`` and the ones ruled out, with P(different). Without an answer a
+    name is worth comparing."""
+    if not others:
+        return [], []
+
+    def typed(e: Entity) -> str:
+        return f'"{e.name}" ({e.entity_type or "type unknown"})'
+
+    questions = {
+        f"n{i}": Choice(instructions=f"Could {typed(other)} name the same thing as {typed(entity)}?",
+                        criteria=NAME_CHECK_CRITERIA)
+        for i, other in enumerate(others)
+    }
+    try:
+        answers = decider.decide(
+            f"A name from one person's long-term memory store: {typed(entity)}.", questions)
+    except Exception:
+        return list(others), []
+    kept: list[Entity] = []
+    ruled_out: list[tuple[Entity, float]] = []
+    for i, other in enumerate(others):
+        answer = answers[f"n{i}"]
+        different = float((answer.probabilities or {}).get("different", 0.0)) if answer.available else 0.0
+        if different >= NAME_CHECK_SKIP:
+            ruled_out.append((other, different))
+        else:
+            kept.append(other)
+    return kept, ruled_out
+
 
 @dataclass
 class Source:
@@ -352,6 +459,10 @@ class Profile:
     sources: list[Source] = field(default_factory=list)
     #: Whether this entity is the owner of the store (the user).
     owner: bool = False
+    #: Other memories from the conversations that saved these facts, naming
+    #: neither side, with where each came from (``CONTEXT_STEP`` only).
+    context: list[str] = field(default_factory=list)
+    context_sources: list[Source] = field(default_factory=list)
 
 
 @dataclass
@@ -363,12 +474,18 @@ class Mention:
     memory: Memory
 
 
-def profile_from(subject: Entity | Mention, memories: list[Memory]) -> Profile:
-    """One side of a comparison, showing ``memories`` as its facts."""
+def profile_from(
+    subject: Entity | Mention, memories: list[Memory], context: Iterable[Memory] = ()
+) -> Profile:
+    """One side of a comparison, showing ``memories`` as its facts and
+    ``context`` as other memories of the conversations that saved them."""
     facts = [m.content for m in memories]
     sources = [source_of(m) for m in memories]
+    around = list(context)
+    extra = {"context": [m.content for m in around],
+             "context_sources": [source_of(m) for m in around]}
     if isinstance(subject, Mention):
-        return Profile(subject.name, subject.entity_type, facts, sources=sources)
+        return Profile(subject.name, subject.entity_type, facts, sources=sources, **extra)
     home = (subject.metadata or {}).get("home")
     return Profile(
         name=subject.name,
@@ -378,6 +495,7 @@ def profile_from(subject: Entity | Mention, memories: list[Memory]) -> Profile:
         home=home.get("name", "") if isinstance(home, dict) else "",
         sources=sources,
         owner=bool((subject.metadata or {}).get("owner")),
+        **extra,
     )
 
 
@@ -424,27 +542,29 @@ def pair_state(a: Profile, b: Profile) -> str:
     texts: dict[str, int] = {}
     sessions: dict[str, int] = {}
     for profile in (a, b):
-        for source in profile.sources:
+        for source in profile.sources + profile.context_sources:
             if source.text:
                 texts.setdefault(source.text, len(texts) + 1)
             if source.session:
                 sessions.setdefault(source.session, len(sessions) + 1)
 
+    def described(src: Source) -> str:
+        parts = [f"recorded {src.recorded}"] if src.recorded else []
+        if src.true_from and src.true_from != src.recorded[:10]:
+            parts.append(f"true from {src.true_from}")
+        if src.text:
+            parts.append(f"saved text {texts[src.text]}")
+        if src.session:
+            parts.append(f"session {sessions[src.session]}")
+        if src.client:
+            parts.append(f"client {src.client}")
+        if src.context:
+            parts.append(f'context "{src.context}"')
+        return "; ".join(parts)
+
     def origin(p: Profile, i: int) -> str:
         if i < len(p.sources):
-            src = p.sources[i]
-            parts = [f"recorded {src.recorded}"] if src.recorded else []
-            if src.true_from and src.true_from != src.recorded[:10]:
-                parts.append(f"true from {src.true_from}")
-            if src.text:
-                parts.append(f"saved text {texts[src.text]}")
-            if src.session:
-                parts.append(f"session {sessions[src.session]}")
-            if src.client:
-                parts.append(f"client {src.client}")
-            if src.context:
-                parts.append(f'context "{src.context}"')
-            return "; ".join(parts)
+            return described(p.sources[i])
         return p.dates[i] if i < len(p.dates) else ""
 
     def side(label: str, p: Profile) -> str:
@@ -461,6 +581,12 @@ def pair_state(a: Profile, b: Profile) -> str:
             where = origin(p, i)
             lines.append(f"- [{where}] {fact}" if where else f"- {fact}")
         lines += [] if p.facts else ["- (no facts)"]
+        if p.context:
+            lines.append("Other memories from the same conversations (they name "
+                         "neither entity):")
+            for i, text in enumerate(p.context):
+                where = described(p.context_sources[i]) if i < len(p.context_sources) else ""
+                lines.append(f"- [{where}] {text}" if where else f"- {text}")
         return "\n".join(lines)
 
     if any(p.sources for p in (a, b)):
@@ -472,6 +598,9 @@ def pair_state(a: Profile, b: Profile) -> str:
         header = " Each fact starts with the date it was recorded."
     else:
         header = ""
+    if any(p.context for p in (a, b)):
+        header += (" An entity with few facts may also show other memories from the "
+                   "conversations that saved its facts; they name neither entity.")
     return ("Two entries from one person's long-term memory store." + header
             + "\n\n" + side("A", a) + "\n\n" + side("B", b))
 
@@ -525,11 +654,17 @@ def compare(
     once more with 50. Before ``APART_STEP`` a pair waits instead of being
     kept apart.
 
+    A pair still waiting after its first comparison, with a side of fewer
+    than ``PAIR_STEPS[1]`` memories, is compared once more at
+    ``CONTEXT_STEP``: with other memories of the conversations that saved
+    that side's, once they have been quiet for ``CONTEXT_QUIET_HOURS``.
+
     ``b`` is an entity, or a mention a save has not attached yet.
     """
     count_b = 1 if isinstance(b, Mention) else backend.count_entity_memories(b.id)
-    owed = rounds(compared, min(backend.count_entity_memories(a.id), count_b))
-    if not owed:
+    smaller = min(backend.count_entity_memories(a.id), count_b)
+    owed = rounds(compared, smaller)
+    if not owed and not _context_owed(compared, smaller):
         return Verdict(None, "wait", compared)
     pool_a = backend.entity_memories(a.id, limit=PAIR_POOL)
     pool_b = ([b.memory] if isinstance(b, Mention)
@@ -542,8 +677,9 @@ def compare(
     if shared:
         pool_a = [m for m in pool_a if m.id not in shared]
         pool_b = [m for m in pool_b if m.id not in shared]
-        owed = rounds(compared, min(len(pool_a), len(pool_b)))
-        if not owed:
+        smaller = min(len(pool_a), len(pool_b))
+        owed = rounds(compared, smaller)
+        if not owed and not _context_owed(compared, smaller):
             return Verdict(None, "wait", compared)
     vectors = backend.vectors_of([m.id for m in pool_a + pool_b])
     ids_a, ids_b = [m.id for m in pool_a], [m.id for m in pool_b]
@@ -561,7 +697,66 @@ def compare(
             verdict.action = "wait"
         if verdict.action != "wait":
             break
+    if verdict.action == "wait" and verdict.step == PAIR_STEPS[0]:
+        return _in_context(decider, backend, a, b, pool_a, pool_b, vectors, verdict)
     return verdict
+
+
+def _context_owed(compared: int, smaller: int) -> bool:
+    return compared == PAIR_STEPS[0] and 1 <= smaller < PAIR_STEPS[1]
+
+
+def _recorded(memory: Memory) -> datetime | None:
+    try:
+        at = datetime.fromisoformat(memory.created_at or "")
+    except ValueError:
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def _in_context(
+    decider: Decider, backend: MemoryBackend, a: Entity, b: Entity | Mention,
+    pool_a: list[Memory], pool_b: list[Memory], vectors: dict[str, np.ndarray],
+    verdict: Verdict,
+) -> Verdict:
+    """The ``CONTEXT_STEP`` comparison of a pair ``verdict`` left waiting at
+    the first step. Nothing is asked while a conversation may still be adding
+    memories; when there is nothing to add, the step counts as done."""
+    thin = [pool if len(pool) < PAIR_STEPS[1] else [] for pool in (pool_a, pool_b)]
+    quiet = datetime.now(timezone.utc) - timedelta(hours=CONTEXT_QUIET_HOURS)
+    for memory in thin[0] + thin[1]:
+        at = _recorded(memory)
+        if at is None or at > quiet:
+            return verdict
+    named = {m.id for m in pool_a + pool_b}
+    sides = {e.id for e in (a, b) if isinstance(e, Entity)}
+    context: list[list[Memory]] = []
+    for pool in thin:
+        found: dict[str, Memory] = {}
+        for memory in pool:
+            for other in backend.session_memories(memory, hours=SESSION_HOURS):
+                if other.id not in named and other.id not in found and not sides & {
+                        e.id for e in backend.entities_of_memory(other.id)}:
+                    found[other.id] = other
+        around = list(found.values())
+        if len(around) > CONTEXT_MEMORIES:
+            near = backend.vectors_of(list(found) + [m.id for m in pool])
+            keep = {m.id for m in choose(around, CONTEXT_MEMORIES, near, [m.id for m in pool])}
+            around = [m for m in around if m.id in keep]
+        context.append(around)
+    if not any(context):
+        return Verdict(verdict.probabilities, verdict.action, CONTEXT_STEP)
+    ids_a, ids_b = [m.id for m in pool_a], [m.id for m in pool_b]
+    shown = memories_shown(PAIR_STEPS[0])
+    probabilities = judge_pair(
+        decider,
+        profile_from(a, choose(pool_a, shown, vectors, ids_b), context[0]),
+        profile_from(b, choose(pool_b, shown, vectors, ids_a), context[1]),
+    )
+    if probabilities is None:
+        return verdict
+    action = decide_pair(probabilities, decider, CONTEXT_STEP)
+    return Verdict(probabilities, "wait" if action == "apart" else action, CONTEXT_STEP)
 
 
 def is_owner(entity: Entity | Mention) -> bool:
