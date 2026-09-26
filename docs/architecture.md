@@ -179,9 +179,14 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    namespace (not only the save's session): entities with that name or alias, plus up to
    five from the name index (a rare shared word, similar spelling, a typo, initials, a
    name close in meaning with a semantic embedder). The owner's name attaches to the owner
-   entity without a comparison. Every other candidate is compared with the new memory;
-   the first "merge" wins, otherwise a new entity is made and each waiting pair is
-   recorded as a proposal (a kept-apart pair is recorded too).
+   entity without a comparison. Every other candidate is compared with the new memory.
+   A name the store already has joins the entity of that name with the highest P(same),
+   unless the judge says "different" at 0.5 or more; the merge bar does not apply. (Held
+   to it, 88 of 431 mentions of a known name became one-memory entities in a replayed
+   store, and those never reached step 3.) For a name written another way, the first
+   "merge" wins. Otherwise a new entity is made and each waiting pair is recorded as a
+   proposal (a kept-apart pair is recorded too). When the judge cannot answer (an
+   outage), the pair waits at step 0 and the weekly pass compares it again.
 3. **The comparison (`compare`).** The judge (Jev) gets both entries side by side, in
    both orders, and the answers are averaged. Each side shows its name, type,
    description (if one has been built), whether it is the store owner, and up to 10
