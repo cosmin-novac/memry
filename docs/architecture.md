@@ -179,7 +179,10 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    namespace (not only the save's session): entities with that name or alias, plus up to
    five from the name index (a rare shared word, similar spelling, a typo, initials, a
    name close in meaning with a semantic embedder). Initials may skip the words a name
-   writes in lower case ("ICAM" and "Ilustre Colegio de la Abogacía de Madrid"). The owner's name attaches to the owner
+   writes in lower case ("ICAM" and "Ilustre Colegio de la Abogacía de Madrid"). A
+   one-word name is also paired with the names that carry that word when at most five
+   do ("Sofia" with "Sofia Marin" and "Sofia Petrescu"): in a store of under 150 names
+   three such names already make the word too common to count as rare. The owner's name attaches to the owner
    entity without a comparison. Every other candidate is compared with the new memory.
    A name the store already has joins the entity of that name with the highest P(same),
    unless the judge says "different" at 0.5 or more; the merge bar does not apply. (Held
@@ -212,6 +215,13 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    so a conversation still adding memories is not judged on part of them, and it is
    skipped (counted as done) when there is nothing to add. It uses the first step's bar
    until it is measured on its own.
+   **Choosing among namesakes.** No answer about a first name reaches the merge bar, but
+   the rest of a conversation tells namesakes apart (on 40 generated cases the right
+   person scored higher in 37 instead of 34). So in the weekly pass, a name with fewer
+   than 3 memories and open pairs to two or more entities, all asked at step 2, joins
+   the likeliest when it leads the next by 0.10 and has P(same) of at least 0.5
+   (`choose_among_candidates`; 29 right and 1 wrong on those cases). With one candidate
+   it keeps waiting, since it may be a third person. It asks the judge nothing.
 6. **The weekly pass (`resolve_entities`, upkeep key `dedup_entities`).** It raises new
    pairs from the name index over all entities (identical names included) and pairs the
    owner with the three people whose memories are closest to its own. Names that only

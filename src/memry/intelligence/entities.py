@@ -18,6 +18,7 @@ prior merge chains and auto-confirms only deterministic or high-confidence match
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from typing import Any, Callable
 
 from ..backends.base import MemoryBackend
@@ -32,7 +33,11 @@ from ..providers.decisions import (
 from ..providers.llm import LLM
 from .extraction import parse_lenient_json
 from .identity import (
+    CHOICE_FLOOR,
+    CHOICE_LEAD,
+    CONTEXT_STEP,
     NAME_CHECKS_PER_PASS,
+    PAIR_STEPS,
     Mention,
     NameIndex,
     closest_people,
@@ -956,4 +961,48 @@ def resolve_open_proposals(
                     compared_step=verdict.step,
                 )
             outcome["kept"] += 1
+    if proposal_ids is None and auto_confirm:
+        outcome["chosen"] = choose_among_candidates(backend=backend, scope=scope)
     return outcome
+
+
+def choose_among_candidates(*, backend: MemoryBackend, scope: Scope) -> int:
+    """Settle names with few memories that could be one of several entities.
+
+    "Sofia" (one memory) waits against both "Sofia Marin" and "Sofia
+    Petrescu": no answer about one first name reaches the merge bar. Once each
+    of its pairs has been asked with the rest of its conversation
+    (``identity.CONTEXT_STEP``), it joins the likeliest when that one leads the
+    next by ``identity.CHOICE_LEAD`` and has a P(same) of at least
+    ``identity.CHOICE_FLOOR``. With one candidate it keeps waiting: it may be
+    a third Sofia. Asks the judge nothing: it reads the answers stored on the
+    open pairs."""
+    options: dict[str, list[tuple[MergeProposal, str]]] = defaultdict(list)
+    counts: dict[str, int] = {}
+
+    def count(entity_id: str) -> int:
+        if entity_id not in counts:
+            counts[entity_id] = backend.count_entity_memories(entity_id)
+        return counts[entity_id]
+
+    for proposal in backend.list_proposals(scope, status="proposed", limit=1000):
+        a = backend.resolve_entity_id(proposal.entity_a)
+        b = backend.resolve_entity_id(proposal.entity_b)
+        if a is None or b is None or a == b:
+            continue
+        thin, other = (a, b) if count(a) <= count(b) else (b, a)
+        if count(thin) < PAIR_STEPS[1]:
+            options[thin].append((proposal, other))
+    chosen = 0
+    for thin_id, pairs in options.items():
+        if len(pairs) < 2 or any(p.compared_step != CONTEXT_STEP for p, _ in pairs):
+            continue
+        ranked = sorted(pairs, key=lambda pair: -pair[0].confidence)
+        (best, keep_id), (second, _) = ranked[0], ranked[1]
+        if best.confidence < CHOICE_FLOOR or best.confidence - second.confidence < CHOICE_LEAD:
+            continue
+        keep, thin = backend.get_entity(keep_id), backend.get_entity(thin_id)
+        if keep is not None and thin is not None and merge_pair(backend, keep, thin):
+            backend.set_proposal_status(best.id, "confirmed")
+            chosen += 1
+    return chosen

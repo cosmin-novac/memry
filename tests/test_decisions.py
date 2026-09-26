@@ -1216,6 +1216,59 @@ def test_the_conversation_step_with_nothing_to_add_asks_nothing():
     store.close()
 
 
+def test_a_one_word_name_is_compared_with_the_few_names_that_carry_it():
+    """Three names carrying "sofia" are too many for the word to count as rare
+    in a small store, yet "Sofia" is most likely one of them."""
+    from memry.intelligence.identity import NameIndex
+    from memry.models import Entity
+
+    def index(names):
+        return NameIndex([Entity(id=n, name=n, entity_type="person", user_id=None) for n in names])
+
+    sofias = index(["Sofia", "Sofia Marin", "Sofia Petrescu", "Carlos Ruiz", "Madrid"])
+    assert {e.name for e in sofias.candidates("Sofia", exclude={"Sofia"})} >= {
+        "Sofia Marin", "Sofia Petrescu"}
+    assert "Sofia" in {e.name for e in sofias.candidates("Sofia Marin", exclude={"Sofia Marin"})}
+    annas = index(["Anna"] + [f"Anna {s}" for s in ("Berg", "Cruz", "Dahl", "Egan", "Frey", "Gold")])
+    assert annas.candidates("Anna", exclude={"Anna"}) == []  # six Annas: the name alone says nothing
+
+
+def _namesakes(store, confidences, steps=None, hours_ago=2.0):
+    """"Sofia" (one memory, saved ``hours_ago``) with an open pair to each of
+    the people named in ``confidences`` (P(same) of each pair), compared at
+    ``steps``."""
+    from memry.models import Entity, MergeProposal
+
+    sofia = store.backend.insert_entity(Entity(
+        name="Sofia", normalized="sofia", entity_type="person", user_id="ada"))
+    _conversation(store, sofia, ["Sofia can come by on Thursday afternoon"], hours_ago=hours_ago)
+    people = {}
+    for i, (name, confidence) in enumerate(confidences.items()):
+        person = _entity_with(store, name, [f"{name} did job {j}" for j in range(10)], "person")
+        store.backend.add_proposal(MergeProposal(
+            entity_a=person.id, entity_b=sofia.id, user_id="ada", confidence=confidence,
+            compared_step=(steps or [2] * len(confidences))[i]))
+        people[name] = person
+    return sofia, people
+
+
+@pytest.mark.parametrize("confidences, steps, joins", [
+    ({"Sofia Marin": 0.80, "Sofia Petrescu": 0.60}, None, "Sofia Marin"),
+    ({"Sofia Marin": 0.80, "Sofia Petrescu": 0.75}, None, None),   # no clear lead
+    ({"Sofia Marin": 0.80}, None, None),                           # may be a third Sofia
+    ({"Sofia Marin": 0.80, "Sofia Petrescu": 0.60}, [2, 1], None),  # one not asked in context yet
+    ({"Sofia Marin": 0.45, "Sofia Petrescu": 0.20}, None, None),   # likelier not her
+])
+def test_a_name_that_could_be_several_people_joins_the_clear_favourite(confidences, steps, joins):
+    store, _, judge = _judged_store(lambda state: (0.5, 0.2))
+    # a pair still owed its conversation step waits for a conversation still going
+    sofia, people = _namesakes(store, confidences, steps, hours_ago=0.2 if steps else 2.0)
+    store.resolve_entities(user_id="ada")
+    merged_into = store.backend.resolve_entity_id(sofia.id)
+    assert merged_into == (people[joins].id if joins else sofia.id)
+    store.close()
+
+
 def test_words_written_in_capitals():
     from memry.intelligence.identity import upper_words
 

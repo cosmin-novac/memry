@@ -116,6 +116,15 @@ NAME_CHECKS_PER_PASS = 20
 #: P(different) from which the judge's look at two names alone rules the pair
 #: out. Provisional: not measured yet.
 NAME_CHECK_SKIP = 0.9
+#: A name with few memories that could be one of several entities ("Sofia":
+#: "Sofia Marin" or "Sofia Petrescu") joins the likeliest once every pair has
+#: been asked with the rest of its conversation (``CONTEXT_STEP``), when it
+#: leads the next by ``CHOICE_LEAD`` and is not less likely than not. On 40
+#: generated cases of namesakes in unrelated parts of a life, the lead of 0.10
+#: picked right 29 times and wrong once (a case whose conversation belonged to
+#: the other person); none reached the merge bar on its own.
+CHOICE_LEAD = 0.10
+CHOICE_FLOOR = 0.5
 #: The comparison funnel. A pair is compared when it is found, and again only
 #: when its smaller side reaches the next of these memory counts; after the
 #: last, never. The smaller side is shown whole (up to ``memories_shown``), so
@@ -285,6 +294,10 @@ class NameIndex:
             if len(tokens) == 1:
                 self._short.append(eid)
         self._counts = counts
+        self._holders: dict[str, set[str]] = defaultdict(set)
+        for eid, tokens in self._tokens.items():
+            for token in tokens:
+                self._holders[token].add(eid)
         self._by_upper: dict[str, set[str]] = defaultdict(set)
         for eid, entity in self.entities.items():
             for word in upper_words(entity.name):
@@ -342,6 +355,14 @@ class NameIndex:
             for eid in self._short:
                 if is_acronym_of(self.entities[eid].name, name):
                     score[eid] += 1.0
+        # A name of one word is the short form of the names that carry that
+        # word, when few do: "Sofia" and "Sofia Marin", "Sofia Petrescu". In a
+        # store of under 150 names three names carrying "sofia" are already too
+        # many for the word to count as rare, and namesakes are the case where
+        # a short name most needs comparing.
+        for word, short_ids in self._short_forms(tokens, name):
+            for eid in short_ids:
+                score[eid] += 1.0
         if vector is not None and self._matrix is not None:
             cosine = self._matrix @ vector
             for i in np.flatnonzero(cosine >= MEANING_SIMILARITY):
@@ -351,6 +372,28 @@ class NameIndex:
         ranked = sorted((eid for eid in score if eid not in excluded),
                         key=lambda eid: -score[eid])
         return [self.entities[eid] for eid in ranked[:limit]]
+
+    def _short_forms(self, tokens: set[str], name: str) -> list[tuple[str, set[str]]]:
+        """(word, entities) pairs for the short-form signal: for a one-word
+        ``name``, the names that carry the word; for a longer one, the one-word
+        names among its words. Only where the word is not rare (rare words
+        already pair the names) and few names carry it."""
+        if not self.rare_words:
+            return []
+
+        def few(word: str) -> bool:
+            return (len(word) >= 3 and self._counts.get(word, 0) > self._rare_at
+                    and len(self._holders.get(word, ())) <= CANDIDATES_PER_NAME + 1)
+
+        if len(tokens) == 1:
+            [word] = tokens
+            return [(word, set(self._holders[word]))] if few(word) else []
+        out = []
+        for eid in self._short:
+            [word] = self._tokens[eid]
+            if word in tokens and few(word):
+                out.append((word, {eid}))
+        return out
 
     def loose_candidates(
         self, name: str, *, exclude: Iterable[str] = (), limit: int = LOOSE_PER_NAME
