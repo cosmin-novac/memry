@@ -869,7 +869,7 @@ def test_a_pair_merges_on_the_average_of_both_orders():
 
 @pytest.mark.parametrize("same, different, entities, proposals", [
     (0.97, 0.0, 1, 0),   # merge
-    (0.30, 0.60, 2, 0),  # kept apart, nothing recorded
+    (0.30, 0.60, 2, 1),  # "apart" on one memory waits: APART_STEP
     (0.80, 0.10, 2, 1),  # waits for evidence
 ])
 def test_the_three_outcomes(same, different, entities, proposals):
@@ -952,14 +952,16 @@ def test_a_pair_with_50_memories_a_side_is_compared_with_10_then_50():
 
 
 def test_a_pair_kept_apart_is_not_compared_again():
+    """Kept apart once both sides have 10 memories, the pair is never asked
+    about again."""
     def answer(state):
         a, b = _names(state)
         return (0.99, 0.0) if a == b else (0.2, 0.7)
 
-    store, save, judge = _judged_store(answer)
-    save("Fundation GmbH's Finanzamt file number is 218/5713")
-    save("Fundation Ventures invests in robotics", as_name="Fundation Ventures")
-    assert store.merge_proposals(user_id="ada") == []
+    store, _, judge = _judged_store(answer)
+    _entity_with(store, "Fundation GmbH", [f"Fundation GmbH invoice {i}" for i in range(10)])
+    _entity_with(store, "Fundation Ventures", [f"Fundation Ventures deal {i}" for i in range(10)])
+    assert store.resolve_entities(user_id="ada")["rejected"] == 1
     asked = len(judge.states)
     store.resolve_entities(user_id="ada")
     assert len(judge.states) == asked

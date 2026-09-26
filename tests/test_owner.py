@@ -84,9 +84,11 @@ def test_the_owner_is_folded_into_the_person_it_is_found_to_be():
     store.close()
 
 
-def test_a_pair_with_the_owner_is_kept_apart_only_from_10_memories():
-    """With a few memories the owner read as someone the named person is not
-    (P(different) 0.90-0.95 on a real store) and as that person at 10."""
+def test_a_pair_is_kept_apart_only_from_10_memories():
+    """Keeping apart ends all comparing. With a few memories the owner read as
+    someone "Cosmin Novac" is not (P(different) 0.90-0.95 on a real store), and
+    "Fundation" as a different thing from "Fundation GmbH" (0.68-0.70); at 10
+    memories both read as one (P(same) 0.99 and 0.91-0.93)."""
     from memry.intelligence.identity import compare
 
     store, save, _, judge = _store(lambda state: (0.02, 0.95))
@@ -95,15 +97,15 @@ def test_a_pair_with_the_owner_is_kept_apart_only_from_10_memories():
     owner = store.backend.get_entity(owner.id)
     ada = _entity_with(store, "Ada Lindqvist", [f"Ada Lindqvist fact {i}" for i in range(12)],
                        "person")
+    bob = _entity_with(store, "Bob", ["Bob fixes bikes"], "person")
     assert compare(judge, store.backend, owner, ada).action == "wait"
+    assert compare(judge, store.backend, bob, ada).action == "wait"
     for i in range(9):
         memory = store.backend.insert_memory(Memory(content=f"The user fact {i}", user_id="ada"))
         store.backend.add_mention(EntityMention(entity_id=owner.id, memory_id=memory.id,
                                                 surface="the user"))
     verdict = compare(judge, store.backend, owner, ada, compared=1)
     assert (verdict.action, verdict.step) == ("apart", 10)
-    bob = _entity_with(store, "Bob", ["Bob fixes bikes"], "person")
-    assert compare(judge, store.backend, bob, ada).action == "apart"  # others: at once
     store.close()
 
 

@@ -27,7 +27,8 @@ in ``evals/identity_resolution_benchmark.py``, five runs:
   from the facts ("PR #92" twice with no repository, "R. Patel" twice). A
   deployment can lower it (``DecisionConfig.pair_merge_probability``): at
   0.85, 73-74 true pairs merged, and so did 4 of those unsettleable pairs;
-* a pair is kept apart from P(different) = 0.5. No true pair scored above 0.43;
+* a pair is kept apart from P(different) = 0.5, once its smaller side has 10
+  memories (``APART_STEP``); before, it waits. No true pair scored above 0.43;
 * anything else waits, and nobody is asked. A waiting pair is compared again
   only when its smaller side reaches the next step of ``PAIR_STEPS``
   (3, 10, then 50 memories), and never after the last: at most four
@@ -119,12 +120,14 @@ PAIR_POOL = 200
 #: entity mostly do not, and they left the judge unsure: "Fundation" against
 #: "Fundation GmbH" scored 0.76 with 3 recent facts per side and 0.59 with 10.
 RECENT_SHARE = 0.3
-#: A pair with the store owner in it is kept apart only from this step on;
-#: before, "apart" waits. With a few memories the owner reads as someone the
-#: named person is not: on a real store, the owner (1 or 3 memories) against
-#: "Cosmin Novac" gave P(different) 0.90-0.95, and at 10 memories P(same) 0.99.
-#: Other people stayed at P(different) 0.85-0.99 at every step.
-OWNER_APART_STEP = 10
+#: A pair is kept apart for good only from this step on; before, "apart"
+#: waits, since keeping apart ends all comparing. On 39 pairs from a real
+#: store, "Fundation" (1 memory) against "Fundation GmbH" gave P(different)
+#: 0.68-0.70 and at 10 memories P(same) 0.91-0.93; the store owner (1 or 3
+#: memories) against "Cosmin Novac" gave P(different) 0.90-0.95 and at 10
+#: P(same) 0.99. Keeping apart from the first step lost that pair for good;
+#: from step 10 no true pair was lost, for 74-76 comparisons instead of 45-47.
+APART_STEP = 10
 #: People compared with the store owner on their memories alone, besides the
 #: ones whose names are worth comparing: an account named "admin", or none,
 #: shares no name with the owner's.
@@ -515,14 +518,13 @@ def compare(
     compared at step ``compared`` (0: never). Nothing is asked when it has
     reached no new step. Otherwise it is compared with 10 memories per side,
     and, when that leaves it waiting and its smaller side has 50 memories,
-    once more with 50. A pair with the store owner in it waits instead of
-    being kept apart before ``OWNER_APART_STEP``.
+    once more with 50. Before ``APART_STEP`` a pair waits instead of being
+    kept apart.
 
     ``b`` is an entity, or a mention a save has not attached yet.
     """
     count_b = 1 if isinstance(b, Mention) else backend.count_entity_memories(b.id)
     owed = rounds(compared, min(backend.count_entity_memories(a.id), count_b))
-    owner = is_owner(a) or is_owner(b)
     if not owed:
         return Verdict(None, "wait", compared)
     pool_a = backend.entity_memories(a.id, limit=PAIR_POOL)
@@ -540,7 +542,7 @@ def compare(
         if probabilities is None:
             break
         verdict = Verdict(probabilities, decide_pair(probabilities, decider), step)
-        if verdict.action == "apart" and step < OWNER_APART_STEP and owner:
+        if verdict.action == "apart" and step < APART_STEP:
             verdict.action = "wait"
         if verdict.action != "wait":
             break
