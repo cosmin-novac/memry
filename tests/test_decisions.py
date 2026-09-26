@@ -1138,3 +1138,24 @@ def test_the_judge_sees_where_each_fact_came_from():
     owner = pair_state(Profile("the user", "person", ["User prefers tea"], owner=True),
                        Profile("Cosmin", "person", ["Cosmin drinks tea"]))
     assert "This entity is the owner of the memory store" in owner.split("ENTITY B")[0]
+
+
+def test_one_name_saved_in_two_sessions_is_one_entity():
+    """Looked up within the save's run, it became two entities that were never
+    compared."""
+    from conftest import fact, facts_response
+
+    llm = FakeLLM()
+    judge = _PairJudge(lambda state: (0.99, 0.0))
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64),
+                        decider=judge)
+    for text, run in (("Fundation GmbH's tax number is 218/5713", "r1"),
+                      ("Fundation GmbH has 150,000 euros in cash", "r2")):
+        llm.queue(facts_response(fact(text, entities=[
+            {"name": "Fundation GmbH", "type": "organization"}])))
+        if store.get_all(user_id="ada"):
+            llm.queue(json.dumps({"action": "ADD", "target": None, "content": None,
+                                  "reason": "new"}))
+        store.add(text, user_id="ada", run_id=run)
+    assert len(store.entities(user_id="ada")) == 1
+    store.close()

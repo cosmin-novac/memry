@@ -605,6 +605,10 @@ def resolve_mentions(
     anything short of "different" is recorded for a person."""
     types = types or {}
     resolved: dict[str, Entity] = {}
+    # Names are looked up across the person's whole namespace, as the weekly
+    # pass does. Looked up within the save's run, the same name saved in two
+    # sessions became two entities that were never compared.
+    lookup = Scope(user_id=scope.user_id) if scope.user_id is not None else scope
     # A name the store has never seen is screened before it becomes an entity:
     # mechanically first (free, certain), then one typed question per name. A
     # name that already has an entity is left alone; upkeep reviews those.
@@ -612,7 +616,7 @@ def resolve_mentions(
     unseen = [
         s for s in dict.fromkeys(cleaned)
         if not non_referent_reason(s)
-        and not backend.find_entity_candidates(s.lower(), scope)
+        and not backend.find_entity_candidates(s.lower(), lookup)
     ]
     verdicts = screen_names(decider, memory_content, unseen)
     # A calibrated judge also compares names that are not spelled the same
@@ -627,10 +631,10 @@ def resolve_mentions(
         if non_referent_reason(surface) or screened_out(verdicts.get(normalized)):
             continue
 
-        candidates = backend.find_entity_candidates(normalized, scope)
+        candidates = backend.find_entity_candidates(normalized, lookup)
         if judge is not None:
             if index is None:
-                index = NameIndex(backend.list_entities(scope, limit=100_000))
+                index = NameIndex(backend.list_entities(lookup, limit=100_000))
             candidates += index.candidates(surface, exclude={c.id for c in candidates})
         target: Entity | None = None
         proposals: list[MergeProposal] = []
