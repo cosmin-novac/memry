@@ -28,10 +28,11 @@ in ``evals/identity_resolution_benchmark.py``, five runs:
   deployment can lower it (``DecisionConfig.pair_merge_probability``): at
   0.85, 73-74 true pairs merged, and so did 4 of those unsettleable pairs;
 * a pair is kept apart from P(different) = 0.5. No true pair scored above 0.43;
-* anything else is compared a second time with all of both entities'
-  memories instead of the most recent eight, and if that still settles
-  nothing it waits for new evidence. Nobody is asked: the pair is compared
-  again whenever a new memory mentions either side.
+* anything else waits, and nobody is asked. A waiting pair is compared again
+  only when its smaller side reaches the next step of ``PAIR_STEPS``
+  (3, 10, then 50 memories), and never after the last: at most four
+  comparisons per pair. Each side is shown 10 memories (50 at the last step),
+  chosen as the most recent few and the rest most similar to the other side's.
 
 Every fact carries its date (when it became true where that is known, else
 when it was recorded). Without dates, "lives in Munich" against "moved to
@@ -101,12 +102,50 @@ EDIT_SIMILARITY = 0.8
 MEANING_SIMILARITY = 0.6
 #: Most candidates compared for one name, best first.
 CANDIDATES_PER_NAME = 5
-#: Facts per side in the first comparison, most recent first.
-PROFILE_FACTS = 8
-#: Facts per side in the second comparison, for a pair the first left waiting.
-#: Jev reads the whole list: one contradicting fact placed last among 100 facts
-#: still gave P(different) = 0.95, and last among 300 gave 0.86.
-FULL_PROFILE_FACTS = 200
+#: The comparison funnel. A pair is compared when it is found, and again only
+#: when its smaller side reaches the next of these memory counts; after the
+#: last, never. The smaller side is shown whole (up to ``memories_shown``), so
+#: each step is new evidence about it. The larger side mostly grows with
+#: memories about other things, so its count triggers nothing. Comparing again
+#: on every memory that mentioned either side had no bound: an entity mentioned
+#: in most saves had its waiting pairs compared on most saves.
+PAIR_STEPS = (1, 3, 10, 50)
+#: Memories per side that a comparison chooses from, most recent first.
+PAIR_POOL = 200
+#: Share of the memories shown per side that are the most recent ones; the rest
+#: are those most similar to any of the other side's memories. A fact that links
+#: the two or contradicts one of them ("lives in Munich", "moved to Amsterdam")
+#: shares a topic with the other side. The most recent memories of a large
+#: entity mostly do not, and they left the judge unsure: "Fundation" against
+#: "Fundation GmbH" scored 0.76 with 3 recent facts per side and 0.59 with 10.
+RECENT_SHARE = 0.3
+
+
+def pair_step(count: int) -> int:
+    """The funnel step a pair whose smaller side has ``count`` memories is at."""
+    return max((step for step in PAIR_STEPS if count >= step), default=0)
+
+
+def memories_shown(step: int) -> int:
+    """Memories shown per side at a step: 10, and 50 at the last step. Jev reads
+    long profiles: one contradicting fact placed last among 100 facts still gave
+    P(different) = 0.95."""
+    return PAIR_STEPS[-1] if step >= PAIR_STEPS[-1] else PAIR_STEPS[-2]
+
+
+def rounds(compared: int, smaller: int) -> list[tuple[int, int]]:
+    """The comparisons owed to a pair last compared at step ``compared`` whose
+    smaller side now has ``smaller`` memories, as (step, memories shown per
+    side). Steps that would show the same memories collapse into one."""
+    owed: list[tuple[int, int]] = []
+    for step in PAIR_STEPS:
+        if compared < step <= smaller:
+            shown = memories_shown(step)
+            if owed and owed[-1][1] == shown:
+                owed[-1] = (step, shown)
+            else:
+                owed.append((step, shown))
+    return owed
 
 
 def _fold(text: str) -> str:
@@ -273,22 +312,70 @@ class Profile:
     owner: bool = False
 
 
-def profile_of(
-    backend: MemoryBackend, entity: Entity, limit: int = PROFILE_FACTS
-) -> tuple[Profile, bool]:
-    """The entity's most recent ``limit`` facts, and whether it has more."""
-    memories = backend.entity_memories(entity.id, limit=limit + 1)
-    home = (entity.metadata or {}).get("home")
-    profile = Profile(
-        name=entity.name,
-        entity_type=entity.entity_type,
-        facts=[m.content for m in memories[:limit]],
-        description=entity.description or "",
+@dataclass
+class Mention:
+    """A name a save has not attached yet, with the memory that carries it."""
+
+    name: str
+    entity_type: str | None
+    memory: Memory
+
+
+def profile_from(subject: Entity | Mention, memories: list[Memory]) -> Profile:
+    """One side of a comparison, showing ``memories`` as its facts."""
+    facts = [m.content for m in memories]
+    sources = [source_of(m) for m in memories]
+    if isinstance(subject, Mention):
+        return Profile(subject.name, subject.entity_type, facts, sources=sources)
+    home = (subject.metadata or {}).get("home")
+    return Profile(
+        name=subject.name,
+        entity_type=subject.entity_type,
+        facts=facts,
+        description=subject.description or "",
         home=home.get("name", "") if isinstance(home, dict) else "",
-        sources=[source_of(m) for m in memories[:limit]],
-        owner=bool((entity.metadata or {}).get("owner")),
+        sources=sources,
+        owner=bool((subject.metadata or {}).get("owner")),
     )
-    return profile, len(memories) > limit
+
+
+def _unit_rows(vectors: dict[str, np.ndarray], ids: list[str]) -> np.ndarray | None:
+    """The unit vectors of ``ids``, of the dimension most of them share (a
+    store can hold vectors from more than one embedding model)."""
+    found = [vectors[i] for i in ids if i in vectors]
+    if not found:
+        return None
+    size = Counter(v.shape[0] for v in found).most_common(1)[0][0]
+    rows = np.vstack([v for v in found if v.shape[0] == size]).astype(float)
+    norms = np.linalg.norm(rows, axis=1, keepdims=True)
+    rows = rows[norms[:, 0] > 0] / norms[norms[:, 0] > 0]
+    return rows if len(rows) else None
+
+
+def choose(
+    pool: list[Memory], shown: int, vectors: dict[str, np.ndarray], against: list[str]
+) -> list[Memory]:
+    """``shown`` memories of ``pool`` (most recent first) for a comparison: the
+    most recent ``RECENT_SHARE`` of them, and the rest the ones most similar to
+    any memory in ``against``, the other side's. Without vectors, the most
+    recent. The result keeps the pool's order."""
+    if len(pool) <= shown:
+        return pool
+    other = _unit_rows(vectors, against)
+    if other is None:
+        return pool[:shown]
+    recent = max(1, round(shown * RECENT_SHARE))
+
+    def closeness(memory: Memory) -> float:
+        vector = vectors.get(memory.id)
+        if vector is None or vector.shape[0] != other.shape[1]:
+            return -2.0
+        norm = np.linalg.norm(vector)
+        return float((other @ (vector / norm)).max()) if norm else -2.0
+
+    rest = pool[recent:]
+    closest = set(sorted(range(len(rest)), key=lambda i: -closeness(rest[i]))[:shown - recent])
+    return pool[:recent] + [m for i, m in enumerate(rest) if i in closest]
 
 
 def pair_state(a: Profile, b: Profile) -> str:
@@ -372,31 +459,52 @@ def decide_pair(probabilities: dict[str, float], decider: Decider) -> str:
     return "wait"
 
 
-def compare(
-    decider: Decider, backend: MemoryBackend, a: Entity, b: Entity | Profile
-) -> tuple[dict[str, float] | None, str]:
-    """Decide a pair: the recent facts first, then, when that leaves the pair
-    waiting and either side has more, all of both entities' memories.
+@dataclass
+class Verdict:
+    """What comparing a pair came to."""
 
-    ``b`` is an entity, or the profile of a mention a save has not stored yet.
-    Returns the probabilities the decision rests on and the decision.
+    #: The averaged answer of the last comparison made, None when none was.
+    probabilities: dict[str, float] | None
+    #: "merge", "apart" or "wait".
+    action: str
+    #: The funnel step the pair has now been compared at.
+    step: int
+
+
+def compare(
+    decider: Decider, backend: MemoryBackend, a: Entity, b: Entity | Mention,
+    compared: int = 0,
+) -> Verdict:
+    """Decide a pair at the funnel steps it has reached since it was last
+    compared at step ``compared`` (0: never). Nothing is asked when it has
+    reached no new step. Otherwise it is compared with 10 memories per side,
+    and, when that leaves it waiting and its smaller side has 50 memories,
+    once more with 50.
+
+    ``b`` is an entity, or a mention a save has not attached yet.
     """
-    first_a, more_a = profile_of(backend, a)
-    if isinstance(b, Entity):
-        first_b, more_b = profile_of(backend, b)
-    else:
-        first_b, more_b = b, False
-    probabilities = judge_pair(decider, first_a, first_b)
-    if probabilities is None:
-        return None, "wait"
-    action = decide_pair(probabilities, decider)
-    if action == "wait" and (more_a or more_b):
-        full_a = profile_of(backend, a, FULL_PROFILE_FACTS)[0] if more_a else first_a
-        full_b = profile_of(backend, b, FULL_PROFILE_FACTS)[0] if more_b else first_b
-        full = judge_pair(decider, full_a, full_b)
-        if full is not None:
-            probabilities, action = full, decide_pair(full, decider)
-    return probabilities, action
+    count_b = 1 if isinstance(b, Mention) else backend.count_entity_memories(b.id)
+    owed = rounds(compared, min(backend.count_entity_memories(a.id), count_b))
+    if not owed:
+        return Verdict(None, "wait", compared)
+    pool_a = backend.entity_memories(a.id, limit=PAIR_POOL)
+    pool_b = ([b.memory] if isinstance(b, Mention)
+              else backend.entity_memories(b.id, limit=PAIR_POOL))
+    vectors = backend.vectors_of([m.id for m in pool_a + pool_b])
+    ids_a, ids_b = [m.id for m in pool_a], [m.id for m in pool_b]
+    verdict = Verdict(None, "wait", compared)
+    for step, shown in owed:
+        probabilities = judge_pair(
+            decider,
+            profile_from(a, choose(pool_a, shown, vectors, ids_b)),
+            profile_from(b, choose(pool_b, shown, vectors, ids_a)),
+        )
+        if probabilities is None:
+            break
+        verdict = Verdict(probabilities, decide_pair(probabilities, decider), step)
+        if verdict.action != "wait":
+            break
+    return verdict
 
 
 def pair_reason(decider: Decider, probabilities: dict[str, float]) -> str:

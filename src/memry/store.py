@@ -630,12 +630,15 @@ class MemoryStore:
     def _recheck_proposals(
         self, scope: Scope, open_before: list[MergeProposal], entity_ids: set[str]
     ) -> None:
-        """Compare again every pair a new memory just added evidence to.
+        """Offer every pair a new memory just added evidence to for comparing.
 
         New evidence is the only thing that can make an unsure pair sure, so a
-        pair is asked again when it gets some, not only on the weekly pass. A
-        pair raised by this same save was judged moments ago and is left alone.
-        A failure here must never fail the save.
+        pair is looked at when it gets some, not only on the weekly pass. A
+        calibrated judge is asked only when the pair's smaller side has reached
+        the next step of the funnel (``identity.PAIR_STEPS``); on other saves
+        this costs two memory counts. A pair raised by this same save was
+        judged moments ago and is left alone. A failure here must never fail
+        the save.
         """
         touched = {
             proposal.id for proposal in open_before

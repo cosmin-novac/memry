@@ -21,7 +21,7 @@ import re
 from typing import Any, Callable
 
 from ..backends.base import MemoryBackend
-from ..models import Entity, EntityMention, MergeProposal, Scope, utcnow
+from ..models import Entity, EntityMention, Memory, MergeProposal, Scope, utcnow
 from ..providers.decisions import (
     MEASURED_MERGE_GATES,
     Answer,
@@ -32,14 +32,13 @@ from ..providers.decisions import (
 from ..providers.llm import LLM
 from .extraction import parse_lenient_json
 from .identity import (
+    Mention,
     NameIndex,
-    Profile,
     compare,
     judges_pairs,
     name_vectors,
     pair_reason,
     parallel,
-    source_of,
 )
 
 IDENTITY_SCHEMA: dict[str, Any] = {
@@ -600,9 +599,10 @@ def resolve_mentions(
 
     With a calibrated judge (``identity.judges_pairs``) each candidate is
     decided by ``identity.compare``: merge, keep apart, or wait for evidence.
-    A pair that waits is recorded so a later save or the weekly pass can
-    compare it again; nobody is asked. Without one, a "same" at the provider's
-    gate merges and anything short of "different" is recorded for a person."""
+    Both kept-apart and waiting pairs are recorded with the funnel step they
+    were compared at, so neither is compared again on the same evidence;
+    nobody is asked. Without one, a "same" at the provider's gate merges and
+    anything short of "different" is recorded for a person."""
     types = types or {}
     resolved: dict[str, Entity] = {}
     # A name the store has never seen is screened before it becomes an entity:
@@ -633,10 +633,9 @@ def resolve_mentions(
                 index = NameIndex(backend.list_entities(scope, limit=100_000))
             candidates += index.candidates(surface, exclude={c.id for c in candidates})
         target: Entity | None = None
-        proposals: list[tuple[Entity, float, str | None]] = []
-        mention = Profile(surface, types.get(normalized), [memory_content],
-                          sources=[source_of(saved)] if saved is not None else [],
-                          dates=[utcnow()[:10]])
+        proposals: list[MergeProposal] = []
+        mention = Mention(surface, types.get(normalized),
+                          saved or Memory(id=memory_id, content=memory_content))
         for candidate in candidates:
             facts = [m.content for m in backend.entity_memories(candidate.id, limit=5)]
             # An identically-named record with no evidence at all cannot be a
@@ -648,16 +647,19 @@ def resolve_mentions(
                 target = candidate
                 break
             if judge is not None:
-                probabilities, action = compare(judge, backend, candidate, mention)
-                if action == "merge":
+                verdict = compare(judge, backend, candidate, mention)
+                if verdict.action == "merge":
                     target = candidate
                     break
-                if action == "wait":
-                    proposals.append((
-                        candidate,
-                        probabilities["same"] if probabilities else 0.5,
-                        pair_reason(judge, probabilities) if probabilities else None,
-                    ))
+                probabilities = verdict.probabilities
+                proposals.append(MergeProposal(
+                    entity_a=candidate.id, entity_b="", user_id=scope.user_id,
+                    confidence=probabilities["same"] if probabilities else 0.5,
+                    reason=pair_reason(judge, probabilities) if probabilities else None,
+                    status="rejected" if verdict.action == "apart" else "proposed",
+                    decided_at=utcnow() if verdict.action == "apart" else None,
+                    compared_step=verdict.step,
+                ))
                 continue
             judgment = _judge(
                 llm, candidate, facts, memory_content, surface, decider
@@ -666,7 +668,10 @@ def resolve_mentions(
                 target = candidate
                 break
             if judgment["verdict"] in ("same", "unsure"):
-                proposals.append((candidate, judgment["confidence"], judgment.get("reason")))
+                proposals.append(MergeProposal(
+                    entity_a=candidate.id, entity_b="", user_id=scope.user_id,
+                    confidence=judgment["confidence"], reason=judgment.get("reason"),
+                ))
 
         if target is None:
             target = backend.insert_entity(
@@ -679,17 +684,9 @@ def resolve_mentions(
                     run_id=scope.run_id,
                 )
             )
-            for candidate, confidence, reason in proposals:
-                if backend.find_proposal(candidate.id, target.id) is None:
-                    backend.add_proposal(
-                        MergeProposal(
-                            entity_a=candidate.id,
-                            entity_b=target.id,
-                            user_id=scope.user_id,
-                            confidence=confidence,
-                            reason=reason,
-                        )
-                    )
+            for proposal in proposals:
+                if backend.find_proposal(proposal.entity_a, target.id) is None:
+                    backend.add_proposal(proposal.model_copy(update={"entity_b": target.id}))
 
         if attach:
             backend.add_mention(
@@ -773,7 +770,9 @@ def resolve_open_proposals(
 
     A pair that stays open keeps the latest answer, so the list shows how sure
     the provider is now, not how sure it was when the pair was first raised.
-    With a calibrated judge every pair goes through ``identity.compare``.
+    With a calibrated judge every pair goes through ``identity.compare``, which
+    asks nothing unless the pair has reached a new step of the funnel since it
+    was last compared.
     """
     outcome = {"confirmed": 0, "rejected": 0, "kept": 0}
     judge = decider if judges_pairs(decider) else None
@@ -846,19 +845,23 @@ def resolve_open_proposals(
             outcome["kept"] += 1
     # The judge's calls are independent, so they run side by side; the store
     # is changed one pair at a time afterwards.
-    decided = parallel(lambda item: compare(judge, backend, item[1], item[2]), pending)
-    for (proposal, entity_a, entity_b), (probabilities, action) in zip(pending, decided):
-        if action == "merge" and auto_confirm and backend.merge_entities(entity_a.id, entity_b.id):
+    decided = parallel(
+        lambda item: compare(judge, backend, item[1], item[2], item[0].compared_step), pending
+    )
+    for (proposal, entity_a, entity_b), verdict in zip(pending, decided):
+        if (verdict.action == "merge" and auto_confirm
+                and backend.merge_entities(entity_a.id, entity_b.id)):
             backend.set_proposal_status(proposal.id, "confirmed")
             outcome["confirmed"] += 1
-        elif action == "apart":
+        elif verdict.action == "apart":
             backend.set_proposal_status(proposal.id, "rejected")
             outcome["rejected"] += 1
         else:
-            if probabilities is not None:
+            if verdict.probabilities is not None:
                 backend.update_proposal_judgement(
-                    proposal.id, confidence=probabilities["same"],
-                    reason=pair_reason(judge, probabilities),
+                    proposal.id, confidence=verdict.probabilities["same"],
+                    reason=pair_reason(judge, verdict.probabilities),
+                    compared_step=verdict.step,
                 )
             outcome["kept"] += 1
     return outcome

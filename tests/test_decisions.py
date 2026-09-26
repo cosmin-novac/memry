@@ -881,26 +881,109 @@ def test_the_three_outcomes(same, different, entities, proposals):
     store.close()
 
 
-def test_a_waiting_pair_is_compared_again_with_all_memories():
-    """The first comparison shows the eight most recent facts per side; a pair
-    it leaves waiting is compared with all of them."""
-    from memry.intelligence.identity import PROFILE_FACTS
+def _names(state: str) -> tuple[str, str]:
+    import re
+
+    a, b = re.findall(r'ENTITY [AB]: "([^"]+)"', state)
+    return a, b
+
+
+def _entity_with(store, name: str, facts: list[str], entity_type: str = "organization"):
     from memry.models import Entity, EntityMention, Memory
 
-    store, save, judge = _judged_store(
-        lambda state: (0.99, 0.0) if state.count("\n- ") > PROFILE_FACTS + 1 else (0.8, 0.0))
     entity = store.backend.insert_entity(Entity(
-        name="Fundation GmbH", normalized="fundation gmbh", entity_type="organization",
-        user_id="ada"))
-    for i in range(PROFILE_FACTS + 2):
-        memory = store.backend.insert_memory(Memory(
-            content=f"Fundation GmbH fact number {i} about its bookkeeping", user_id="ada"))
+        name=name, normalized=name.lower(), entity_type=entity_type, user_id="ada"))
+    for text in facts:
+        memory = store.backend.insert_memory(Memory(content=text, user_id="ada"))
         store.backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
-                                                surface="Fundation GmbH"))
-    save("Fundation GmbH has 150,000 euros in cash after taxes")
-    assert [e.id for e in store.entities(user_id="ada")] == [entity.id]
-    assert len(judge.states) == 4  # both orders, twice
+                                                surface=name))
+    return entity
+
+
+def test_the_funnel_owes_a_pair_a_comparison_only_at_a_new_step():
+    from memry.intelligence.identity import rounds
+
+    assert rounds(0, 1) == [(1, 10)]               # found: compared with what there is
+    assert rounds(1, 2) == []                       # nothing new at this step
+    assert rounds(1, 3) == [(3, 10)]
+    assert rounds(3, 9) == []
+    assert rounds(3, 10) == [(10, 10)]
+    assert rounds(0, 60) == [(10, 10), (50, 50)]    # 10 each first, then 50 if unsure
+    assert rounds(10, 49) == []
+    assert rounds(50, 5000) == []                   # after the last step, never again
+    assert rounds(0, 0) == []                       # a side with no memories: nothing to show
+
+
+def test_a_waiting_pair_is_compared_again_when_its_smaller_side_reaches_a_step():
+    """"Fundation GmbH" has 12 memories and "Fundation" gains one per save. The
+    pair is compared when found and when "Fundation" reaches 3 and 10
+    memories, not on the saves in between."""
+    def answer(state):
+        a, b = _names(state)
+        return (0.99, 0.0) if a == b else (0.8, 0.0)
+
+    store, save, judge = _judged_store(answer)
+    _entity_with(store, "Fundation GmbH", [f"Fundation GmbH invoice {i} was paid" for i in range(12)])
+    asked = []
+    for i in range(10):
+        save(f"Fundation office note {i}", as_name="Fundation")
+        asked.append(sum(1 for state in judge.states if set(_names(state)) == {
+            "Fundation", "Fundation GmbH"}) // 2)
+    assert asked == [1, 1, 2, 2, 2, 2, 2, 2, 2, 3]
+    [proposal] = store.merge_proposals(user_id="ada")
+    assert proposal.compared_step == 10
     store.close()
+
+
+def test_a_pair_with_50_memories_a_side_is_compared_with_10_then_50():
+    from memry.intelligence.identity import compare
+
+    store, _, judge = _judged_store(
+        lambda state: (0.99, 0.0) if state.count("\n- [") > 40 else (0.8, 0.0))
+    a = _entity_with(store, "Fundation GmbH", [f"Fundation GmbH invoice {i}" for i in range(60)])
+    b = _entity_with(store, "Fundation", [f"Fundation office note {i}" for i in range(55)])
+    verdict = compare(judge, store.backend, a, b)
+    assert (verdict.action, verdict.step) == ("merge", 50)
+    assert [state.count("\n- [") for state in judge.states] == [20, 20, 100, 100]
+    judge.states.clear()
+    assert compare(judge, store.backend, a, b, compared=50).probabilities is None
+    assert judge.states == []  # after the last step, never again
+    store.close()
+
+
+def test_a_pair_kept_apart_is_not_compared_again():
+    def answer(state):
+        a, b = _names(state)
+        return (0.99, 0.0) if a == b else (0.2, 0.7)
+
+    store, save, judge = _judged_store(answer)
+    save("Fundation GmbH's Finanzamt file number is 218/5713")
+    save("Fundation Ventures invests in robotics", as_name="Fundation Ventures")
+    assert store.merge_proposals(user_id="ada") == []
+    asked = len(judge.states)
+    store.resolve_entities(user_id="ada")
+    assert len(judge.states) == asked
+    store.close()
+
+
+def test_each_side_shows_its_recent_memories_and_those_closest_to_the_other_side():
+    import numpy as np
+
+    from memry.intelligence.identity import choose
+    from memry.models import Memory
+
+    pool = [Memory(id=f"m{i}", content=f"fact {i}") for i in range(30)]  # most recent first
+    far, near = np.array([1.0, 0.0]), np.array([0.0, 1.0])
+    vectors = {m.id: far for m in pool}
+    vectors.update({"m20": near, "m25": near, "m29": np.array([0.1, 0.9]),
+                    "m28": np.array([0.0, 0.0, 1.0])})  # another model's vector is ignored
+    vectors["other"] = near
+    chosen = [m.id for m in choose(pool, 10, vectors, ["other"])]
+    assert chosen[:3] == ["m0", "m1", "m2"]           # the most recent 3 of 10
+    assert {"m20", "m25", "m29"} <= set(chosen)       # the closest to the other side
+    assert len(chosen) == 10 and "m28" not in chosen
+    assert [m.id for m in choose(pool, 10, {}, ["other"])] == [f"m{i}" for i in range(10)]
+    assert choose(pool[:4], 10, vectors, ["other"]) == pool[:4]
 
 
 def test_a_name_written_another_way_is_found_and_compared():
@@ -999,7 +1082,7 @@ def test_a_typo_that_swaps_two_letters_is_compared():
 def test_the_judge_sees_when_each_fact_was_recorded():
     """Without dates "lives in Munich" against "moved to Amsterdam last month"
     read as two people (0.54); with them as one (0.97)."""
-    from memry.intelligence.identity import profile_of
+    from memry.intelligence.identity import profile_from
     from memry.models import Entity, EntityMention, Memory
 
     store, save, judge = _judged_store(lambda state: (0.99, 0.0), "person")
@@ -1009,7 +1092,7 @@ def test_the_judge_sees_when_each_fact_was_recorded():
                                                 user_id="ada", valid_from="2025-01-10T00:00:00+00:00"))
     store.backend.add_mention(EntityMention(entity_id=ada.id, memory_id=memory.id,
                                             surface="Ada Lindqvist"))
-    profile, _ = profile_of(store.backend, ada)
+    profile = profile_from(ada, store.backend.entity_memories(ada.id))
     assert profile.sources[0].true_from == "2025-01-10"
     save("Ada Lindqvist moved to Amsterdam last month", as_name="Ada Lindqvist", as_type="person")
     munich = [line for s in judge.states for line in s.splitlines()
