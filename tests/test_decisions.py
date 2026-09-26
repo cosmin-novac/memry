@@ -859,7 +859,7 @@ def test_a_pair_merges_on_the_average_of_both_orders():
 
     store, save, judge = _judged_store(answer)
     save("Fundation GmbH's Finanzamt file number is 218/5713")
-    save("Fundation GmbH has 150,000 euros in cash after taxes")
+    save("Fundation has 150,000 euros in cash after taxes", as_name="Fundation")
     assert len(store.entities(user_id="ada")) == 2
     [proposal] = store.merge_proposals(user_id="ada")
     assert proposal.confidence == pytest.approx(0.925)
@@ -875,9 +875,47 @@ def test_a_pair_merges_on_the_average_of_both_orders():
 def test_the_three_outcomes(same, different, entities, proposals):
     store, save, _ = _judged_store(lambda state: (same, different))
     save("Fundation GmbH's Finanzamt file number is 218/5713")
+    save("Fundation has 150,000 euros in cash after taxes", as_name="Fundation")
+    assert len(store.entities(user_id="ada")) == entities
+    assert len(store.merge_proposals(user_id="ada")) == proposals
+    store.close()
+
+
+@pytest.mark.parametrize("same, different, entities, proposals", [
+    (0.97, 0.00, 1, 0),
+    (0.60, 0.20, 1, 0),  # under the merge bar, but nothing says it is another
+    (0.30, 0.45, 1, 0),
+    (0.30, 0.60, 2, 1),  # the judge says another: a new entity, compared again later
+])
+def test_a_known_name_attaches_unless_the_judge_says_it_is_another(
+        same, different, entities, proposals):
+    """A second mention of a name the store has joins that entity unless the
+    judge says "different" at the apart bar. Held to the merge bar instead,
+    most mentions of a known name became one-memory entities in a replayed
+    store, and a one-memory entity never gains the evidence to be compared
+    again."""
+    store, save, _ = _judged_store(lambda state: (same, different))
+    save("Fundation GmbH's Finanzamt file number is 218/5713")
     save("Fundation GmbH has 150,000 euros in cash after taxes")
     assert len(store.entities(user_id="ada")) == entities
     assert len(store.merge_proposals(user_id="ada")) == proposals
+    store.close()
+
+
+def test_a_known_name_joins_the_likeliest_of_its_entities():
+    """Two "Fundation GmbH" entities: the mention about Cologne joins the one
+    whose memories are about Cologne, and no proposal is left behind."""
+    def answer(state):
+        return (0.9, 0.05) if state.count("Cologne") > 1 else (0.7, 0.1)
+
+    store, save, _ = _judged_store(answer)
+    _entity_with(store, "Fundation GmbH", ["Fundation GmbH paid invoice 12"])
+    cologne = _entity_with(store, "Fundation GmbH", ["Fundation GmbH has an office in Cologne"])
+    save("Fundation GmbH moved its Cologne office to Ehrenfeld")
+    joined = [m.memory_id for m in store.backend.entity_mentions(cologne.id)]
+    assert len(joined) == 2
+    assert len(store.entities(user_id="ada")) == 2
+    assert store.merge_proposals(user_id="ada") == []
     store.close()
 
 
@@ -999,7 +1037,7 @@ def test_a_name_written_another_way_is_found_and_compared():
 def test_a_judged_pair_never_reaches_the_upkeep_queue():
     store, save, _ = _judged_store(lambda state: (0.8, 0.1))
     save("Fundation GmbH's Finanzamt file number is 218/5713")
-    save("Fundation GmbH has 150,000 euros in cash after taxes")
+    save("Fundation has 150,000 euros in cash after taxes", as_name="Fundation")
     assert len(store.merge_proposals(user_id="ada")) == 1
     assert [i for i in store.upkeep_queue(user_id="ada") if i["kind"] == "proposal"] == []
     assert store.upkeep_count(user_id="ada") == 0

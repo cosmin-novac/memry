@@ -607,7 +607,9 @@ def resolve_mentions(
     decided by ``identity.compare``: merge, keep apart, or wait for evidence.
     Both kept-apart and waiting pairs are recorded with the funnel step they
     were compared at, so neither is compared again on the same evidence;
-    nobody is asked. Without one, a "same" at the provider's gate merges and
+    nobody is asked. A name the store already has is the exception: the
+    mention joins the likeliest entity of that name unless the judge says
+    "different" at the apart bar. Without one, a "same" at the provider's gate merges and
     anything short of "different" is recorded for a person."""
     types = types or {}
     resolved: dict[str, Entity] = {}
@@ -647,6 +649,7 @@ def resolve_mentions(
             continue
 
         candidates = backend.find_entity_candidates(normalized, lookup)
+        same_name = {c.id for c in candidates}
         if judge is not None:
             if index is None:
                 index = NameIndex(backend.list_entities(lookup, limit=100_000))
@@ -655,7 +658,16 @@ def resolve_mentions(
         proposals: list[MergeProposal] = []
         mention = Mention(surface, types.get(normalized),
                           saved or Memory(id=memory_id, content=memory_content))
+        # A name the store already has: the mention belongs to the likeliest
+        # entity of that name unless the evidence says it is something else.
+        # Attaching one memory can be undone; merging entities cannot. Holding
+        # it to the merge bar instead left 88 of 431 mentions of a known name
+        # as new one-memory entities in a replayed store, which never gained
+        # the evidence to be compared again.
+        likely: list[tuple[float, Entity]] = []
         for candidate in candidates:
+            if likely and candidate.id not in same_name:
+                break  # a known name found its entity; no need to try others
             facts = [m.content for m in backend.entity_memories(candidate.id, limit=5)]
             # An identically-named record with no evidence at all cannot be a
             # different thing. Reuse it before spending an LLM call on a
@@ -667,10 +679,17 @@ def resolve_mentions(
                 break
             if judge is not None:
                 verdict = compare(judge, backend, candidate, mention)
+                probabilities = verdict.probabilities
+                if candidate.id in same_name and (
+                    verdict.action == "merge"
+                    or (probabilities is not None
+                        and probabilities["different"] < judge.pair_apart_probability)
+                ):
+                    likely.append((probabilities["same"] if probabilities else 1.0, candidate))
+                    continue
                 if verdict.action == "merge":
                     target = candidate
                     break
-                probabilities = verdict.probabilities
                 proposals.append(MergeProposal(
                     entity_a=candidate.id, entity_b="", user_id=scope.user_id,
                     confidence=probabilities["same"] if probabilities else 0.5,
@@ -692,6 +711,9 @@ def resolve_mentions(
                     confidence=judgment["confidence"], reason=judgment.get("reason"),
                 ))
 
+        if target is None and likely:
+            target = max(likely, key=lambda option: option[0])[1]
+            proposals = []
         if target is None:
             target = backend.insert_entity(
                 Entity(
