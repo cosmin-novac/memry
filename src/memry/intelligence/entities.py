@@ -39,6 +39,7 @@ from .identity import (
     name_vectors,
     pair_reason,
     parallel,
+    source_of,
 )
 
 IDENTITY_SCHEMA: dict[str, Any] = {
@@ -618,6 +619,7 @@ def resolve_mentions(
     # ("Fundation" and "Fundation GmbH"); without one, only exact names meet.
     judge = decider if judges_pairs(decider) else None
     index: NameIndex | None = None
+    saved = backend.get_memory(memory_id) if judge is not None else None
     for surface in cleaned:
         normalized = surface.lower()
         if not normalized or normalized in resolved:
@@ -633,6 +635,7 @@ def resolve_mentions(
         target: Entity | None = None
         proposals: list[tuple[Entity, float, str | None]] = []
         mention = Profile(surface, types.get(normalized), [memory_content],
+                          sources=[source_of(saved)] if saved is not None else [],
                           dates=[utcnow()[:10]])
         for candidate in candidates:
             facts = [m.content for m in backend.entity_memories(candidate.id, limit=5)]

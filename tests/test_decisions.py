@@ -1010,8 +1010,37 @@ def test_the_judge_sees_when_each_fact_was_recorded():
     store.backend.add_mention(EntityMention(entity_id=ada.id, memory_id=memory.id,
                                             surface="Ada Lindqvist"))
     profile, _ = profile_of(store.backend, ada)
-    assert profile.dates == ["2025-01-10"]
+    assert profile.sources[0].true_from == "2025-01-10"
     save("Ada Lindqvist moved to Amsterdam last month", as_name="Ada Lindqvist", as_type="person")
-    assert any("- [2025-01-10] Ada Lindqvist lives in Munich" in s for s in judge.states)
-    assert all("Each fact starts with the date it was recorded." in s for s in judge.states)
+    munich = [line for s in judge.states for line in s.splitlines()
+              if line.endswith("Ada Lindqvist lives in Munich")]
+    assert munich and all("true from 2025-01-10" in line for line in munich)
+    assert all("when it was recorded" in s for s in judge.states)
     store.close()
+
+
+def test_the_judge_sees_where_each_fact_came_from():
+    """Jev decides what a shared saved text or session means; Memry only shows
+    it, numbered the same way on both sides."""
+    from memry.intelligence.identity import Profile, Source, pair_state
+
+    one = Source(recorded="2026-09-01 10:00", text="ep-x", session="run-7", client="claude",
+                 context="grant application")
+    other = Source(recorded="2026-09-20 18:30", text="ep-y", session="run-9")
+    same_text = Source(recorded="2026-09-01 10:00", text="ep-x", session="run-7")
+    state = pair_state(
+        Profile("Andrei", "person", ["Andrei reviews the budget", "Andrei is on holiday"],
+                sources=[one, other]),
+        Profile("Andrei Dumitru", "person", ["Andrei Dumitru leads finance"],
+                sources=[same_text]),
+    )
+    assert ('- [recorded 2026-09-01 10:00; saved text 1; session 1; client claude; '
+            'context "grant application"] Andrei reviews the budget') in state
+    assert "- [recorded 2026-09-20 18:30; saved text 2; session 2] Andrei is on holiday" in state
+    assert ("- [recorded 2026-09-01 10:00; saved text 1; session 1] Andrei Dumitru leads finance"
+            in state)
+    assert "ep-x" not in state and "run-7" not in state
+    assert "owner of the memory store" not in state
+    owner = pair_state(Profile("the user", "person", ["User prefers tea"], owner=True),
+                       Profile("Cosmin", "person", ["Cosmin drinks tea"]))
+    assert "This entity is the owner of the memory store" in owner.split("ENTITY B")[0]

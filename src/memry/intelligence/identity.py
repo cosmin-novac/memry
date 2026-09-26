@@ -56,7 +56,7 @@ from typing import Any, Callable, Iterable
 import numpy as np
 
 from ..backends.base import MemoryBackend
-from ..models import Entity
+from ..models import Entity, Memory
 from ..providers.decisions import Choice, Decider
 
 PAIR_QUESTION = Choice(
@@ -231,6 +231,29 @@ class NameIndex:
 
 
 @dataclass
+class Source:
+    """Where one fact came from, passed to the judge as it is stored."""
+
+    recorded: str = ""   # when it was saved, "YYYY-MM-DD HH:MM"
+    true_from: str = ""  # when the fact became true, if known
+    text: str = ""       # the saved text it was extracted from
+    session: str = ""    # the session that saved it
+    client: str = ""     # the client that saved it
+    context: str = ""    # the context label it was saved under
+
+
+def source_of(memory: Memory) -> Source:
+    return Source(
+        recorded=(memory.created_at or "")[:16].replace("T", " "),
+        true_from=(memory.valid_from or "")[:10],
+        text=memory.source_episode_ids[0] if memory.source_episode_ids else "",
+        session=memory.run_id or "",
+        client=memory.agent_id or "",
+        context=" ".join(str((memory.metadata or {}).get("context") or "").split())[:120],
+    )
+
+
+@dataclass
 class Profile:
     """One side of a comparison: what the store knows about an entity."""
 
@@ -239,9 +262,15 @@ class Profile:
     facts: list[str] = field(default_factory=list)
     description: str = ""
     home: str = ""
-    #: The date of each fact (YYYY-MM-DD), parallel to ``facts``, so the judge
-    #: can tell an update ("moved to Amsterdam last month") from a contradiction.
+    #: The date of each fact (YYYY-MM-DD), parallel to ``facts``, for callers
+    #: that only have dates (the benchmark). Without dates, "lives in Munich"
+    #: against "moved to Amsterdam last month" read as two people (0.54).
     dates: list[str] = field(default_factory=list)
+    #: Where each fact came from, parallel to ``facts``. Shown as stored; the
+    #: judge decides what a shared saved text or session means.
+    sources: list[Source] = field(default_factory=list)
+    #: Whether this entity is the owner of the store (the user).
+    owner: bool = False
 
 
 def profile_of(
@@ -256,27 +285,65 @@ def profile_of(
         facts=[m.content for m in memories[:limit]],
         description=entity.description or "",
         home=home.get("name", "") if isinstance(home, dict) else "",
-        dates=[(m.valid_from or m.created_at or "")[:10] for m in memories[:limit]],
+        sources=[source_of(m) for m in memories[:limit]],
+        owner=bool((entity.metadata or {}).get("owner")),
     )
     return profile, len(memories) > limit
 
 
 def pair_state(a: Profile, b: Profile) -> str:
+    texts: dict[str, int] = {}
+    sessions: dict[str, int] = {}
+    for profile in (a, b):
+        for source in profile.sources:
+            if source.text:
+                texts.setdefault(source.text, len(texts) + 1)
+            if source.session:
+                sessions.setdefault(source.session, len(sessions) + 1)
+
+    def origin(p: Profile, i: int) -> str:
+        if i < len(p.sources):
+            src = p.sources[i]
+            parts = [f"recorded {src.recorded}"] if src.recorded else []
+            if src.true_from and src.true_from != src.recorded[:10]:
+                parts.append(f"true from {src.true_from}")
+            if src.text:
+                parts.append(f"saved text {texts[src.text]}")
+            if src.session:
+                parts.append(f"session {sessions[src.session]}")
+            if src.client:
+                parts.append(f"client {src.client}")
+            if src.context:
+                parts.append(f'context "{src.context}"')
+            return "; ".join(parts)
+        return p.dates[i] if i < len(p.dates) else ""
+
     def side(label: str, p: Profile) -> str:
         lines = [f'ENTITY {label}: "{p.name}" ({p.entity_type or "type unknown"})']
+        if p.owner:
+            lines.append("This entity is the owner of the memory store: the person the "
+                         "memories belong to.")
         if p.home:
             lines.append(f"Part of: {p.home}")
         if p.description:
             lines.append(f"Description: {p.description}")
         lines.append("Facts:")
-        dated = [(p.dates[i] if i < len(p.dates) else "", fact) for i, fact in enumerate(p.facts)]
-        lines += [f"- [{date}] {fact}" if date else f"- {fact}" for date, fact in dated]
+        for i, fact in enumerate(p.facts):
+            where = origin(p, i)
+            lines.append(f"- [{where}] {fact}" if where else f"- {fact}")
         lines += [] if p.facts else ["- (no facts)"]
         return "\n".join(lines)
 
-    dated = any(p.dates for p in (a, b))
-    return ("Two entries from one person's long-term memory store."
-            + (" Each fact starts with the date it was recorded." if dated else "")
+    if any(p.sources for p in (a, b)):
+        header = (" Each fact is shown with where it came from: when it was recorded, "
+                  "when it became true if known, the saved text it was extracted from, "
+                  "the session and client that saved it, and the context label it was "
+                  "saved under. A saved text or session has the same number on both sides.")
+    elif any(p.dates for p in (a, b)):
+        header = " Each fact starts with the date it was recorded."
+    else:
+        header = ""
+    return ("Two entries from one person's long-term memory store." + header
             + "\n\n" + side("A", a) + "\n\n" + side("B", b))
 
 
