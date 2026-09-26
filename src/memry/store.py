@@ -2033,6 +2033,45 @@ class MemoryStore:
     def relations(self, *, user_id: str | None = None, limit: int = 1000) -> list[Relation]:
         return self.backend.list_relations(Scope(user_id=user_id), limit=limit)
 
+    def restore_context_labels(
+        self, *, user_id: str | None = None, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Give memories back the context label of the saves they came from.
+
+        Facts extracted from a save did not keep the save's context label
+        (fixed in the write path); the save's episode kept it, and every fact
+        keeps its episode ids. A memory without a label takes the labels of its
+        episodes, distinct ones joined as distillation joins them. Only
+        memories without a label are looked at, so a second run changes
+        nothing. Token-free. ``dry_run`` counts without writing."""
+        missing = [
+            m for m in self.get_all(user_id=user_id, limit=1_000_000)
+            if not _ingestion_context(m.metadata) and m.source_episode_ids
+        ]
+        episodes = self.backend.episodes_by_id(
+            [e for m in missing for e in m.source_episode_ids]
+        )
+        summary = {"without_label": len(missing), "restorable": 0, "restored": 0,
+                   "save_had_no_label": 0}
+        for memory in missing:
+            labels = list(dict.fromkeys(
+                label for episode_id in memory.source_episode_ids
+                if (episode := episodes.get(episode_id))
+                and (label := _ingestion_context(episode.metadata))
+            ))
+            if not labels:
+                summary["save_had_no_label"] += 1
+                continue
+            summary["restorable"] += 1
+            if not dry_run:
+                self.backend.update_memory(
+                    memory.id,
+                    metadata={**memory.metadata, "context": " | ".join(labels)[:200]},
+                    touch=False,
+                )
+                summary["restored"] += 1
+        return summary
+
     def repair_updated_at(self, *, user_id: str | None = None) -> dict[str, Any]:
         """Reconstruct each memory's updated_at from its audit trail.
 

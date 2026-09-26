@@ -202,6 +202,36 @@ def test_a_direct_save_keeps_its_context_label(tmp_path):
     assert memory.metadata["context"] == "kitchen renovation"
     store.close()
 
+def test_lost_context_labels_are_restored_from_the_saves(tmp_path):
+    """Memories distilled before facts kept the save's label get it back from
+    the save's episode; a save without a label leaves nothing to restore."""
+    llm = FakeLLM([
+        facts_response(fact("The kitchen needs new sockets."), fact("Tiles arrive on Friday.")),
+        facts_response(fact("The user likes green tea.")),
+    ])
+    store = _store(str(tmp_path / "memry.db"), llm)
+    store.add_deferred("Kitchen: new sockets, tiles on Friday.", user_id="ada", run_id="r1",
+                       metadata={"context": "kitchen renovation"})
+    store.add_deferred("I like green tea.", user_id="ada", run_id="r2")
+    for pending in store.backend.list_pending_memories(limit=10):
+        store.distill(pending.id)
+    for memory in store.get_all(user_id="ada"):  # as distilled before the fix
+        store.backend.update_memory(
+            memory.id, metadata={k: v for k, v in memory.metadata.items() if k != "context"},
+            touch=False)
+
+    assert store.restore_context_labels(user_id="ada", dry_run=True) == {
+        "without_label": 3, "restorable": 2, "restored": 0, "save_had_no_label": 1}
+    assert not any(m.metadata.get("context") for m in store.get_all(user_id="ada"))
+    assert store.restore_context_labels(user_id="ada")["restored"] == 2
+    labels = {m.content: m.metadata.get("context") for m in store.get_all(user_id="ada")}
+    assert labels == {"The kitchen needs new sockets.": "kitchen renovation",
+                      "Tiles arrive on Friday.": "kitchen renovation",
+                      "The user likes green tea.": None}
+    assert store.restore_context_labels(user_id="ada")["restored"] == 0
+    store.close()
+
+
 def test_same_scope_burst_coalesces_without_explicit_context(tmp_path):
     llm = FakeLLM([
         facts_response(

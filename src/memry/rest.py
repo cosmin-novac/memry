@@ -3175,6 +3175,17 @@ def create_app(
         ))
         return JSONResponse(result)
 
+    async def restore_context_route(request: Request) -> Response:
+        """One-time: give memories back the context label of their saves.
+        ``{"dry_run": true}`` counts without writing."""
+        body = await request.json() if await request.body() else {}
+        result = await run_in_threadpool(partial(
+            store.restore_context_labels,
+            user_id=_p(request).namespace(body.get("user_id")),
+            dry_run=bool(body.get("dry_run")),
+        ))
+        return JSONResponse(result)
+
     async def edit_tags_route(request: Request) -> Response:
         """Manual tag curation: rename, merge, or delete a tag across memories.
 
@@ -3703,6 +3714,7 @@ def create_app(
         Route("/api/v1/relations/backfill", guarded(backfill_relations_route), methods=["POST"]),
         Route("/api/v1/entities/backfill-types", guarded(backfill_entity_types_route), methods=["POST"]),
         Route("/api/v1/memories/repair-dates", guarded(repair_dates_route), methods=["POST"]),
+        Route("/api/v1/memories/restore-context", guarded(restore_context_route), methods=["POST"]),
         Route("/api/v1/export", guarded(export_memories_route), methods=["GET"]),
         Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),
         Route("/api/v1/search", guarded(search), methods=["POST"]),

@@ -279,7 +279,10 @@ The default `save_memories(infer=true)` path is intentionally split at the safe 
    label are then sent through one extraction pass, capped at eight raw records per pass.
    Optional client `tags` are prompt hints, not grouping identifiers.
 4. The extractor sees the whole related input while still producing small atomic facts.
-   Every derived fact keeps the source episode IDs of the group. On success, reconcile the
+   Every derived fact keeps the source episode IDs of the group and the save's context
+   label (before 28066d1 the label was lost; `memry restore-context`, or
+   `POST /api/v1/memories/restore-context`, puts it back from the episodes, with
+   `--dry-run` / `{"dry_run": true}` to count first). On success, reconcile the
    facts and supersede the raw pending memories. If extraction finds no facts, keep the raw
    memories and clear their pending markers.
 5. On provider or processing failure, keep every raw memory active, record the error on

@@ -41,6 +41,11 @@ class MemoryBackend(ABC):
     @abstractmethod
     def list_episodes(self, scope: Scope, limit: int = 100) -> list[Episode]: ...
 
+    def episodes_by_id(self, episode_ids: list[str]) -> dict[str, Episode]:
+        """The stored episodes among ``episode_ids``. A backend that cannot look
+        episodes up by id returns none."""
+        return {}
+
     # -- memories -------------------------------------------------------
     @abstractmethod
     def insert_memory(self, memory: Memory, embedding: list[float] | None = None) -> Memory:

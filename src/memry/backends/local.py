@@ -648,6 +648,23 @@ class LocalBackend(MemoryBackend):
             for r in rows
         ]
 
+    def episodes_by_id(self, episode_ids: list[str]) -> dict[str, Episode]:
+        out: dict[str, Episode] = {}
+        ids = list(dict.fromkeys(episode_ids))
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    f"SELECT * FROM episodes WHERE id IN ({','.join('?' * len(chunk))})", chunk,
+                ).fetchall()
+            for r in rows:
+                out[r["id"]] = Episode(
+                    id=r["id"], content=r["content"], role=r["role"], user_id=r["user_id"],
+                    agent_id=r["agent_id"], run_id=r["run_id"],
+                    metadata=json.loads(r["metadata"]), created_at=r["created_at"],
+                )
+        return out
+
     # -- memories -------------------------------------------------------
     def insert_memory(self, memory: Memory, embedding: list[float] | None = None) -> Memory:
         blob = np.asarray(embedding, dtype=np.float32).tobytes() if embedding else None
