@@ -994,3 +994,24 @@ def test_a_typo_that_swaps_two_letters_is_compared():
 
     assert edit_similarity("colonge", "cologne") > 0.8
     assert [e.name for e in _index("Cologne", "Berlin").candidates("Colonge")] == ["Cologne"]
+
+
+def test_the_judge_sees_when_each_fact_was_recorded():
+    """Without dates "lives in Munich" against "moved to Amsterdam last month"
+    read as two people (0.54); with them as one (0.97)."""
+    from memry.intelligence.identity import profile_of
+    from memry.models import Entity, EntityMention, Memory
+
+    store, save, judge = _judged_store(lambda state: (0.99, 0.0), "person")
+    ada = store.backend.insert_entity(Entity(name="Ada Lindqvist", normalized="ada lindqvist",
+                                             entity_type="person", user_id="ada"))
+    memory = store.backend.insert_memory(Memory(content="Ada Lindqvist lives in Munich",
+                                                user_id="ada", valid_from="2025-01-10T00:00:00+00:00"))
+    store.backend.add_mention(EntityMention(entity_id=ada.id, memory_id=memory.id,
+                                            surface="Ada Lindqvist"))
+    profile, _ = profile_of(store.backend, ada)
+    assert profile.dates == ["2025-01-10"]
+    save("Ada Lindqvist moved to Amsterdam last month", as_name="Ada Lindqvist", as_type="person")
+    assert any("- [2025-01-10] Ada Lindqvist lives in Munich" in s for s in judge.states)
+    assert all("Each fact starts with the date it was recorded." in s for s in judge.states)
+    store.close()

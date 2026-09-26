@@ -129,8 +129,15 @@ def load_cases() -> list[dict]:
 
 
 def profiles(case: dict) -> tuple[Profile, Profile]:
-    return (Profile(case["a_name"], case["a_type"], case["a_facts"]),
-            Profile(case["b_name"], case["b_type"], case["b_facts"]))
+    """Both sides with dated facts, as Memry sends them. One rule for every
+    case, so the dates carry no hint of the label: entity A's facts are the
+    older ones (January onwards), entity B's the newer ones (July onwards)."""
+    return (
+        Profile(case["a_name"], case["a_type"], case["a_facts"],
+                dates=[f"2025-{1 + i:02d}-10" for i in range(len(case["a_facts"]))]),
+        Profile(case["b_name"], case["b_type"], case["b_facts"],
+                dates=[f"2025-{7 + i:02d}-10" for i in range(len(case["b_facts"]))]),
+    )
 
 
 def judge(cases: list[dict], decider: JevDecider) -> list[dict]:

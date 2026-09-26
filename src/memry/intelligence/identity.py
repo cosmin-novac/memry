@@ -33,6 +33,13 @@ in ``evals/identity_resolution_benchmark.py``, five runs:
   nothing it waits for new evidence. Nobody is asked: the pair is compared
   again whenever a new memory mentions either side.
 
+Every fact carries its date (when it became true where that is known, else
+when it was recorded). Without dates, "lives in Munich" against "moved to
+Amsterdam last month" read as two people (P(same) 0.54), and a promotion as
+two roles (0.78); with dates, 0.97 and 1.00. Over the 156 pairs, two runs,
+dates raised the true merges at 0.90 from 67-68 to 72-73, with no pair of
+two things merged and one unsettleable pair instead of three.
+
 The question Memry asked before (the existing entity's facts against one new
 fact, decided on Jev's own confidence) merged nothing safely on the same pairs.
 """
@@ -232,6 +239,9 @@ class Profile:
     facts: list[str] = field(default_factory=list)
     description: str = ""
     home: str = ""
+    #: The date of each fact (YYYY-MM-DD), parallel to ``facts``, so the judge
+    #: can tell an update ("moved to Amsterdam last month") from a contradiction.
+    dates: list[str] = field(default_factory=list)
 
 
 def profile_of(
@@ -246,6 +256,7 @@ def profile_of(
         facts=[m.content for m in memories[:limit]],
         description=entity.description or "",
         home=home.get("name", "") if isinstance(home, dict) else "",
+        dates=[(m.valid_from or m.created_at or "")[:10] for m in memories[:limit]],
     )
     return profile, len(memories) > limit
 
@@ -258,11 +269,15 @@ def pair_state(a: Profile, b: Profile) -> str:
         if p.description:
             lines.append(f"Description: {p.description}")
         lines.append("Facts:")
-        lines += [f"- {fact}" for fact in p.facts] or ["- (no facts)"]
+        dated = [(p.dates[i] if i < len(p.dates) else "", fact) for i, fact in enumerate(p.facts)]
+        lines += [f"- [{date}] {fact}" if date else f"- {fact}" for date, fact in dated]
+        lines += [] if p.facts else ["- (no facts)"]
         return "\n".join(lines)
 
-    return ("Two entries from one person's long-term memory store.\n\n"
-            + side("A", a) + "\n\n" + side("B", b))
+    dated = any(p.dates for p in (a, b))
+    return ("Two entries from one person's long-term memory store."
+            + (" Each fact starts with the date it was recorded." if dated else "")
+            + "\n\n" + side("A", a) + "\n\n" + side("B", b))
 
 
 def judge_pair(decider: Decider, a: Profile, b: Profile) -> dict[str, float] | None:

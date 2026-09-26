@@ -21,7 +21,7 @@ import re
 from typing import Any, Callable
 
 from ..backends.base import MemoryBackend
-from ..models import Entity, EntityMention, MergeProposal, Scope
+from ..models import Entity, EntityMention, MergeProposal, Scope, utcnow
 from ..providers.decisions import (
     MEASURED_MERGE_GATES,
     Answer,
@@ -632,7 +632,8 @@ def resolve_mentions(
             candidates += index.candidates(surface, exclude={c.id for c in candidates})
         target: Entity | None = None
         proposals: list[tuple[Entity, float, str | None]] = []
-        mention = Profile(surface, types.get(normalized), [memory_content])
+        mention = Profile(surface, types.get(normalized), [memory_content],
+                          dates=[utcnow()[:10]])
         for candidate in candidates:
             facts = [m.content for m in backend.entity_memories(candidate.id, limit=5)]
             # An identically-named record with no evidence at all cannot be a
