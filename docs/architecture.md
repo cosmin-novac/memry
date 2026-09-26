@@ -167,15 +167,57 @@ mis-sort, and the benefit is confined to those three uses, none of which is retr
 quality. A new type should be added only when a real store shows a large group of entities
 that the existing types describe badly, which is the standard `document` and `code` met.
 
-Names and aliases discover identity candidates. Candidate lookup uses indexed canonical
-names, observed mention surfaces, and merged names. Optional user aliases stored in entity
-metadata use a fallback scan only when indexed evidence finds nothing. An exact multi-part
-name plus meaningful contextual overlap is a deterministic identity match unless known types
-conflict or the model finds a concrete contradiction. A shared short name or full name
-without contextual overlap remains separate and creates a merge proposal. Proposal actions
-resolve each endpoint through `merged_into`, so already-satisfied and stale proposals are
-idempotent. Confirmed merges retain the losing entity, repoint mentions and relations, and
-preserve its name as alias evidence.
+#### How Memry decides that two entities are one
+
+Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py`):
+
+1. **Extraction names the entities.** The extractor is given the store's existing entity
+   names that the text may mean (a rare shared name word, or initials), and the owner's
+   name ("the user" until the account names it). It writes a stored name as stored when a
+   fact names that entity, and lists the owner under the owner's name.
+2. **Save time (`resolve_mentions`).** Each extracted name is looked up across the whole
+   namespace (not only the save's session): entities with that name or alias, plus up to
+   five from the name index (a rare shared word, similar spelling, a typo, initials, a
+   name close in meaning with a semantic embedder). The owner's name attaches to the owner
+   entity without a comparison. Every other candidate is compared with the new memory;
+   the first "merge" wins, otherwise a new entity is made and each waiting pair is
+   recorded as a proposal (a kept-apart pair is recorded too).
+3. **The comparison (`compare`).** The judge (Jev) gets both entries side by side, in
+   both orders, and the answers are averaged. Each side shows its name, type,
+   description (if one has been built), whether it is the store owner, and up to 10
+   memories (50 at the last step): the most recent 30% and the rest closest in embedding
+   to the other side's. A memory naming both entries is left out of both sides. Every
+   memory carries when it was recorded, when it became true if known, the saved text and
+   session it came from (numbered the same on both sides), the client and the context
+   label. The judge answers same / different / unsure.
+4. **The decision.** Merge when P(same) reaches the bar for the evidence on the smaller
+   side (`Decider.pair_merge_by_step`; for Jev 0.97 / 0.96 / 0.85 / 0.80 at 1 / 3 / 10 /
+   50 memories). Keep apart for good when P(different) reaches 0.5, but only from 10
+   memories on. Anything else waits, and nobody is asked.
+5. **The funnel.** A waiting pair is compared again only when its smaller side reaches
+   3, 10 and 50 memories, and never after that: at most four comparisons. With Jev this
+   check runs on every save that mentions either side; it costs nothing unless a step
+   was reached. A merge restarts the funnel for the merged entity's open pairs.
+6. **The weekly pass (`resolve_entities`, upkeep key `dedup_entities`).** It raises new
+   pairs from the name index over all entities (identical names included) and pairs the
+   owner with the three people whose memories are closest to its own, then compares every
+   open pair that reached a new step. When the owner merges with a person, the person
+   keeps the name and becomes the owner. It also removes orphan entities.
+7. **Descriptions** are built from up to 50 memories when an entity is opened or recalled
+   into context, not on the save path.
+
+Merge proposals never reach the Upkeep queue when a calibrated judge decides pairs.
+Merges cannot be undone. Without a calibrated judge (a text model only), only identical
+names are compared and nothing merges on the model's own confidence.
+
+Tags follow the same pattern (`judged_tag_merges`): candidate pairs from the name index
+(no shared-word signal for tags), judged in both orders with the 10 most recent memories
+per tag, merged from P(same subject) 0.55, compared when found and once more when both
+tags are on 10 memories; the dashboard's suggest button asks the judge nothing.
+
+The measurements behind these numbers are in the PhD repository,
+`papers/memry-field-studies/findings/identity-obvious-merges.md` and
+`identity-threshold-by-evidence.md`.
 
 Each entity has two derived profile fields only:
 
