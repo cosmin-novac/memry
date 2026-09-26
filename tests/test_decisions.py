@@ -1056,6 +1056,17 @@ def test_names_worth_comparing_come_from_the_store_not_from_lists():
     assert found("Nordwind GmbH") == [] or all("Firma" not in n for n in found("Nordwind GmbH"))
 
 
+def test_an_acronym_holds_the_first_letter_of_every_word():
+    from memry.intelligence.identity import is_acronym_of
+
+    for short, long in (("AWS", "Amazon Web Services"), ("KfW", "Kreditanstalt für Wiederaufbau"),
+                        ("BSFZ", "Bescheinigungsstelle Forschungszulage"),
+                        ("GTM", "Google Tag Manager"), ("qa", "quality assurance")):
+        assert is_acronym_of(short, long), short
+    assert not is_acronym_of("action", "ai applications")  # no second "a"
+    assert not is_acronym_of("api", "ai applications")
+
+
 def test_names_close_in_meaning_are_compared_when_there_are_vectors():
     import numpy as np
 

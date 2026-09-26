@@ -248,3 +248,60 @@ def test_the_judge_is_told_which_tags_name_an_entity(verbatim_store):
     assert judge.states and all('a product named "Memry"' in s for s in judge.states)
     assert all("memry fact 4" in s and "memory fact 4" in s for s in judge.states)
     assert len(verbatim_store.categories(user_id="ada")) == 2
+
+
+def test_a_tag_pair_is_compared_when_found_and_once_more_at_10_memories(verbatim_store):
+    judge = _tag_judge(0.3)
+    verbatim_store.decider = judge
+    added = {"quality assurance": 0, "qa": 0}
+
+    def tag(name, times):
+        for _ in range(times):
+            verbatim_store.add(f"{name} fact {added[name]}", user_id="ada", infer=False,
+                               categories=[name])
+            added[name] += 1
+
+    tag("quality assurance", 5)
+    tag("qa", 1)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(judge.states) == 2  # both orders, once
+    tag("quality assurance", 5)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(judge.states) == 2  # "qa" is still on one memory
+    tag("qa", 9)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(judge.states) == 4
+    tag("qa", 40)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(judge.states) == 4  # never after
+
+
+def test_the_suggest_merges_button_asks_the_judge_nothing(verbatim_store):
+    from starlette.testclient import TestClient
+
+    from memry.rest import create_app
+
+    judge = _tag_judge(0.9)
+    verbatim_store.decider = judge
+    for tag, times in (("quality assurance", 5), ("qa", 1)):
+        for i in range(times):
+            verbatim_store.add(f"{tag} fact {i}", user_id="default", infer=False,
+                               categories=[tag])
+    # Not entered as a context manager, so the upkeep scheduler, whose weekly
+    # pass does judge tags, does not start.
+    client = TestClient(create_app(verbatim_store))
+    assert client.get("/api/v1/tags/suggest-merges").status_code == 200
+    assert judge.states == []
+    assert len(verbatim_store.categories(user_id="default")) == 2
+
+
+def test_tags_that_only_share_a_word_are_not_compared(verbatim_store):
+    """Tags are short phrases that share words across related subjects."""
+    judge = _tag_judge(0.9)
+    verbatim_store.decider = judge
+    _tagged(verbatim_store, "art assets", 2)
+    _tagged(verbatim_store, "art direction", 2)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert judge.states == []

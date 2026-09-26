@@ -182,8 +182,11 @@ def edit_similarity(a: str, b: str) -> float:
 
 def is_acronym_of(short: str, long: str) -> bool:
     """Whether ``short`` is built from the letters of ``long`` in order,
-    starting with its first letter: "AWS" and "Amazon Web Services", "BSFZ"
-    and "Bescheinigungsstelle Forschungszulage"."""
+    starting with its first letter, and holds the first letter of every word
+    of ``long`` in order: "AWS" and "Amazon Web Services", "BSFZ" and
+    "Bescheinigungsstelle Forschungszulage", "KfW" and "Kreditanstalt für
+    Wiederaufbau". Without the second condition "action" counted as an
+    acronym of "ai applications"."""
     parts, words = name_tokens(short), name_tokens(long)
     if len(parts) != 1 or len(words) < 2:
         return False
@@ -191,7 +194,10 @@ def is_acronym_of(short: str, long: str) -> bool:
     if not (2 <= len(letters) <= 6) or len(letters) < len(words) or letters[0] != text[0]:
         return False
     rest = iter(text)
-    return all(letter in rest for letter in letters)
+    if not all(letter in rest for letter in letters):
+        return False
+    rest = iter(letters)
+    return all(word[0] in rest for word in words)
 
 
 class NameIndex:
@@ -199,9 +205,15 @@ class NameIndex:
     with a given name."""
 
     def __init__(
-        self, entities: Iterable[Entity], vectors: dict[str, np.ndarray] | None = None
+        self, entities: Iterable[Entity], vectors: dict[str, np.ndarray] | None = None,
+        *, rare_words: bool = True,
     ) -> None:
         self.entities = {e.id: e for e in entities if e.merged_into is None}
+        #: Whether a shared rare word pairs two names. Off for tags: tags are
+        #: short phrases that share words across related subjects ("art assets"
+        #: and "art direction"). On 417 real tags it raised 263 of 379 pairs
+        #: and was the only signal for none of the 16 duplicates.
+        self.rare_words = rare_words
         self.vectors = vectors or {}
         self._tokens = {eid: set(name_tokens(e.name)) for eid, e in self.entities.items()}
         self._grams = {eid: _grams(e.name) for eid, e in self.entities.items()}
@@ -235,7 +247,7 @@ class NameIndex:
         excluded = set(exclude)
         tokens, grams = set(name_tokens(name)), _grams(name)
         score: dict[str, float] = defaultdict(float)
-        for token in tokens:
+        for token in tokens if self.rare_words else ():
             if len(token) >= 3 and self._counts.get(token, 0) <= self._rare_at:
                 for eid in self._by_token.get(token, ()):
                     score[eid] += 1.0
@@ -553,6 +565,20 @@ def parallel(fn: Callable[[Any], Any], items: list[Any], workers: int = 8) -> li
 #: show what a tag is used for; with 10 no pair of two subjects scored above
 #: 0.46, and 25 were no better.
 TAG_EXAMPLES = 10
+#: A tag pair is compared when it is found, and once more when both tags are on
+#: ``TAG_EXAMPLES`` memories and the judge sees all it will ever see; never
+#: after. Comparing every candidate pair on every pass cost 758 judge calls a
+#: pass on a 417-tag store, for the same answers.
+TAG_STEPS = (1, TAG_EXAMPLES)
+
+
+def tag_step(count: int) -> int:
+    """The funnel step of a tag pair whose less used tag is on ``count`` memories."""
+    return max((step for step in TAG_STEPS if count >= step), default=0)
+
+
+def tag_pair_key(a: str, b: str) -> str:
+    return "\n".join(sorted((a, b)))
 
 TAG_QUESTION = Choice(
     instructions=(
@@ -615,11 +641,16 @@ def judged_tag_merges(
     known: dict[str, tuple[str, str | None]],
     memories_of: Callable[[str], list[str]],
     vectors: dict[str, np.ndarray] | None = None,
+    compared: dict[str, int] | None = None,
     limit: int = 400,
 ) -> list[dict[str, Any]]:
     """Groups of tags the judge puts at ``decider.tag_merge_probability`` or
     higher, each kept under its most used tag. ``memories_of(tag)`` returns the
     tag's most recent memories, most recent first.
+
+    ``compared`` maps ``tag_pair_key`` to the step of ``TAG_STEPS`` the pair was
+    last compared at, and is updated in place: only pairs that reached a new
+    step are asked about, and pairs of tags that no longer exist are dropped.
 
     Measured on the 379 candidate pairs of a real 417-tag store, 10 memories per
     tag, two runs: from 0.55 it merged 7-9 of the 16 pairs I labelled one
@@ -628,19 +659,30 @@ def judged_tag_merges(
     41 borderline or 322 two-subject pairs; the highest two-subject pair was
     "restart" and "shutdown" at 0.46.
     """
+    compared = {} if compared is None else compared
     counts = {str(t["category"]).strip().casefold(): int(t.get("count") or 0) for t in tags}
     labels = sorted(counts)
     nodes = [Entity(id=label, name=label, user_id=None) for label in labels]
-    index = NameIndex(nodes, vectors)
-    pairs = sorted({
-        tuple(sorted((label, other.name)))
-        for label in labels
-        for other in index.candidates(label, vector=(vectors or {}).get(label))
-    })[:limit]
+    index = NameIndex(nodes, vectors, rare_words=False)
+    step = {
+        pair: tag_step(min(counts[pair[0]], counts[pair[1]]))
+        for pair in {
+            tuple(sorted((label, other.name)))
+            for label in labels
+            for other in index.candidates(label, vector=(vectors or {}).get(label))
+        }
+    }
+    live = {tag_pair_key(*pair) for pair in step}
+    for key in [key for key in compared if key not in live]:
+        del compared[key]
+    pairs = sorted(p for p in step if step[p] > compared.get(tag_pair_key(*p), 0))[:limit]
     examples = {tag: memories_of(tag) for tag in sorted({t for pair in pairs for t in pair})}
     scores = parallel(
         lambda pair: judge_tag_pair(decider, *pair, counts, known, examples), pairs
     )
+    for pair, score in zip(pairs, scores):
+        if score is not None:
+            compared[tag_pair_key(*pair)] = step[pair]
     parent = {label: label for label in labels}
 
     def root(label: str) -> str:

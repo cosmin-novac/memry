@@ -3124,7 +3124,10 @@ def create_app(
 
     async def suggest_merges_route(request: Request) -> Response:
         user_id = _p(request).namespace(request.query_params.get("user_id"))
-        await run_in_threadpool(partial(store.merge_obvious_topics, user_id=user_id))
+        # Formatting only: the judged tag merges belong to the weekly pass, not
+        # to a button that can be clicked any number of times.
+        await run_in_threadpool(partial(store.merge_obvious_topics, user_id=user_id,
+                                        judge=False))
         groups = await run_in_threadpool(partial(
             store.suggest_tag_merges,
             user_id=user_id,

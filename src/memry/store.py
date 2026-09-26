@@ -2563,9 +2563,13 @@ class MemoryStore:
         user_id: str | None = None,
         agent_id: str | None = None,
         run_id: str | None = None,
+        judge: bool = True,
     ) -> dict[str, Any]:
         """Collapse formatting and plural duplicates, then, with a calibrated
-        judge, the tags it puts at its tag merge threshold (identity.py)."""
+        judge and ``judge`` set, the tags it puts at its tag merge threshold
+        (identity.py). Each tag pair's funnel step is stored, so a pair is
+        compared when found and once more at 10 memories a tag, not on every
+        pass."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         categories = self.categories(
             user_id=user_id, agent_id=agent_id, run_id=run_id
@@ -2577,15 +2581,18 @@ class MemoryStore:
             result = self.backend.retag_topics(scope, remove, group["canonical"])
             changed += result or 0
         judged: list[dict[str, Any]] = []
-        if judges_pairs(self.decider):
+        if judge and judges_pairs(self.decider):
             tags = self.categories(user_id=user_id, agent_id=agent_id, run_id=run_id)
+            compared = self._upkeep_get("tag_pairs", user_id, {})
             judged = judged_tag_merges(
                 self.decider, tags, self._entities_named(scope, tags),
                 lambda tag: [m.content for m in self.get_all(
                     user_id=user_id, agent_id=agent_id, run_id=run_id,
                     categories=[tag], limit=TAG_EXAMPLES)],
                 self._tag_vectors(tags),
+                compared=compared,
             )
+            self._upkeep_set("tag_pairs", user_id, compared)
             for group in judged:
                 remove = set(group["variants"]) - {group["canonical"]}
                 changed += self.backend.retag_topics(scope, remove, group["canonical"]) or 0
