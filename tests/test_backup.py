@@ -118,3 +118,49 @@ def test_backup_rejects_other_namespace_and_conflicting_identity():
     finally:
         source.close()
         target.close()
+
+def test_a_backup_from_before_a_column_was_added_still_restores():
+    """Merge decisions gained ``compared_step``; older backups lack it. The
+    column's default fills it in, and any other difference is still refused."""
+    source = populated_store()
+    target = make_store()
+    try:
+        backup = source.export_backup(user_id="ada")
+        older = deepcopy(backup)
+        for row in older["tables"]["entity_proposals"]:
+            del row["compared_step"]
+        assert target.import_backup(older, owner_prefix="ada")["inserted"] > 0
+        assert target.import_backup(older, owner_prefix="ada")["inserted"] == 0
+        assert target.export_backup(user_id="ada")["tables"] == backup["tables"]
+
+        unknown = deepcopy(backup)
+        unknown["tables"]["entity_proposals"][0]["surprise"] = 1
+        with pytest.raises(ValueError, match="wrong columns"):
+            make_store().import_backup(unknown, owner_prefix="ada")
+        missing = deepcopy(backup)
+        del missing["tables"]["entity_proposals"][0]["reason"]  # no default: refused
+        with pytest.raises(ValueError, match="wrong columns"):
+            make_store().import_backup(missing, owner_prefix="ada")
+    finally:
+        source.close()
+        target.close()
+
+
+def test_a_database_from_before_the_funnel_gains_its_column(tmp_path):
+    import sqlite3
+
+    from memry.backends.local import LocalBackend
+
+    path = tmp_path / "old.db"
+    LocalBackend(str(path)).close()
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE entity_proposals DROP COLUMN compared_step")
+    db.execute("INSERT INTO entity_proposals (id, entity_a, entity_b, created_at) "
+               "VALUES ('p1', 'a', 'b', '2026-01-01')")
+    db.commit()
+    db.close()
+    backend = LocalBackend(str(path))
+    try:
+        assert backend.get_proposal("p1").compared_step == 0
+    finally:
+        backend.close()

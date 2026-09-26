@@ -13,6 +13,7 @@ import json
 import re
 import sqlite3
 import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -177,7 +178,8 @@ CREATE TABLE IF NOT EXISTS entity_proposals (
     confidence REAL NOT NULL DEFAULT 0.5,
     reason TEXT,
     created_at TEXT NOT NULL,
-    decided_at TEXT
+    decided_at TEXT,
+    compared_step INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON entity_proposals(status, user_id);
 
@@ -361,6 +363,14 @@ class LocalBackend(MemoryBackend):
         if "description_updated_at" not in columns:
             self._db.execute(
                 "ALTER TABLE entities ADD COLUMN description_updated_at TEXT"
+            )
+        proposal_columns = {
+            row["name"]
+            for row in self._db.execute("PRAGMA table_info(entity_proposals)").fetchall()
+        }
+        if "compared_step" not in proposal_columns:
+            self._db.execute(
+                "ALTER TABLE entity_proposals ADD COLUMN compared_step INTEGER NOT NULL DEFAULT 0"
             )
 
     def _topic_locked(self, name: str, scope: Scope, provenance: str = "memory") -> Topic:
@@ -637,6 +647,23 @@ class LocalBackend(MemoryBackend):
             )
             for r in rows
         ]
+
+    def episodes_by_id(self, episode_ids: list[str]) -> dict[str, Episode]:
+        out: dict[str, Episode] = {}
+        ids = list(dict.fromkeys(episode_ids))
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    f"SELECT * FROM episodes WHERE id IN ({','.join('?' * len(chunk))})", chunk,
+                ).fetchall()
+            for r in rows:
+                out[r["id"]] = Episode(
+                    id=r["id"], content=r["content"], role=r["role"], user_id=r["user_id"],
+                    agent_id=r["agent_id"], run_id=r["run_id"],
+                    metadata=json.loads(r["metadata"]), created_at=r["created_at"],
+                )
+        return out
 
     # -- memories -------------------------------------------------------
     def insert_memory(self, memory: Memory, embedding: list[float] | None = None) -> Memory:
@@ -1612,6 +1639,49 @@ class LocalBackend(MemoryBackend):
             (r["id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows
         ]
 
+    def vectors_of(self, memory_ids: list[str]) -> dict[str, np.ndarray]:
+        out: dict[str, np.ndarray] = {}
+        for start in range(0, len(memory_ids), 500):
+            chunk = memory_ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    f"SELECT id, embedding FROM memories WHERE id IN ({','.join('?' * len(chunk))}) "
+                    "AND embedding IS NOT NULL",
+                    chunk,
+                ).fetchall()
+            out.update(
+                (r["id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows
+            )
+        return out
+
+    def session_memories(
+        self, memory: Memory, *, hours: float = 3.0, limit: int = 50
+    ) -> list[Memory]:
+        context = (memory.metadata or {}).get("context")
+        if memory.run_id:
+            same, params = "run_id = ?", [memory.run_id]
+        elif memory.agent_id and context:
+            same, params = "agent_id = ? AND json_extract(metadata, '$.context') = ?", [
+                memory.agent_id, context]
+        else:
+            return []
+        try:
+            at = datetime.fromisoformat(memory.created_at)
+        except (TypeError, ValueError):
+            return []
+        window = timedelta(hours=hours)
+        owner = "user_id IS NULL" if memory.user_id is None else "user_id = ?"
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {_MEMORY_COLS} FROM memories WHERE {owner} AND id != ? "
+                f"AND invalid_at IS NULL AND {same} AND created_at BETWEEN ? AND ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (*([] if memory.user_id is None else [memory.user_id]), memory.id, *params,
+                 (at - window).isoformat(timespec="seconds"),
+                 (at + window).isoformat(timespec="seconds"), limit),
+            ).fetchall()
+        return [_row_to_memory(r) for r in rows]
+
     @staticmethod
     def _row_to_entity(row: sqlite3.Row) -> Entity:
         return Entity(
@@ -1642,6 +1712,7 @@ class LocalBackend(MemoryBackend):
             reason=row["reason"],
             created_at=row["created_at"],
             decided_at=row["decided_at"],
+            compared_step=row["compared_step"],
         )
 
     def insert_entity(self, entity: Entity) -> Entity:
@@ -1912,6 +1983,16 @@ class LocalBackend(MemoryBackend):
                 (entity_id, limit),
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
+
+    def count_entity_memories(self, entity_id: str) -> int:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(DISTINCT m.id) FROM entity_mentions em "
+                "JOIN memories m ON m.id = em.memory_id "
+                "WHERE em.entity_id = ? AND m.invalid_at IS NULL",
+                (entity_id,),
+            ).fetchone()
+        return int(row[0])
 
     def set_entity_type(self, entity_id: str, entity_type: str) -> None:
         with self._lock:
@@ -2227,6 +2308,13 @@ class LocalBackend(MemoryBackend):
                 "WHERE entity_a = entity_b AND status = 'proposed'",
                 (changed_at,),
             )
+            # The merged entity carries both sides' memories now: its open
+            # pairs start the comparison funnel again on that evidence.
+            self._db.execute(
+                "UPDATE entity_proposals SET compared_step = 0 "
+                "WHERE status = 'proposed' AND (entity_a = ? OR entity_b = ?)",
+                (keep_root, keep_root),
+            )
             self._db.execute(
                 "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
                 "WHERE id = ?",
@@ -2239,11 +2327,12 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             self._db.execute(
                 "INSERT INTO entity_proposals (id, entity_a, entity_b, user_id, status, "
-                "confidence, reason, created_at, decided_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                "confidence, reason, created_at, decided_at, compared_step) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     proposal.id, proposal.entity_a, proposal.entity_b, proposal.user_id,
                     proposal.status, proposal.confidence, proposal.reason,
-                    proposal.created_at, proposal.decided_at,
+                    proposal.created_at, proposal.decided_at, proposal.compared_step,
                 ),
             )
             self._db.commit()
@@ -2285,13 +2374,15 @@ class LocalBackend(MemoryBackend):
         return [self._row_to_proposal(r) for r in rows]
 
     def update_proposal_judgement(
-        self, proposal_id: str, *, confidence: float, reason: str | None
+        self, proposal_id: str, *, confidence: float, reason: str | None,
+        compared_step: int | None = None,
     ) -> None:
         with self._lock:
             self._db.execute(
-                "UPDATE entity_proposals SET confidence = ?, reason = ? "
+                "UPDATE entity_proposals SET confidence = ?, reason = ?, "
+                "compared_step = COALESCE(?, compared_step) "
                 "WHERE id = ? AND status = 'proposed'",
-                (confidence, reason, proposal_id),
+                (confidence, reason, compared_step, proposal_id),
             )
             self._db.commit()
 
@@ -2448,10 +2539,15 @@ class LocalBackend(MemoryBackend):
             raw_rows = raw_tables[table]
             if not isinstance(raw_rows, list):
                 raise ValueError(f"backup table {table} must be a list")
-            columns = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
+            info = self._db.execute(f"PRAGMA table_info({table})").fetchall()
+            columns = {row["name"] for row in info}
+            # A backup from before a column was added lacks it; the column's
+            # default fills it in. Any other difference is refused.
+            defaulted = {row["name"] for row in info if row["dflt_value"] is not None}
             rows: list[dict[str, Any]] = []
             for raw in raw_rows:
-                if not isinstance(raw, dict) or set(raw) != columns:
+                if (not isinstance(raw, dict) or not set(raw) <= columns
+                        or not columns - set(raw) <= defaulted):
                     raise ValueError(f"backup row for {table} has the wrong columns")
                 row = {key: self._restore_value(value) for key, value in raw.items()}
                 if table in _BACKUP_USER_TABLES and not self._backup_owner_matches(
@@ -2511,7 +2607,9 @@ class LocalBackend(MemoryBackend):
                             tuple(row[key] for key in keys),
                         ).fetchone()
                         if existing is not None:
-                            if dict(existing) != row:
+                            # Compared on the backup's columns: a backup from
+                            # before a column was added does not carry it.
+                            if {key: existing[key] for key in row} != row:
                                 identity = ", ".join(f"{key}={row[key]!r}" for key in keys)
                                 raise ValueError(f"backup conflicts with existing {table} row ({identity})")
                             table_unchanged += 1; unchanged += 1

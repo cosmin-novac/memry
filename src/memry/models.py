@@ -284,6 +284,10 @@ class MergeProposal(BaseModel):
     reason: str | None = None
     created_at: str = Field(default_factory=utcnow)
     decided_at: str | None = None
+    #: The step of the comparison funnel the pair was last compared at: how
+    #: many memories its smaller side had then (``identity.PAIR_STEPS``).
+    #: 0 means not compared yet. A pair is compared again only at a later step.
+    compared_step: int = 0
 
 
 class Relation(BaseModel):

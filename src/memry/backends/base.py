@@ -41,6 +41,11 @@ class MemoryBackend(ABC):
     @abstractmethod
     def list_episodes(self, scope: Scope, limit: int = 100) -> list[Episode]: ...
 
+    def episodes_by_id(self, episode_ids: list[str]) -> dict[str, Episode]:
+        """The stored episodes among ``episode_ids``. A backend that cannot look
+        episodes up by id returns none."""
+        return {}
+
     # -- memories -------------------------------------------------------
     @abstractmethod
     def insert_memory(self, memory: Memory, embedding: list[float] | None = None) -> Memory:
@@ -108,11 +113,13 @@ class MemoryBackend(ABC):
     ) -> list[Memory]: ...
 
     def update_proposal_judgement(
-        self, proposal_id: str, *, confidence: float, reason: str | None
+        self, proposal_id: str, *, confidence: float, reason: str | None,
+        compared_step: int | None = None,
     ) -> None:
         """Record the latest comparison on an open proposal, so the list shows
-        the provider's latest answer instead of its first. A backend that
-        cannot store the latest answer keeps the first."""
+        the provider's latest answer instead of its first, and the step of the
+        comparison funnel it was made at (``identity.PAIR_STEPS``). A backend
+        that cannot store the latest answer keeps the first."""
         return None
 
     def count_memories(self, owner_prefix: str | None = None) -> dict[str, int]:
@@ -441,6 +448,10 @@ class MemoryBackend(ABC):
         """Memories that mention this entity. Active evidence is the default."""
         return []
 
+    def count_entity_memories(self, entity_id: str) -> int:
+        """How many active memories mention this entity."""
+        return len(self.entity_memories(entity_id, limit=100_000))
+
     def entities_of_memory(self, memory_id: str) -> list[Entity]:
         """The entities a single memory mentions (for relation backfill)."""
         return []
@@ -475,6 +486,18 @@ class MemoryBackend(ABC):
         Used by consolidation and tag health to compare what is stored without
         re-embedding anything.
         """
+        return []
+
+    def vectors_of(self, memory_ids: list[str]) -> dict[str, "np.ndarray"]:
+        """The stored embedding of each of these memories that has one."""
+        return {}
+
+    def session_memories(
+        self, memory: Memory, *, hours: float = 3.0, limit: int = 50
+    ) -> list[Memory]:
+        """Other active memories saved in the same conversation as ``memory``,
+        within ``hours`` of it: the same session, or without one the same client
+        and context label. A backend that cannot tell returns none."""
         return []
 
     def add_proposal(self, proposal: MergeProposal) -> MergeProposal:

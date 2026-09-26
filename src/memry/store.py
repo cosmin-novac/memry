@@ -49,7 +49,6 @@ from .intelligence.decay import (
 from .intelligence.entities import (
     _gate,
     classify_entity_types,
-    describe_proposal,
     judge_entity_referents,
     non_referent_reason,
     screen_names,
@@ -61,6 +60,13 @@ from .intelligence.entities import (
     synthesize_entity_description,
 )
 from .intelligence.graph_retrieval import detect_query_entities, relational_memory_ids
+from .intelligence.identity import (
+    TAG_EXAMPLES,
+    NameIndex,
+    judged_tag_merges,
+    judges_pairs,
+    name_vectors,
+)
 from .intelligence.extraction import (
     VOCABULARY_LIMIT,
     extract_facts,
@@ -113,6 +119,15 @@ _ENRICHMENT_MAX_BACKOFF_SECONDS = 300
 
 def _ingestion_context(metadata: dict[str, Any] | None) -> str:
     return " ".join(str((metadata or {}).get("context") or "").split())[:200]
+
+
+def _keep_context(candidates: list[CandidateFact], context: str) -> None:
+    """Facts extracted from a save keep the save's context label. The identity
+    judge is shown it with each fact, and it tells which memories came from one
+    conversation when the client sent no session id."""
+    if context:
+        for candidate in candidates:
+            candidate.metadata.setdefault("context", context)
 
 
 def _client_tag_hints(
@@ -394,6 +409,11 @@ class MemoryStore:
                     ),
                     context=_ingestion_context(metadata),
                     tag_hints=_client_tag_hints(metadata, categories),
+                    owner=self.owner_name(scope.user_id),
+                    entity_names=self._entity_vocabulary(
+                        scope,
+                        "\n".join(str(m.get("content") or "") for m in messages),
+                    ),
                 )
                 self._confirm_candidate_whens(candidates)
             except Exception as exc:
@@ -407,6 +427,7 @@ class MemoryStore:
         else:
             candidates = self._pending_verbatim(messages)
 
+        _keep_context(candidates, _ingestion_context(metadata))
         actions = self._apply_candidates(candidates, scope, episode_ids)
 
         # Post-write audit: extraction is lossy and non-deterministic, and a
@@ -611,6 +632,7 @@ class MemoryStore:
                     memory_content=action.content or candidate.content,
                     surfaces=candidate.entities,
                     types=candidate.entity_types,
+                    owner=self._owner_for(scope, candidate.entities),
                 )
                 self._resolve_relations(
                     candidate.relations, resolved, scope, action.memory_id
@@ -630,12 +652,15 @@ class MemoryStore:
     def _recheck_proposals(
         self, scope: Scope, open_before: list[MergeProposal], entity_ids: set[str]
     ) -> None:
-        """Compare again every pair a new memory just added evidence to.
+        """Offer every pair a new memory just added evidence to for comparing.
 
         New evidence is the only thing that can make an unsure pair sure, so a
-        pair is asked again when it gets some, not only on the weekly pass. A
-        pair raised by this same save was judged moments ago and is left alone.
-        A failure here must never fail the save.
+        pair is looked at when it gets some, not only on the weekly pass. A
+        calibrated judge is asked only when the pair's smaller side has reached
+        the next step of the funnel (``identity.PAIR_STEPS``); on other saves
+        this costs two memory counts. A pair raised by this same save was
+        judged moments ago and is left alone. A failure here must never fail
+        the save.
         """
         touched = {
             proposal.id for proposal in open_before
@@ -723,7 +748,9 @@ class MemoryStore:
             return {"entities": surfaces, "mentions": mentions}
         try:
             candidates = extract_facts(
-                self.llm, [{"role": "user", "content": content}]
+                self.llm, [{"role": "user", "content": content}],
+                owner=self.owner_name(scope.user_id),
+                entity_names=self._entity_vocabulary(scope, content),
             )
             surfaces = []
             types: dict[str, str] = {}
@@ -745,6 +772,7 @@ class MemoryStore:
                 surfaces=surfaces,
                 types=types,
                 attach=False,
+                owner=self._owner_for(scope, surfaces),
             )
         except Exception as exc:
             raise ValueError(
@@ -1120,6 +1148,10 @@ class MemoryStore:
             ),
             context=context or None,
             tag_hints=tag_hints,
+            owner=self.owner_name(first_scope.user_id),
+            entity_names=self._entity_vocabulary(
+                first_scope, "\n".join(memory.content for memory in active)
+            ),
         )
         self._confirm_candidate_whens(candidates)
         if not candidates:
@@ -1133,6 +1165,7 @@ class MemoryStore:
                 warnings=["no facts extracted; memories kept verbatim"],
             )
 
+        _keep_context(candidates, context)
         actions = self._apply_candidates(
             candidates,
             first_scope,
@@ -1495,6 +1528,24 @@ class MemoryStore:
             {"category": c, "count": n}
             for c, n in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
         ]
+
+    def _entity_vocabulary(self, scope: Scope, text: str) -> list[tuple[str, str | None]]:
+        """Existing entities a text may be naming, offered to extraction as
+        (name, type) so it writes their names as stored. On 11 texts that
+        named a stored entity another way ("bildy.ai", "AWS", "Prof. Olsen"),
+        extraction wrote the stored name 11 times with the offer and once
+        without; on 7 texts about a new thing with a look-alike name ("Kestrel
+        Capital", "Priya Sharma") it used a stored name 0 times either way.
+        """
+        if not text.strip():
+            return []
+        lookup = Scope(user_id=scope.user_id) if scope.user_id is not None else scope
+        try:
+            entities = self.backend.list_entities(lookup, limit=100_000)
+        except Exception:
+            return []
+        named = NameIndex(entities).named_in(text)
+        return [(e.name, e.entity_type) for e in named if not (e.metadata or {}).get("owner")]
 
     def _tag_vocabulary(
         self, scope: Scope, text: str = "", limit: int = VOCABULARY_LIMIT
@@ -1982,6 +2033,45 @@ class MemoryStore:
     def relations(self, *, user_id: str | None = None, limit: int = 1000) -> list[Relation]:
         return self.backend.list_relations(Scope(user_id=user_id), limit=limit)
 
+    def restore_context_labels(
+        self, *, user_id: str | None = None, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Give memories back the context label of the saves they came from.
+
+        Facts extracted from a save did not keep the save's context label
+        (fixed in the write path); the save's episode kept it, and every fact
+        keeps its episode ids. A memory without a label takes the labels of its
+        episodes, distinct ones joined as distillation joins them. Only
+        memories without a label are looked at, so a second run changes
+        nothing. Token-free. ``dry_run`` counts without writing."""
+        missing = [
+            m for m in self.get_all(user_id=user_id, limit=1_000_000)
+            if not _ingestion_context(m.metadata) and m.source_episode_ids
+        ]
+        episodes = self.backend.episodes_by_id(
+            [e for m in missing for e in m.source_episode_ids]
+        )
+        summary = {"without_label": len(missing), "restorable": 0, "restored": 0,
+                   "save_had_no_label": 0}
+        for memory in missing:
+            labels = list(dict.fromkeys(
+                label for episode_id in memory.source_episode_ids
+                if (episode := episodes.get(episode_id))
+                and (label := _ingestion_context(episode.metadata))
+            ))
+            if not labels:
+                summary["save_had_no_label"] += 1
+                continue
+            summary["restorable"] += 1
+            if not dry_run:
+                self.backend.update_memory(
+                    memory.id,
+                    metadata={**memory.metadata, "context": " | ".join(labels)[:200]},
+                    touch=False,
+                )
+                summary["restored"] += 1
+        return summary
+
     def repair_updated_at(self, *, user_id: str | None = None) -> dict[str, Any]:
         """Reconstruct each memory's updated_at from its audit trail.
 
@@ -2436,6 +2526,57 @@ class MemoryStore:
             return False
         return self.backend.merge_entities(keep_root, merge_root)
 
+    # -- the store owner ----------------------------------------------------
+    def set_owner_name(self, user_id: str | None, name: str) -> None:
+        """Record the name of the person a namespace belongs to, from their
+        account. The owner entity starts with it; the identity judge may later
+        find the owner to be a named person in the store, whose name it keeps.
+        """
+        name = " ".join(str(name or "").split())[:80]
+        if name and self._upkeep_get("owner_name", user_id, None) != name:
+            self._upkeep_set("owner_name", user_id, name)
+
+    def owner_entity(self, user_id: str | None) -> Entity | None:
+        """The entity of the person this namespace belongs to, once a memory
+        has mentioned them. Followed through merges: the entity the owner was
+        merged into is the owner now."""
+        pointer = self._upkeep_get("owner_entity", user_id, None)
+        root = self.backend.resolve_entity_id(pointer) if pointer else None
+        entity = self.backend.get_entity(root) if root else None
+        if entity is None:
+            return None
+        if root != pointer:
+            self._upkeep_set("owner_entity", user_id, root)
+        if not (entity.metadata or {}).get("owner"):
+            metadata = {**(entity.metadata or {}), "owner": True}
+            self.backend.set_entity_metadata(entity.id, metadata)
+            entity = entity.model_copy(update={"metadata": metadata})
+        return entity
+
+    def owner_name(self, user_id: str | None) -> str:
+        """The name the extractor lists the owner under: the owner entity's,
+        else the account's, else "the user"."""
+        entity = self.owner_entity(user_id)
+        if entity is not None:
+            return entity.name
+        return self._upkeep_get("owner_name", user_id, None) or "the user"
+
+    def _owner_for(self, scope: Scope, surfaces: list[str]) -> Entity | None:
+        """The owner entity, created when these extracted names first include
+        the owner's. It belongs to the whole namespace, not to one run."""
+        owner = self.owner_entity(scope.user_id)
+        if owner is not None:
+            return owner
+        name = self.owner_name(scope.user_id)
+        if not any(str(s).strip().casefold() == name.casefold() for s in surfaces):
+            return None
+        owner = self.backend.insert_entity(Entity(
+            name=name, normalized=name.lower(), entity_type="person",
+            user_id=scope.user_id, metadata={"owner": True},
+        ))
+        self._upkeep_set("owner_entity", scope.user_id, owner.id)
+        return owner
+
     def resolve_entities(self, *, user_id: str | None = None) -> dict[str, int]:
         """Re-judge open proposals with accumulated evidence; auto-confirm only
         clear, high-confidence matches. Everything ambiguous stays proposed.
@@ -2445,10 +2586,18 @@ class MemoryStore:
         accumulate forever: a real store reached 206 such rows out of 519.
         """
         scope = Scope(user_id=user_id)
-        # Surface same-name duplicates first: proposals are otherwise only made
-        # at write time, so anything already duplicated has nothing scheduled to
-        # look at it again and would sit there for good.
-        proposed = propose_same_name_duplicates(backend=self.backend, scope=scope)
+        # Surface duplicates first: proposals are otherwise only made at write
+        # time, so anything already duplicated has nothing scheduled to look at
+        # it again and would sit there for good. Names close in meaning only
+        # count with a semantic embedder: hash vectors put "Köln" nowhere near
+        # "Cologne".
+        semantic = self.embedder.dimensions and self.embedder.name != "hash"
+        proposed = propose_same_name_duplicates(
+            backend=self.backend, scope=scope, decider=self.decider,
+            embed=self.embedder.embed if semantic else None,
+            limit=300 if self.decider.calibrated and self.decider.available else 50,
+            owner=self.owner_entity(user_id),
+        )
         outcome = resolve_open_proposals(
             backend=self.backend, llm=self.llm, decider=self.decider, scope=scope
         )
@@ -2553,8 +2702,13 @@ class MemoryStore:
         user_id: str | None = None,
         agent_id: str | None = None,
         run_id: str | None = None,
+        judge: bool = True,
     ) -> dict[str, Any]:
-        """Automatically collapse deterministic formatting/plural duplicates."""
+        """Collapse formatting and plural duplicates, then, with a calibrated
+        judge and ``judge`` set, the tags it puts at its tag merge threshold
+        (identity.py). Each tag pair's funnel step is stored, so a pair is
+        compared when found and once more at 10 memories a tag, not on every
+        pass."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         categories = self.categories(
             user_id=user_id, agent_id=agent_id, run_id=run_id
@@ -2565,7 +2719,45 @@ class MemoryStore:
             remove = set(group["variants"]) - {group["canonical"]}
             result = self.backend.retag_topics(scope, remove, group["canonical"])
             changed += result or 0
-        return {"groups_merged": len(groups), "memories_changed": changed}
+        judged: list[dict[str, Any]] = []
+        if judge and judges_pairs(self.decider):
+            tags = self.categories(user_id=user_id, agent_id=agent_id, run_id=run_id)
+            compared = self._upkeep_get("tag_pairs", user_id, {})
+            judged = judged_tag_merges(
+                self.decider, tags, self._entities_named(scope, tags),
+                lambda tag: [m.content for m in self.get_all(
+                    user_id=user_id, agent_id=agent_id, run_id=run_id,
+                    categories=[tag], limit=TAG_EXAMPLES)],
+                self._tag_vectors(tags),
+                compared=compared,
+            )
+            self._upkeep_set("tag_pairs", user_id, compared)
+            for group in judged:
+                remove = set(group["variants"]) - {group["canonical"]}
+                changed += self.backend.retag_topics(scope, remove, group["canonical"]) or 0
+        return {"groups_merged": len(groups) + len(judged), "memories_changed": changed}
+
+    def _entities_named(
+        self, scope: Scope, tags: list[dict[str, Any]]
+    ) -> dict[str, tuple[str, str | None]]:
+        """For each tag that is also the name of an entity: that entity's name
+        and type, as evidence of what the tag means."""
+        labels = {str(t["category"]).strip().casefold() for t in tags}
+        named: dict[str, tuple[str, str | None]] = {}
+        for entity in self.backend.find_entities_by_aliases(sorted(labels), scope, limit=10_000):
+            label = entity.name.strip().casefold()
+            if label in labels:
+                named[label] = (entity.name, entity.entity_type)
+        return named
+
+    def _tag_vectors(self, tags: list[dict[str, Any]]):
+        if not self.embedder.dimensions or self.embedder.name == "hash":
+            return None
+        labels = [str(t["category"]).strip().casefold() for t in tags]
+        vectors = name_vectors(self.embedder.embed, [
+            Entity(id=label, name=label, user_id=None) for label in labels
+        ])
+        return vectors
 
     def consolidate_memories(
         self,
@@ -3070,9 +3262,11 @@ class MemoryStore:
             outcome["skipped"] = -1
             return outcome
         scope = Scope(user_id=user_id)
+        # The store owner is a person by construction, whatever its name
+        # ("the user" until the judge finds who it is).
         pending = [
             e for e in self.backend.list_entities(scope, limit=1_000_000)
-            if "screen" not in (e.metadata or {})
+            if "screen" not in (e.metadata or {}) and not (e.metadata or {}).get("owner")
         ][: limit or self.SCREEN_BATCH]
 
         def ask(entity: Entity):
@@ -3301,12 +3495,10 @@ class MemoryStore:
             entity = self.backend.get_entity(entity_id)
             return entity.name if entity is not None else entity_id
 
-        for proposal in self.merge_proposals(user_id=user_id, limit=1000):
+        for proposal in self._proposals_for_a_person(user_id):
             items.append({
                 "kind": "proposal", "id": proposal.id,
                 "title": f"{entity_name(proposal.entity_a)} and {entity_name(proposal.entity_b)}",
-                "detail": "Might be the same one. "
-                          + describe_proposal(proposal, self.merge_gate()),
                 "accept": "merge", "decline": "keep separate",
             })
 
@@ -3394,6 +3586,14 @@ class MemoryStore:
             self._upkeep_set("tag_split:count", user_id, splits_listed)
         return items
 
+    def _proposals_for_a_person(self, user_id: str | None) -> list[MergeProposal]:
+        """Entity pairs Upkeep asks a person about. With a calibrated judge,
+        none: a pair it could not settle waits for new evidence and is
+        compared again, since a person would be guessing from the same facts."""
+        if judges_pairs(self.decider):
+            return []
+        return self.merge_proposals(user_id=user_id, limit=1000)
+
     def upkeep_count(self, *, user_id: str | None = None) -> int:
         """How many rows wait under Upkeep, without asking a model anything.
 
@@ -3404,7 +3604,7 @@ class MemoryStore:
         waiting = {entity.id for entity, _ in self._screen_rows(user_id)}
         waiting |= {p["id"] for p in self._upkeep_get("entity_review:pending", user_id, [])}
         return (
-            len(self.merge_proposals(user_id=user_id, limit=1000))
+            len(self._proposals_for_a_person(user_id))
             + len(self._upkeep_get("conflict:pending", user_id, []))
             + len(self._upkeep_get("consolidation:pending", user_id, []))
             + len(waiting)

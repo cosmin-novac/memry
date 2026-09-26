@@ -83,6 +83,12 @@ class DecisionConfig(BaseModel):
     #: Override the provider's own automatic-merge gate. Leave unset to use the
     #: value measured for that provider.
     auto_confirm_confidence: float | None = None
+    #: Override for the probability from which a calibrated judge merges two
+    #: entities (0.95 for Jev). Measured on 156 labelled pairs: at 0.85, 73-74
+    #: of 81 true pairs merged against 57-58 at 0.95, no pair of two different
+    #: things merged, but 4 pairs that no fact settles did ("PR #92" twice,
+    #: "Maria" twice). See evals/identity_resolution_benchmark.py.
+    pair_merge_probability: float | None = None
     #: Turn re-ranking on or off. Unset leaves it as the provider has it: on
     #: with Jev, off otherwise. Turning it on only works for a provider that
     #: was measured to beat no re-ranking (Jev, and gpt-5.6-luna as the text
@@ -336,6 +342,7 @@ def _from_env() -> dict[str, Any]:
     put("decision", "api_key", e("MEMRY_DECISION_API_KEY"))
     put("decision", "base_url", e("MEMRY_DECISION_BASE_URL"))
     put("decision", "auto_confirm_confidence", _float(e("MEMRY_DECISION_MERGE_CONFIDENCE")))
+    put("decision", "pair_merge_probability", _float(e("MEMRY_DECISION_PAIR_MERGE_PROBABILITY")))
     put("decision", "rerank", _bool(e("MEMRY_DECISION_RERANK")))
 
     put("supersede", "protect_importance", _float(e("MEMRY_SUPERSEDE_PROTECT_IMPORTANCE")))

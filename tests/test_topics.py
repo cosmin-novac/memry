@@ -180,3 +180,128 @@ def test_existing_plural_topics_are_merged_by_maintenance(verbatim_store):
     assert verbatim_store.categories(user_id="ada") == [
         {"category": "project", "count": 2}
     ]
+
+
+# ------------------------------------------- tags decided by a calibrated judge
+def _tag_judge(same: float):
+    from memry.providers.decisions import Answer, Answers, NoneDecider
+
+    class Judge(NoneDecider):
+        name = "stub"
+        available = True
+        calibrated = True
+        tag_merge_probability = 0.55
+
+        def __init__(self):
+            self.states = []
+
+        def decide(self, state, questions):
+            if "tag" not in questions:
+                return Answers({})
+            self.states.append(state)
+            return Answers({"tag": Answer("same" if same >= 0.5 else "different",
+                                          {"same": same, "different": 1 - same}, 0.9, True)})
+
+    return Judge()
+
+
+def _tagged(store, tag, times):
+    for i in range(times):
+        store.add(f"{tag} fact {i}", user_id="ada", infer=False, categories=[tag])
+
+
+def test_a_judged_tag_pair_merges_into_the_more_used_tag(verbatim_store):
+    verbatim_store.decider = _tag_judge(0.9)
+    _tagged(verbatim_store, "quality assurance", 5)
+    _tagged(verbatim_store, "qa", 1)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert verbatim_store.categories(user_id="ada") == [
+        {"category": "quality assurance", "count": 6}]
+
+
+def test_a_tag_pair_under_the_threshold_stays(verbatim_store):
+    verbatim_store.decider = _tag_judge(0.5)
+    _tagged(verbatim_store, "quality assurance", 5)
+    _tagged(verbatim_store, "qa", 1)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(verbatim_store.categories(user_id="ada")) == 2
+
+
+def test_without_a_calibrated_judge_only_formatting_merges(verbatim_store):
+    _tagged(verbatim_store, "quality assurance", 5)
+    _tagged(verbatim_store, "qa", 1)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(verbatim_store.categories(user_id="ada")) == 2
+
+
+def test_the_judge_is_told_which_tags_name_an_entity(verbatim_store):
+    """Without it "memry" read as a typo of "memory"."""
+    from memry.models import Entity
+
+    judge = _tag_judge(0.1)
+    verbatim_store.decider = judge
+    verbatim_store.backend.insert_entity(Entity(name="Memry", normalized="memry",
+                                                entity_type="product", user_id="ada"))
+    _tagged(verbatim_store, "memory", 5)
+    _tagged(verbatim_store, "memry", 5)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert judge.states and all('a product named "Memry"' in s for s in judge.states)
+    assert all("memry fact 4" in s and "memory fact 4" in s for s in judge.states)
+    assert len(verbatim_store.categories(user_id="ada")) == 2
+
+
+def test_a_tag_pair_is_compared_when_found_and_once_more_at_10_memories(verbatim_store):
+    judge = _tag_judge(0.3)
+    verbatim_store.decider = judge
+    added = {"quality assurance": 0, "qa": 0}
+
+    def tag(name, times):
+        for _ in range(times):
+            verbatim_store.add(f"{name} fact {added[name]}", user_id="ada", infer=False,
+                               categories=[name])
+            added[name] += 1
+
+    tag("quality assurance", 5)
+    tag("qa", 1)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(judge.states) == 2  # both orders, once
+    tag("quality assurance", 5)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(judge.states) == 2  # "qa" is still on one memory
+    tag("qa", 9)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(judge.states) == 4
+    tag("qa", 40)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert len(judge.states) == 4  # never after
+
+
+def test_the_suggest_merges_button_asks_the_judge_nothing(verbatim_store):
+    from starlette.testclient import TestClient
+
+    from memry.rest import create_app
+
+    judge = _tag_judge(0.9)
+    verbatim_store.decider = judge
+    for tag, times in (("quality assurance", 5), ("qa", 1)):
+        for i in range(times):
+            verbatim_store.add(f"{tag} fact {i}", user_id="default", infer=False,
+                               categories=[tag])
+    # Not entered as a context manager, so the upkeep scheduler, whose weekly
+    # pass does judge tags, does not start.
+    client = TestClient(create_app(verbatim_store))
+    assert client.get("/api/v1/tags/suggest-merges").status_code == 200
+    assert judge.states == []
+    assert len(verbatim_store.categories(user_id="default")) == 2
+
+
+def test_tags_that_only_share_a_word_are_not_compared(verbatim_store):
+    """Tags are short phrases that share words across related subjects."""
+    judge = _tag_judge(0.9)
+    verbatim_store.decider = judge
+    _tagged(verbatim_store, "art assets", 2)
+    _tagged(verbatim_store, "art direction", 2)
+    verbatim_store.merge_obvious_topics(user_id="ada")
+    assert judge.states == []

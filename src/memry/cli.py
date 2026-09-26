@@ -253,6 +253,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
 
+    p = sub.add_parser(
+        "restore-context",
+        help="give memories back the context label of the saves they came from (token-free)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+    p.add_argument("--dry-run", action="store_true", help="count without writing")
+
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
     p = sub.add_parser("export", help="export a lossless JSON backup to stdout")
@@ -425,6 +432,12 @@ def main(argv: list[str] | None = None) -> int:
                 [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
             )
             _print([store.repair_updated_at(user_id=uid) for uid in namespaces])
+        elif args.command == "restore-context":
+            namespaces = (
+                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
+            )
+            _print([store.restore_context_labels(user_id=uid, dry_run=args.dry_run)
+                    for uid in namespaces])
         elif args.command == "reindex":
             count = store.reindex()
             _print({"reindexed": count, "embedder": store.embedder.model_id})

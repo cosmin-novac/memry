@@ -173,6 +173,28 @@ class Decider(ABC):
     #: turned off. Only Jev earned that: 190 ms a search for better recall.
     reranks_by_default: bool = False
 
+    #: Whether the answers carry probabilities the provider computed, rather
+    #: than a number a text model reports about itself. Only then does Memry
+    #: decide entity pairs on them (intelligence/identity.py): gpt-5-mini
+    #: reported 0.9 on its wrong answers too.
+    calibrated: bool = False
+
+    #: P(same), averaged over both orders of the pair question, from which two
+    #: entities merge without a person. Measured per provider; unmeasured
+    #: providers never merge on their own.
+    pair_merge_probability: float = NEVER_AUTO_MERGE
+
+    #: The same bar per step of the comparison funnel (memories on the pair's
+    #: smaller side, ``identity.PAIR_STEPS``), for a provider whose P(same)
+    #: was measured to mean more with more evidence. None: one bar for all.
+    pair_merge_by_step: dict[int, float] | None = None
+
+    #: P(different) from which a pair is kept apart for good.
+    pair_apart_probability: float = 0.5
+
+    #: P(same subject), averaged over both orders, from which two tags merge.
+    tag_merge_probability: float = NEVER_AUTO_MERGE
+
     #: Whether an open merge proposal is compared again as soon as a new
     #: memory mentions either side of it. New evidence is the only thing that
     #: can change the answer, so that is when to ask again. The question is
@@ -180,6 +202,13 @@ class Decider(ABC):
     #: a fraction of a second. Pairs under other providers wait for the weekly
     #: self-healing pass.
     rejudges_on_new_evidence: bool = False
+
+    def pair_merge_threshold(self, step: int) -> float:
+        """The P(same) from which a pair compared at this funnel step merges."""
+        if not self.pair_merge_by_step:
+            return self.pair_merge_probability
+        reached = [s for s in self.pair_merge_by_step if s <= step]
+        return self.pair_merge_by_step[max(reached)] if reached else self.pair_merge_probability
 
     #: Whether re-ranking may be turned on at all. A provider that was not
     #: measured to beat no re-ranking cannot be talked into it: through
@@ -330,6 +359,22 @@ class JevDecider(Decider):
     # An identity question took a median 211 ms, against 2.5 s through a text
     # model, so asking again inside a save costs little.
     rejudges_on_new_evidence = True
+    # Measured over 156 labelled pairs, three runs, both orders averaged: from
+    # 0.95 no wrong merge, 58-59 of 81 true pairs merged; no pair of two
+    # different things scored above 0.79 (evals/identity_resolution_benchmark.py).
+    calibrated = True
+    pair_merge_probability = 0.95
+    # Per step of the funnel: the lowest P(same) that kept wrong merges at or
+    # under 2% of merges, the stricter of two sets of synthetic stores with
+    # exact labels (18,885 comparisons of a new name against the entity it may
+    # belong to, 1 to 50 memories on its side). One memory: 2% was not reached
+    # in one set, 0.97 gave 1.7% and 3.0%; three: 0.85 and 0.96; eight: 0.79
+    # and 0.84; fifteen to thirty: 0.78-0.79. Waiting costs little, since the
+    # pair is compared again at the next step.
+    pair_merge_by_step = {1: 0.97, 3: 0.96, 10: 0.85, 50: 0.80}
+    # 379 candidate tag pairs from a real store, 10 memories per tag, two runs:
+    # nothing wrong from 0.55, the highest pair of two subjects at 0.46.
+    tag_merge_probability = 0.55
 
     def __init__(self, cfg: DecisionConfig) -> None:
         self.cfg = cfg
@@ -442,4 +487,8 @@ def build_decider(cfg: DecisionConfig, llm: LLM) -> Decider:
     if cfg.auto_confirm_confidence is not None:
         decider.auto_confirm_confidence = cfg.auto_confirm_confidence
         decider.fallback_gate = cfg.auto_confirm_confidence
+    if cfg.pair_merge_probability is not None and decider.calibrated:
+        # A deployment's own bar applies at every step.
+        decider.pair_merge_probability = cfg.pair_merge_probability
+        decider.pair_merge_by_step = None
     return decider

@@ -57,7 +57,6 @@ from starlette.routing import Mount, Route
 
 from .accounts import SESSION_TTL, AccountStore, default_auth_db_path
 from .enrichment import EnrichmentWorker
-from .intelligence.entities import describe_proposal
 from .intelligence.when import next_occurrence, parse_when
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
 from .oauth import MEMRY_SCOPE, MemryOAuthProvider
@@ -407,9 +406,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
       <div class="tagbar"><span class="sel" id="entcount"></span>
         <button onclick="backfillTypes()" title="classify entities that have no type yet">Backfill types</button></div>
       <div id="entlist"></div>
-      <h2 style="font-size:.95rem;margin-top:1.1rem">Merge proposals</h2>
-      <div class="hint">Pairs that Memry could not decide on its own. Each pair is compared again once a week, and with Jev also whenever a new memory contains either name.</div>
-      <div id="proplist"></div>
+      <h2 style="font-size:.95rem;margin-top:1.1rem">Merge proposals</h2><div id="proplist"></div>
     </div>
     <aside class="entity-side" id="entitydetail"></aside>
   </div>
@@ -1830,8 +1827,7 @@ async function loadEntities(){
   entityGroups=byType;
   renderEntityGroups();
   document.getElementById('proplist').innerHTML=proposals.length?proposals.map(proposal=>`<div class="tagrow"><span class="name">
-    <b>${esc(knowledgeNames[proposal.entity_a]||proposal.entity_a)}</b> and <b>${esc(knowledgeNames[proposal.entity_b]||proposal.entity_b)}</b>
-    <span class="cnt">${esc(proposal.summary||proposal.reason||'identity is uncertain')}</span></span>
+    <b>${esc(knowledgeNames[proposal.entity_a]||proposal.entity_a)}</b> and <b>${esc(knowledgeNames[proposal.entity_b]||proposal.entity_b)}</b></span>
     <button class="act" onclick='decideProposal(${JSON.stringify(proposal.id)},"confirm",this)'>merge</button>
     <button class="act del" onclick='decideProposal(${JSON.stringify(proposal.id)},"reject",this)'>keep separate</button></div>`).join(''):'<div class="empty">No open merge proposals.</div>';
 }
@@ -2441,8 +2437,10 @@ def create_app(
     def _unauthorized() -> JSONResponse:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
+    owners_named: set[tuple[str, str]] = set()
+
     def _account_principal(account) -> Principal:
-        return Principal(
+        principal = Principal(
             name=account.name,
             default_user=default_user,
             admin=account.is_admin,
@@ -2452,6 +2450,11 @@ def create_app(
                 else f"{account.name}::{default_user}"
             ),
         )
+        # The account's name is where the store owner's entity name starts.
+        if (principal.fixed_user, account.name) not in owners_named:
+            store.set_owner_name(principal.fixed_user, account.name)
+            owners_named.add((principal.fixed_user, account.name))
+        return principal
 
     def resolve_principal(token: str) -> Principal | None:
         """Map a bearer token to who it acts as, or None to reject it.
@@ -3128,7 +3131,10 @@ def create_app(
 
     async def suggest_merges_route(request: Request) -> Response:
         user_id = _p(request).namespace(request.query_params.get("user_id"))
-        await run_in_threadpool(partial(store.merge_obvious_topics, user_id=user_id))
+        # Formatting only: the judged tag merges belong to the weekly pass, not
+        # to a button that can be clicked any number of times.
+        await run_in_threadpool(partial(store.merge_obvious_topics, user_id=user_id,
+                                        judge=False))
         groups = await run_in_threadpool(partial(
             store.suggest_tag_merges,
             user_id=user_id,
@@ -3166,6 +3172,17 @@ def create_app(
         result = await run_in_threadpool(partial(
             store.repair_updated_at,
             user_id=_p(request).namespace(body.get("user_id")),
+        ))
+        return JSONResponse(result)
+
+    async def restore_context_route(request: Request) -> Response:
+        """One-time: give memories back the context label of their saves.
+        ``{"dry_run": true}`` counts without writing."""
+        body = await request.json() if await request.body() else {}
+        result = await run_in_threadpool(partial(
+            store.restore_context_labels,
+            user_id=_p(request).namespace(body.get("user_id")),
+            dry_run=bool(body.get("dry_run")),
         ))
         return JSONResponse(result)
 
@@ -3449,12 +3466,7 @@ def create_app(
             status=q.get("status", "proposed"),
             limit=int(q.get("limit", "100")),
         )
-        gate = store.merge_gate()
-        # "summary" gives the provider's confidence and the merge gate. The
-        # stored reason alone ("jev: same") read like a verdict Memry ignored.
-        return JSONResponse([
-            {**p.model_dump(), "summary": describe_proposal(p, gate)} for p in proposals
-        ])
+        return JSONResponse([p.model_dump() for p in proposals])
 
     def _proposal_guard(request: Request):
         proposal = store.backend.get_proposal(request.path_params["proposal_id"])
@@ -3702,6 +3714,7 @@ def create_app(
         Route("/api/v1/relations/backfill", guarded(backfill_relations_route), methods=["POST"]),
         Route("/api/v1/entities/backfill-types", guarded(backfill_entity_types_route), methods=["POST"]),
         Route("/api/v1/memories/repair-dates", guarded(repair_dates_route), methods=["POST"]),
+        Route("/api/v1/memories/restore-context", guarded(restore_context_route), methods=["POST"]),
         Route("/api/v1/export", guarded(export_memories_route), methods=["GET"]),
         Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),
         Route("/api/v1/search", guarded(search), methods=["POST"]),
