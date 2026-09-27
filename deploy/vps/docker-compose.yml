@@ -14,9 +14,10 @@ services:
       MEMRY_LLM_MODEL: ${MEMRY_LLM_MODEL:-}
       MEMRY_LLM_EFFORT: ${MEMRY_LLM_EFFORT:-}
       MEMRY_EMBEDDING_PROVIDER: ${MEMRY_EMBEDDING_PROVIDER:-}
-      # Typed decisions (experimental): entity identity, durability, re-ranking.
-      # "jev" is TypeSafe's hosted model; "llm" reuses the text model above.
-      MEMRY_DECISION_PROVIDER: ${MEMRY_DECISION_PROVIDER:-}
+      # Decision model (required): entity identity, durability, re-ranking.
+      # "jev" is TypeSafe's System One model; "llm" lets the text model decide,
+      # only on purpose (no entity then merges without you).
+      MEMRY_DECISION_PROVIDER: ${MEMRY_DECISION_PROVIDER:?set MEMRY_DECISION_PROVIDER in .env (jev, or llm to let the text model decide)}
       MEMRY_DECISION_API_KEY: ${MEMRY_DECISION_API_KEY:-}
       MEMRY_DECISION_MODEL: ${MEMRY_DECISION_MODEL:-}
       MEMRY_DECISION_BASE_URL: ${MEMRY_DECISION_BASE_URL:-}

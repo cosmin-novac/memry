@@ -19,7 +19,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict
 
-from .config import Config
+from .config import Config, require_models
 from .enrichment import EnrichmentWorker
 from .models import EventType, MemoryType
 from .principal import ADMIN, Principal
@@ -640,6 +640,8 @@ def main(config: Config | None = None) -> None:
     Remote MCP is served only by ``memry serve``, which applies the configured
     network authentication and mounts these same tools at ``/mcp``.
     """
+    config = config or Config.load()
+    require_models(config)
     store = MemoryStore(config)
     try:
         create_server(store).run()

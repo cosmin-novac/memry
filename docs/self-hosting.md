@@ -5,10 +5,36 @@ Knowledge lives in `memry.db`; runtime accounts and OAuth live in the adjacent `
 Keeping them separate prevents knowledge restore/reset operations from changing login data.
 A complete server backup must include both files.
 
+## Models
+
+A Memry server needs two models, and `memry serve` and `memry mcp` refuse to start
+without them, saying what is missing:
+
+| | What it does | Set |
+|---|---|---|
+| Text model | Pulls facts and names out of what you save, writes descriptions | `OPENAI_API_KEY` (default model `gpt-6-luna`), or `ANTHROPIC_API_KEY`, or `MEMRY_LLM_PROVIDER=ollama` |
+| Decision model | Decides whether two names are one thing, what a name is, whether a memory replaces another, what a search result is worth | `MEMRY_DECISION_PROVIDER=jev` and `MEMRY_DECISION_API_KEY` (a [TypeSafe](https://typesafe.ai) key) |
+
+```bash
+export OPENAI_API_KEY=sk-...
+export MEMRY_DECISION_PROVIDER=jev
+export MEMRY_DECISION_API_KEY=...
+```
+
+The decision model has to be a System One model like Jev: it answers each question with
+a probability per option that is calibrated, so Memry can merge duplicates on its own at
+thresholds measured for it. A text model can be told to make these decisions instead, but
+only on purpose: `MEMRY_DECISION_PROVIDER=llm`. Its confidence is a number it reports
+about itself, so no entity then merges without you; every merge waits under **Upkeep**.
+The server logs a warning at start when it runs that way.
+
+`memry config` prints the resolved configuration and anything a server would miss.
+
 ## Option 1 - bare (recommended for personal use)
 
 ```bash
 pip install memry
+export OPENAI_API_KEY=sk-... MEMRY_DECISION_PROVIDER=jev MEMRY_DECISION_API_KEY=...
 memry serve --host 0.0.0.0 --port 8787
 ```
 
@@ -25,7 +51,9 @@ docker compose up -d --build
 ```
 
 The compose file mounts a named volume at `/data` and reads the same `MEMRY_*`
-environment variables. See [`docker-compose.yml`](../docker-compose.yml).
+environment variables from `.env` (copy [`.env.example`](../.env.example)): the API key,
+the text model and the decision model are required. See
+[`docker-compose.yml`](../docker-compose.yml).
 
 Docker automatically reuses the package layer for source-only updates. A first build or
 a change to `requirements-docker.txt` installs all dependencies; normal code and dashboard
@@ -43,7 +71,8 @@ DigitalOcean, ...):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cosmin-novac/memry/main/deploy/install.sh \
-  | MEMRY_DOMAIN=memory.example.com bash
+  | MEMRY_DOMAIN=memory.example.com OPENAI_API_KEY=sk-... \
+    MEMRY_DECISION_PROVIDER=jev MEMRY_DECISION_API_KEY=... bash
 ```
 
 Installs Docker, builds Memry, puts Caddy in front for automatic HTTPS, and
@@ -153,12 +182,7 @@ rerouted.
 
 Connecting ChatGPT this way: [connect-chatgpt.md](connect-chatgpt.md).
 
-## Typed decisions (experimental, off by default)
-
-**This is experimental and off unless you turn it on.** It sends identity and
-housekeeping questions to a third-party API, it changes how much of the upkeep happens
-without you, and the thresholds behind it were chosen from a small sample. Leave it off
-unless you want to try it.
+## Typed decisions
 
 Parts of the pipeline do not need a text model. Deciding whether two people called Jonas
 are the same person is a choice between `same`, `different` and `unsure`, and Memry
@@ -170,9 +194,10 @@ which nothing calibrates.
 
 | Value | Behaviour |
 |---|---|
-| `none` (default) | No decision provider. Everything works exactly as it did before. |
-| `llm` | The same questions, typed, answered by the configured text model. An answer outside the declared options is rejected rather than accepted. |
-| `jev` | [TypeSafe Jev](https://typesafe.ai), a System One model that answers typed questions directly and returns a probability per option. |
+| `jev` | [TypeSafe Jev](https://typesafe.ai), a System One model that answers typed questions directly and returns a calibrated probability per option. What a server expects. |
+| `llm` | Chosen on purpose only: the same questions, typed, answered by the configured text model. An answer outside the declared options is rejected rather than accepted. No entity merges without you. |
+| `none` | Chosen on purpose only: no typed questions; the text model's older prompt path, and the passes that need a decision provider are off. No entity merges without you. |
+| unset | A server refuses to start (see [Models](#models)). |
 
 ```bash
 export MEMRY_DECISION_PROVIDER=jev
@@ -181,9 +206,9 @@ export MEMRY_DECISION_MODEL=jev-latest   # optional
 export MEMRY_DECISION_BASE_URL=...       # optional, for a proxy
 ```
 
-Jev is a hosted API, so turning it on means these questions leave the machine, the same
-trade as configuring an LLM provider. It does not replace one: extraction still needs a
-text model.
+Jev is a hosted API, so these questions leave the machine, the same trade as a hosted
+text model. It does not replace one: extraction still needs a text model. A fully offline
+server (Ollama) has to choose `MEMRY_DECISION_PROVIDER=llm` and review merges itself.
 
 The provider can never fail a write. A transport error, a rate limit, a malformed reply
 or an answer outside the declared options all read as "no answer", and the caller falls
@@ -222,8 +247,8 @@ so the gate has to sit high and little gets automated. Override with
 gpt-5.6-luna got 52 verdicts safe, better than gpt-5-mini's 49, and put its worst wrong
 "same" at 0.98, above any threshold. There is no number that is safe for a model that
 has not been run against the labelled set, so for any text model other than gpt-5-mini,
-the OpenAI default gpt-5.6-luna included,
-every proposed merge waits for you under **Upkeep**. To measure your own
+gpt-5.6-luna and the OpenAI default gpt-6-luna included,
+every proposed merge waits for you under **Upkeep** when the text model decides. To measure your own
 model, run `evals/identity_benchmark.py llm --model <name>` and set the gate it reports
 with `MEMRY_DECISION_MERGE_CONFIDENCE`. A confident "different" still blocks an
 obvious-looking merge at 0.95 whatever the gate, so raising the gate never makes merging
@@ -297,9 +322,11 @@ For local single-machine use, prefer stdio (`memry mcp`) - no port, no auth surf
 |---|---|
 | Default Anthropic extraction | `ANTHROPIC_API_KEY` + `pip install "memry[anthropic]"` (defaults to the fast, lower-cost `claude-haiku-4-5`) |
 | Larger Anthropic model | `MEMRY_LLM_MODEL=claude-opus-4-8` (explicitly trades more latency and cost for extraction quality) |
-| OpenAI end-to-end | `OPENAI_API_KEY` (LLM `gpt-5.6-luna`, embeddings `text-embedding-3-small`) |
-| Fully offline | `MEMRY_LLM_PROVIDER=ollama` + `MEMRY_EMBEDDING_PROVIDER=ollama` (e.g. `llama3.1`, `nomic-embed-text`) |
-| Zero keys, zero model downloads | nothing - verbatim writes + BM25/hash retrieval |
+| OpenAI end-to-end | `OPENAI_API_KEY` (LLM `gpt-6-luna`, embeddings `text-embedding-3-small`) |
+| Previous OpenAI default | `MEMRY_LLM_MODEL=gpt-5.6-luna` (the only text model measured to improve re-ranking) |
+| Fully offline | `MEMRY_LLM_PROVIDER=ollama` + `MEMRY_EMBEDDING_PROVIDER=ollama` (e.g. `llama3.1`, `nomic-embed-text`) + `MEMRY_DECISION_PROVIDER=llm` |
+
+Every server also needs the decision model (see [Models](#models)).
 
 After switching embedding providers, run `memry reindex` once to re-embed the store.
 
@@ -459,7 +486,9 @@ write path and in the backfill:
 | And the decision provider vetoes what it calls a record with 0.80 probability or more | 97%, 66% | 86%, 68% |
 
 gpt-5-mini dates work logs and price checks after being told not to, which is one reason
-gpt-5.6-luna is the OpenAI default; it also read the 160 memories four times faster. A wrong
+it is not the OpenAI default; gpt-5.6-luna also read the 160 memories four times faster.
+gpt-6-luna, the default now, has not been measured on this set; the decision provider's
+veto applies to it the same way. A wrong
 `when` is worse than none, so the veto applies whenever a decision provider is configured.
 Requiring the provider to say "event" was tried first and lost a fifth of the real events
 for no gain in precision.

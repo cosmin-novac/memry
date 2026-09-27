@@ -4,11 +4,16 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/cosmin-novac/memry/main/deploy/install.sh | bash
 #
-# With a domain (DNS A record already pointing at this server) for automatic HTTPS,
-# and an optional LLM key for extraction:
+# Memry needs a text model and a decision model; pass their keys on the first
+# run (they are kept in /opt/memry/.env). With a domain (DNS A record already
+# pointing at this server) for automatic HTTPS:
 #
 #   curl -fsSL https://raw.githubusercontent.com/cosmin-novac/memry/main/deploy/install.sh \
-#     | MEMRY_DOMAIN=memory.example.com ANTHROPIC_API_KEY=sk-ant-... bash
+#     | MEMRY_DOMAIN=memory.example.com OPENAI_API_KEY=sk-... \
+#       MEMRY_DECISION_PROVIDER=jev MEMRY_DECISION_API_KEY=... bash
+#
+# MEMRY_DECISION_PROVIDER=llm lets the text model make the decisions instead;
+# no entity then merges without you.
 #
 # Re-running the same command updates Memry and keeps your configuration.
 # Layout: code in /opt/memry/app (disposable), config in /opt/memry/.env,
@@ -73,10 +78,31 @@ if ! grep -q '^MEMRY_API_KEY=' "$ENV_FILE"; then
     set_kv MEMRY_API_KEY "$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   fi
 fi
-for key in MEMRY_DOMAIN ANTHROPIC_API_KEY OPENAI_API_KEY MEMRY_LLM_MODEL MEMRY_TENANTS \n           MEMRY_DECISION_PROVIDER MEMRY_DECISION_API_KEY MEMRY_DECISION_MODEL; do
+for key in MEMRY_DOMAIN ANTHROPIC_API_KEY OPENAI_API_KEY MEMRY_LLM_PROVIDER MEMRY_LLM_MODEL \
+           MEMRY_TENANTS MEMRY_DECISION_PROVIDER MEMRY_DECISION_API_KEY MEMRY_DECISION_MODEL; do
   val="${!key:-}"
   [ -n "$val" ] && set_kv "$key" "$val"
 done
+
+# --- Models ------------------------------------------------------------------
+# Checked before building, so an update that lacks them leaves the running
+# server alone.
+env_val() { grep "^$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
+missing=""
+if [ -z "$(env_val OPENAI_API_KEY)$(env_val ANTHROPIC_API_KEY)$(env_val MEMRY_LLM_PROVIDER)" ]; then
+  missing="$missing\n  - a text model: OPENAI_API_KEY (or ANTHROPIC_API_KEY)"
+fi
+decision="$(env_val MEMRY_DECISION_PROVIDER)"
+if [ -z "$decision" ]; then
+  missing="$missing\n  - a decision model: MEMRY_DECISION_PROVIDER=jev and MEMRY_DECISION_API_KEY"
+  missing="$missing (a TypeSafe key), or MEMRY_DECISION_PROVIDER=llm to let the text"
+  missing="$missing model decide (no entity then merges without you)"
+elif [ "$decision" = "jev" ] && [ -z "$(env_val MEMRY_DECISION_API_KEY)" ]; then
+  missing="$missing\n  - MEMRY_DECISION_API_KEY: the TypeSafe key for MEMRY_DECISION_PROVIDER=jev"
+fi
+if [ -n "$missing" ]; then
+  fail "$(printf '%b' "Memry needs a text model and a decision model. Missing:$missing\nAdd them to $ENV_FILE, or pass them to this installer:\n  curl ... | OPENAI_API_KEY=sk-... MEMRY_DECISION_PROVIDER=jev MEMRY_DECISION_API_KEY=... bash")"
+fi
 
 # --- Launch ------------------------------------------------------------------
 compose() {

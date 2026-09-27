@@ -6,10 +6,15 @@ Resolution order (later wins):
 3. environment variables (``MEMRY_*``)
 4. explicit kwargs / ``Config(...)`` construction
 
-Zero-config behavior: with no keys configured, Memry runs fully local -
-verbatim memory writes (no LLM extraction) + hybrid retrieval over FTS5 BM25
-and deterministic hash embeddings. Setting ``ANTHROPIC_API_KEY`` or
-``OPENAI_API_KEY`` upgrades extraction/reconciliation automatically.
+The servers (``memry serve``, ``memry mcp``) need two models and refuse to
+start without them (``require_models``): a text model for extraction
+(``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY`` or ``MEMRY_LLM_PROVIDER``) and a
+decision model that answers with calibrated probabilities
+(``MEMRY_DECISION_PROVIDER=jev`` with ``MEMRY_DECISION_API_KEY``). Letting the
+text model decide instead is allowed only when chosen:
+``MEMRY_DECISION_PROVIDER=llm`` (or ``none``). A store built directly in code
+has no such check: without keys it writes memories verbatim and retrieves over
+FTS5 BM25 and deterministic hash embeddings.
 """
 
 from __future__ import annotations
@@ -31,15 +36,16 @@ EmbeddingProvider = Literal["openai", "ollama", "voyage", "hash", "none"]
 # the configured text model; "jev" uses TypeSafe's System One model.
 DecisionProvider = Literal["none", "llm", "jev"]
 
-#: The OpenAI default is gpt-5.6-luna. It judged entity identity better than
-#: gpt-5-mini on the labelled set (52 of 56 safe against 49) and is the only
-#: text model measured to make re-ranking better rather than worse. Its own
-#: confidence is not trustworthy, so without a decision provider it never
-#: merges entities on its own (see providers/decisions.py); every judgement a
-#: decision provider can make goes there instead.
+#: The OpenAI default is gpt-6-luna, at half the price of gpt-5.6-luna. As the
+#: extraction model it matched gpt-5.6-luna on every measure (details kept,
+#: entities listed, same-name naming, coverage audit; two runs each on 118
+#: saves) and listed fewer ordinary nouns as entities. gpt-5.6-luna stays the
+#: only text model measured for re-ranking. A text model's own confidence is
+#: not trustworthy, so it never merges entities on its own (see
+#: providers/decisions.py); the decision model makes those judgements.
 DEFAULT_LLM_MODELS: dict[str, str] = {
     "anthropic": "claude-haiku-4-5",
-    "openai": "gpt-5.6-luna",
+    "openai": "gpt-6-luna",
     "ollama": "llama3.1",
 }
 
@@ -65,17 +71,20 @@ class LLMConfig(BaseModel):
 
 
 class DecisionConfig(BaseModel):
-    """Provider for typed judgements. Experimental, and off by default.
+    """Provider for typed judgements: entity identity, name screening,
+    reconciliation, durability, dates, re-ranking.
 
-    Off by default. "none" means no separate decision provider, so identity
-    judgement keeps using the prompt path Memry has always used and nothing
-    about an existing deployment changes. "llm" routes the same questions
-    through the configured text model over the typed interface, and "jev" opts
-    in to TypeSafe's System One model, which answers them directly and returns
-    a calibrated distribution instead of a self-reported number.
+    "jev" is TypeSafe's System One model, which answers them directly and
+    returns a calibrated distribution instead of a self-reported number; the
+    servers expect it. "llm" routes the same questions through the text model,
+    and "none" keeps the text model's older prompt path: both are allowed only
+    when chosen, because a text model's confidence is not calibrated and no
+    entity then merges without a person. Unset (None) means nobody chose, which
+    a server refuses (``require_models``); a store built in code treats it as
+    "none".
     """
 
-    provider: DecisionProvider = "none"
+    provider: DecisionProvider | None = None
     model: str | None = None
     api_key: str | None = None
     base_url: str | None = None
@@ -258,7 +267,7 @@ class Config(BaseModel):
 
     def redacted(self) -> dict[str, Any]:
         d = self.model_dump()
-        for section in ("llm", "embedding"):
+        for section in ("llm", "embedding", "decision"):
             if d[section].get("api_key"):
                 d[section]["api_key"] = "***"
         if d.get("api_key"):
@@ -266,6 +275,46 @@ class Config(BaseModel):
         for tenant in d.get("tenants", []):
             tenant["api_key"] = "***"
         return d
+
+
+def model_requirements(cfg: Config) -> list[str]:
+    """What a server is missing: a text model, and a decision model that was
+    chosen (Jev, or the text model on purpose). Empty when nothing is."""
+    missing = []
+    if cfg.llm.provider == "none":
+        missing.append(
+            "a text model for extraction: set OPENAI_API_KEY (model gpt-6-luna), "
+            "ANTHROPIC_API_KEY, or MEMRY_LLM_PROVIDER=ollama"
+        )
+    if cfg.decision.provider is None:
+        missing.append(
+            "a decision model for merges and other judgements: set "
+            "MEMRY_DECISION_PROVIDER=jev and MEMRY_DECISION_API_KEY to a TypeSafe "
+            "key (https://typesafe.ai). To let the text model decide instead, set "
+            "MEMRY_DECISION_PROVIDER=llm; entities then never merge on their own"
+        )
+    elif cfg.decision.provider == "jev" and not cfg.decision.api_key:
+        missing.append("MEMRY_DECISION_API_KEY: the TypeSafe key for MEMRY_DECISION_PROVIDER=jev")
+    return missing
+
+
+def require_models(cfg: Config) -> None:
+    """Stop a server that lacks the models it needs, saying what to set; warn
+    when the text model was chosen to make the decisions."""
+    missing = model_requirements(cfg)
+    if missing:
+        raise SystemExit(
+            "Memry needs a text model and a decision model to run. Missing:\n"
+            + "\n".join(f"  - {item}" for item in missing)
+            + "\nSee docs/self-hosting.md#models."
+        )
+    if cfg.decision.provider in ("llm", "none"):
+        logging.getLogger("memry").warning(
+            "MEMRY_DECISION_PROVIDER=%s: the text model makes Memry's decisions. Its "
+            "confidence is not calibrated, so entities never merge on their own; merge "
+            "proposals wait for you in Upkeep. MEMRY_DECISION_PROVIDER=jev settles them.",
+            cfg.decision.provider,
+        )
 
 
 def _deep_merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:

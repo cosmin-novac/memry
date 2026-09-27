@@ -5,6 +5,7 @@ yourself - [memry.tech](https://memry.tech)
 
 ```
 pip install memry
+export OPENAI_API_KEY=sk-... MEMRY_DECISION_PROVIDER=jev MEMRY_DECISION_API_KEY=...
 memry mcp        # your agent now has long-term memory
 ```
 
@@ -12,7 +13,8 @@ Memry gives any MCP-capable agent - Claude Code, Claude Desktop, Cursor, Windsur
 Codex - durable long-term memory. It distills conversations into discrete facts,
 reconciles each new fact against what it already knows, and serves the result back as
 token-budgeted context. All knowledge state is a single SQLite file on your machine: no external vector
-database or queue service, no cloud account, and it works with zero API keys.
+database or queue service. It needs two models: a text model (OpenAI, Anthropic or Ollama)
+and a decision model, [TypeSafe Jev](https://typesafe.ai).
 
 A scratchpad or a `MEMORY.md` file is text your agent rereads at the start of every
 session. You keep it short by hand, and a line that is no longer true is still in the file
@@ -22,11 +24,12 @@ same memory.
 
 ## Why Memry
 
-**It runs anywhere, with nothing.** The default install needs no services and no keys:
-knowledge storage is one SQLite file, retrieval falls back to FTS5 BM25 plus deterministic hash
-embeddings, and writes are stored verbatim. Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`
-and the same pipeline upgrades itself to LLM extraction and real embeddings. Local-first
-is the default, not a demo mode.
+**It runs anywhere, with two models.** Knowledge storage is one SQLite file with no
+services around it. A text model pulls facts out of what you save; a decision model
+(Jev, a System One model with calibrated probabilities) decides which names are one
+thing, so duplicates merge without you. The server refuses to start without both. A text
+model can make those decisions instead only when you choose it
+(`MEMRY_DECISION_PROVIDER=llm`), and then merges wait for you.
 
 **It remembers the way you would want it to.** New facts are reconciled against existing
 ones: duplicates are skipped, refinements update in place, and contradictions supersede
@@ -88,7 +91,8 @@ several agents and devices talk to.
 
 ```bash
 # Claude Code
-claude mcp add memry -- memry mcp
+claude mcp add memry -e OPENAI_API_KEY=sk-... -e MEMRY_DECISION_PROVIDER=jev \
+  -e MEMRY_DECISION_API_KEY=... -- memry mcp
 ```
 
 ```jsonc
@@ -98,15 +102,19 @@ claude mcp add memry -- memry mcp
     "memry": {
       "command": "memry",
       "args": ["mcp"],
-      "env": { "ANTHROPIC_API_KEY": "sk-ant-..." }   // optional but recommended
+      "env": {
+        "OPENAI_API_KEY": "sk-...",           // text model (or ANTHROPIC_API_KEY)
+        "MEMRY_DECISION_PROVIDER": "jev",     // decision model
+        "MEMRY_DECISION_API_KEY": "..."       // TypeSafe key
+      }
     }
   }
 }
 ```
 
 The Anthropic SDK is an optional extra: `pip install "memry[anthropic]"`.
-Without it an `ANTHROPIC_API_KEY` is ignored with a warning and memories are
-stored verbatim; `OPENAI_API_KEY` needs no extra.
+Without it an `ANTHROPIC_API_KEY` is ignored with a warning, and with no other text
+model the server does not start; `OPENAI_API_KEY` needs no extra.
 
 **Remote, streamable HTTP** - point any MCP client at a self-hosted server
 (see below) and share one memory across every machine:
@@ -182,6 +190,7 @@ print(ctx.text)
 ### As a self-hosted server (REST + dashboard + MCP)
 
 ```bash
+export OPENAI_API_KEY=sk-... MEMRY_DECISION_PROVIDER=jev MEMRY_DECISION_API_KEY=...
 memry serve --host 0.0.0.0 --port 8787
 # dashboard:  http://localhost:8787/
 # REST API:   http://localhost:8787/api/v1/...
@@ -293,7 +302,9 @@ flowchart LR
 
 ## Configuration
 
-Everything works with defaults. Override via env vars, `~/.memry/config.json`, or `Config(...)`:
+A server needs a text model and a decision model and refuses to start without them
+([docs/self-hosting.md#models](docs/self-hosting.md#models)); the rest has defaults.
+Override via env vars, `~/.memry/config.json`, or `Config(...)`:
 
 | Env var | Default | Notes |
 |---|---|---|
@@ -301,22 +312,21 @@ Everything works with defaults. Override via env vars, `~/.memry/config.json`, o
 | `MEMRY_AUTH_DB_PATH` | next to `MEMRY_DB_PATH` as `auth.db` | accounts and OAuth; include it in every complete server backup |
 | `MEMRY_DEFAULT_USER` | `default` | user scope when the agent doesn't pass one |
 | `MEMRY_LLM_PROVIDER` | auto | `anthropic` \| `openai` \| `ollama` \| `none` - auto-detected from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. With both keys set, OpenAI wins so the LLM and the embeddings stay on one provider (Anthropic has no embeddings API); pin this to override |
-| `MEMRY_LLM_MODEL` | per provider | `claude-haiku-4-5` / `gpt-5.6-luna` / `llama3.1`; Haiku is the Anthropic default for lower save cost and enrichment latency |
+| `MEMRY_LLM_MODEL` | per provider | `claude-haiku-4-5` / `gpt-6-luna` / `llama3.1`; Haiku is the Anthropic default for lower save cost and enrichment latency |
 | `MEMRY_EMBEDDING_PROVIDER` | auto | `openai` \| `ollama` \| `voyage` \| `hash` \| `none` |
 | `MEMRY_API_KEY` | - | bearer token for the REST/MCP HTTP server |
-| `MEMRY_DECISION_PROVIDER` | `none` | `jev` \| `llm` \| `none` - who answers the typed questions below |
-| `MEMRY_DECISION_API_KEY` | - | TypeSafe API key when the provider is `jev` |
+| `MEMRY_DECISION_PROVIDER` | required | `jev`; `llm` or `none` only on purpose (the text model decides and no entity merges without you) |
+| `MEMRY_DECISION_API_KEY` | required for `jev` | TypeSafe API key |
 
 Anthropic extraction requires the optional SDK: `pip install "memry[anthropic]"`.
 
-### Typed decisions with Jev (optional, experimental)
+### Decisions with Jev
 
 Some of Memry's judgements are typed questions with a fixed set of answers: are these two
 entities the same one, how long will this fact stay worth remembering, do these memories
-say the same thing, which result answers the question best. By default the text model
-answers them, or nobody does. `MEMRY_DECISION_PROVIDER=jev` sends them to
-[TypeSafe Jev](https://typesafe.ai), a hosted model that answers typed questions directly
-and returns a probability per option.
+say the same thing, which result answers the question best. `MEMRY_DECISION_PROVIDER=jev`
+sends them to [TypeSafe Jev](https://typesafe.ai), a hosted System One model that answers
+typed questions directly and returns a calibrated probability per option.
 
 ```bash
 export MEMRY_DECISION_PROVIDER=jev
@@ -327,8 +337,10 @@ With Jev, entity self-healing merges duplicates on its own above 0.70 confidence
 measured on the labelled identity set in `evals/`; a text model nobody has measured never
 merges without asking. The upkeep pass scores how long each memory stays relevant, so each
 memory decays at its own pace, and search re-ranking is on. Extraction still needs a text
-model, and without a decision provider everything works as it did before. The measurements
-and the remaining settings are in [docs/self-hosting.md](docs/self-hosting.md#typed-decisions-experimental-off-by-default).
+model. Letting the text model answer these questions (`MEMRY_DECISION_PROVIDER=llm`) is
+allowed only as a choice you make, since no entity then merges without you. The
+measurements and the remaining settings are in
+[docs/self-hosting.md](docs/self-hosting.md#typed-decisions).
 
 ## Evaluation
 

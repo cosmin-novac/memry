@@ -11,6 +11,7 @@ KEYS = [
     "MEMRY_API_KEY", "MEMRY_LLM_PROVIDER", "MEMRY_LLM_MODEL", "MEMRY_LLM_API_KEY",
     "MEMRY_LLM_BASE_URL", "MEMRY_LLM_EFFORT", "MEMRY_EMBEDDING_PROVIDER",
     "MEMRY_EMBEDDING_MODEL", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "VOYAGE_API_KEY",
+    "MEMRY_DECISION_PROVIDER", "MEMRY_DECISION_API_KEY", "MEMRY_DECISION_MODEL",
 ]
 
 
@@ -93,7 +94,7 @@ def test_both_keys_pick_one_provider_for_everything(monkeypatch):
     cfg = Config.load()
     assert cfg.llm.provider == "openai"
     assert cfg.embedding.provider == "openai"
-    assert cfg.llm.resolved_model() == "gpt-5.6-luna"
+    assert cfg.llm.resolved_model() == "gpt-6-luna"
 
 
 def test_anthropic_still_wins_when_it_is_the_only_key(monkeypatch):
@@ -176,3 +177,51 @@ def test_autodetect_anthropic_without_sdk_stays_keyless(monkeypatch, caplog):
     cfg.db_path = ":memory:"
     assert MemoryStore(cfg).llm.available is False
 
+
+
+# -- the two models a server needs ------------------------------------------
+def test_a_server_needs_a_text_model_and_a_decision_model():
+    from memry.config import model_requirements, require_models
+
+    cfg = Config.load()
+    assert len(model_requirements(cfg)) == 2
+    with pytest.raises(SystemExit) as stopped:
+        require_models(cfg)
+    assert "OPENAI_API_KEY" in str(stopped.value)
+    assert "MEMRY_DECISION_PROVIDER=jev" in str(stopped.value)
+
+
+def test_a_text_model_alone_is_not_enough(monkeypatch):
+    from memry.config import model_requirements
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    [missing] = model_requirements(Config.load())
+    assert "decision model" in missing
+
+
+def test_jev_needs_its_key(monkeypatch):
+    from memry.config import model_requirements, require_models
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("MEMRY_DECISION_PROVIDER", "jev")
+    [missing] = model_requirements(Config.load())
+    assert "MEMRY_DECISION_API_KEY" in missing
+    monkeypatch.setenv("MEMRY_DECISION_API_KEY", "ts-test")
+    require_models(Config.load())  # nothing missing
+
+
+@pytest.mark.parametrize("provider", ["llm", "none"])
+def test_the_text_model_decides_only_when_chosen(monkeypatch, caplog, provider):
+    from memry.config import require_models
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("MEMRY_DECISION_PROVIDER", provider)
+    with caplog.at_level("WARNING", logger="memry"):
+        require_models(Config.load())
+    assert "never merge on their own" in caplog.text
+
+
+def test_the_decision_key_is_redacted(monkeypatch):
+    monkeypatch.setenv("MEMRY_DECISION_PROVIDER", "jev")
+    monkeypatch.setenv("MEMRY_DECISION_API_KEY", "ts-secret")
+    assert "ts-secret" not in json.dumps(Config.load().redacted())

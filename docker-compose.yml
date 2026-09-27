@@ -1,7 +1,8 @@
-# Quick self-host: `cp .env.example .env`, set MEMRY_API_KEY, then
-# `docker compose up -d`. The container binds 0.0.0.0 inside the network
-# namespace and this file publishes port 8787, so a key is REQUIRED - without
-# it `memry serve` refuses to start rather than expose an open memory store.
+# Quick self-host: `cp .env.example .env`, set MEMRY_API_KEY, the text model key
+# and the decision model, then `docker compose up -d`. The container binds
+# 0.0.0.0 inside the network namespace and this file publishes port 8787, so a
+# key is REQUIRED - without it `memry serve` refuses to start rather than
+# expose an open memory store.
 services:
   memry:
     build: .
@@ -12,15 +13,16 @@ services:
     environment:
       MEMRY_API_KEY: ${MEMRY_API_KEY:?set MEMRY_API_KEY in .env (bearer token for REST and MCP)}
       MEMRY_DB_PATH: /data/memry.db
-      # LLM extraction (optional but recommended); this image ships both SDKs.
-      # OpenAI covers extraction + embeddings; Anthropic is used when it is the
-      # only key present.
+      # Text model for extraction (required; the server does not start
+      # without one). This image ships both SDKs. OpenAI covers extraction +
+      # embeddings; Anthropic is used when it is the only key present.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MEMRY_LLM_MODEL: ${MEMRY_LLM_MODEL:-}
-      # Typed decisions (experimental): entity identity, durability, re-ranking.
-      # "jev" is TypeSafe's hosted model; "llm" reuses the text model above.
-      MEMRY_DECISION_PROVIDER: ${MEMRY_DECISION_PROVIDER:-}
+      # Decision model (required): entity identity, durability, re-ranking.
+      # "jev" is TypeSafe's System One model; "llm" lets the text model above
+      # decide, only on purpose (no entity then merges without you).
+      MEMRY_DECISION_PROVIDER: ${MEMRY_DECISION_PROVIDER:?set MEMRY_DECISION_PROVIDER in .env (jev, or llm to let the text model decide)}
       MEMRY_DECISION_API_KEY: ${MEMRY_DECISION_API_KEY:-}
       MEMRY_DECISION_MODEL: ${MEMRY_DECISION_MODEL:-}
       MEMRY_DECISION_BASE_URL: ${MEMRY_DECISION_BASE_URL:-}

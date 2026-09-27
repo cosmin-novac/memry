@@ -473,11 +473,11 @@ class JevDecider(Decider):
 
 
 def build_decider(cfg: DecisionConfig, llm: LLM) -> Decider:
-    """Pick the decision provider. ``llm`` backs the default, so a deployment
-    that configures nothing keeps exactly the behaviour it has today."""
+    """Pick the decision provider. Unset (a store built in code; a server
+    refuses it, see ``config.require_models``) behaves as "none"."""
     if cfg.provider == "jev":
         decider: Decider = JevDecider(cfg)
-    elif cfg.provider == "none":
+    elif cfg.provider in (None, "none"):
         decider = NoneDecider()
     else:
         decider = LLMDecider(llm)

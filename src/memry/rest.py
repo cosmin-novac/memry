@@ -56,6 +56,7 @@ from starlette.responses import (
 from starlette.routing import Mount, Route
 
 from .accounts import SESSION_TTL, AccountStore, default_auth_db_path
+from .config import Config, require_models
 from .enrichment import EnrichmentWorker
 from .intelligence.when import next_occurrence, parse_when
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
@@ -3823,7 +3824,9 @@ def check_bind_safety(store: MemoryStore, accounts: AccountStore, host: str) -> 
 def main(host: str = "127.0.0.1", port: int = 8787) -> None:
     import uvicorn
 
-    store = MemoryStore()
+    config = Config.load()
+    require_models(config)
+    store = MemoryStore(config)
     accounts = AccountStore(
         store.config.auth_db_path or default_auth_db_path(store.config.db_path)
     )

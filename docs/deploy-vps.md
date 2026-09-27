@@ -5,7 +5,8 @@ Linode, a home box...) gives you Memry behind Caddy with automatic HTTPS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cosmin-novac/memry/main/deploy/install.sh \
-  | MEMRY_DOMAIN=memory.example.com ANTHROPIC_API_KEY=sk-ant-... bash
+  | MEMRY_DOMAIN=memory.example.com OPENAI_API_KEY=sk-... \
+    MEMRY_DECISION_PROVIDER=jev MEMRY_DECISION_API_KEY=... bash
 ```
 
 The installer:
@@ -16,9 +17,13 @@ The installer:
 4. starts two containers - `memry` (the server) and `caddy` (TLS termination),
 5. waits for `/health` and prints your URLs and API key.
 
-Both env vars are optional: without `MEMRY_DOMAIN` it serves plain HTTP on
-port 80 (fine for a first look, not for real use); without an LLM key Memry
-stores verbatim and retrieves with BM25 + hash embeddings.
+Memry needs a text model (`OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`) and a decision
+model (`MEMRY_DECISION_PROVIDER=jev` with a [TypeSafe](https://typesafe.ai) key in
+`MEMRY_DECISION_API_KEY`); the installer stops before building when either is missing,
+and says what to add. `MEMRY_DECISION_PROVIDER=llm` lets the text model make the
+decisions instead, only on purpose: no entity then merges without you. See
+[self-hosting.md#models](self-hosting.md#models). `MEMRY_DOMAIN` is optional: without
+it the server answers plain HTTP on port 80 (fine for a first look, not for real use).
 
 **Re-running the same command updates Memry in place.** Code in
 `/opt/memry/app` is disposable; your config (`/opt/memry/.env`) and data
@@ -31,7 +36,7 @@ stores verbatim and retrieves with BM25 + hash embeddings.
    Pick **Ubuntu 24.04** as the image.
 2. **Optional, zero-SSH path**: in the order form, expand **Cloud-Init** and
    paste [`deploy/cloud-init.yaml`](../deploy/cloud-init.yaml) (edit the domain
-   line first). The server boots straight into a running Memry.
+   and the two model keys first). The server boots straight into a running Memry.
 3. **DNS**: create an A record for your domain/subdomain pointing at the VPS IP
    (Contabo shows it in the panel once provisioned). Do this before or right
    after install; Caddy retries certificate issuance automatically.
@@ -40,7 +45,8 @@ stores verbatim and retrieves with BM25 + hash embeddings.
    ```bash
    ssh root@<vps-ip>
    curl -fsSL https://raw.githubusercontent.com/cosmin-novac/memry/main/deploy/install.sh \
-     | MEMRY_DOMAIN=memory.example.com bash
+     | MEMRY_DOMAIN=memory.example.com OPENAI_API_KEY=sk-... \
+       MEMRY_DECISION_PROVIDER=jev MEMRY_DECISION_API_KEY=... bash
    ```
 
 5. **Verify**:
@@ -78,7 +84,7 @@ not a second dashboard identity.
 
 ## Changing configuration
 
-Edit `/opt/memry/.env` (domain, LLM keys, `MEMRY_TENANTS` for multi-tenant
+Edit `/opt/memry/.env` (domain, model keys, `MEMRY_TENANTS` for multi-tenant
 mode - see [self-hosting.md](self-hosting.md)), then apply:
 
 ```bash
@@ -161,6 +167,6 @@ The installer is convenience, not magic. Equivalent manual steps:
 
 ```bash
 git clone https://github.com/cosmin-novac/memry && cd memry/deploy/vps
-cp .env.example .env    # set MEMRY_API_KEY (and MEMRY_DOMAIN etc.)
+cp .env.example .env    # set MEMRY_API_KEY, the text model and the decision model
 docker compose up -d --build
 ```

@@ -7,12 +7,14 @@
 #
 # Edit MEMRY_DOMAIN to your domain (DNS A record pointing at the new server)
 # for automatic HTTPS, or remove it to serve plain HTTP on port 80.
-# Optionally add ANTHROPIC_API_KEY=sk-ant-... (or OPENAI_API_KEY=...) before
-# `bash` to enable LLM extraction.
+# Required: a text model key (OPENAI_API_KEY, or ANTHROPIC_API_KEY) and the
+# decision model (MEMRY_DECISION_PROVIDER=jev with a TypeSafe key in
+# MEMRY_DECISION_API_KEY). MEMRY_DECISION_PROVIDER=llm lets the text model
+# decide instead, only on purpose: no entity then merges without you.
 #
 # After boot, the generated API key is in /opt/memry/.env on the server.
 
 package_update: true
 
 runcmd:
-  - curl -fsSL https://raw.githubusercontent.com/cosmin-novac/memry/main/deploy/install.sh | MEMRY_DOMAIN=memory.example.com bash
+  - curl -fsSL https://raw.githubusercontent.com/cosmin-novac/memry/main/deploy/install.sh | MEMRY_DOMAIN=memory.example.com OPENAI_API_KEY=sk-... MEMRY_DECISION_PROVIDER=jev MEMRY_DECISION_API_KEY=... bash
