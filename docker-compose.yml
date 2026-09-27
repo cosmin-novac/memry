@@ -23,7 +23,7 @@ services:
       # Decision model (required) for entity identity and Memry's other decision
       # questions: "jev" is TypeSafe's System One model. Set "llm" only on
       # purpose: Memry then sends these questions to the text model above,
-      # and you confirm every entity merge yourself.
+      # merges entities only by fixed rules, and you confirm the other merges.
       MEMRY_DECISION_PROVIDER: ${MEMRY_DECISION_PROVIDER:?set MEMRY_DECISION_PROVIDER in .env (jev, or llm to send the decision questions to the text model)}
       MEMRY_DECISION_API_KEY: ${MEMRY_DECISION_API_KEY:-}
       MEMRY_DECISION_MODEL: ${MEMRY_DECISION_MODEL:-}

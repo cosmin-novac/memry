@@ -78,7 +78,7 @@ class DecisionConfig(BaseModel):
     distribution over the answers. With "llm" Memry sends the same questions
     to the text model; with "none" it uses the text model's older prompts. An
     operator sets either one only on purpose: nobody has calibrated a text
-    model's confidence, so Memry then merges no entity without a person. Unset
+    model's confidence, so Memry then merges entities only by fixed rules. Unset
     (None) means nobody chose; a server does not start with it
     (``require_models``), and Memry treats it as "none" in a store built in
     code.
@@ -292,8 +292,8 @@ def model_requirements(cfg: Config) -> list[str]:
             "a decision model for merges and Memry's other decision questions: set "
             "MEMRY_DECISION_PROVIDER=jev and MEMRY_DECISION_API_KEY to a TypeSafe "
             "key (https://typesafe.ai). To send these questions to the text model, "
-            "set MEMRY_DECISION_PROVIDER=llm; you then confirm every entity merge "
-            "yourself"
+            "set MEMRY_DECISION_PROVIDER=llm; Memry then merges entities only by fixed "
+            "rules, and you confirm the other merges yourself"
         )
     elif cfg.decision.provider == "jev" and not cfg.decision.api_key:
         missing.append("MEMRY_DECISION_API_KEY: the TypeSafe key for MEMRY_DECISION_PROVIDER=jev")
@@ -314,8 +314,9 @@ def require_models(cfg: Config) -> None:
     if cfg.decision.provider in ("llm", "none"):
         logging.getLogger("memry").warning(
             "MEMRY_DECISION_PROVIDER=%s: Memry sends its decision questions to the text "
-            "model. Nobody has calibrated a text model's confidence, so Memry never "
-            "merges two entities on its own; you confirm each merge under Upkeep. With "
+            "model. A text model's confidence scores have not been calibrated, so Memry "
+            "merges entities only by fixed rules; you confirm the other merges under "
+            "Upkeep. With "
             "MEMRY_DECISION_PROVIDER=jev, Memry merges duplicates on its own.",
             cfg.decision.provider,
         )

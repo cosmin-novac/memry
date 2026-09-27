@@ -13,7 +13,8 @@
 #       MEMRY_DECISION_PROVIDER=jev MEMRY_DECISION_API_KEY=... bash
 #
 # With MEMRY_DECISION_PROVIDER=llm, Memry sends the decision questions to the
-# text model, and you confirm every entity merge yourself.
+# text model, merges entities only by fixed rules, and you confirm the other
+# merges yourself.
 #
 # Re-running the same command updates Memry and keeps your configuration.
 # Layout: code in /opt/memry/app (disposable), config in /opt/memry/.env,
@@ -96,7 +97,7 @@ decision="$(env_val MEMRY_DECISION_PROVIDER)"
 if [ -z "$decision" ]; then
   missing="$missing\n  - a decision model: MEMRY_DECISION_PROVIDER=jev and MEMRY_DECISION_API_KEY"
   missing="$missing (a TypeSafe key), or MEMRY_DECISION_PROVIDER=llm to send the decision"
-  missing="$missing questions to the text model (you then confirm every entity merge yourself)"
+  missing="$missing questions to the text model (Memry then merges entities only by fixed rules, and you confirm the other merges yourself)"
 elif [ "$decision" = "jev" ] && [ -z "$(env_val MEMRY_DECISION_API_KEY)" ]; then
   missing="$missing\n  - MEMRY_DECISION_API_KEY: the TypeSafe key for MEMRY_DECISION_PROVIDER=jev"
 fi

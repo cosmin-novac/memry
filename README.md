@@ -28,8 +28,8 @@ same memory.
 services around it. A text model extracts the facts from what you save. A decision model,
 Jev, returns a calibrated probability that two names belong to one thing, and Memry merges
 the duplicates on its own. The server doesn't start without both models. If you set
-`MEMRY_DECISION_PROVIDER=llm`, Memry sends the decision questions to the text model, and
-you confirm every merge yourself.
+`MEMRY_DECISION_PROVIDER=llm`, Memry sends the decision questions to the text model,
+merges entities only by fixed rules, and you confirm the other merges yourself.
 
 **It remembers the way you would want it to.** New facts are reconciled against existing
 ones: duplicates are skipped, refinements update in place, and contradictions supersede
@@ -316,7 +316,7 @@ Override via env vars, `~/.memry/config.json`, or `Config(...)`:
 | `MEMRY_LLM_MODEL` | per provider | `claude-haiku-4-5` / `gpt-6-luna` / `llama3.1`; Haiku is the Anthropic default for lower save cost and enrichment latency |
 | `MEMRY_EMBEDDING_PROVIDER` | auto | `openai` \| `ollama` \| `voyage` \| `hash` \| `none` |
 | `MEMRY_API_KEY` | - | bearer token for the REST/MCP HTTP server |
-| `MEMRY_DECISION_PROVIDER` | required | `jev`, or on purpose `llm`: Memry then sends the decision questions to the text model and you confirm every merge yourself |
+| `MEMRY_DECISION_PROVIDER` | required | `jev`, or on purpose `llm`: Memry then sends the decision questions to the text model, merges entities only by fixed rules, and you confirm the other merges yourself |
 | `MEMRY_DECISION_API_KEY` | required for `jev` | TypeSafe API key |
 
 Anthropic extraction requires the optional SDK: `pip install "memry[anthropic]"`.
@@ -338,7 +338,8 @@ With Jev, Memry merges duplicate entities on its own above 0.70 confidence, a th
 measured on the labelled identity set in `evals/`. The upkeep pass scores how long each
 memory stays relevant, so each memory decays at its own pace, and search re-ranking is on.
 You still need a text model for extraction. If you set `MEMRY_DECISION_PROVIDER=llm`,
-Memry sends these questions to the text model, and you confirm every merge yourself. The
+Memry sends these questions to the text model, merges entities only by fixed rules, and
+you confirm the other merges yourself. The
 measurements and the remaining settings are in [docs/self-hosting.md](docs/self-hosting.md#where-memry-sends-its-decision-questions).
 
 ## Evaluation

@@ -218,7 +218,7 @@ def test_the_text_model_decides_only_when_chosen(monkeypatch, caplog, provider):
     monkeypatch.setenv("MEMRY_DECISION_PROVIDER", provider)
     with caplog.at_level("WARNING", logger="memry"):
         require_models(Config.load())
-    assert "never merges two entities on its own" in caplog.text
+    assert "merges entities only by fixed rules" in caplog.text
 
 
 def test_the_decision_key_is_redacted(monkeypatch):

@@ -244,7 +244,7 @@ footer a{color:var(--dim)}
         belong to one thing: <code>MEMRY_DECISION_PROVIDER=jev</code> and a TypeSafe key
         in <code>MEMRY_DECISION_API_KEY</code>. Memry doesn't start without both. With
         <code>MEMRY_DECISION_PROVIDER=llm</code>, Memry sends those questions to the text
-        model and you confirm every merge yourself.</p></div>
+        model, merges entities only by fixed rules, and you confirm the other merges yourself.</p></div>
       <div class="stage"><span class="num">03 · CONNECT</span>
         <h3>Plug into your agent</h3>
         <p>In Claude Code, run <code>claude mcp add memry -e OPENAI_API_KEY=… -e

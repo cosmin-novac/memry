@@ -10,8 +10,8 @@
 # Give the installer a text model key (OPENAI_API_KEY, or ANTHROPIC_API_KEY)
 # and the decision model (MEMRY_DECISION_PROVIDER=jev with a TypeSafe key in
 # MEMRY_DECISION_API_KEY). With MEMRY_DECISION_PROVIDER=llm, set on purpose,
-# Memry sends the decision questions to the text model and you confirm every
-# entity merge yourself.
+# Memry sends the decision questions to the text model, merges entities only by
+# fixed rules, and you confirm the other merges yourself.
 #
 # After boot, the generated API key is in /opt/memry/.env on the server.
 

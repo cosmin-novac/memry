@@ -26,9 +26,10 @@ returns a calibrated probability per answer, and Memry merges duplicates on its 
 thresholds measured for Jev.
 
 If you set `MEMRY_DECISION_PROVIDER=llm`, Memry sends these questions to the text model.
-Nobody has calibrated a text model's confidence scores, so Memry then never merges two
-entities on its own, and you confirm every merge under Upkeep in the dashboard. The server
-logs a warning at start in that mode.
+A text model's confidence scores have not been calibrated, so Memry then merges entities
+only by fixed rules, for example two entities with the same name where one of them has no
+memories yet. You confirm the other merges under Upkeep in the dashboard. The other upkeep
+passes run as usual. The server logs a warning at start in that mode.
 
 `memry config` prints the resolved configuration and lists any model setting that is
 still empty.
@@ -197,8 +198,8 @@ You set where Memry sends those questions with `MEMRY_DECISION_PROVIDER`:
 | Value | Behaviour |
 |---|---|
 | `jev` | [TypeSafe Jev](https://typesafe.ai), a System One model. For each decision question it returns a calibrated probability per answer, and Memry merges duplicates on its own at the measured thresholds. |
-| `llm` | Memry sends the same decision questions to the configured text model and rejects any answer outside the declared options. Set it only on purpose: you then confirm every entity merge yourself. |
-| `none` | Memry sends no decision questions, uses the text model's older prompts and skips the upkeep passes built on a decision provider. Set it only on purpose: you then confirm every entity merge yourself. |
+| `llm` | Memry sends the same decision questions to the configured text model and rejects any answer outside the declared options. Set it only on purpose: Memry then merges entities only by fixed rules, and you confirm the other merges yourself. |
+| `none` | Memry sends no decision questions, uses the text model's older prompts and skips the upkeep passes built on a decision provider. Set it only on purpose: Memry then merges entities only by fixed rules, and you confirm the other merges yourself. |
 | unset | The server doesn't start (see [the two models needed when setting up the server](#the-two-models-needed-when-setting-up-the-server)). |
 
 ```bash

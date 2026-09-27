@@ -21,7 +21,8 @@ To run Memry you need a text model (`OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`) an
 model (`MEMRY_DECISION_PROVIDER=jev` with a [TypeSafe](https://typesafe.ai) key in
 `MEMRY_DECISION_API_KEY`). If you haven't set one of them, the installer stops before
 building and prints what to add. If you set `MEMRY_DECISION_PROVIDER=llm`, Memry sends the
-decision questions to the text model and you confirm every entity merge yourself; see
+decision questions to the text model, merges entities only by fixed rules, and you confirm the
+other merges yourself; see
 [self-hosting.md](self-hosting.md#the-two-models-needed-when-setting-up-the-server). `MEMRY_DOMAIN` is
 optional: without it the server serves plain HTTP on port 80, with no HTTPS.
 
