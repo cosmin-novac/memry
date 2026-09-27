@@ -116,8 +116,8 @@ def test_the_weekly_upkeep_refreshes_them(store):
 
 def test_property_vectors_can_be_stored_short(store):
     """With ``property_dimensions`` a property vector keeps its first numbers,
-    at length 1, in float16; a vector stored at another length is not read
-    and is re-embedded."""
+    at length 1; a vector stored at another length is not read and is
+    re-embedded."""
     bildy = _entity(store, "bildy")
     memory = _memory(store, "bildy runs on Linux", [bildy])
     store.refresh_property_vectors(user_id="ada")
@@ -126,4 +126,4 @@ def test_property_vectors_can_be_stored_short(store):
     assert store.refresh_property_vectors(user_id="ada") == 1
     vector = store.backend.property_vectors_of([memory.id], store._property_label())[memory.id]
     assert vector.shape == (8,)
-    assert float((vector ** 2).sum()) == pytest.approx(1.0, abs=1e-2)
+    assert float((vector ** 2).sum()) == pytest.approx(1.0)

@@ -74,8 +74,8 @@ CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(user_id, agent_id, run
 
 -- A memory with its own entity names replaced by "it", embedded: what it says
 -- about whatever it is about. Derived, like the ANN index, so not in backups.
--- Stored as float16. masked_hash identifies the masked text, so a refresh
--- re-embeds only what changed.
+-- masked_hash identifies the masked text, so a refresh re-embeds only what
+-- changed.
 CREATE TABLE IF NOT EXISTS memory_property_vectors (
     memory_id TEXT PRIMARY KEY,
     embedding BLOB NOT NULL,
@@ -1718,7 +1718,7 @@ class LocalBackend(MemoryBackend):
             self._db.executemany(
                 "INSERT OR REPLACE INTO memory_property_vectors "
                 "(memory_id, embedding, embedding_model, masked_hash) VALUES (?,?,?,?)",
-                [(mid, np.asarray(v, dtype=np.float16).tobytes(), embedding_model,
+                [(mid, np.asarray(v, dtype=np.float32).tobytes(), embedding_model,
                   hashes.get(mid))
                  for mid, v in vectors.items()],
             )
@@ -1738,8 +1738,7 @@ class LocalBackend(MemoryBackend):
                     [*chunk, *([embedding_model] if embedding_model else [])],
                 ).fetchall()
             out.update(
-                (r["memory_id"], np.frombuffer(r["embedding"], dtype=np.float16).astype(np.float32))
-                for r in rows
+                (r["memory_id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows
             )
         return out
 
