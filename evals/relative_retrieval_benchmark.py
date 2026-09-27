@@ -409,20 +409,30 @@ def main() -> None:
     args = parser.parse_args()
     decider = None
     modes = [m for m in MODES if not args.modes or m[0] in args.modes]
-    if args.jev:
+    def jev_judge():
+        """A fresh Jev decider per store (closing a store closes its decider)
+        that counts its calls and stops the run after three failed ones, so a
+        search never falls back to vectors unnoticed."""
         from memry.config import DecisionConfig
         from memry.providers.decisions import JevDecider
 
-        decider = JevDecider(DecisionConfig(provider="jev", api_key=os.environ["TYPESAFE_API_KEY"]))
-        decider.reranks_by_default = False
-        decider.calls = 0
-        _decide = decider.decide
+        judge = JevDecider(DecisionConfig(provider="jev", api_key=os.environ["TYPESAFE_API_KEY"]))
+        judge.reranks_by_default = False
+        judge.calls, judge.failed = 0, 0
+        ask = judge.decide
 
         def counted(state, questions):
-            decider.calls += 1
-            return _decide(state, questions)
+            judge.calls += 1
+            answers = ask(state, questions)
+            if not any(answers[key].available for key in questions):
+                judge.failed += 1
+                if judge.failed >= 3:
+                    print("stopped: Jev is not answering", flush=True)
+                    os._exit(2)
+            return answers
 
-        decider.decide = counted
+        judge.decide = counted
+        return judge
     if args.rerank:
         from memry.config import DecisionConfig
         from memry.providers.decisions import JevDecider
@@ -457,6 +467,8 @@ def main() -> None:
         print(f"\n===== {len(world['memories'])} memories, embedder {embedder.model_id} =====",
               flush=True)
         for links in ("none", "oracle", "measured"):
+            if args.jev:
+                decider = jev_judge()
             store, memory_ids = build_store(world, embedder, links, answers, decider=decider)
             for mode in modes:
                 if links == "none" and mode[2] != "typed":
