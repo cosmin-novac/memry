@@ -312,3 +312,17 @@ def test_a_question_about_a_version_is_also_asked_of_its_thing(store, family):
     store.config.retrieval.relational_fusion = "inherit"
     top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
     assert "bildy runs on Linux and macOS" in [r.memory.content for r in top[:2]]
+
+
+def test_how_a_memory_is_weighed_by_the_entities_it_names():
+    from memry.intelligence.graph_retrieval import LOW, link_factor, specificity
+
+    # names nothing: its text alone decides
+    assert link_factor([]) == 1.0
+    # the entity asked about, or its thing: the text decides between them
+    assert link_factor([1.0]) == link_factor([0.72]) == 1.0
+    # a sibling version or an unrelated entity falls back
+    assert link_factor([0.0]) == LOW
+    assert LOW < link_factor([0.11]) < 1.0
+    # gated: among memories that answer, the version's own before its thing's
+    assert specificity([1.0]) > specificity([0.72]) > specificity([0.11]) > specificity([])

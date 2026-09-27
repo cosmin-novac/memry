@@ -153,8 +153,13 @@ class RetrievalConfig(BaseModel):
     #: How the linked memories join the text ranking: "rescue" adds only what
     #: the text ranking buried; "weighted" weighs every candidate by how
     #: strongly its entities are linked to the query's; "inherit" also asks
-    #: the query of the thing a named version belongs to (directed mode).
+    #: the query of the thing a named version belongs to (directed mode);
+    #: "gated" does that and puts the most specific memory first among those
+    #: that answer the question (``relational_gate``).
     relational_fusion: str = "rescue"
+    #: "gated" fusion: a memory answers the question when its vector
+    #: similarity is within this much of the best one found.
+    relational_gate: float = 0.05
 
 
 class SupersedeConfig(BaseModel):

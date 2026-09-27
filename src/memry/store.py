@@ -66,6 +66,7 @@ from .intelligence.graph_retrieval import (
     inherited_questions,
     link_factor,
     linked_memories,
+    specificity,
     relational_memory_ids,
 )
 from .intelligence.identity import (
@@ -1339,8 +1340,11 @@ class MemoryStore:
             rel_ids = relational_memory_ids(self.backend, scope, query,
                                             hops=cfg.relational_depth)
             act = {}
-        if cfg.relational_fusion == "inherit" and cfg.relational_mode == "directed":
+        if cfg.relational_fusion in ("inherit", "gated") and cfg.relational_mode == "directed":
             results = self._with_inherited(query, scope, results, include_invalid)
+        if cfg.relational_fusion == "gated" and rel_ids and act:
+            results = self._gate_specific(results, act)
+            return self._fuse_relational(results, rel_ids, include_invalid)
         if cfg.relational_fusion in ("weighted", "inherit") and rel_ids:
             if not act:
                 act = activation(self.backend, detect_query_entities(self.backend, scope, query),
@@ -1367,6 +1371,34 @@ class MemoryStore:
                 if known is None or r.score > known.score:
                     have[r.memory.id] = r
         return sorted(have.values(), key=lambda r: -r.score)
+
+    def _gate_specific(
+        self, results: list[SearchResult], act: dict[str, float]
+    ) -> list[SearchResult]:
+        """Among the memories whose vector similarity is within
+        ``relational_gate`` of the best, the most specific to what the query
+        names first (``graph_retrieval.specificity``); the rest after them,
+        weighed as "weighted" fusion weighs them. "Where does bildy v3 store its
+        data?": v3's own "moved to Postgres" before bildy's "stores its data in
+        SQLite". "Which platforms does bildy v3 run on?": v3 has no memory on
+        that, so bildy's answers, and v3's release date is not in the running."""
+        gate = self.config.retrieval.relational_gate
+        vector = {r.memory.id: float(r.signals.get("vector", 0.0) or 0.0) for r in results}
+        best = max(vector.values(), default=0.0)
+        entities = {r.memory.id: [act.get(e.id, 0.0) for e in
+                                  self.backend.entities_of_memory(r.memory.id)]
+                    for r in results}
+
+        def key(r: SearchResult):
+            acts = entities[r.memory.id]
+            if best > 0 and vector[r.memory.id] >= best - gate:
+                return (0, -specificity(acts), -r.score)
+            return (1, 0.0, -r.score * link_factor(acts))
+
+        ranked = sorted(results, key=key)
+        for r in ranked:
+            r.signals = {**r.signals, "specific": round(specificity(entities[r.memory.id]), 3)}
+        return ranked
 
     def _fuse_weighted(
         self,

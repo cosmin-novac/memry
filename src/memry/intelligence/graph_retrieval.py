@@ -211,6 +211,19 @@ STRONG = 0.5
 LOW = 0.3
 
 
+def specificity(activations: list[float]) -> float:
+    """How specific a memory is to what the query names: 1.0 for the entity
+    it names, the activation for a thing it belongs to, ``LOW`` and up for
+    entities the links do not reach. "gated" fusion puts the most specific of
+    the memories that answer the question first: a version's own fact
+    overrides its thing's, as a default does in an inheritance hierarchy, and
+    only where the version has a fact on what was asked."""
+    if not activations:
+        return LOW
+    strongest = max(activations)
+    return strongest if strongest >= STRONG else LOW + (1.0 - LOW) * strongest / STRONG
+
+
 def link_factor(activations: list[float]) -> float:
     """What a memory's text score is multiplied by in "weighted" fusion, from
     the activations of the entities it names (empty: it names none)."""

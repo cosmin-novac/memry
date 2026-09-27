@@ -276,9 +276,12 @@ def build_world(size: int, seed: int = 7) -> dict:
             "queries": dict(queries), "types": types}
 
 
-def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed: int = 3):
-    """The world in a fresh store, with compared pairs as ``links`` says."""
-    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=embedder)
+def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed: int = 3,
+                decider=None):
+    """The world in a fresh store, with compared pairs as ``links`` says.
+    ``decider`` re-ranks every search when given (Jev in production)."""
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=embedder,
+                        decider=decider)
     ids: dict[str, str] = {}
     for name, entity_type in world["types"].items():
         ids[name] = store.backend.insert_entity(Entity(
@@ -288,7 +291,8 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
     stamp = "2026-06-01T09:00:00+00:00"
     for m, vector in zip(world["memories"], vectors):
         memory = store.backend.insert_memory(
-            Memory(content=m["text"], user_id=USER, created_at=stamp, updated_at=stamp),
+            Memory(content=m["text"], user_id=USER, created_at=stamp, updated_at=stamp,
+                   embedding_model=embedder.model_id),
             embedding=vector)
         memory_ids.append(memory.id)
         for name in m["entities"]:
@@ -318,6 +322,7 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
 MODES = [
     # (label, relational, mode, depth, fusion)
     ("hybrid", False, "typed", 2, "rescue"),
+    ("typed d1", True, "typed", 1, "rescue"),
     ("typed d2 (today)", True, "typed", 2, "rescue"),
     ("undirected d1", True, "undirected", 1, "rescue"),
     ("undirected d2", True, "undirected", 2, "rescue"),
@@ -330,7 +335,8 @@ MODES = [
     ("directed d2 weighted", True, "directed", 2, "weighted"),
     ("directed d3 weighted", True, "directed", 3, "weighted"),
     ("directed d1 inherit", True, "directed", 1, "inherit"),
-    ("directed d2 inherit", True, "directed", 2, "inherit"),
+    ("directed d1 gated", True, "directed", 1, "gated"),
+    ("directed d2 gated", True, "directed", 2, "gated"),
 ]
 
 
@@ -369,7 +375,20 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sizes", type=int, nargs="*", default=None)
     parser.add_argument("--out", default=None)
+    parser.add_argument("--rerank", action="store_true",
+                        help="Jev re-ranks each search (TYPESAFE_API_KEY), on the families "
+                             "where the text ranking and the links disagree, fewer modes")
     args = parser.parse_args()
+    decider = None
+    modes = MODES
+    if args.rerank:
+        from memry.config import DecisionConfig
+        from memry.providers.decisions import JevDecider
+
+        decider = JevDecider(DecisionConfig(provider="jev", rerank=True,
+                                            api_key=os.environ["TYPESAFE_API_KEY"]))
+        modes = [m for m in MODES if m[0] in (
+            "hybrid", "typed d2 (today)", "directed d1 weighted", "directed d1 inherit")]
     key = os.environ.get("OPENAI_API_KEY", "").strip()
     if key:
         base: Embedder = OpenAIEmbedder(EmbeddingConfig(provider="openai", api_key=key))
@@ -386,11 +405,15 @@ def main() -> None:
         texts = [m["text"] for m in world["memories"]]
         texts += [q for items in world["queries"].values() for q, _, _ in items]
         embedder.warm(texts)
+        if args.rerank:
+            keep = ("inherit", "override", "sibling", "override_worded", "sibling_worded",
+                    "event_inherit", "event_override", "single_fact", "multi_hop")
+            world["queries"] = {f: q[:25] for f, q in world["queries"].items() if f in keep}
         print(f"\n===== {len(world['memories'])} memories, embedder {embedder.model_id} =====",
               flush=True)
         for links in ("none", "oracle", "measured"):
-            store, memory_ids = build_store(world, embedder, links, answers)
-            for mode in MODES:
+            store, memory_ids = build_store(world, embedder, links, answers, decider=decider)
+            for mode in modes:
                 if links == "none" and mode[2] != "typed":
                     continue  # without compared pairs the link modes see only relations
                 if links != "none" and mode[2] == "typed" and mode[0] != "hybrid":
