@@ -276,6 +276,15 @@ def build_world(size: int, seed: int = 7) -> dict:
             "queries": dict(queries), "types": types}
 
 
+def masked_names(world: dict, memory: dict) -> list[str]:
+    """The names replaced by "it" in a memory's property vector: its entities'
+    and the things they belong to, since a version's memory often names its
+    thing ("With its third release, Kaven planner moved ...")."""
+    parents = {child: parent for child, parent, kind in world["pairs"]
+               if kind in ("version", "occurrence", "component")}
+    return list(memory["entities"]) + [parents[e] for e in memory["entities"] if e in parents]
+
+
 def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed: int = 3,
                 decider=None):
     """The world in a fresh store, with compared pairs as ``links`` says.
@@ -300,7 +309,7 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
                                                     surface=name))
     from memry.intelligence.graph_retrieval import mask_names
 
-    masked = [mask_names(m["text"], m["entities"]) for m in world["memories"]]
+    masked = [mask_names(m["text"], masked_names(world, m)) for m in world["memories"]]
     store.backend.set_property_vectors(dict(zip(memory_ids, embedder.embed(masked))),
                                        embedder.model_id)
     for subject, predicate, obj in world["relations"]:
@@ -439,7 +448,7 @@ def main() -> None:
         texts += [q for items in world["queries"].values() for q, _, _ in items]
         from memry.intelligence.graph_retrieval import mask_names
 
-        texts += [mask_names(m["text"], m["entities"]) for m in world["memories"]]
+        texts += [mask_names(m["text"], masked_names(world, m)) for m in world["memories"]]
         embedder.warm(texts)
         if args.rerank or args.jev:
             keep = ("inherit", "override", "sibling", "override_worded", "sibling_worded",

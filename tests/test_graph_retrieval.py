@@ -399,7 +399,7 @@ def test_names_are_masked_as_whole_words():
         "its database moved; rebuildy stays"
     assert aboutness([None, 0.72]) == 0.72  # the strongest linked entity
     assert aboutness([None]) == 0.3          # only entities the links do not reach
-    assert aboutness([]) == 0.5              # no entity: no evidence either way
+    assert aboutness([]) == 0.3              # no entity: about something else too
 
 
 def test_linked_search_can_ask_the_decision_provider_what_states_the_property(store, family):

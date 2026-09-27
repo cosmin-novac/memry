@@ -405,10 +405,12 @@ LINKED_RELATION = 0.5
 FAMILY_MIN = 0.3
 FAMILY_TOP = 10
 FAMILY_SCAN = 500
-#: A memory that names no entity carries no evidence about which entity it is
-#: about; one that names only entities the links do not reach is about
-#: something else (``LOW``).
-NO_ENTITY = 0.5
+#: A memory that names only entities the links do not reach is about something
+#: else (``LOW``), and so, as measured, is one that names none: at 0.5, notes
+#: naming nothing outranked a product's own parts on "What do I know about
+#: it?" (roll-up recall 0.78 against 1.00). A memory about the entity a query
+#: names names it.
+NO_ENTITY = LOW
 
 _POSSESSIVE = "(?:'s|\u2019s)?"
 
