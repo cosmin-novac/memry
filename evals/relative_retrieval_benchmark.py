@@ -345,6 +345,9 @@ MODES = [
     ("linked k1", True, "directed", 1, "linked", 1.0),
     ("linked k2", True, "directed", 1, "linked", 2.0),
     ("linked k3", True, "directed", 1, "linked", 3.0),
+    # the same, with the decision provider judging relevance (--rerank off,
+    # --jev on): its answer is a probability, so no sharpening
+    ("linked jev", True, "directed", 1, "linked", 1.0, "jev"),
 ]
 
 
@@ -354,6 +357,7 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
     cfg.relational_mode, cfg.relational_depth, cfg.relational_fusion = rmode, depth, fusion
     if len(mode) > 5:
         cfg.relational_sharpness = mode[5]
+    cfg.relational_relevance = mode[6] if len(mode) > 6 else "vector"
     out: dict[str, dict[str, float]] = {}
     for family, items in queries.items():
         mrr, recall, wrong_first, ms = [], [], [], []
@@ -387,12 +391,29 @@ def main() -> None:
     parser.add_argument("--out", default=None)
     parser.add_argument("--modes", nargs="*", default=None,
                         help="only these mode labels (all by default)")
+    parser.add_argument("--jev", action="store_true",
+                        help="give the store Jev as its decision provider without re-ranking "
+                             "(TYPESAFE_API_KEY), for the linked jev mode")
     parser.add_argument("--rerank", action="store_true",
                         help="Jev re-ranks each search (TYPESAFE_API_KEY), on the families "
                              "where the text ranking and the links disagree, fewer modes")
     args = parser.parse_args()
     decider = None
     modes = [m for m in MODES if not args.modes or m[0] in args.modes]
+    if args.jev:
+        from memry.config import DecisionConfig
+        from memry.providers.decisions import JevDecider
+
+        decider = JevDecider(DecisionConfig(provider="jev", api_key=os.environ["TYPESAFE_API_KEY"]))
+        decider.reranks_by_default = False
+        decider.calls = 0
+        _decide = decider.decide
+
+        def counted(state, questions):
+            decider.calls += 1
+            return _decide(state, questions)
+
+        decider.decide = counted
     if args.rerank:
         from memry.config import DecisionConfig
         from memry.providers.decisions import JevDecider
@@ -420,7 +441,7 @@ def main() -> None:
 
         texts += [mask_names(m["text"], m["entities"]) for m in world["memories"]]
         embedder.warm(texts)
-        if args.rerank:
+        if args.rerank or args.jev:
             keep = ("inherit", "override", "sibling", "override_worded", "sibling_worded",
                     "event_inherit", "event_override", "single_fact", "multi_hop")
             world["queries"] = {f: q[:25] for f, q in world["queries"].items() if f in keep}
@@ -435,12 +456,16 @@ def main() -> None:
                     continue  # "typed" reads no compared pairs: same as without links
                 if links != "none" and mode[0] == "hybrid":
                     continue
+                calls_before = getattr(decider, "calls", 0)
                 res = score(store, memory_ids, world["queries"], mode)
+                asked = sum(v["n"] for v in res.values())
+                res["_jev_calls_per_search"] = (getattr(decider, "calls", 0) - calls_before) / asked
                 results[f"{size}|{links}|{mode[0]}"] = res
                 print(f"{links:9} {mode[0]:24} " + "  ".join(
                     f"{f[:12]} {v[RECALL.get(f, 'mrr')]:.2f}"
                     + (f"/{v['wrong_first']:.2f}" if v["wrong_first"] is not None else "")
-                    for f, v in res.items()), flush=True)
+                    for f, v in res.items() if not f.startswith("_"))
+                    + f"  jev/search {res['_jev_calls_per_search']:.2f}", flush=True)
             store.close()
     if args.out:
         pathlib.Path(args.out).write_text(json.dumps(results, indent=1))

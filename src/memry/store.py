@@ -83,6 +83,7 @@ from .intelligence.identity import (
     judged_tag_merges,
     judges_pairs,
     name_vectors,
+    parallel,
 )
 from .intelligence.extraction import (
     VOCABULARY_LIMIT,
@@ -1400,15 +1401,46 @@ class MemoryStore:
             for memory in sorted(members, key=lambda m: -similarity(vectors, m.id))[:FAMILY_TOP]:
                 pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
         vectors = self._property_vectors(list(pool))
+        judged = (self._judged_relevance(mask_names(query, names), pool)
+                  if cfg.relational_relevance == "jev" else {})
         scored = []
         for mid, result in pool.items():
-            relevance = similarity(vectors, mid)
+            relevance = judged.get(mid, similarity(vectors, mid))
             about = aboutness([act.get(e.id) for e in self.backend.entities_of_memory(mid)])
             result.signals = {**result.signals, "property": round(relevance, 4),
                               "about": round(about, 3)}
             scored.append((relevance ** cfg.relational_sharpness * about, result.score, result))
         scored.sort(key=lambda item: (-item[0], -item[1]))
         return [result for _, _, result in scored]
+
+    def _judged_relevance(
+        self, asked: str, pool: dict[str, SearchResult]
+    ) -> dict[str, float]:
+        """P(the memory states what the question asks) from the decision
+        provider, the question and each memory with entity names replaced by
+        "it". Up to 128 memories a call, calls side by side. A memory the
+        provider did not answer for is left out, and keeps its vector score."""
+        if not self.decider.available:
+            return {}
+        items = []
+        for mid, result in pool.items():
+            names = [e.name for e in self.backend.entities_of_memory(mid)]
+            items.append((mid, mask_names(result.memory.content, names)))
+        chunks = [items[i:i + 128] for i in range(0, len(items), 128)]
+
+        def ask(chunk):
+            answers = self.decider.decide(
+                f"QUESTION: {asked}",
+                {f"m{i}": Noul(instructions="This memory states what the question asks "
+                                            f"about. Memory: {text}")
+                 for i, (_, text) in enumerate(chunk)})
+            return {mid: float(answers[f"m{i}"].value) for i, (mid, _) in enumerate(chunk)
+                    if answers[f"m{i}"].available}
+
+        judged: dict[str, float] = {}
+        for part in parallel(ask, chunks):
+            judged.update(part)
+        return judged
 
     def _property_vectors(self, memory_ids: list[str]) -> dict[str, np.ndarray]:
         """Property vectors, and the ordinary vector for a memory saved before

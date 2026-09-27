@@ -400,3 +400,28 @@ def test_names_are_masked_as_whole_words():
     assert aboutness([None, 0.72]) == 0.72  # the strongest linked entity
     assert aboutness([None]) == 0.3          # only entities the links do not reach
     assert aboutness([]) == 0.5              # no entity: no evidence either way
+
+
+def test_linked_search_can_ask_the_decision_provider_what_states_the_property(store, family):
+    """With ``relational_relevance = "jev"`` the provider's probability that a
+    memory states what the question asks replaces the vector similarity. It
+    sees the question and the memories with the names replaced by "it"."""
+    from memry.providers.decisions import Answer, Answers, NoneDecider
+
+    seen = []
+
+    class Judge(NoneDecider):
+        available = True
+
+        def decide(self, state, questions):
+            seen.append(state)
+            return Answers({key: Answer(0.9 if "runs on" in q.instructions else 0.1, {}, 0.9, True)
+                            for key, q in questions.items()})
+
+    _linked(store)
+    store.decider = Judge()
+    store.config.retrieval.relational_relevance = "jev"
+    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=2)
+    assert top[0].memory.content == "bildy runs on Linux and macOS"
+    assert top[0].signals["property"] == pytest.approx(0.9)
+    assert seen == ["QUESTION: Which systems does it run on?"]

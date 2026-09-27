@@ -166,6 +166,10 @@ class RetrievalConfig(BaseModel):
     #: "linked" fusion: the power the property similarity is raised to before
     #: it is multiplied by how strongly the memory is about the query's entity.
     relational_sharpness: float = 2.0
+    #: "linked" fusion: what judges whether a memory states the property asked.
+    #: "vector": the property vectors, compared in memory. "jev": the decision
+    #: provider, one question per candidate (up to 128 a call), names replaced.
+    relational_relevance: str = "vector"
 
 
 class SupersedeConfig(BaseModel):
