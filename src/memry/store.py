@@ -334,6 +334,14 @@ def _when_within(
     )
 
 
+def _cut(vector: list[float], keep: int | None) -> list[float]:
+    """The first ``keep`` numbers of a vector, scaled back to length 1."""
+    if not keep or keep >= len(vector):
+        return vector
+    short = np.asarray(vector[:keep], dtype=np.float32)
+    return (short / (float(np.linalg.norm(short)) or 1.0)).tolist()
+
+
 def _text_hash(text: str) -> str:
     """Identifies a property vector's masked text, to tell when it changed."""
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
@@ -1413,12 +1421,14 @@ class MemoryStore:
                                       mode="directed", relation=LINKED_RELATION)
         names = [n for seed in seeds for n in self.backend.entity_aliases(seed)]
         asked = np.asarray(self.embedder.embed([mask_names(query, names)])[0], dtype=np.float32)
+        asked = asked[: cfg.property_dimensions or len(asked)]
         asked /= float(np.linalg.norm(asked)) or 1.0
 
         def similarity(vectors: dict[str, np.ndarray], mid: str) -> float:
             vector = vectors.get(mid)
-            if vector is None or vector.shape != asked.shape:
+            if vector is None or vector.shape[0] < asked.shape[0]:
                 return 0.0
+            vector = vector[: asked.shape[0]]  # an ordinary vector is cut like the question
             return max(float(vector @ asked) / (float(np.linalg.norm(vector)) or 1.0), 0.0)
 
         pool: dict[str, SearchResult] = {r.memory.id: r for r in results}
@@ -1524,11 +1534,16 @@ class MemoryStore:
     def _property_vectors(self, memory_ids: list[str]) -> dict[str, np.ndarray]:
         """Property vectors, and the ordinary vector for a memory saved before
         property vectors existed."""
-        vectors = self.backend.property_vectors_of(memory_ids, self.embedder.model_id)
+        vectors = self.backend.property_vectors_of(memory_ids, self._property_label())
         missing = [mid for mid in memory_ids if mid not in vectors]
         if missing:
             vectors.update(self.backend.vectors_of(missing, self.embedder.model_id))
         return vectors
+
+    def _property_label(self) -> str:
+        """The embedding model and length a property vector was stored at: a
+        vector of another model or length is not read, and is re-embedded."""
+        return f"{self.embedder.model_id}#{self.config.retrieval.property_dimensions or 'all'}"
 
     def _linked_search_on(self) -> bool:
         """Property vectors are computed only while the linked search, which
@@ -1582,7 +1597,8 @@ class MemoryStore:
                     entities[memory_id] = [e.id for e in self.backend.entities_of_memory(memory_id)]
         masked = self._masked_texts(contents, entities)
         stored = self.backend.property_vector_hashes(list(masked))
-        model = self.embedder.model_id
+        model = self._property_label()
+        keep = self.config.retrieval.property_dimensions
         unmasked = [mid for mid, text in masked.items() if text == contents[mid] and mid in stored]
         if unmasked:
             self.backend.delete_property_vectors(unmasked)
@@ -1592,7 +1608,7 @@ class MemoryStore:
         for start in range(0, len(due), 64):
             batch = due[start:start + 64]
             vectors = self.embedder.embed([text for _, text in batch])
-            rows = {mid: vector for (mid, _), vector in zip(batch, vectors) if vector}
+            rows = {mid: _cut(vector, keep) for (mid, _), vector in zip(batch, vectors) if vector}
             self.backend.set_property_vectors(
                 rows, model, {mid: _text_hash(text) for mid, text in batch if mid in rows})
             embedded += len(rows)

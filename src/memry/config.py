@@ -165,11 +165,16 @@ class RetrievalConfig(BaseModel):
     relational_gate: float = 0.05
     #: "linked" fusion: the power the property similarity is raised to before
     #: it is multiplied by how strongly the memory is about the query's entity.
-    relational_sharpness: float = 2.0
+    #: 1 measured best: 2 and 3 lost the versions whose change is worded as one.
+    relational_sharpness: float = 1.0
     #: "linked" fusion: what judges whether a memory states the property asked.
     #: "vector": the property vectors, compared in memory. "jev": the decision
-    #: provider, one question per candidate (up to 128 a call), names replaced.
+    #: provider judges the first ``decision.rerank_pool`` in one call.
     relational_relevance: str = "vector"
+    #: "linked" fusion: how many leading numbers of each vector the property
+    #: comparison keeps (None: all). The v3 OpenAI models are trained so a
+    #: vector cut short still works; property vectors are stored this short.
+    property_dimensions: int | None = None
 
 
 class SupersedeConfig(BaseModel):

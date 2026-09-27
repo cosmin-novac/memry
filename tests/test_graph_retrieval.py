@@ -338,7 +338,7 @@ def _with_property_vectors(store):
     texts = {m.id: mask_names(m.content, [e.name for e in store.backend.entities_of_memory(m.id)])
              for m in memories}
     vectors = store.embedder.embed(list(texts.values()))
-    store.backend.set_property_vectors(dict(zip(texts, vectors)), store.embedder.model_id)
+    store.backend.set_property_vectors(dict(zip(texts, vectors)), store._property_label())
 
 
 class _ConceptEmbedder(Embedder):
@@ -414,7 +414,7 @@ def test_linked_search_keeps_the_names_of_a_memory_the_links_do_not_reach(store,
     kaven = _entity(store, "Kaven planner")
     other = _memory(store, "Kaven planner is popular with bildy fans", [kaven.id])
     store.backend.set_property_vectors({other.id: [0.0, 1.0, 0.0, 0.0, 0.1]},
-                                       store.embedder.model_id)  # as if it ran on systems
+                                       store._property_label())  # as if it ran on systems
     results = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=20)
     stranger = next(r for r in results if r.memory.id == other.id)
     assert stranger.signals["property"] < 0.2  # its own vector, not the masked one

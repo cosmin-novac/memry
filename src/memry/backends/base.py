@@ -515,9 +515,9 @@ class MemoryBackend(ABC):
         self, vectors: dict[str, list[float]], embedding_model: str,
         hashes: dict[str, str] | None = None,
     ) -> None:
-        """Store each memory's property vector: its text with its own entity
-        names replaced by "it", embedded (``graph_retrieval.mask_names``), and
-        a hash of that masked text."""
+        """Store each memory's property vector (float16): its text with its own
+        entity names replaced by "it", embedded (``graph_retrieval.mask_names``),
+        and a hash of that masked text."""
         return None
 
     def property_vectors_of(

@@ -55,7 +55,7 @@ def test_a_saved_memory_gets_its_property_vector_once_its_mentions_are_attached(
     memory_id = actions[0].memory_id
     assert "it stores its data in SQLite" in store.embedder.texts
     assert store.backend.property_vector_hashes([memory_id]) == {
-        memory_id: (_text_hash("it stores its data in SQLite"), store.embedder.model_id)}
+        memory_id: (_text_hash("it stores its data in SQLite"), store._property_label())}
 
 
 def test_nothing_is_computed_while_the_linked_search_is_off(store):
@@ -85,7 +85,7 @@ def test_a_new_home_masks_the_things_name_at_the_next_refresh(store):
     assert store.refresh_property_vectors(user_id="ada") == 1
     assert store.embedder.texts[-1] == "The third release of it added offline mode"
     assert store.refresh_property_vectors(user_id="ada") == 0
-    assert memory.id in store.backend.property_vectors_of([memory.id], store.embedder.model_id)
+    assert memory.id in store.backend.property_vectors_of([memory.id], store._property_label())
 
 
 def test_a_vector_from_another_embedding_model_is_not_read_and_is_replaced(store):
@@ -93,9 +93,9 @@ def test_a_vector_from_another_embedding_model_is_not_read_and_is_replaced(store
     memory = _memory(store, "bildy runs on Linux", [bildy])
     store.backend.set_property_vectors({memory.id: [0.0] * 32}, "old-model",
                                        {memory.id: _text_hash("it runs on Linux")})
-    assert store.backend.property_vectors_of([memory.id], store.embedder.model_id) == {}
+    assert store.backend.property_vectors_of([memory.id], store._property_label()) == {}
     assert store.refresh_property_vectors(user_id="ada") == 1
-    assert memory.id in store.backend.property_vectors_of([memory.id], store.embedder.model_id)
+    assert memory.id in store.backend.property_vectors_of([memory.id], store._property_label())
 
 
 def test_deleting_a_memory_deletes_its_property_vector(store):
@@ -112,3 +112,18 @@ def test_the_weekly_upkeep_refreshes_them(store):
     _memory(store, "bildy runs on Linux", [bildy])
     ran = store.run_upkeep_cycle(user_id="ada")
     assert ran.get("property_vectors") == {"embedded": 1}
+
+
+def test_property_vectors_can_be_stored_short(store):
+    """With ``property_dimensions`` a property vector keeps its first numbers,
+    at length 1, in float16; a vector stored at another length is not read
+    and is re-embedded."""
+    bildy = _entity(store, "bildy")
+    memory = _memory(store, "bildy runs on Linux", [bildy])
+    store.refresh_property_vectors(user_id="ada")
+    store.config.retrieval.property_dimensions = 8
+    assert store.backend.property_vectors_of([memory.id], store._property_label()) == {}
+    assert store.refresh_property_vectors(user_id="ada") == 1
+    vector = store.backend.property_vectors_of([memory.id], store._property_label())[memory.id]
+    assert vector.shape == (8,)
+    assert float((vector ** 2).sum()) == pytest.approx(1.0, abs=1e-2)

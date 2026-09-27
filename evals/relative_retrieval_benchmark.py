@@ -202,11 +202,17 @@ def build_world(size: int, seed: int = 7) -> dict:
                                           [m_override], [m_db]))
         queries["sibling" + tag].append((f"What did {versions[0]} add?", [feature_mem[versions[0]]],
                                          [feature_mem[versions[1]], feature_mem[versions[2]]]))
+        # the same questions in words the answers do not use
+        queries["inherit_para"].append(
+            (f"Which operating systems does {versions[1]} support?", [m_platform], []))
+        queries["override_para"].append(
+            (f"What database does {versions[2]} use?", [m_override], [m_db]))
         queries["rollup"].append((f"What do I know about {p}?", family, []))
         # a version's own memories and what it inherits from its product
         queries["version_rollup"].append((f"What do I know about {versions[2]}?",
                                           own[versions[2]] + family[:5], []))
         queries["part"].append((f"Who maintains the {s}?", [m_part], []))
+        queries["part_para"].append((f"Who is in charge of the {s}?", [m_part], []))
         if i % 2 == 0:
             bakery = f"{w} Bakery"
             types[bakery] = "organization"
@@ -236,6 +242,7 @@ def build_world(size: int, seed: int = 7) -> dict:
             for b in range(a + 1, 3):
                 pairs.append((occ[a], occ[b], "siblings"))
         queries["event_inherit"].append((f"Where did {occ[1]} take place?", [m_city], [m_moved]))
+        queries["event_inherit_para"].append((f"Where was {occ[1]} held?", [m_city], [m_moved]))
         queries["event_override"].append((f"Where did {occ[2]} take place?", [m_moved], [m_city]))
         queries["event_sibling"].append((f"How many attendees did {occ[0]} have?",
                                          [attendees[occ[0]]],
@@ -264,6 +271,7 @@ def build_world(size: int, seed: int = 7) -> dict:
         pref = add(f"{who} prefers {rnd.choice(['dark mode', 'short answers', 'metric units', 'async updates', 'vim keybindings'])}.", who)
         add(f"{who} joined the team and focuses on {rnd.choice(TOPICWORDS)}.", who)
         queries["single_fact"].append((f"What does {who} prefer?", [pref], []))
+        queries["single_fact_para"].append((f"What does {who} like?", [pref], []))
         gold = [m for pr in mine for m in project_tool_mems[pr]]
         queries["multi_hop"].append((f"What tools does {who} use for their work?", gold, []))
     for pr in rnd.sample(projects, min(len(projects), 20)):
@@ -281,11 +289,12 @@ def build_world(size: int, seed: int = 7) -> dict:
 
 
 def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed: int = 3,
-                decider=None):
+                decider=None, property_dimensions: int | None = None):
     """The world in a fresh store, with compared pairs as ``links`` says.
     ``decider`` re-ranks every search when given (Jev in production)."""
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=embedder,
                         decider=decider)
+    store.config.retrieval.property_dimensions = property_dimensions
     ids: dict[str, str] = {}
     for name, entity_type in world["types"].items():
         ids[name] = store.backend.insert_entity(Entity(
