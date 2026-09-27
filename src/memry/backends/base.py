@@ -500,6 +500,15 @@ class MemoryBackend(ABC):
         """The stored embedding of each of these memories that has one."""
         return {}
 
+    def set_property_vectors(self, vectors: dict[str, list[float]], embedding_model: str) -> None:
+        """Store each memory's property vector: its text with its own entity
+        names replaced by "it", embedded (``graph_retrieval.mask_names``)."""
+        return None
+
+    def property_vectors_of(self, memory_ids: list[str]) -> dict[str, "np.ndarray"]:
+        """The property vector of each of these memories that has one."""
+        return {}
+
     def session_memories(
         self, memory: Memory, *, hours: float = 3.0, limit: int = 50
     ) -> list[Memory]:

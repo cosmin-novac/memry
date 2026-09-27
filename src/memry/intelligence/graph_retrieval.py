@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 import re
+from typing import Iterable
 
 from ..backends.base import MemoryBackend
 from ..models import Scope
@@ -287,7 +288,7 @@ def links_of(backend: MemoryBackend, entity_ids: list[str], *, graded: bool) -> 
     return links
 
 
-def _steps(link: Link, node: str, directed: bool):
+def _steps(link: Link, node: str, directed: bool, relation: float = RELATION):
     """(other end, factor, step up, step down) for following ``link`` from ``node``."""
     if node not in (link.child, link.parent):
         return
@@ -295,7 +296,7 @@ def _steps(link: Link, node: str, directed: bool):
     if not directed:
         yield other, RELATION, False, False
     elif link.kind in ("relation", "same"):
-        yield other, (RELATION if link.kind == "relation" else 1.0) * link.p, False, False
+        yield other, (relation if link.kind == "relation" else 1.0) * link.p, False, False
     elif node == link.child:
         yield other, (UP_KIND if link.kind == "kind" else UP_PART) * link.p, True, False
     else:
@@ -303,7 +304,8 @@ def _steps(link: Link, node: str, directed: bool):
 
 
 def activation(
-    backend: MemoryBackend, seeds: list[str], *, depth: int = 2, mode: str = "directed"
+    backend: MemoryBackend, seeds: list[str], *, depth: int = 2, mode: str = "directed",
+    relation: float = RELATION,
 ) -> dict[str, float]:
     """How strongly each entity near the seeds bears on a query about the
     seeds: 1.0 for a seed, the product of the factors along the best path for
@@ -322,7 +324,7 @@ def activation(
         reached: dict[tuple[str, bool], float] = {}
         for (node, went_up), act in frontier.items():
             for link in links:
-                for other, factor, up, down in _steps(link, node, directed):
+                for other, factor, up, down in _steps(link, node, directed, relation):
                     if down and went_up:
                         factor *= TURN
                     value = act * factor
@@ -381,3 +383,51 @@ def inherited_questions(
         if found:
             asked.append((query[:found.start()] + parent.name + query[found.end():], parent.id))
     return asked
+
+
+# -- "linked" search: which entity from the links, which property from the text --
+# A memory answers a question when it is about an entity the answer can come
+# from and it states the property asked about. The links say the first: how
+# strongly the memory's entity is linked to the one the query names. The text
+# says the second, once the entity names are out of it: "Where did Tovel Forum
+# 2024 take place?" was closest to "Tovel Forum 2024 had 420 attendees" only
+# because both say "Tovel Forum 2024". With names replaced by "it", "Where did
+# it take place?" is closest to "It takes place in Lisbon", the forum's memory,
+# which the 2024 edition inherits. See the PhD notes, relative-retrieval.
+
+#: A relation carries little of what is true of an entity: Ada works on Project
+#: X, but "Project X is written in Rust" says nothing about Ada. Its memories are
+#: still candidates (the tools Ada uses are among Project X's), at this weight.
+LINKED_RELATION = 0.5
+#: Entities linked at least this strongly have their memories that best state
+#: the property asked searched as well: ``FAMILY_TOP`` of them each, chosen
+#: among their ``FAMILY_SCAN`` newest.
+FAMILY_MIN = 0.3
+FAMILY_TOP = 10
+FAMILY_SCAN = 500
+#: A memory that names no entity carries no evidence about which entity it is
+#: about; one that names only entities the links do not reach is about
+#: something else (``LOW``).
+NO_ENTITY = 0.5
+
+_POSSESSIVE = "(?:'s|\u2019s)?"
+
+
+def mask_names(text: str, names: Iterable[str]) -> str:
+    """``text`` with each of ``names`` replaced by "it" ("its" for a
+    possessive), longest first, matched as whole words in any case."""
+    for name in sorted({n.strip() for n in names if n and n.strip()}, key=len, reverse=True):
+        pattern = re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)" + _POSSESSIVE, re.IGNORECASE)
+        text = pattern.sub(lambda m: "its" if m.group(0)[len(name):] else "it", text)
+    return text
+
+
+def aboutness(activations: list[float | None]) -> float:
+    """How strongly a memory is about what the query names, from the
+    activation of each entity it names (None for an entity the links do not
+    reach): the strongest linked one, ``LOW`` if it names only unlinked ones,
+    ``NO_ENTITY`` if it names none."""
+    linked = [a for a in activations if a is not None]
+    if linked:
+        return max(linked)
+    return LOW if activations else NO_ENTITY

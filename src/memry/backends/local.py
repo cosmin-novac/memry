@@ -71,6 +71,14 @@ CREATE TABLE IF NOT EXISTS memories (
     embedding_model TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(user_id, agent_id, run_id);
+
+-- A memory with its own entity names replaced by "it", embedded: what it says
+-- about whatever it is about. Derived, like the ANN index, so not in backups.
+CREATE TABLE IF NOT EXISTS memory_property_vectors (
+    memory_id TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    embedding_model TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_memories_invalid ON memories(invalid_at);
 CREATE INDEX IF NOT EXISTS idx_memories_pending_enrichment
     ON memories(invalid_at, created_at)
@@ -1669,6 +1677,31 @@ class LocalBackend(MemoryBackend):
                 ).fetchall()
             out.update(
                 (r["id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows
+            )
+        return out
+
+    def set_property_vectors(self, vectors: dict[str, list[float]], embedding_model: str) -> None:
+        with self._lock:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO memory_property_vectors "
+                "(memory_id, embedding, embedding_model) VALUES (?,?,?)",
+                [(mid, np.asarray(v, dtype=np.float32).tobytes(), embedding_model)
+                 for mid, v in vectors.items()],
+            )
+            self._db.commit()
+
+    def property_vectors_of(self, memory_ids: list[str]) -> dict[str, np.ndarray]:
+        out: dict[str, np.ndarray] = {}
+        for start in range(0, len(memory_ids), 500):
+            chunk = memory_ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT memory_id, embedding FROM memory_property_vectors "
+                    f"WHERE memory_id IN ({','.join('?' * len(chunk))})",
+                    chunk,
+                ).fetchall()
+            out.update(
+                (r["memory_id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows
             )
         return out
 

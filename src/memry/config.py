@@ -155,11 +155,17 @@ class RetrievalConfig(BaseModel):
     #: strongly its entities are linked to the query's; "inherit" also asks
     #: the query of the thing a named version belongs to (directed mode);
     #: "gated" does that and puts the most specific memory first among those
-    #: that answer the question (``relational_gate``).
+    #: that answer the question (``relational_gate``); "linked" scores every
+    #: candidate, and the best of each linked entity's memories, by how well it
+    #: states the property asked times how strongly it is about the entity the
+    #: query names (``graph_retrieval``, "linked" search).
     relational_fusion: str = "rescue"
     #: "gated" fusion: a memory answers the question when its vector
     #: similarity is within this much of the best one found.
     relational_gate: float = 0.05
+    #: "linked" fusion: the power the property similarity is raised to before
+    #: it is multiplied by how strongly the memory is about the query's entity.
+    relational_sharpness: float = 2.0
 
 
 class SupersedeConfig(BaseModel):

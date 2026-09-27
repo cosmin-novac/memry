@@ -60,14 +60,20 @@ from .intelligence.entities import (
     synthesize_entity_description,
 )
 from .intelligence.graph_retrieval import (
+    FAMILY_MIN,
+    FAMILY_SCAN,
+    FAMILY_TOP,
+    LINKED_RELATION,
     LINK_MODES,
+    aboutness,
     activation,
     detect_query_entities,
     inherited_questions,
     link_factor,
     linked_memories,
-    specificity,
+    mask_names,
     relational_memory_ids,
+    specificity,
 )
 from .intelligence.identity import (
     BELONGS_BAR,
@@ -91,6 +97,7 @@ from .intelligence.structure import (
     Node,
     derive_homes,
     hub_reason,
+    is_hub,
     same_name_plan,
 )
 from .intelligence.when import confirm_whens, extract_when, overlaps as when_overlaps
@@ -1333,6 +1340,8 @@ class MemoryStore:
         as ``retrieval.relational_mode``, ``relational_depth`` and
         ``relational_fusion`` say (``intelligence/graph_retrieval.py``)."""
         cfg = self.config.retrieval
+        if cfg.relational_fusion == "linked":
+            return self._search_linked(query, scope, results, include_invalid)
         if cfg.relational_mode in LINK_MODES:
             rel_ids, act = linked_memories(self.backend, scope, query,
                                            depth=cfg.relational_depth, mode=cfg.relational_mode)
@@ -1353,6 +1362,73 @@ class MemoryStore:
         if rel_ids:
             return self._fuse_relational(results, rel_ids, include_invalid)
         return results
+
+    def _search_linked(
+        self, query: str, scope: Scope, results: list[SearchResult], include_invalid: bool,
+    ) -> list[SearchResult]:
+        """Score each candidate by how well it states the property asked
+        (similarity of the question and the memory with the entity names
+        replaced by "it") to the power ``relational_sharpness``, times how
+        strongly it is about the entity the query names (``aboutness``). The
+        candidates are the text ranking's and, for every entity linked at
+        ``FAMILY_MIN`` or more, the ``FAMILY_TOP`` of its memories that best
+        state the property. A query naming no hub keeps the text ranking."""
+        cfg = self.config.retrieval
+        seeds = [e for e in detect_query_entities(self.backend, scope, query, longest=True)
+                 if self._is_hub(e)]
+        if not seeds:
+            return results
+        act = activation(self.backend, seeds, depth=cfg.relational_depth, mode="directed",
+                         relation=LINKED_RELATION)
+        names = [n for seed in seeds for n in self.backend.entity_aliases(seed)]
+        asked = np.asarray(self.embedder.embed([mask_names(query, names)])[0], dtype=np.float32)
+        asked /= float(np.linalg.norm(asked)) or 1.0
+
+        def similarity(vectors: dict[str, np.ndarray], mid: str) -> float:
+            vector = vectors.get(mid)
+            if vector is None or vector.shape != asked.shape:
+                return 0.0
+            return max(float(vector @ asked) / (float(np.linalg.norm(vector)) or 1.0), 0.0)
+
+        pool: dict[str, SearchResult] = {r.memory.id: r for r in results}
+        for entity_id, strength in act.items():
+            if strength < FAMILY_MIN:
+                continue
+            members = [m for m in self.backend.entity_memories(entity_id, limit=FAMILY_SCAN)
+                       if include_invalid or m.invalid_at is None]
+            vectors = self._property_vectors([m.id for m in members])
+            for memory in sorted(members, key=lambda m: -similarity(vectors, m.id))[:FAMILY_TOP]:
+                pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
+        vectors = self._property_vectors(list(pool))
+        scored = []
+        for mid, result in pool.items():
+            relevance = similarity(vectors, mid)
+            about = aboutness([act.get(e.id) for e in self.backend.entities_of_memory(mid)])
+            result.signals = {**result.signals, "property": round(relevance, 4),
+                              "about": round(about, 3)}
+            scored.append((relevance ** cfg.relational_sharpness * about, result.score, result))
+        scored.sort(key=lambda item: (-item[0], -item[1]))
+        return [result for _, _, result in scored]
+
+    def _property_vectors(self, memory_ids: list[str]) -> dict[str, np.ndarray]:
+        """Property vectors, and the ordinary vector for a memory saved before
+        property vectors existed."""
+        vectors = self.backend.property_vectors_of(memory_ids)
+        missing = [mid for mid in memory_ids if mid not in vectors]
+        if missing:
+            vectors.update(self.backend.vectors_of(missing))
+        return vectors
+
+    def _is_hub(self, entity_id: str) -> bool:
+        """Whether an entity counts as one a query can name: a hub by the
+        structure rules, so a stray phrase stored as an entity ("go",
+        "upkeep") does not decide what a search is about."""
+        entity = self.backend.get_entity(entity_id)
+        if entity is None:
+            return False
+        return is_hub(entity.entity_type, self.backend.count_entity_memories(entity_id),
+                      len(self.backend.relations_of([entity_id])),
+                      (entity.metadata or {}).get("screen"))
 
     def _with_inherited(
         self, query: str, scope: Scope, results: list[SearchResult], include_invalid: bool,

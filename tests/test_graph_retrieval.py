@@ -9,7 +9,7 @@ import pytest
 
 from memry.config import Config
 from memry.models import Entity, EntityMention, Memory, Relation, Scope
-from memry.providers.embeddings import HashEmbedder
+from memry.providers.embeddings import Embedder, HashEmbedder
 from memry.providers.llm import NoneLLM
 from memry.store import MemoryStore
 
@@ -326,3 +326,77 @@ def test_how_a_memory_is_weighed_by_the_entities_it_names():
     assert LOW < link_factor([0.11]) < 1.0
     # gated: among memories that answer, the version's own before its thing's
     assert specificity([1.0]) > specificity([0.72]) > specificity([0.11]) > specificity([])
+
+
+def _with_property_vectors(store):
+    """Every memory's property vector: its text with its entities' names
+    replaced by "it"."""
+    from memry.intelligence.graph_retrieval import mask_names
+    from memry.models import Scope
+
+    memories = store.backend.list_memories(Scope(user_id="ada"), limit=1000)
+    texts = {m.id: mask_names(m.content, [e.name for e in store.backend.entities_of_memory(m.id)])
+             for m in memories}
+    vectors = store.embedder.embed(list(texts.values()))
+    store.backend.set_property_vectors(dict(zip(texts, vectors)), store.embedder.model_id)
+
+
+class _ConceptEmbedder(Embedder):
+    """Words to a few properties, so a test controls what "states the property
+    asked" means: storage, platforms, features, bread. The real embedder's
+    quality is the benchmark's to measure, not a unit test's."""
+
+    name, _model, dimensions = "concept", "v1", 5
+    CONCEPTS = [{"store", "stores", "data", "database"},
+                {"run", "runs", "systems", "linux", "macos"},
+                {"added", "add", "feature", "view", "mode"},
+                {"sells", "bread", "sourdough"}]
+
+    def embed(self, texts):
+        import re
+
+        out = []
+        for text in texts:
+            words = set(re.findall(r"[a-z]+", text.lower()))
+            out.append([float(len(words & c)) for c in self.CONCEPTS] + [0.1])
+        return out
+
+
+def _linked(store):
+    store.embedder = _ConceptEmbedder()
+    store.config.retrieval.relational_fusion = "linked"
+    store.config.retrieval.relational_depth = 1
+    _with_property_vectors(store)
+
+
+def test_linked_search_takes_the_versions_own_fact_over_its_things(store, family):
+    _linked(store)
+    top = store.search("Where does bildy v4 store its data?", user_id="ada", limit=3)
+    contents = [r.memory.content for r in top]
+    assert contents[0] == "bildy v4 stores its data in Postgres"
+    assert contents.index("bildy stores its data in SQLite") > 0
+
+
+def test_linked_search_takes_the_things_fact_where_the_version_has_none(store, family):
+    _linked(store)
+    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
+    assert top[0].memory.content == "bildy runs on Linux and macOS"
+    assert top[0].signals["about"] == pytest.approx(0.72)
+
+
+def test_linked_search_keeps_the_text_ranking_when_the_query_names_no_hub(store, family):
+    before = [r.memory.id for r in store.search("offline mode", user_id="ada", limit=5)]
+    _linked(store)
+    assert [r.memory.id for r in store.search("offline mode", user_id="ada", limit=5)] == before
+
+
+def test_names_are_masked_as_whole_words():
+    from memry.intelligence.graph_retrieval import aboutness, mask_names
+
+    assert mask_names("Where does bildy v3 store its data?", ["bildy", "bildy v3"]) == \
+        "Where does it store its data?"
+    assert mask_names("bildy's database moved; rebuildy stays", ["bildy"]) == \
+        "its database moved; rebuildy stays"
+    assert aboutness([None, 0.72]) == 0.72  # the strongest linked entity
+    assert aboutness([None]) == 0.3          # only entities the links do not reach
+    assert aboutness([]) == 0.5              # no entity: no evidence either way

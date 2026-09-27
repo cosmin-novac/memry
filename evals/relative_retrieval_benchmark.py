@@ -298,6 +298,11 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
         for name in m["entities"]:
             store.backend.add_mention(EntityMention(entity_id=ids[name], memory_id=memory.id,
                                                     surface=name))
+    from memry.intelligence.graph_retrieval import mask_names
+
+    masked = [mask_names(m["text"], m["entities"]) for m in world["memories"]]
+    store.backend.set_property_vectors(dict(zip(memory_ids, embedder.embed(masked))),
+                                       embedder.model_id)
     for subject, predicate, obj in world["relations"]:
         store.backend.add_relation(Relation(subject=ids[subject], predicate=predicate,
                                             object=ids[obj], user_id=USER))
@@ -337,13 +342,18 @@ MODES = [
     ("directed d1 inherit", True, "directed", 1, "inherit"),
     ("directed d1 gated", True, "directed", 1, "gated"),
     ("directed d2 gated", True, "directed", 2, "gated"),
+    ("linked k1", True, "directed", 1, "linked", 1.0),
+    ("linked k2", True, "directed", 1, "linked", 2.0),
+    ("linked k3", True, "directed", 1, "linked", 3.0),
 ]
 
 
 def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dict:
-    label, relational, rmode, depth, fusion = mode
+    label, relational, rmode, depth, fusion = mode[:5]
     cfg = store.config.retrieval
     cfg.relational_mode, cfg.relational_depth, cfg.relational_fusion = rmode, depth, fusion
+    if len(mode) > 5:
+        cfg.relational_sharpness = mode[5]
     out: dict[str, dict[str, float]] = {}
     for family, items in queries.items():
         mrr, recall, wrong_first, ms = [], [], [], []
@@ -375,12 +385,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sizes", type=int, nargs="*", default=None)
     parser.add_argument("--out", default=None)
+    parser.add_argument("--modes", nargs="*", default=None,
+                        help="only these mode labels (all by default)")
     parser.add_argument("--rerank", action="store_true",
                         help="Jev re-ranks each search (TYPESAFE_API_KEY), on the families "
                              "where the text ranking and the links disagree, fewer modes")
     args = parser.parse_args()
     decider = None
-    modes = MODES
+    modes = [m for m in MODES if not args.modes or m[0] in args.modes]
     if args.rerank:
         from memry.config import DecisionConfig
         from memry.providers.decisions import JevDecider
@@ -404,6 +416,9 @@ def main() -> None:
         world = build_world(size)
         texts = [m["text"] for m in world["memories"]]
         texts += [q for items in world["queries"].values() for q, _, _ in items]
+        from memry.intelligence.graph_retrieval import mask_names
+
+        texts += [mask_names(m["text"], m["entities"]) for m in world["memories"]]
         embedder.warm(texts)
         if args.rerank:
             keep = ("inherit", "override", "sibling", "override_worded", "sibling_worded",
