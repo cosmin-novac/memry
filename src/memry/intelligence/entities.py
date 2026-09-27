@@ -714,6 +714,7 @@ def resolve_mentions(
                     status="rejected" if verdict.action == "apart" else "proposed",
                     decided_at=utcnow() if verdict.action == "apart" else None,
                     compared_step=verdict.step,
+                    different=probabilities["different"] if probabilities else None,
                 ))
                 continue
             judgment = _judge(
@@ -954,6 +955,7 @@ def resolve_open_proposals(
                     proposal.id, confidence=verdict.probabilities["same"],
                     reason=pair_reason(judge, verdict.probabilities),
                     compared_step=verdict.step,
+                    different=verdict.probabilities["different"],
                 )
             elif verdict.step != proposal.compared_step:  # a step with nothing to ask
                 backend.update_proposal_judgement(
@@ -961,12 +963,15 @@ def resolve_open_proposals(
                     compared_step=verdict.step,
                 )
             outcome["kept"] += 1
-    if proposal_ids is None and auto_confirm:
-        outcome["chosen"] = choose_among_candidates(backend=backend, scope=scope)
+    if proposal_ids is None and auto_confirm and judge is not None:
+        outcome["chosen"] = choose_among_candidates(
+            backend=backend, scope=scope, apart=judge.pair_apart_probability)
     return outcome
 
 
-def choose_among_candidates(*, backend: MemoryBackend, scope: Scope) -> int:
+def choose_among_candidates(
+    *, backend: MemoryBackend, scope: Scope, apart: float = 0.5
+) -> int:
     """Settle names with few memories that could be one of several entities.
 
     "Sofia" (one memory) waits against both "Sofia Marin" and "Sofia
@@ -974,9 +979,12 @@ def choose_among_candidates(*, backend: MemoryBackend, scope: Scope) -> int:
     of its pairs has been asked with the rest of its conversation
     (``identity.CONTEXT_STEP``), it joins the likeliest when that one leads the
     next by ``identity.CHOICE_LEAD`` and has a P(same) of at least
-    ``identity.CHOICE_FLOOR``. With one candidate it keeps waiting: it may be
-    a third Sofia. Asks the judge nothing: it reads the answers stored on the
-    open pairs."""
+    ``identity.CHOICE_FLOOR``. Only candidates the judge has not ruled out
+    (P(different) under ``apart``) count: "the ICAM PR" against the ICAM bar
+    association (0.575) and two PR #42s ruled out at 0.84 and 0.96 is one
+    candidate, not three, and a lead over ruled-out ones merged it at a bar of
+    0.5. With one candidate it keeps waiting: it may be a third Sofia. Asks
+    the judge nothing: it reads the answers stored on the open pairs."""
     options: dict[str, list[tuple[MergeProposal, str]]] = defaultdict(list)
     counts: dict[str, int] = {}
 
@@ -995,9 +1003,12 @@ def choose_among_candidates(*, backend: MemoryBackend, scope: Scope) -> int:
             options[thin].append((proposal, other))
     chosen = 0
     for thin_id, pairs in options.items():
-        if len(pairs) < 2 or any(p.compared_step != CONTEXT_STEP for p, _ in pairs):
+        if any(p.compared_step != CONTEXT_STEP for p, _ in pairs):
             continue
-        ranked = sorted(pairs, key=lambda pair: -pair[0].confidence)
+        options = [(p, other) for p, other in pairs if p.different is not None and p.different < apart]
+        if len(options) < 2:
+            continue
+        ranked = sorted(options, key=lambda pair: -pair[0].confidence)
         (best, keep_id), (second, _) = ranked[0], ranked[1]
         if best.confidence < CHOICE_FLOOR or best.confidence - second.confidence < CHOICE_LEAD:
             continue

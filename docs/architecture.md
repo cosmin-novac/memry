@@ -220,8 +220,10 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    person scored higher in 37 instead of 34). So in the weekly pass, a name with fewer
    than 3 memories and open pairs to two or more entities, all asked at step 2, joins
    the likeliest when it leads the next by 0.10 and has P(same) of at least 0.5
-   (`choose_among_candidates`; 29 right and 1 wrong on those cases). With one candidate
-   it keeps waiting, since it may be a third person. It asks the judge nothing.
+   (`choose_among_candidates`; 29 right and 1 wrong on those cases). Only candidates the
+   judge has not ruled out (P(different) under 0.5, stored on each pair) count: with one
+   candidate left it keeps waiting, since it may be a third person. It asks the judge
+   nothing.
 6. **The weekly pass (`resolve_entities`, upkeep key `dedup_entities`).** It raises new
    pairs from the name index over all entities (identical names included) and pairs the
    owner with the three people whose memories are closest to its own. Names that only

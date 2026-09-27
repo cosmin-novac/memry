@@ -288,6 +288,10 @@ class MergeProposal(BaseModel):
     #: many memories its smaller side had then (``identity.PAIR_STEPS``).
     #: 0 means not compared yet. A pair is compared again only at a later step.
     compared_step: int = 0
+    #: P(different) in the latest comparison, None before one was made. A
+    #: pair at 0.5 or more is ruled out as an option when a name with few
+    #: memories is settled among several entities.
+    different: float | None = None
 
 
 class Relation(BaseModel):

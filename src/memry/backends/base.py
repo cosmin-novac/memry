@@ -114,7 +114,7 @@ class MemoryBackend(ABC):
 
     def update_proposal_judgement(
         self, proposal_id: str, *, confidence: float, reason: str | None,
-        compared_step: int | None = None,
+        compared_step: int | None = None, different: float | None = None,
     ) -> None:
         """Record the latest comparison on an open proposal, so the list shows
         the provider's latest answer instead of its first, and the step of the

@@ -1233,10 +1233,10 @@ def test_a_one_word_name_is_compared_with_the_few_names_that_carry_it():
     assert annas.candidates("Anna", exclude={"Anna"}) == []  # six Annas: the name alone says nothing
 
 
-def _namesakes(store, confidences, steps=None, hours_ago=2.0):
+def _namesakes(store, confidences, steps=None, hours_ago=2.0, different=None):
     """"Sofia" (one memory, saved ``hours_ago``) with an open pair to each of
-    the people named in ``confidences`` (P(same) of each pair), compared at
-    ``steps``."""
+    the people named in ``confidences`` (P(same) of each pair; P(different)
+    from ``different``, else 0.1), compared at ``steps``."""
     from memry.models import Entity, MergeProposal
 
     sofia = store.backend.insert_entity(Entity(
@@ -1247,22 +1247,27 @@ def _namesakes(store, confidences, steps=None, hours_ago=2.0):
         person = _entity_with(store, name, [f"{name} did job {j}" for j in range(10)], "person")
         store.backend.add_proposal(MergeProposal(
             entity_a=person.id, entity_b=sofia.id, user_id="ada", confidence=confidence,
-            compared_step=(steps or [2] * len(confidences))[i]))
+            compared_step=(steps or [2] * len(confidences))[i],
+            different=(different or {}).get(name, 0.1)))
         people[name] = person
     return sofia, people
 
 
-@pytest.mark.parametrize("confidences, steps, joins", [
-    ({"Sofia Marin": 0.80, "Sofia Petrescu": 0.60}, None, "Sofia Marin"),
-    ({"Sofia Marin": 0.80, "Sofia Petrescu": 0.75}, None, None),   # no clear lead
-    ({"Sofia Marin": 0.80}, None, None),                           # may be a third Sofia
-    ({"Sofia Marin": 0.80, "Sofia Petrescu": 0.60}, [2, 1], None),  # one not asked in context yet
-    ({"Sofia Marin": 0.45, "Sofia Petrescu": 0.20}, None, None),   # likelier not her
+@pytest.mark.parametrize("confidences, steps, different, joins", [
+    ({"Sofia Marin": 0.80, "Sofia Petrescu": 0.60}, None, None, "Sofia Marin"),
+    ({"Sofia Marin": 0.80, "Sofia Petrescu": 0.75}, None, None, None),   # no clear lead
+    ({"Sofia Marin": 0.80}, None, None, None),                           # may be a third Sofia
+    ({"Sofia Marin": 0.80, "Sofia Petrescu": 0.60}, [2, 1], None, None),  # one not asked in context yet
+    ({"Sofia Marin": 0.45, "Sofia Petrescu": 0.20}, None, None, None),   # likelier not her
+    # the other is ruled out: one candidate left, as with one to begin with
+    ({"Sofia Marin": 0.60, "Sofia Petrescu": 0.05}, None, {"Sofia Petrescu": 0.9}, None),
 ])
-def test_a_name_that_could_be_several_people_joins_the_clear_favourite(confidences, steps, joins):
+def test_a_name_that_could_be_several_people_joins_the_clear_favourite(
+        confidences, steps, different, joins):
     store, _, judge = _judged_store(lambda state: (0.5, 0.2))
     # a pair still owed its conversation step waits for a conversation still going
-    sofia, people = _namesakes(store, confidences, steps, hours_ago=0.2 if steps else 2.0)
+    sofia, people = _namesakes(store, confidences, steps, hours_ago=0.2 if steps else 2.0,
+                               different=different)
     store.resolve_entities(user_id="ada")
     merged_into = store.backend.resolve_entity_id(sofia.id)
     assert merged_into == (people[joins].id if joins else sofia.id)

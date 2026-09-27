@@ -179,7 +179,8 @@ CREATE TABLE IF NOT EXISTS entity_proposals (
     reason TEXT,
     created_at TEXT NOT NULL,
     decided_at TEXT,
-    compared_step INTEGER NOT NULL DEFAULT 0
+    compared_step INTEGER NOT NULL DEFAULT 0,
+    different REAL
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON entity_proposals(status, user_id);
 
@@ -372,6 +373,8 @@ class LocalBackend(MemoryBackend):
             self._db.execute(
                 "ALTER TABLE entity_proposals ADD COLUMN compared_step INTEGER NOT NULL DEFAULT 0"
             )
+        if "different" not in proposal_columns:
+            self._db.execute("ALTER TABLE entity_proposals ADD COLUMN different REAL")
 
     def _topic_locked(self, name: str, scope: Scope, provenance: str = "memory") -> Topic:
         display = name.strip()
@@ -1713,6 +1716,7 @@ class LocalBackend(MemoryBackend):
             created_at=row["created_at"],
             decided_at=row["decided_at"],
             compared_step=row["compared_step"],
+            different=row["different"] if "different" in row.keys() else None,
         )
 
     def insert_entity(self, entity: Entity) -> Entity:
@@ -2327,12 +2331,13 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             self._db.execute(
                 "INSERT INTO entity_proposals (id, entity_a, entity_b, user_id, status, "
-                "confidence, reason, created_at, decided_at, compared_step) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "confidence, reason, created_at, decided_at, compared_step, different) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     proposal.id, proposal.entity_a, proposal.entity_b, proposal.user_id,
                     proposal.status, proposal.confidence, proposal.reason,
                     proposal.created_at, proposal.decided_at, proposal.compared_step,
+                    proposal.different,
                 ),
             )
             self._db.commit()
@@ -2375,14 +2380,15 @@ class LocalBackend(MemoryBackend):
 
     def update_proposal_judgement(
         self, proposal_id: str, *, confidence: float, reason: str | None,
-        compared_step: int | None = None,
+        compared_step: int | None = None, different: float | None = None,
     ) -> None:
         with self._lock:
             self._db.execute(
                 "UPDATE entity_proposals SET confidence = ?, reason = ?, "
-                "compared_step = COALESCE(?, compared_step) "
+                "compared_step = COALESCE(?, compared_step), "
+                "different = COALESCE(?, different) "
                 "WHERE id = ? AND status = 'proposed'",
-                (confidence, reason, compared_step, proposal_id),
+                (confidence, reason, compared_step, different, proposal_id),
             )
             self._db.commit()
 
