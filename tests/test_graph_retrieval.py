@@ -437,7 +437,8 @@ def test_linked_search_can_ask_the_decision_provider_what_answers(store, family)
         def decide(self, state, questions):
             seen.append(state)
             asked.extend(q.instructions for q in questions.values())
-            return Answers({key: Answer(0.9 if "runs on" in q.instructions else 0.1, {}, 0.9, True)
+            return Answers({key: Answer(1.0 if key == "property" else 0.9 if "runs on" in
+                                        q.instructions else 0.1, {}, 0.9, True)
                             for key, q in questions.items()})
 
     _linked(store)
@@ -462,9 +463,11 @@ def test_a_versions_own_answer_overrides_its_things_with_the_decision_provider(s
         available = True
 
         def decide(self, state, questions):
-            def value(text):
+            def value(key, text):
+                if key == "property":
+                    return 1.0
                 return 0.6 if "Postgres" in text else 0.9 if "SQLite" in text else 0.05
-            return Answers({key: Answer(value(q.instructions), {}, 0.9, True)
+            return Answers({key: Answer(value(key, q.instructions), {}, 0.9, True)
                             for key, q in questions.items()})
 
     _linked(store)
@@ -487,3 +490,61 @@ def test_only_steps_up_count_as_inherited(store, family):
     assert family["bildy v4"] not in above
     _, above = activation_paths(store.backend, [family["bildy"]], depth=1)
     assert above == set()
+
+
+def test_it_stands_for_one_entity_in_what_the_decision_provider_reads(store, family):
+    """"it" is the entity a memory is about and what that entity belongs to;
+    someone linked by a relation keeps their name where the memory is about
+    the query's entity ("Kai Lund works on it", not "it works on it")."""
+    from memry.providers.decisions import Answer, Answers, NoneDecider
+
+    asked = []
+
+    class Judge(NoneDecider):
+        available = True
+
+        def decide(self, state, questions):
+            asked.extend(q.instructions.split("Memory: ", 1)[1] for key, q in questions.items()
+                         if key != "property")
+            return Answers({key: Answer(0.5, {}, 0.9, True) for key in questions})
+
+    kai = _entity(store, "Kai Lund")
+    store.backend.add_relation(Relation(subject=kai.id, predicate="works_on",
+                                        object=family["bildy"], user_id="ada"))
+    _memory(store, "Kai Lund works on bildy", [kai.id, family["bildy"]])
+    _memory(store, "Kai Lund prefers tea with bildy stickers", [kai.id])
+    _memory(store, "With its third release, bildy added sync", [family["bildy v3"]])
+    _linked(store)
+    store.decider = Judge()
+    store.config.retrieval.relational_relevance = "jev"
+    store.search("What do I know about bildy?", user_id="ada", limit=5)
+    assert "Kai Lund works on it" in asked
+    assert "it prefers tea with bildy stickers" in asked  # about Kai, who belongs to nothing
+    assert "With its third release, it added sync" in asked  # v3 and the product it is of
+
+
+def test_a_question_about_everything_is_ordered_by_aboutness(store, family):
+    """Relevance and the override are per property. When the provider says
+    the question asks for no particular property, the version's own memories
+    come first and the product's are not pushed down by them."""
+    from memry.providers.decisions import Answer, Answers, NoneDecider
+
+    class Judge(NoneDecider):
+        available = True
+
+        def decide(self, state, questions):
+            def value(key, text):
+                if key == "property":
+                    return 0.05
+                return 0.9 if "SQLite" in text or "Linux" in text else 0.2
+            return Answers({key: Answer(value(key, q.instructions), {}, 0.9, True)
+                            for key, q in questions.items()})
+
+    _linked(store)
+    store.decider = Judge()
+    store.config.retrieval.relational_relevance = "jev"
+    top = store.search("Show everything about bildy v4", user_id="ada", limit=4)
+    assert {r.memory.content for r in top[:2]} == {"bildy v4 stores its data in Postgres",
+                                                   "bildy v4 added a timeline view"}
+    thing = next(r for r in top if r.memory.content == "bildy stores its data in SQLite")
+    assert thing.signals["judged"] == pytest.approx((0.9 * 0.8) ** 0.05, abs=1e-3)

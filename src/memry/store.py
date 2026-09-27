@@ -72,6 +72,7 @@ from .intelligence.graph_retrieval import (
     inherited_questions,
     link_factor,
     linked_memories,
+    links_of,
     mask_names,
     relational_memory_ids,
     specificity,
@@ -1381,7 +1382,9 @@ class MemoryStore:
         whether each of the first ``decision.rerank_pool`` answers the
         question, and that replaces the similarity for them. An answer from a
         thing the query's entity belongs to then counts only as far as none of
-        the entity's own memories answers (a version's own change wins)."""
+        the entity's own memories answers (a version's own change wins). Both
+        count to the power of P(the question asks for one property): on "Show
+        everything about it" aboutness alone orders the list."""
         cfg = self.config.retrieval
         seeds = [e for e in detect_query_entities(self.backend, scope, query, longest=True)
                  if self._is_hub(e)]
@@ -1431,20 +1434,37 @@ class MemoryStore:
         # The decision provider judges the shortlist; the judged come first,
         # since its answers and cosine similarities are on different scales.
         shortlist = ranked[: max(self.config.decision.rerank_pool, 2)]
-        # The names of the entities the links reach read "it", since
-        # aboutness accounts for them; any other name stays, as it can be the
-        # answer ("uses Redis") or a different entity ("Bildy Bakery").
-        family = [n for entity_id in act for n in self.backend.entity_aliases(entity_id)]
-        judged = self._judged_relevance(mask_names(query, names), [
-            (r.memory.id, mask_names(r.memory.content, family,
-                                     keep=[e.name for e in entities[r.memory.id]
-                                           if e.id not in act]))
-            for r in shortlist])
+        # "it" stands for the entity a memory's aboutness comes from and the
+        # things that entity more likely than not belongs to ("The first
+        # release of bildy" in a memory of bildy v1). Every other name stays:
+        # it can be the answer ("uses Redis"), someone else ("Kai Lund works
+        # on it", not "it works on it") or another entity ("Bildy Bakery").
+        about_whom: dict[str, str] = {}
+        for result in shortlist:
+            linked = [e.id for e in entities[result.memory.id] if e.id in act]
+            if linked:
+                about_whom[result.memory.id] = max(linked, key=act.get)
+        subjects = sorted(set(about_whom.values()))
+        line = {entity_id: {entity_id} for entity_id in subjects}
+        for link in links_of(self.backend, subjects, graded=True):
+            if link.kind in ("kind", "part") and link.p >= 0.5 and link.child in line:
+                line[link.child].add(link.parent)
+        aliases = {entity_id: self.backend.entity_aliases(entity_id)
+                   for entity_id in set().union(*line.values())}
+        texts = []
+        for result in shortlist:
+            it = line.get(about_whom.get(result.memory.id, ""), set())
+            texts.append((result.memory.id, mask_names(
+                result.memory.content, [n for entity_id in it for n in aliases[entity_id]],
+                keep=[e.name for e in entities[result.memory.id] if e.id not in it])))
+        judged, specific = self._judged_relevance(mask_names(query, names), texts)
         if not judged:
             return ranked
         # What is true of the thing a seed belongs to holds for the seed only
         # where the seed says nothing else: an answer reached by a step up
-        # counts as far as none of the seed's own memories answers.
+        # counts as far as none of the seed's own memories answers. Both
+        # relevance and that override are per property, so they count as far
+        # as the question asks for one ("Show everything about it" does not).
         own = [judged[mid] for mid in judged if any(e.id in seeds for e in entities[mid])]
         overridden = max(own, default=0.0)
         for result in shortlist:
@@ -1452,28 +1472,37 @@ class MemoryStore:
             if mid not in judged:
                 continue
             value = judged[mid]
-            linked = [e.id for e in entities[mid] if e.id in act]
-            if linked and max(linked, key=act.get) in above:
+            if about_whom.get(mid) in above:
                 value *= 1.0 - overridden
                 result.signals = {**result.signals, "overridden": round(overridden, 4)}
-            result.signals = {**result.signals, "judged": round(value, 4)}
+            result.signals = {**result.signals, "judged": round(value ** specific, 4),
+                              "specific": round(specific, 4)}
         shortlist.sort(key=lambda r: ("judged" not in r.signals,
                                       -r.signals.get("judged", 0.0) * r.signals["about"]))
         return shortlist + ranked[len(shortlist):]
 
-    def _judged_relevance(self, asked: str, memories: list[tuple[str, str]]) -> dict[str, float]:
+    def _judged_relevance(
+        self, asked: str, memories: list[tuple[str, str]]
+    ) -> tuple[dict[str, float], float]:
         """P(the memory answers the question) from the decision provider, for
-        (memory id, text) pairs, in one call. A memory the provider did not
-        answer for is left out."""
+        (memory id, text) pairs, and P(the question asks for one particular
+        property rather than everything about its entity), in one call. A
+        memory the provider did not answer for is left out; an unanswered
+        second question counts as a property question."""
         if not self.decider.available or not memories:
-            return {}
-        answers = self.decider.decide(
-            f"QUESTION: {asked}",
-            {f"m{i}": Noul(instructions="Someone who reads only this memory can answer the "
-                                        f"question. Memory: {text}")
-             for i, (_, text) in enumerate(memories)})
-        return {mid: float(answers[f"m{i}"].value) for i, (mid, _) in enumerate(memories)
-                if answers[f"m{i}"].available}
+            return {}, 1.0
+        questions: dict[str, Noul] = {
+            f"m{i}": Noul(instructions="Someone who reads only this memory can answer the "
+                                       f"question. Memory: {text}")
+            for i, (_, text) in enumerate(memories)}
+        questions["property"] = Noul(instructions="The question asks for one particular "
+                                                  "property or fact of it, not for everything "
+                                                  "about it.")
+        answers = self.decider.decide(f"QUESTION: {asked}", questions)
+        judged = {mid: float(answers[f"m{i}"].value) for i, (mid, _) in enumerate(memories)
+                  if answers[f"m{i}"].available}
+        specific = answers["property"]
+        return judged, float(specific.value) if specific.available else 1.0
 
     def _property_vectors(self, memory_ids: list[str]) -> dict[str, np.ndarray]:
         """Property vectors, and the ordinary vector for a memory saved before

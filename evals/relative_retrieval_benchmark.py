@@ -175,17 +175,19 @@ def build_world(size: int, seed: int = 7) -> dict:
         # often write them: the extractor still tags the version, but no text
         # says "v1", so only the entity tells the versions apart
         worded = i % 2 == 1
-        feature_mem = {}
+        feature_mem, own = {}, defaultdict(list)
         for n, (v, feat) in enumerate(zip(versions, feats), start=1):
             types[v] = "product"
             said = f"The {ORDINALS[n - 1]} release of {p}" if worded else v
             feature_mem[v] = add(f"{said} added {feat}.", v)
-            family.append(feature_mem[v])
-            family.append(add(f"{said} came out in {rnd.choice(MONTHS)} {2021 + n}.", v))
+            own[v].append(feature_mem[v])
+            own[v].append(add(f"{said} came out in {rnd.choice(MONTHS)} {2021 + n}.", v))
+            family += own[v]
             pairs.append((v, p, "version"))
         m_override = add(
             f"With its third release, {p} moved its data to {db3}." if worded
             else f"{versions[2]} stores its data in {db3}.", versions[2])
+        own[versions[2]].append(m_override)
         family.append(m_override)
         for a in range(3):
             for b in range(a + 1, 3):
@@ -202,6 +204,9 @@ def build_world(size: int, seed: int = 7) -> dict:
         queries["sibling" + tag].append((f"What did {versions[0]} add?", [feature_mem[versions[0]]],
                                          [feature_mem[versions[1]], feature_mem[versions[2]]]))
         queries["rollup"].append((f"What do I know about {p}?", family, []))
+        # a version's own memories and what it inherits from its product
+        queries["version_rollup"].append((f"What do I know about {versions[2]}?",
+                                          own[versions[2]] + family[:5], []))
         queries["part"].append((f"Who maintains the {s}?", [m_part], []))
         if i % 2 == 0:
             bakery = f"{w} Bakery"
@@ -391,7 +396,8 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
 
 
 #: Families scored by recall@10 (many memories answer them); the rest by MRR.
-RECALL = {"rollup": "recall", "multi_hop": "recall", "by_entity": "recall"}
+RECALL = {"rollup": "recall", "version_rollup": "recall", "multi_hop": "recall",
+          "by_entity": "recall"}
 
 
 def main() -> None:
