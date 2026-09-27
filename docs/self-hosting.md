@@ -403,6 +403,12 @@ earned it.
   product has to appear in at least 70% of the part's memories, and a part seen once needs
   that project to be the only project, product or organization in its memory. An
   organization becomes a home only through a stated relation.
+- **A version or a part** gets a home from the comparison itself. Whenever Memry compares
+  two entities with Jev, it asks in the same call whether one is a version, a dated
+  occurrence or a part of the other. At 0.80 or more, "bildy v4" gets "bildy" as its home
+  and "Tovel Forum 2025" gets "Tovel Forum", whatever their type, and Memry doesn't merge
+  the two. A home stated in a memory comes first. A person or a place never gets a home
+  this way.
 - **A shared name** is read through home. Two entities with the same name under different
   homes are never proposed for merging. Two with the same name and nothing setting them
   apart are merged. Two people are never merged on a name alone.
@@ -428,6 +434,7 @@ every merge the pass would make, and changes nothing.
 | Home, as shipped | 141 labelled homes | 86% correct |
 | Home from co-mention alone | the same homes | 68% correct, and 47% when the home is an organization |
 | Same name, not a person, nothing setting them apart | 78 past merge decisions | all 78 had been confirmed |
+| Version or part at 0.80 | 427 pairs: the identity benchmark and 271 generated | no true merge held back; no wrong home outside web domains and handles; none pointing the wrong way |
 
 An independent reader labelled the names and homes, all from one real store. Two first
 drafts failed the labels and were changed: recurrence turned out to find topics like

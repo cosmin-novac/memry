@@ -1,0 +1,2331 @@
+{
+ "about": "Jev 1.13.0 answers to the pair question and the belongs question, both orders averaged, keyed with the child as A (for siblings and namesakes either side). From the belongs-to-question measurements (PhD notes, experiments 14 and 15): generated pairs and identity-benchmark pairs, fictional names.",
+ "answers": {
+  "namesake": [
+   {
+    "same": 0.0,
+    "different": 0.995,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.995,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.755,
+    "different": 0.225,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.99
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.765,
+    "different": 0.215,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.99
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.06,
+    "different": 0.86,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.025,
+     "b_kind_of_a": 0.045,
+     "b_part_of_a": 0.015,
+     "neither": 0.905
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.065,
+    "different": 0.85,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.02,
+     "b_kind_of_a": 0.045,
+     "b_part_of_a": 0.01,
+     "neither": 0.915
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.995,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.98,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.995
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.975,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.995
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.835,
+    "different": 0.14,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.985
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.835,
+    "different": 0.14,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.99
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.04,
+    "different": 0.945,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.08,
+     "neither": 0.91
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.04,
+    "different": 0.95,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.015,
+     "b_part_of_a": 0.105,
+     "neither": 0.87
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.995,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.985
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.995,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.99
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.025,
+    "different": 0.93,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.005,
+     "neither": 0.99
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.03,
+    "different": 0.925,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.995
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.02,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.025,
+     "neither": 0.955
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.98,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.01,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.03,
+     "neither": 0.96
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.705,
+    "different": 0.275,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.01,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.985
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.645,
+    "different": 0.335,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.99
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.015,
+    "different": 0.87,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.01,
+     "neither": 0.99
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.015,
+    "different": 0.88,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.015,
+     "neither": 0.985
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.005,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.025,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.965
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.01,
+    "different": 0.985,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.02,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.975
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.04,
+    "different": 0.905,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.99
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.03,
+    "different": 0.915,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.995
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.005,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.005,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 1.0,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 1.0,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.01,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.02,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.97
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.01,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.02,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.965
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.115,
+    "different": 0.71,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.985
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.095,
+    "different": 0.755,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.99
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.2,
+    "different": 0.71,
+    "belongs": {
+     "a_kind_of_b": 0.04,
+     "a_part_of_b": 0.02,
+     "b_kind_of_a": 0.035,
+     "b_part_of_a": 0.01,
+     "neither": 0.895
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.15,
+    "different": 0.77,
+    "belongs": {
+     "a_kind_of_b": 0.035,
+     "a_part_of_b": 0.015,
+     "b_kind_of_a": 0.03,
+     "b_part_of_a": 0.01,
+     "neither": 0.91
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.19,
+    "different": 0.685,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.015,
+     "b_part_of_a": 0.0,
+     "neither": 0.985
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.16,
+    "different": 0.72,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.99
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.01,
+    "different": 0.985,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.01,
+    "different": 0.98,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 1.0,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.995
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 1.0,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.995
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.01,
+    "different": 0.985,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.99
+    },
+    "smaller_side": 2
+   },
+   {
+    "same": 0.01,
+    "different": 0.985,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.995
+    },
+    "smaller_side": 2
+   },
+   {
+    "same": 0.08,
+    "different": 0.775,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.985
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.09,
+    "different": 0.775,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.99
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.005,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.01,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.985
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.005,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.01,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.98
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.595,
+    "different": 0.18,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.635,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.065,
+     "neither": 0.28
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.565,
+    "different": 0.215,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.645,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.045,
+     "neither": 0.29
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.01,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.13,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.04,
+     "neither": 0.825
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.01,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.155,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.035,
+     "neither": 0.805
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.995,
+    "belongs": {
+     "a_kind_of_b": 0.025,
+     "a_part_of_b": 0.03,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.945
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.995,
+    "belongs": {
+     "a_kind_of_b": 0.035,
+     "a_part_of_b": 0.035,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.93
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.155,
+    "different": 0.755,
+    "belongs": {
+     "a_kind_of_b": 0.03,
+     "a_part_of_b": 0.015,
+     "b_kind_of_a": 0.02,
+     "b_part_of_a": 0.01,
+     "neither": 0.925
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.17,
+    "different": 0.765,
+    "belongs": {
+     "a_kind_of_b": 0.035,
+     "a_part_of_b": 0.015,
+     "b_kind_of_a": 0.025,
+     "b_part_of_a": 0.01,
+     "neither": 0.915
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.295,
+    "different": 0.235,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.985
+    },
+    "smaller_side": 2
+   },
+   {
+    "same": 0.285,
+    "different": 0.205,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.99
+    },
+    "smaller_side": 2
+   },
+   {
+    "same": 0.0,
+    "different": 1.0,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 1.0,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 1.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.12,
+    "different": 0.79,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.02,
+     "b_part_of_a": 0.0,
+     "neither": 0.97
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.105,
+    "different": 0.805,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.015,
+     "b_part_of_a": 0.0,
+     "neither": 0.975
+    },
+    "smaller_side": 1
+   }
+  ],
+  "siblings": [
+   {
+    "same": 0.08,
+    "different": 0.915,
+    "belongs": {
+     "a_kind_of_b": 0.03,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.23,
+     "b_part_of_a": 0.005,
+     "neither": 0.735
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.065,
+    "different": 0.93,
+    "belongs": {
+     "a_kind_of_b": 0.03,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.245,
+     "b_part_of_a": 0.005,
+     "neither": 0.72
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.095,
+    "different": 0.895,
+    "belongs": {
+     "a_kind_of_b": 0.02,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.1,
+     "b_part_of_a": 0.0,
+     "neither": 0.88
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.09,
+    "different": 0.9,
+    "belongs": {
+     "a_kind_of_b": 0.02,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.095,
+     "b_part_of_a": 0.0,
+     "neither": 0.885
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.51,
+    "different": 0.48,
+    "belongs": {
+     "a_kind_of_b": 0.095,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.045,
+     "b_part_of_a": 0.0,
+     "neither": 0.86
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.05,
+    "different": 0.94,
+    "belongs": {
+     "a_kind_of_b": 0.105,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.055,
+     "b_part_of_a": 0.0,
+     "neither": 0.835
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.115,
+    "different": 0.88,
+    "belongs": {
+     "a_kind_of_b": 0.035,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.32,
+     "b_part_of_a": 0.015,
+     "neither": 0.63
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.12,
+    "different": 0.875,
+    "belongs": {
+     "a_kind_of_b": 0.015,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.07,
+     "b_part_of_a": 0.0,
+     "neither": 0.915
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.0,
+    "different": 0.995,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.005,
+     "neither": 0.995
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.18,
+    "different": 0.81,
+    "belongs": {
+     "a_kind_of_b": 0.05,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.94
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.16,
+    "different": 0.79,
+    "belongs": {
+     "a_kind_of_b": 0.03,
+     "a_part_of_b": 0.15,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.14,
+     "neither": 0.67
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.065,
+    "different": 0.785,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.01,
+     "b_kind_of_a": 0.015,
+     "b_part_of_a": 0.015,
+     "neither": 0.95
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.01,
+    "different": 0.99,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.015,
+     "b_part_of_a": 0.0,
+     "neither": 0.98
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.18,
+    "different": 0.81,
+    "belongs": {
+     "a_kind_of_b": 0.02,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.07,
+     "b_part_of_a": 0.0,
+     "neither": 0.91
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.03,
+    "different": 0.965,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.015,
+     "b_part_of_a": 0.0,
+     "neither": 0.98
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.075,
+    "different": 0.865,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.115,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.015,
+     "neither": 0.87
+    },
+    "smaller_side": 1
+   }
+  ],
+  "version": [
+   {
+    "same": 0.79,
+    "different": 0.205,
+    "belongs": {
+     "a_kind_of_b": 0.96,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.04
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.8,
+    "different": 0.195,
+    "belongs": {
+     "a_kind_of_b": 0.965,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.035
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.615,
+    "different": 0.375,
+    "belongs": {
+     "a_kind_of_b": 0.935,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.06
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.575,
+    "different": 0.415,
+    "belongs": {
+     "a_kind_of_b": 0.94,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.055
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.685,
+    "different": 0.305,
+    "belongs": {
+     "a_kind_of_b": 0.845,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.02,
+     "b_part_of_a": 0.0,
+     "neither": 0.135
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.685,
+    "different": 0.31,
+    "belongs": {
+     "a_kind_of_b": 0.84,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.015,
+     "b_part_of_a": 0.0,
+     "neither": 0.14
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.72,
+    "different": 0.27,
+    "belongs": {
+     "a_kind_of_b": 0.9,
+     "a_part_of_b": 0.045,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.05
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.71,
+    "different": 0.28,
+    "belongs": {
+     "a_kind_of_b": 0.89,
+     "a_part_of_b": 0.05,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.055
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.405,
+    "different": 0.575,
+    "belongs": {
+     "a_kind_of_b": 0.835,
+     "a_part_of_b": 0.07,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.09
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.395,
+    "different": 0.585,
+    "belongs": {
+     "a_kind_of_b": 0.86,
+     "a_part_of_b": 0.045,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.09
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.87,
+    "different": 0.13,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 1.0,
+     "a_part_of_b": 0.0,
+     "neither": 0.0
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.87,
+    "different": 0.13,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 1.0,
+     "a_part_of_b": 0.0,
+     "neither": 0.0
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.605,
+    "different": 0.38,
+    "belongs": {
+     "a_kind_of_b": 0.89,
+     "a_part_of_b": 0.01,
+     "b_kind_of_a": 0.015,
+     "b_part_of_a": 0.0,
+     "neither": 0.085
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.575,
+    "different": 0.41,
+    "belongs": {
+     "a_kind_of_b": 0.895,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.09
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.78,
+    "different": 0.21,
+    "belongs": {
+     "a_kind_of_b": 0.915,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.08
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.785,
+    "different": 0.205,
+    "belongs": {
+     "a_kind_of_b": 0.92,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.075
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.53,
+    "different": 0.46,
+    "belongs": {
+     "b_kind_of_a": 0.02,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.885,
+     "a_part_of_b": 0.0,
+     "neither": 0.095
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.59,
+    "different": 0.405,
+    "belongs": {
+     "b_kind_of_a": 0.015,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.9,
+     "a_part_of_b": 0.0,
+     "neither": 0.085
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.525,
+    "different": 0.455,
+    "belongs": {
+     "a_kind_of_b": 0.815,
+     "a_part_of_b": 0.015,
+     "b_kind_of_a": 0.035,
+     "b_part_of_a": 0.0,
+     "neither": 0.135
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.525,
+    "different": 0.455,
+    "belongs": {
+     "a_kind_of_b": 0.79,
+     "a_part_of_b": 0.015,
+     "b_kind_of_a": 0.03,
+     "b_part_of_a": 0.0,
+     "neither": 0.165
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.85,
+    "different": 0.15,
+    "belongs": {
+     "a_kind_of_b": 0.905,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.085
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.86,
+    "different": 0.14,
+    "belongs": {
+     "a_kind_of_b": 0.905,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.085
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.76,
+    "different": 0.235,
+    "belongs": {
+     "a_kind_of_b": 0.78,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.04,
+     "b_part_of_a": 0.0,
+     "neither": 0.18
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.745,
+    "different": 0.245,
+    "belongs": {
+     "a_kind_of_b": 0.78,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.03,
+     "b_part_of_a": 0.0,
+     "neither": 0.19
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.6,
+    "different": 0.39,
+    "belongs": {
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.95,
+     "a_part_of_b": 0.0,
+     "neither": 0.045
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.6,
+    "different": 0.39,
+    "belongs": {
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.96,
+     "a_part_of_b": 0.0,
+     "neither": 0.035
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.435,
+    "different": 0.545,
+    "belongs": {
+     "a_kind_of_b": 0.845,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.015,
+     "b_part_of_a": 0.0,
+     "neither": 0.14
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.435,
+    "different": 0.55,
+    "belongs": {
+     "a_kind_of_b": 0.85,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.14
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.365,
+    "different": 0.61,
+    "belongs": {
+     "a_kind_of_b": 0.635,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.045,
+     "b_part_of_a": 0.0,
+     "neither": 0.315
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.395,
+    "different": 0.58,
+    "belongs": {
+     "a_kind_of_b": 0.67,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.04,
+     "b_part_of_a": 0.0,
+     "neither": 0.285
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.77,
+    "different": 0.22,
+    "belongs": {
+     "a_kind_of_b": 0.91,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.085
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.79,
+    "different": 0.2,
+    "belongs": {
+     "a_kind_of_b": 0.91,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.085
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.895,
+    "different": 0.1,
+    "belongs": {
+     "a_kind_of_b": 0.965,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.035
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.905,
+    "different": 0.09,
+    "belongs": {
+     "a_kind_of_b": 0.975,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.025
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.9,
+    "different": 0.1,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.965,
+     "a_part_of_b": 0.0,
+     "neither": 0.035
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.39,
+    "different": 0.605,
+    "belongs": {
+     "a_kind_of_b": 0.91,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.085
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.935,
+    "different": 0.065,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.97,
+     "a_part_of_b": 0.0,
+     "neither": 0.03
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.83,
+    "different": 0.16,
+    "belongs": {
+     "a_kind_of_b": 0.875,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.115
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.665,
+    "different": 0.32,
+    "belongs": {
+     "a_kind_of_b": 0.825,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.165
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.62,
+    "different": 0.37,
+    "belongs": {
+     "b_kind_of_a": 0.015,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.86,
+     "a_part_of_b": 0.0,
+     "neither": 0.125
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.88,
+    "different": 0.11,
+    "belongs": {
+     "a_kind_of_b": 0.985,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.015
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.38,
+    "different": 0.585,
+    "belongs": {
+     "a_kind_of_b": 0.72,
+     "a_part_of_b": 0.04,
+     "b_kind_of_a": 0.02,
+     "b_part_of_a": 0.0,
+     "neither": 0.22
+    },
+    "smaller_side": 3
+   }
+  ],
+  "occurrence": [
+   {
+    "same": 0.75,
+    "different": 0.24,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.98,
+     "a_part_of_b": 0.0,
+     "neither": 0.02
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.775,
+    "different": 0.215,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.985,
+     "a_part_of_b": 0.0,
+     "neither": 0.015
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.715,
+    "different": 0.275,
+    "belongs": {
+     "a_kind_of_b": 0.985,
+     "a_part_of_b": 0.01,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.005
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.71,
+    "different": 0.28,
+    "belongs": {
+     "a_kind_of_b": 0.99,
+     "a_part_of_b": 0.01,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.0
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.665,
+    "different": 0.325,
+    "belongs": {
+     "a_kind_of_b": 0.98,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.02
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.715,
+    "different": 0.275,
+    "belongs": {
+     "a_kind_of_b": 0.975,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.025
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.625,
+    "different": 0.365,
+    "belongs": {
+     "a_kind_of_b": 0.95,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.045
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.61,
+    "different": 0.38,
+    "belongs": {
+     "a_kind_of_b": 0.95,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.045
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.085,
+    "different": 0.9,
+    "belongs": {
+     "a_kind_of_b": 0.56,
+     "a_part_of_b": 0.025,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.06,
+     "neither": 0.35
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.085,
+    "different": 0.9,
+    "belongs": {
+     "a_kind_of_b": 0.56,
+     "a_part_of_b": 0.02,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.05,
+     "neither": 0.36
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.03,
+    "different": 0.96,
+    "belongs": {
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.01,
+     "a_kind_of_b": 0.505,
+     "a_part_of_b": 0.01,
+     "neither": 0.465
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.025,
+    "different": 0.97,
+    "belongs": {
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.005,
+     "a_kind_of_b": 0.5,
+     "a_part_of_b": 0.005,
+     "neither": 0.48
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.075,
+    "different": 0.915,
+    "belongs": {
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.015,
+     "a_kind_of_b": 0.65,
+     "a_part_of_b": 0.035,
+     "neither": 0.29
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.085,
+    "different": 0.9,
+    "belongs": {
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.015,
+     "a_kind_of_b": 0.7,
+     "a_part_of_b": 0.025,
+     "neither": 0.25
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.175,
+    "different": 0.82,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.985,
+     "a_part_of_b": 0.01,
+     "neither": 0.005
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.145,
+    "different": 0.85,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.985,
+     "a_part_of_b": 0.01,
+     "neither": 0.005
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.735,
+    "different": 0.255,
+    "belongs": {
+     "a_kind_of_b": 1.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.0
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.69,
+    "different": 0.3,
+    "belongs": {
+     "a_kind_of_b": 1.0,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.0
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.765,
+    "different": 0.23,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.995,
+     "a_part_of_b": 0.0,
+     "neither": 0.005
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.77,
+    "different": 0.225,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.995,
+     "a_part_of_b": 0.0,
+     "neither": 0.005
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.695,
+    "different": 0.3,
+    "belongs": {
+     "a_kind_of_b": 0.995,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.0
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.675,
+    "different": 0.32,
+    "belongs": {
+     "a_kind_of_b": 0.995,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.0
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.265,
+    "different": 0.73,
+    "belongs": {
+     "a_kind_of_b": 0.655,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.34
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.22,
+    "different": 0.775,
+    "belongs": {
+     "a_kind_of_b": 0.665,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.325
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.09,
+    "different": 0.905,
+    "belongs": {
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.02,
+     "a_kind_of_b": 0.8,
+     "a_part_of_b": 0.02,
+     "neither": 0.15
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.085,
+    "different": 0.91,
+    "belongs": {
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.02,
+     "a_kind_of_b": 0.81,
+     "a_part_of_b": 0.02,
+     "neither": 0.145
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.005,
+    "different": 0.99,
+    "belongs": {
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.025,
+     "a_kind_of_b": 0.6,
+     "a_part_of_b": 0.05,
+     "neither": 0.32
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.005,
+    "different": 0.99,
+    "belongs": {
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.025,
+     "a_kind_of_b": 0.605,
+     "a_part_of_b": 0.045,
+     "neither": 0.32
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.06,
+    "different": 0.93,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.005,
+     "a_kind_of_b": 0.925,
+     "a_part_of_b": 0.03,
+     "neither": 0.04
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.055,
+    "different": 0.935,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.005,
+     "a_kind_of_b": 0.93,
+     "a_part_of_b": 0.03,
+     "neither": 0.035
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.125,
+    "different": 0.87,
+    "belongs": {
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.005,
+     "a_kind_of_b": 0.695,
+     "a_part_of_b": 0.015,
+     "neither": 0.275
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.1,
+    "different": 0.895,
+    "belongs": {
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.005,
+     "a_kind_of_b": 0.735,
+     "a_part_of_b": 0.015,
+     "neither": 0.235
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.815,
+    "different": 0.175,
+    "belongs": {
+     "a_kind_of_b": 0.99,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.01
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.845,
+    "different": 0.15,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.99,
+     "a_part_of_b": 0.0,
+     "neither": 0.01
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.845,
+    "different": 0.145,
+    "belongs": {
+     "a_kind_of_b": 0.985,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.01
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.46,
+    "different": 0.5,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.785,
+     "a_part_of_b": 0.19,
+     "neither": 0.025
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.435,
+    "different": 0.55,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.96,
+     "a_part_of_b": 0.04,
+     "neither": 0.0
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.935,
+    "different": 0.065,
+    "belongs": {
+     "a_kind_of_b": 0.925,
+     "a_part_of_b": 0.0,
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "neither": 0.07
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.72,
+    "different": 0.265,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.985,
+     "a_part_of_b": 0.0,
+     "neither": 0.015
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.83,
+    "different": 0.155,
+    "belongs": {
+     "a_kind_of_b": 0.965,
+     "a_part_of_b": 0.01,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.025
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.89,
+    "different": 0.1,
+    "belongs": {
+     "a_kind_of_b": 0.895,
+     "a_part_of_b": 0.02,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.075
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.86,
+    "different": 0.14,
+    "belongs": {
+     "a_kind_of_b": 0.975,
+     "a_part_of_b": 0.005,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.02
+    },
+    "smaller_side": 3
+   }
+  ],
+  "component": [
+   {
+    "same": 0.035,
+    "different": 0.95,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.015,
+     "a_part_of_b": 0.98,
+     "neither": 0.005
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.035,
+    "different": 0.96,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.015,
+     "a_part_of_b": 0.97,
+     "neither": 0.015
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.01,
+    "different": 0.985,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.41,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.005,
+     "neither": 0.58
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.015,
+    "different": 0.98,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.365,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.005,
+     "neither": 0.625
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.055,
+    "different": 0.885,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.43,
+     "a_part_of_b": 0.245,
+     "neither": 0.325
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.06,
+    "different": 0.885,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.395,
+     "a_part_of_b": 0.25,
+     "neither": 0.355
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.015,
+    "different": 0.98,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.94,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.05
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.01,
+    "different": 0.98,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.92,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.07
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.01,
+    "different": 0.975,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.97,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.03
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.01,
+    "different": 0.975,
+    "belongs": {
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.965,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.035
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.005,
+    "different": 0.975,
+    "belongs": {
+     "a_kind_of_b": 0.015,
+     "a_part_of_b": 0.33,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.005,
+     "neither": 0.65
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.005,
+    "different": 0.975,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.42,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.005,
+     "neither": 0.565
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.02,
+    "different": 0.965,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.015,
+     "a_part_of_b": 0.885,
+     "neither": 0.1
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.03,
+    "different": 0.95,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.015,
+     "a_part_of_b": 0.885,
+     "neither": 0.1
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.01,
+    "different": 0.975,
+    "belongs": {
+     "a_kind_of_b": 0.005,
+     "a_part_of_b": 0.46,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.535
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.015,
+    "different": 0.975,
+    "belongs": {
+     "a_kind_of_b": 0.01,
+     "a_part_of_b": 0.515,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.475
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.335,
+    "different": 0.645,
+    "belongs": {
+     "a_kind_of_b": 0.22,
+     "a_part_of_b": 0.65,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.12
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.365,
+    "different": 0.615,
+    "belongs": {
+     "a_kind_of_b": 0.195,
+     "a_part_of_b": 0.665,
+     "b_kind_of_a": 0.01,
+     "b_part_of_a": 0.0,
+     "neither": 0.13
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.18,
+    "different": 0.81,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.015,
+     "a_part_of_b": 0.985,
+     "neither": 0.0
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.16,
+    "different": 0.83,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.02,
+     "a_part_of_b": 0.975,
+     "neither": 0.005
+    },
+    "smaller_side": 10
+   },
+   {
+    "same": 0.305,
+    "different": 0.665,
+    "belongs": {
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.005,
+     "a_kind_of_b": 0.015,
+     "a_part_of_b": 0.86,
+     "neither": 0.115
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.465,
+    "different": 0.515,
+    "belongs": {
+     "b_kind_of_a": 0.005,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.375,
+     "a_part_of_b": 0.54,
+     "neither": 0.08
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.08,
+    "different": 0.885,
+    "belongs": {
+     "a_kind_of_b": 0.025,
+     "a_part_of_b": 0.815,
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "neither": 0.16
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.385,
+    "different": 0.595,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.04,
+     "a_part_of_b": 0.95,
+     "neither": 0.01
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.0,
+    "different": 0.97,
+    "belongs": {
+     "b_kind_of_a": 0.02,
+     "b_part_of_a": 0.015,
+     "a_kind_of_b": 0.0,
+     "a_part_of_b": 0.31,
+     "neither": 0.655
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.415,
+    "different": 0.565,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.0,
+     "a_kind_of_b": 0.03,
+     "a_part_of_b": 0.95,
+     "neither": 0.02
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.42,
+    "different": 0.555,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.005,
+     "a_kind_of_b": 0.04,
+     "a_part_of_b": 0.935,
+     "neither": 0.02
+    },
+    "smaller_side": 1
+   },
+   {
+    "same": 0.235,
+    "different": 0.68,
+    "belongs": {
+     "a_kind_of_b": 0.185,
+     "a_part_of_b": 0.365,
+     "b_kind_of_a": 0.04,
+     "b_part_of_a": 0.0,
+     "neither": 0.41
+    },
+    "smaller_side": 3
+   },
+   {
+    "same": 0.69,
+    "different": 0.285,
+    "belongs": {
+     "b_kind_of_a": 0.0,
+     "b_part_of_a": 0.005,
+     "a_kind_of_b": 0.015,
+     "a_part_of_b": 0.885,
+     "neither": 0.095
+    },
+    "smaller_side": 1
+   }
+  ]
+ }
+}

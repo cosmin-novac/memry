@@ -40,6 +40,7 @@ from .identity import (
     PAIR_STEPS,
     Mention,
     NameIndex,
+    belongs_blocks,
     closest_people,
     compare,
     judges_pairs,
@@ -697,7 +698,9 @@ def resolve_mentions(
             if judge is not None:
                 verdict = compare(judge, backend, candidate, mention)
                 probabilities = verdict.probabilities
-                if candidate.id in same_name and (
+                if candidate.id in same_name and not belongs_blocks(
+                    verdict.belongs, candidate.entity_type, types.get(normalized)
+                ) and (
                     verdict.action == "merge"
                     or (probabilities is not None
                         and probabilities["different"] < judge.pair_apart_probability)
@@ -715,6 +718,7 @@ def resolve_mentions(
                     decided_at=utcnow() if verdict.action == "apart" else None,
                     compared_step=verdict.step,
                     different=probabilities["different"] if probabilities else None,
+                    belongs=verdict.belongs,
                 ))
                 continue
             judgment = _judge(
@@ -937,13 +941,15 @@ def resolve_open_proposals(
             )
             outcome["kept"] += 1
     # The judge's calls are independent, so they run side by side; the store
-    # is changed one pair at a time afterwards. A pair of one name raised
-    # before P(different) was stored is asked once more, for the rule below.
+    # is changed one pair at a time afterwards. A pair compared before its
+    # P(different) or its belongs answer was stored is asked once more at the
+    # step it has reached; the belongs answer only in the weekly pass, so a
+    # judge that does not answer it is not asked again on every save.
     decided = parallel(
         lambda item: compare(
-            judge, backend, item[1], item[2],
-            0 if _one_name(item[1], item[2]) and item[0].different is None
-            else item[0].compared_step,
+            judge, backend, item[1], item[2], item[0].compared_step,
+            recheck=(proposal_ids is None and item[0].belongs is None)
+            or (_one_name(item[1], item[2]) and item[0].different is None),
         ),
         pending,
     )
@@ -965,6 +971,7 @@ def resolve_open_proposals(
                     reason=pair_reason(judge, probabilities),
                     compared_step=verdict.step,
                     different=probabilities["different"],
+                    belongs=verdict.belongs,
                 )
             elif verdict.step != proposal.compared_step:  # a step with nothing to ask
                 backend.update_proposal_judgement(
@@ -974,8 +981,12 @@ def resolve_open_proposals(
             same, different = ((probabilities["same"], probabilities["different"])
                                if probabilities is not None
                                else (proposal.confidence, proposal.different))
+            belongs = verdict.belongs if probabilities is not None else proposal.belongs
             if auto_confirm and _one_name(entity_a, entity_b) and different is not None:
-                if different < judge.pair_apart_probability:
+                # A version or a part of one name ("FacTShirt" the shop and
+                # "FacTShirt" the brand) stays apart like a pair ruled out.
+                if (different < judge.pair_apart_probability and not belongs_blocks(
+                        belongs, entity_a.entity_type, entity_b.entity_type)):
                     namesakes.append((same, proposal, entity_a, entity_b))
                     continue
                 held_apart.append((entity_a.id, entity_b.id))

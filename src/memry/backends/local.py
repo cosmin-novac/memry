@@ -180,7 +180,8 @@ CREATE TABLE IF NOT EXISTS entity_proposals (
     created_at TEXT NOT NULL,
     decided_at TEXT,
     compared_step INTEGER NOT NULL DEFAULT 0,
-    different REAL
+    different REAL,
+    belongs TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON entity_proposals(status, user_id);
 
@@ -375,6 +376,8 @@ class LocalBackend(MemoryBackend):
             )
         if "different" not in proposal_columns:
             self._db.execute("ALTER TABLE entity_proposals ADD COLUMN different REAL")
+        if "belongs" not in proposal_columns:
+            self._db.execute("ALTER TABLE entity_proposals ADD COLUMN belongs TEXT")
 
     def _topic_locked(self, name: str, scope: Scope, provenance: str = "memory") -> Topic:
         display = name.strip()
@@ -1628,6 +1631,18 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [self._row_to_relation(r) for r in rows]
 
+    def proposals_of(self, entity_ids: list[str]) -> list[MergeProposal]:
+        if not entity_ids:
+            return []
+        placeholders = ",".join("?" * len(entity_ids))
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM entity_proposals WHERE status != 'confirmed' AND "
+                f"(entity_a IN ({placeholders}) OR entity_b IN ({placeholders}))",
+                (*entity_ids, *entity_ids),
+            ).fetchall()
+        return [self._row_to_proposal(r) for r in rows]
+
     # -- vectors -----------------------------------------------------------
     def memory_vectors(self, scope: Scope, *, limit: int = 5000):
         clause, params = _scope_clause(scope)
@@ -1717,6 +1732,8 @@ class LocalBackend(MemoryBackend):
             decided_at=row["decided_at"],
             compared_step=row["compared_step"],
             different=row["different"] if "different" in row.keys() else None,
+            belongs=(json.loads(row["belongs"])
+                     if "belongs" in row.keys() and row["belongs"] else None),
         )
 
     def insert_entity(self, entity: Entity) -> Entity:
@@ -2331,13 +2348,14 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             self._db.execute(
                 "INSERT INTO entity_proposals (id, entity_a, entity_b, user_id, status, "
-                "confidence, reason, created_at, decided_at, compared_step, different) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "confidence, reason, created_at, decided_at, compared_step, different, "
+                "belongs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     proposal.id, proposal.entity_a, proposal.entity_b, proposal.user_id,
                     proposal.status, proposal.confidence, proposal.reason,
                     proposal.created_at, proposal.decided_at, proposal.compared_step,
                     proposal.different,
+                    json.dumps(proposal.belongs) if proposal.belongs is not None else None,
                 ),
             )
             self._db.commit()
@@ -2381,14 +2399,17 @@ class LocalBackend(MemoryBackend):
     def update_proposal_judgement(
         self, proposal_id: str, *, confidence: float, reason: str | None,
         compared_step: int | None = None, different: float | None = None,
+        belongs: dict[str, float] | None = None,
     ) -> None:
         with self._lock:
             self._db.execute(
                 "UPDATE entity_proposals SET confidence = ?, reason = ?, "
                 "compared_step = COALESCE(?, compared_step), "
-                "different = COALESCE(?, different) "
+                "different = COALESCE(?, different), "
+                "belongs = COALESCE(?, belongs) "
                 "WHERE id = ? AND status = 'proposed'",
-                (confidence, reason, compared_step, different, proposal_id),
+                (confidence, reason, compared_step, different,
+                 json.dumps(belongs) if belongs is not None else None, proposal_id),
             )
             self._db.commit()
 

@@ -762,3 +762,27 @@ def test_the_entity_tab_lists_only_the_pairs_memry_asks_about(client):
     s.decider = Calibrated()
     assert client.get(asked).json() == []
     assert len(client.get("/api/v1/entities/proposals?user_id=ada").json()) == 1
+
+
+def test_a_judged_version_gets_a_home_of_any_type_but_a_person_or_a_place():
+    """A version of a document or a dated occurrence of an event has a home,
+    which co-mention never gives (a document is not a home type there)."""
+    nodes = [_node("plan", "document"), _node("plan v3", "document"),
+             _node("fest", "event"), _node("fest 2025", "event"),
+             _node("ana", "person"), _node("family", "organization"),
+             _node("district", "place"), _node("city", "place")]
+    judged = [("plan v3", "plan", 0.93), ("fest 2025", "fest", 0.88),
+              ("ana", "family", 0.95), ("district", "city", 0.9)]
+    assert derive_homes(nodes, [], [], judged) == {
+        "plan v3": {"id": "plan", "share": 0.93, "source": "judged"},
+        "fest 2025": {"id": "fest", "share": 0.88, "source": "judged"},
+    }
+
+
+def test_a_stated_part_of_wins_over_a_judged_home_and_a_judged_home_over_co_mention():
+    nodes = [*PART_AND_PROJECT, _node("atlas", "project"), _node("orion", "project")]
+    links = [*THREE_SHARED, ("atlas", "m7"), ("atlas", "m8"), ("atlas", "m9")]
+    assert derive_homes(nodes, links, [("part", "part_of", "atlas")],
+                        [("part", "orion", 0.9)])["part"]["source"] == "relation"
+    assert derive_homes(nodes, links, [], [("part", "orion", 0.9)]) == {
+        "part": {"id": "orion", "share": 0.9, "source": "judged"}}

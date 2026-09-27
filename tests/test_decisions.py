@@ -820,6 +820,12 @@ def test_only_jev_rechecks_on_every_save():
 
 
 # ------------------------------------------- pairs decided by a calibrated judge
+#: A belongs answer for a pair compared since the question exists: neither
+#: entity is a version or a part of the other.
+NEITHER = {"a_kind_of_b": 0.0, "a_part_of_b": 0.0, "b_kind_of_a": 0.0,
+           "b_part_of_a": 0.0, "neither": 1.0}
+
+
 class _PairJudge(NoneDecider):
     """A calibrated judge that answers the pair question from a function of the
     state it is shown, so a test can make the answer depend on the order of the
@@ -1159,7 +1165,8 @@ def _waiting_pair(store, hours_ago=2.0, others=("The user is renovating the kitc
         name="Johnny", normalized="johnny", entity_type="person", user_id="ada"))
     _conversation(store, johnny, ["Johnny comes on Tuesday", *others], hours_ago=hours_ago)
     store.backend.add_proposal(MergeProposal(
-        entity_a=weber.id, entity_b=johnny.id, user_id="ada", compared_step=1))
+        entity_a=weber.id, entity_b=johnny.id, user_id="ada", compared_step=1,
+        belongs=NEITHER))
     return weber, johnny
 
 
@@ -1252,7 +1259,7 @@ def _namesakes(store, confidences, steps=None, hours_ago=2.0, different=None):
         store.backend.add_proposal(MergeProposal(
             entity_a=person.id, entity_b=sofia.id, user_id="ada", confidence=confidence,
             compared_step=(steps or [2] * len(confidences))[i],
-            different=(different or {}).get(name, 0.1)))
+            different=(different or {}).get(name, 0.1), belongs=NEITHER))
         people[name] = person
     return sofia, people
 
@@ -1489,7 +1496,8 @@ def _one_name_pairs(store, names, pairs, compared_step=2):
     for first, second, same, different in pairs:
         store.backend.add_proposal(MergeProposal(
             entity_a=entities[first].id, entity_b=entities[second].id, user_id="ada",
-            confidence=same, compared_step=compared_step, different=different))
+            confidence=same, compared_step=compared_step, different=different,
+            belongs=NEITHER))
     return entities
 
 
@@ -1547,3 +1555,136 @@ def test_two_entities_kept_apart_are_never_joined_through_a_third():
     assert resolve(a.id) == resolve(b.id)
     assert resolve(a.id) != resolve(c.id)
     store.close()
+
+
+# ------------------------------------------------ one entity belongs to the other
+class _BelongsJudge(_PairJudge):
+    """Answers the pair question with ``pair(state)`` and the belongs question
+    with ``belongs(state)``: how likely the entity shown first is a version of
+    the one shown second, and the other way round."""
+
+    def __init__(self, pair, belongs) -> None:
+        super().__init__(pair)
+        self.belongs = belongs
+        self.asked: list[set[str]] = []
+
+    def decide(self, state, questions):
+        from memry.providers.decisions import Answers
+
+        self.asked.append(set(questions))
+        answers = super().decide(state, questions).answers
+        if "belongs" in questions:
+            a_of_b, b_of_a = self.belongs(state)
+            probabilities = {"a_kind_of_b": a_of_b, "a_part_of_b": 0.0,
+                             "b_kind_of_a": b_of_a, "b_part_of_a": 0.0,
+                             "neither": 1.0 - a_of_b - b_of_a}
+            answers["belongs"] = Answer(max(probabilities, key=probabilities.get),
+                                        probabilities, 0.9, True)
+        return Answers(answers)
+
+
+def _version_of(p):
+    """``p`` for "X v2" being a version of "X", 0 otherwise."""
+    def answer(state):
+        first, second = _names(state)
+        return (p if first.endswith(" v2") else 0.0, p if second.endswith(" v2") else 0.0)
+    return answer
+
+
+def _version_pair(store, entity_type="product", belongs=None, step=0):
+    from memry.models import MergeProposal
+
+    thing = _entity_with(store, "Kestrel planner", ["Kestrel planner runs on Linux"], entity_type)
+    version = _entity_with(store, "Kestrel planner v2", ["Kestrel planner v2 added offline mode"],
+                           entity_type)
+    store.backend.add_proposal(MergeProposal(
+        entity_a=thing.id, entity_b=version.id, user_id="ada", confidence=0.5,
+        compared_step=step, belongs=belongs))
+    return thing, version
+
+
+def test_the_belongs_question_is_asked_in_the_same_call_as_the_pair_question():
+    judge = _BelongsJudge(lambda state: (0.5, 0.2), _version_of(0.9))
+    store, _ = _jonas_store(judge, "Kestrel planner", "product")
+    _version_pair(store)
+    store.resolve_entities(user_id="ada")
+    assert judge.asked and all(asked == {"pair", "belongs"} for asked in judge.asked
+                               if "pair" in asked)
+    store.close()
+
+
+@pytest.mark.parametrize("entity_type, belongs, merged", [
+    ("product", 0.9, False),   # a version: not merged at P(same) 0.99
+    ("product", 0.7, True),    # under the bar: merged as before
+    ("person", 0.9, True),     # a person is never a version or a part
+])
+def test_a_version_is_not_merged_into_its_thing(entity_type, belongs, merged):
+    judge = _BelongsJudge(lambda state: (0.99, 0.0), _version_of(belongs))
+    store, _ = _jonas_store(judge, "Kestrel planner", entity_type)
+    thing, version = _version_pair(store, entity_type)
+    store.resolve_entities(user_id="ada")
+    resolve = store.backend.resolve_entity_id
+    assert (resolve(thing.id) == resolve(version.id)) is merged
+    if not merged:
+        [proposal] = store.merge_proposals(user_id="ada")
+        assert proposal.belongs["b_kind_of_a"] == pytest.approx(0.9)
+        home = store.entity_structure(user_id="ada")[version.id]["home"]
+        assert (home["id"], home["source"]) == (thing.id, "judged")
+    store.close()
+
+
+def test_a_pair_compared_before_the_belongs_question_is_asked_once_in_the_weekly_pass():
+    judge = _BelongsJudge(lambda state: (0.5, 0.2), _version_of(0.0))
+    store, _ = _jonas_store(judge, "Kestrel planner", "product")
+    _version_pair(store, step=1)
+    store.resolve_entities(user_id="ada")
+    asked = len(judge.states)
+    assert asked == 2  # both orders, at the step it had reached
+    [proposal] = store.merge_proposals(user_id="ada")
+    assert proposal.belongs is not None
+    store.resolve_entities(user_id="ada")
+    assert len(judge.states) == asked
+    store.close()
+
+
+def test_a_known_name_does_not_join_the_entity_it_is_a_part_of():
+    """A save names "FacTShirt", and the store's "FacTShirt" is a shop the new
+    mention is a product line of: the mention becomes its own entity with the
+    shop as its home, instead of joining the shop."""
+    def part_of(state):
+        product_first = state.index("(product)") < state.index("(organization)")
+        return (0.9, 0.0) if product_first else (0.0, 0.9)
+
+    judge = _BelongsJudge(lambda state: (0.6, 0.2), part_of)
+    store, save = _jonas_store(judge, "FacTShirt", "organization")
+    save("FacTShirt opened its Etsy shop in 2025")
+    save("FacTShirt sells a dinosaur shirt for 24 euros", as_type="product")
+    shops = [e for e in store.entities(user_id="ada") if e.name == "FacTShirt"]
+    assert len(shops) == 2
+    [proposal] = store.merge_proposals(user_id="ada")
+    assert max(proposal.belongs.values()) == pytest.approx(0.9)
+    store.close()
+
+
+def test_a_store_from_before_the_belongs_answer_gains_the_column(tmp_path):
+    import sqlite3
+
+    from memry.backends.local import LocalBackend
+    from memry.models import MergeProposal, Scope
+
+    path = tmp_path / "old.db"
+    LocalBackend(str(path)).close()
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE entity_proposals DROP COLUMN belongs")
+    db.execute("INSERT INTO entity_proposals (id, entity_a, entity_b, user_id, created_at) "
+               "VALUES ('old', 'a', 'b', 'ada', '2026-01-01T00:00:00+00:00')")
+    db.commit()
+    db.close()
+    backend = LocalBackend(str(path))
+    assert backend.get_proposal("old").belongs is None
+    backend.add_proposal(MergeProposal(id="new", entity_a="c", entity_b="d", user_id="ada",
+                                       belongs=NEITHER))
+    backend.update_proposal_judgement("old", confidence=0.4, reason=None, belongs=NEITHER)
+    assert {p.id: p.belongs for p in backend.list_proposals(Scope(user_id="ada"))} == {
+        "old": NEITHER, "new": NEITHER}
+    backend.close()

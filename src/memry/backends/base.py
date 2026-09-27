@@ -115,11 +115,14 @@ class MemoryBackend(ABC):
     def update_proposal_judgement(
         self, proposal_id: str, *, confidence: float, reason: str | None,
         compared_step: int | None = None, different: float | None = None,
+        belongs: dict[str, float] | None = None,
     ) -> None:
         """Record the latest comparison on an open proposal, so the list shows
         the provider's latest answer instead of its first, and the step of the
-        comparison funnel it was made at (``identity.PAIR_STEPS``). A backend
-        that cannot store the latest answer keeps the first."""
+        comparison funnel it was made at (``identity.PAIR_STEPS``). ``belongs``
+        is the latest answer to whether one entity is a version or a part of the
+        other (``identity.BELONGS_QUESTION``). A backend that cannot store the
+        latest answer keeps the first."""
         return None
 
     def count_memories(self, owner_prefix: str | None = None) -> dict[str, int]:
@@ -475,6 +478,11 @@ class MemoryBackend(ABC):
 
     def relations_of(self, entity_ids: list[str]) -> list[Relation]:
         """Active relations touching any of these entities (either endpoint)."""
+        return []
+
+    def proposals_of(self, entity_ids: list[str]) -> list[MergeProposal]:
+        """Compared pairs touching any of these entities that are not merged:
+        open ones and ruled-out ones, with the judge's latest answers."""
         return []
 
     # -- vectors ----------------------------------------------------------

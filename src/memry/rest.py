@@ -1837,7 +1837,7 @@ async function loadEntities(){
 function placeBlock(detail){
   const lines=[];
   if(detail.home)lines.push(`Part of <button class="entity-link" onclick='openEntity(${JSON.stringify(detail.home.id)})'>${esc(detail.home.name)}</button>`
-    +` <span class="cnt">${detail.home.source==='relation'?'stated in a memory':'appears with it in '+Math.round(detail.home.share*100)+'% of its memories'}</span>`);
+    +` <span class="cnt">${detail.home.source==='relation'?'stated in a memory':detail.home.source==='judged'?'a version or a part of it, at '+Math.round(detail.home.share*100)+'%':'appears with it in '+Math.round(detail.home.share*100)+'% of its memories'}</span>`);
   if(detail.parts&&detail.parts.length)lines.push(`${detail.parts.length} part${detail.parts.length===1?'':'s'}: `
     +detail.parts.slice(0,40).map(part=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(part.id)})'>${esc(part.name)}</button>`).join(', ')
     +(detail.parts.length>40?` <span class="cnt">and ${detail.parts.length-40} more</span>`:''));

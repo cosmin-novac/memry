@@ -46,6 +46,9 @@ from typing import Any, Iterable
 ANCHOR_TYPES = frozenset({"person", "organization", "project", "product", "place"})
 #: Types a part can belong to. A person or a place is never a home.
 HOME_TYPES = frozenset({"project", "product", "organization"})
+#: Types that never get a home and are never one, whatever a judge answered
+#: (kept equal to ``identity.HOMELESS_TYPES``).
+HOMELESS_TYPES = frozenset({"person", "place"})
 #: Types that can become a home from co-mention alone. An organization needs a
 #: stated relation: as a co-mentioned home it measured 47% right.
 COMENTION_HOME_TYPES = frozenset({"project", "product"})
@@ -115,6 +118,7 @@ def derive_homes(
     nodes: Iterable[Node],
     links: Iterable[tuple[str, str]],
     relations: Iterable[tuple[str, str, str]],
+    judged: Iterable[tuple[str, str, float]] = (),
     *,
     min_share: float = HOME_MIN_SHARE,
     min_anchor_memories: int = HOME_MIN_ANCHOR_MEMORIES,
@@ -122,8 +126,11 @@ def derive_homes(
     """Where each part belongs: ``{entity_id: {"id", "share", "source"}}``.
 
     ``links`` are (entity_id, memory_id) over active memories; ``relations``
-    are (subject, predicate, object). One level only: a home has no home, so a
-    chain cannot form and nothing needs a tree.
+    are (subject, predicate, object). ``judged`` are (child, parent,
+    probability): pairs a decision provider answered that the child is a
+    version or a part of the parent, at ``identity.BELONGS_BAR`` or above. One
+    level only: a home has no home, so a chain cannot form and nothing needs a
+    tree.
     """
     by_id = {node.id: node for node in nodes}
     entity_memories: dict[str, set[str]] = defaultdict(set)
@@ -149,7 +156,19 @@ def derive_homes(
             if target is not None and target.entity_type in HOME_TYPES:
                 homes.setdefault(subject, {"id": obj, "share": 1.0, "source": "relation"})
 
-    # 2. otherwise the anchor it keeps appearing with
+    # 2. then what the judge answered, likeliest first. A version of a
+    # document or a dated occurrence of an event is a home as well: the judge
+    # read both sides, where co-mention only counts memories. A person or a
+    # place is never a home and never has one.
+    for child, parent, probability in sorted(judged, key=lambda item: -item[2]):
+        child_node, parent_node = by_id.get(child), by_id.get(parent)
+        if (child_node is None or parent_node is None or child == parent
+                or child_node.entity_type in HOMELESS_TYPES
+                or parent_node.entity_type in HOMELESS_TYPES):
+            continue
+        homes.setdefault(child, {"id": parent, "share": round(probability, 2), "source": "judged"})
+
+    # 3. otherwise the anchor it keeps appearing with
     for node in by_id.values():
         if node.id in homes or node.entity_type in ANCHOR_TYPES:
             continue

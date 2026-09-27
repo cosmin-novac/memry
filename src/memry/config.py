@@ -142,6 +142,19 @@ class RetrievalConfig(BaseModel):
     # without this a buried graph neighbour can outrank the correct answer. 0
     # restores the unprotected behaviour.
     relational_protect_top: int = 5
+    #: How search follows links from the entities a query names
+    #: (``intelligence/graph_retrieval.py``): "typed" follows extracted
+    #: relations both ways, nearest first, as it always has; "undirected" also
+    #: follows version and part links at the belongs bar; "directed" weighs
+    #: every link by its kind, its direction and the judge's probability.
+    relational_mode: str = "typed"
+    #: How many links a search follows from the query's entities.
+    relational_depth: int = 2
+    #: How the linked memories join the text ranking: "rescue" adds only what
+    #: the text ranking buried; "weighted" weighs every candidate by how
+    #: strongly its entities are linked to the query's; "inherit" also asks
+    #: the query of the thing a named version belongs to (directed mode).
+    relational_fusion: str = "rescue"
 
 
 class SupersedeConfig(BaseModel):

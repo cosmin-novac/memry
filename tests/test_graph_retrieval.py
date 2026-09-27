@@ -222,3 +222,93 @@ def test_multi_hop_still_works_with_protection_on(store, graph):
     """The protection must not cost the feature its reason to exist."""
     fused = store.search("What tool does Ada use for her work?", user_id="ada", limit=5)
     assert graph["m_uses"].id in {r.memory.id for r in fused}
+
+
+# ------------------------------------------- versions, parts and siblings
+def _belongs(store, child, parent, kind="kind", p=0.9, same=0.3):
+    """A compared pair: ``child`` is a version ("kind") or a part of ``parent``."""
+    from memry.models import MergeProposal
+
+    answer = {"a_kind_of_b": 0.0, "a_part_of_b": 0.0, "b_kind_of_a": 0.0,
+              "b_part_of_a": 0.0, "neither": 1.0 - p}
+    answer[f"a_{kind}_of_b"] = p
+    store.backend.add_proposal(MergeProposal(
+        entity_a=child.id, entity_b=parent.id, user_id="ada", confidence=same,
+        belongs=answer))
+
+
+@pytest.fixture
+def family(store):
+    """bildy with two versions and a part, and a namesake that shares a word."""
+    names = ["bildy", "bildy v3", "bildy v4", "bildy sync service", "Bildy Bakery"]
+    e = {name: _entity(store, name) for name in names}
+    _memory(store, "bildy stores its data in SQLite", [e["bildy"].id])
+    _memory(store, "bildy runs on Linux and macOS", [e["bildy"].id])
+    _memory(store, "bildy v3 added offline mode", [e["bildy v3"].id])
+    _memory(store, "bildy v4 stores its data in Postgres", [e["bildy v4"].id])
+    _memory(store, "bildy v4 added a timeline view", [e["bildy v4"].id])
+    _memory(store, "The bildy sync service is maintained by Omar", [e["bildy sync service"].id])
+    _memory(store, "Bildy Bakery sells sourdough", [e["Bildy Bakery"].id])
+    _belongs(store, e["bildy v3"], e["bildy"])
+    _belongs(store, e["bildy v4"], e["bildy"])
+    _belongs(store, e["bildy sync service"], e["bildy"], kind="part")
+    _belongs(store, e["Bildy Bakery"], e["bildy"], p=0.0, same=0.02)
+    return {name: entity.id for name, entity in e.items()}
+
+
+def test_a_version_takes_its_things_memories_and_little_of_its_siblings(store, family):
+    from memry.intelligence.graph_retrieval import DOWN_KIND, TURN, UP_KIND, activation
+
+    act = activation(store.backend, [family["bildy v4"]], depth=2, mode="directed")
+    assert act[family["bildy v4"]] == 1.0
+    assert act[family["bildy"]] == pytest.approx(UP_KIND * 0.9)
+    assert act[family["bildy v3"]] == pytest.approx(UP_KIND * 0.9 * DOWN_KIND * 0.9 * TURN)
+    assert act[family["bildy v3"]] < 0.2
+    assert family["Bildy Bakery"] not in act  # P(same) 0.02 is under the floor
+
+
+def test_a_thing_takes_its_versions_and_parts(store, family):
+    from memry.intelligence.graph_retrieval import activation
+
+    act = activation(store.backend, [family["bildy"]], depth=1, mode="directed")
+    assert {name for name, eid in family.items() if act.get(eid, 0) >= 0.5} == {
+        "bildy", "bildy v3", "bildy v4", "bildy sync service"}
+
+
+def test_undirected_reaches_siblings_as_strongly_as_the_thing(store, family):
+    from memry.intelligence.graph_retrieval import activation
+
+    act = activation(store.backend, [family["bildy v4"]], depth=2, mode="undirected")
+    assert act[family["bildy v3"]] > 0.5
+    assert family["Bildy Bakery"] not in act
+
+
+def test_weighted_fusion_puts_a_versions_own_memory_first(store, family):
+    store.config.retrieval.relational_mode = "directed"
+    store.config.retrieval.relational_fusion = "weighted"
+    top = store.search("Where does bildy v4 store its data?", user_id="ada", limit=3)
+    assert top[0].memory.content == "bildy v4 stores its data in Postgres"
+    contents = [r.memory.content for r in top]
+    assert contents.index("bildy stores its data in SQLite") < len(contents)
+
+
+def test_search_keeps_its_old_path_by_default(store):
+    cfg = store.config.retrieval
+    assert (cfg.relational_mode, cfg.relational_depth, cfg.relational_fusion) == (
+        "typed", 2, "rescue")
+
+
+def test_a_question_about_a_version_is_also_asked_of_its_thing(store, family):
+    from memry.intelligence.graph_retrieval import inherited_questions
+    from memry.models import Scope
+
+    assert inherited_questions(store.backend, Scope(user_id="ada"),
+                               "Which systems does bildy v4 run on?") == [
+        ("Which systems does bildy run on?", family["bildy"])]
+    # a part inherits nothing: its whole is not asked
+    assert inherited_questions(store.backend, Scope(user_id="ada"),
+                               "Who maintains the bildy sync service?") == []
+    store.config.retrieval.relational_mode = "directed"
+    store.config.retrieval.relational_fusion = "inherit"
+    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
+    assert "bildy runs on Linux and macOS" in [r.memory.content for r in top[:2]]

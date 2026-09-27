@@ -59,10 +59,20 @@ from .intelligence.entities import (
     resolve_open_proposals,
     synthesize_entity_description,
 )
-from .intelligence.graph_retrieval import detect_query_entities, relational_memory_ids
+from .intelligence.graph_retrieval import (
+    LINK_MODES,
+    activation,
+    detect_query_entities,
+    inherited_questions,
+    link_factor,
+    linked_memories,
+    relational_memory_ids,
+)
 from .intelligence.identity import (
+    BELONGS_BAR,
     TAG_EXAMPLES,
     NameIndex,
+    belonging,
     judged_tag_merges,
     judges_pairs,
     name_vectors,
@@ -1262,9 +1272,7 @@ class MemoryStore:
         # Relational fusion: add memories reachable by typed relations from the
         # query's entities (multi-hop answers hybrid alone scores at zero).
         if relational and not categories and not entity_id:
-            rel_ids = relational_memory_ids(self.backend, scope, query, hops=2)
-            if rel_ids:
-                results = self._fuse_relational(results, rel_ids, include_invalid)
+            results = self._relational(query, scope, results, include_invalid)
         if since or until:
             results = [r for r in results if _within(r.memory.created_at, since, until)]
         if when_since or when_until:
@@ -1316,6 +1324,70 @@ class MemoryStore:
             ordered.append((demoted, -blended, i, result))
         ordered.sort()
         return [r for _d, _s, _i, r in ordered] + results[len(pool):]
+
+    def _relational(
+        self, query: str, scope: Scope, results: list[SearchResult], include_invalid: bool,
+    ) -> list[SearchResult]:
+        """Join the memories linked to the query's entities to the text ranking,
+        as ``retrieval.relational_mode``, ``relational_depth`` and
+        ``relational_fusion`` say (``intelligence/graph_retrieval.py``)."""
+        cfg = self.config.retrieval
+        if cfg.relational_mode in LINK_MODES:
+            rel_ids, act = linked_memories(self.backend, scope, query,
+                                           depth=cfg.relational_depth, mode=cfg.relational_mode)
+        else:
+            rel_ids = relational_memory_ids(self.backend, scope, query,
+                                            hops=cfg.relational_depth)
+            act = {}
+        if cfg.relational_fusion == "inherit" and cfg.relational_mode == "directed":
+            results = self._with_inherited(query, scope, results, include_invalid)
+        if cfg.relational_fusion in ("weighted", "inherit") and rel_ids:
+            if not act:
+                act = activation(self.backend, detect_query_entities(self.backend, scope, query),
+                                 depth=cfg.relational_depth, mode="undirected")
+            return self._fuse_weighted(results, rel_ids, act, include_invalid)
+        if rel_ids:
+            return self._fuse_relational(results, rel_ids, include_invalid)
+        return results
+
+    def _with_inherited(
+        self, query: str, scope: Scope, results: list[SearchResult], include_invalid: bool,
+    ) -> list[SearchResult]:
+        """Add the thing's memories that answer the query asked of the thing a
+        named version belongs to (``graph_retrieval.inherited_questions``),
+        each with the text score it earned on that question."""
+        have = {r.memory.id: r for r in results}
+        for asked, parent_id in inherited_questions(self.backend, scope, query):
+            for r in hybrid_search(backend=self.backend, embedder=self.embedder, query=asked,
+                                   scope=scope, limit=len(results) or 40,
+                                   cfg=self.config.retrieval, include_invalid=include_invalid):
+                if parent_id not in {e.id for e in self.backend.entities_of_memory(r.memory.id)}:
+                    continue
+                known = have.get(r.memory.id)
+                if known is None or r.score > known.score:
+                    have[r.memory.id] = r
+        return sorted(have.values(), key=lambda r: -r.score)
+
+    def _fuse_weighted(
+        self,
+        hybrid_results: list[SearchResult],
+        rel_ids: list[str],
+        act: dict[str, float],
+        include_invalid: bool,
+    ) -> list[SearchResult]:
+        """Weigh the text ranking by whether each memory is about the entities
+        the query is about (``graph_retrieval.link_factor``), then rescue the
+        linked memories it buried, as "rescue" fusion does. The first orders
+        what the text found: a memory about a sibling version or another
+        product falls back. The second finds what no text matches: the tool a
+        person's project uses."""
+        factors = {r.memory.id: link_factor([act.get(e.id, 0.0)
+                                             for e in self.backend.entities_of_memory(r.memory.id)])
+                   for r in hybrid_results}
+        reordered = sorted(hybrid_results, key=lambda r: -r.score * factors[r.memory.id])
+        for r in reordered:
+            r.signals = {**r.signals, "linked": round(factors[r.memory.id], 3)}
+        return self._fuse_relational(reordered, rel_ids, include_invalid)
 
     def _fuse_relational(
         self,
@@ -3159,7 +3231,25 @@ class MemoryStore:
             for e in entities
         ]
         triples = [(r.subject, r.predicate, r.object) for r in relations]
-        return entities, nodes, links, triples
+        return entities, nodes, links, triples, self._judged_homes(scope)
+
+    def _judged_homes(self, scope: Scope) -> list[tuple[str, str, float]]:
+        """(child, parent, probability) for every compared pair the decision
+        provider answered is a version or a part, at ``BELONGS_BAR`` or above.
+        Kept on open and ruled-out pairs alike: a version is ruled out as the
+        same thing and still belongs to its thing."""
+        judged: list[tuple[str, str, float]] = []
+        for status in ("proposed", "rejected"):
+            for proposal in self.backend.list_proposals(scope, status=status, limit=100_000):
+                side, probability = belonging(proposal.belongs)
+                if side is None or probability < BELONGS_BAR:
+                    continue
+                a = self.backend.resolve_entity_id(proposal.entity_a)
+                b = self.backend.resolve_entity_id(proposal.entity_b)
+                if a is None or b is None or a == b:
+                    continue
+                judged.append((a, b, probability) if side == "a" else (b, a, probability))
+        return judged
 
     def entity_structure(self, *, user_id: str | None = None) -> dict[str, dict[str, Any]]:
         """Hub status and home for every active entity.
@@ -3167,8 +3257,8 @@ class MemoryStore:
         Computed on request and never stored, so a phrase seen a second time is
         a hub the next time anyone looks, and nothing has to be kept in step.
         """
-        entities, nodes, links, triples = self._structure_inputs(user_id)
-        homes = derive_homes(nodes, links, triples)
+        entities, nodes, links, triples, judged = self._structure_inputs(user_id)
+        homes = derive_homes(nodes, links, triples, judged)
         names = {node.id: node.name for node in nodes}
         screens = {e.id: (e.metadata or {}).get("screen") for e in entities}
         out: dict[str, dict[str, Any]] = {}
@@ -3203,8 +3293,8 @@ class MemoryStore:
         less evidence, exactly as a confirmed proposal does. ``dry_run=True``
         changes nothing and returns the full plan instead.
         """
-        entities, nodes, links, triples = self._structure_inputs(user_id)
-        homes = derive_homes(nodes, links, triples)
+        entities, nodes, links, triples, judged = self._structure_inputs(user_id)
+        homes = derive_homes(nodes, links, triples, judged)
         names = {node.id: node.name for node in nodes}
         outcome: dict[str, Any] = {
             "homes": len(homes), "homes_changed": 0,
