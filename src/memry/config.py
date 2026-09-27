@@ -6,15 +6,15 @@ Resolution order (later wins):
 3. environment variables (``MEMRY_*``)
 4. explicit kwargs / ``Config(...)`` construction
 
-The servers (``memry serve``, ``memry mcp``) need two models and refuse to
-start without them (``require_models``): a text model for extraction
+The servers (``memry serve``, ``memry mcp``) don't start until you set two
+models (``require_models``): a text model for extraction
 (``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY`` or ``MEMRY_LLM_PROVIDER``) and a
-decision model that answers with calibrated probabilities
-(``MEMRY_DECISION_PROVIDER=jev`` with ``MEMRY_DECISION_API_KEY``). Letting the
-text model decide instead is allowed only when chosen:
-``MEMRY_DECISION_PROVIDER=llm`` (or ``none``). A store built directly in code
-has no such check: without keys it writes memories verbatim and retrieves over
-FTS5 BM25 and deterministic hash embeddings.
+decision model that returns calibrated probabilities
+(``MEMRY_DECISION_PROVIDER=jev`` with ``MEMRY_DECISION_API_KEY``). An operator
+can send the decision questions to the text model, but only by setting
+``MEMRY_DECISION_PROVIDER=llm`` (or ``none``). Memry does not run this check for
+a store built directly in code; without keys, Memry then stores memories
+verbatim and retrieves them over FTS5 BM25 and deterministic hash embeddings.
 """
 
 from __future__ import annotations
@@ -40,9 +40,9 @@ DecisionProvider = Literal["none", "llm", "jev"]
 #: extraction model it matched gpt-5.6-luna on every measure (details kept,
 #: entities listed, same-name naming, coverage audit; two runs each on 118
 #: saves) and listed fewer ordinary nouns as entities. gpt-5.6-luna stays the
-#: only text model measured for re-ranking. A text model's own confidence is
-#: not trustworthy, so it never merges entities on its own (see
-#: providers/decisions.py); the decision model makes those judgements.
+#: only text model measured for re-ranking. Nobody has calibrated a text
+#: model's confidence, so Memry never merges entities on it alone (see
+#: providers/decisions.py); it sends those questions to the decision model.
 DEFAULT_LLM_MODELS: dict[str, str] = {
     "anthropic": "claude-haiku-4-5",
     "openai": "gpt-6-luna",
@@ -71,17 +71,17 @@ class LLMConfig(BaseModel):
 
 
 class DecisionConfig(BaseModel):
-    """Provider for typed judgements: entity identity, name screening,
-    reconciliation, durability, dates, re-ranking.
+    """Provider for Memry's decision questions: entity identity, name screening,
+    reconciliation, durability, dates and re-ranking.
 
-    "jev" is TypeSafe's System One model, which answers them directly and
-    returns a calibrated distribution instead of a self-reported number; the
-    servers expect it. "llm" routes the same questions through the text model,
-    and "none" keeps the text model's older prompt path: both are allowed only
-    when chosen, because a text model's confidence is not calibrated and no
-    entity then merges without a person. Unset (None) means nobody chose, which
-    a server refuses (``require_models``); a store built in code treats it as
-    "none".
+    "jev" is TypeSafe's System One model, which returns a calibrated
+    distribution over the answers. With "llm" Memry sends the same questions
+    to the text model; with "none" it uses the text model's older prompts. An
+    operator sets either one only on purpose: nobody has calibrated a text
+    model's confidence, so Memry then merges no entity without a person. Unset
+    (None) means nobody chose; a server does not start with it
+    (``require_models``), and Memry treats it as "none" in a store built in
+    code.
     """
 
     provider: DecisionProvider | None = None
@@ -278,8 +278,9 @@ class Config(BaseModel):
 
 
 def model_requirements(cfg: Config) -> list[str]:
-    """What a server is missing: a text model, and a decision model that was
-    chosen (Jev, or the text model on purpose). Empty when nothing is."""
+    """The model settings still empty before a server can start: a text model,
+    and a decision model an operator chose (Jev, or the text model on
+    purpose). The list is empty once both are set."""
     missing = []
     if cfg.llm.provider == "none":
         missing.append(
@@ -288,10 +289,11 @@ def model_requirements(cfg: Config) -> list[str]:
         )
     if cfg.decision.provider is None:
         missing.append(
-            "a decision model for merges and other judgements: set "
+            "a decision model for merges and Memry's other decision questions: set "
             "MEMRY_DECISION_PROVIDER=jev and MEMRY_DECISION_API_KEY to a TypeSafe "
-            "key (https://typesafe.ai). To let the text model decide instead, set "
-            "MEMRY_DECISION_PROVIDER=llm; entities then never merge on their own"
+            "key (https://typesafe.ai). To send these questions to the text model, "
+            "set MEMRY_DECISION_PROVIDER=llm; you then confirm every entity merge "
+            "yourself"
         )
     elif cfg.decision.provider == "jev" and not cfg.decision.api_key:
         missing.append("MEMRY_DECISION_API_KEY: the TypeSafe key for MEMRY_DECISION_PROVIDER=jev")
@@ -299,20 +301,22 @@ def model_requirements(cfg: Config) -> list[str]:
 
 
 def require_models(cfg: Config) -> None:
-    """Stop a server that lacks the models it needs, saying what to set; warn
-    when the text model was chosen to make the decisions."""
+    """Exit and list the empty model settings when someone starts a server
+    without them, and log a warning when an operator sent the decision
+    questions to the text model."""
     missing = model_requirements(cfg)
     if missing:
         raise SystemExit(
-            "Memry needs a text model and a decision model to run. Missing:\n"
+            "Set a text model and a decision model to run Memry. Not set yet:\n"
             + "\n".join(f"  - {item}" for item in missing)
-            + "\nSee docs/self-hosting.md#models."
+            + "\nSee docs/self-hosting.md#the-two-models-needed-when-setting-up-the-server."
         )
     if cfg.decision.provider in ("llm", "none"):
         logging.getLogger("memry").warning(
-            "MEMRY_DECISION_PROVIDER=%s: the text model makes Memry's decisions. Its "
-            "confidence is not calibrated, so entities never merge on their own; merge "
-            "proposals wait for you in Upkeep. MEMRY_DECISION_PROVIDER=jev settles them.",
+            "MEMRY_DECISION_PROVIDER=%s: Memry sends its decision questions to the text "
+            "model. Nobody has calibrated a text model's confidence, so Memry never "
+            "merges two entities on its own; you confirm each merge under Upkeep. With "
+            "MEMRY_DECISION_PROVIDER=jev, Memry merges duplicates on its own.",
             cfg.decision.provider,
         )
 

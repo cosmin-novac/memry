@@ -17,13 +17,13 @@ The installer:
 4. starts two containers - `memry` (the server) and `caddy` (TLS termination),
 5. waits for `/health` and prints your URLs and API key.
 
-Memry needs a text model (`OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`) and a decision
+To run Memry you need a text model (`OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`) and a decision
 model (`MEMRY_DECISION_PROVIDER=jev` with a [TypeSafe](https://typesafe.ai) key in
-`MEMRY_DECISION_API_KEY`); the installer stops before building when either is missing,
-and says what to add. `MEMRY_DECISION_PROVIDER=llm` lets the text model make the
-decisions instead, only on purpose: no entity then merges without you. See
-[self-hosting.md#models](self-hosting.md#models). `MEMRY_DOMAIN` is optional: without
-it the server answers plain HTTP on port 80 (fine for a first look, not for real use).
+`MEMRY_DECISION_API_KEY`). If you haven't set one of them, the installer stops before
+building and prints what to add. If you set `MEMRY_DECISION_PROVIDER=llm`, Memry sends the
+decision questions to the text model and you confirm every entity merge yourself; see
+[self-hosting.md](self-hosting.md#the-two-models-needed-when-setting-up-the-server). `MEMRY_DOMAIN` is
+optional: without it the server serves plain HTTP on port 80, with no HTTPS.
 
 **Re-running the same command updates Memry in place.** Code in
 `/opt/memry/app` is disposable; your config (`/opt/memry/.env`) and data
@@ -167,6 +167,6 @@ The installer is convenience, not magic. Equivalent manual steps:
 
 ```bash
 git clone https://github.com/cosmin-novac/memry && cd memry/deploy/vps
-cp .env.example .env    # set MEMRY_API_KEY, the text model and the decision model
+cp .env.example .env    # set MEMRY_API_KEY and both models
 docker compose up -d --build
 ```

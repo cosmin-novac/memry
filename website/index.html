@@ -237,20 +237,20 @@ footer a{color:var(--dim)}
         <code>pip install git+https://github.com/cosmin-novac/memry.git</code>).
         Python 3.11+, no other services.</p></div>
       <div class="stage"><span class="num">02 · MODELS</span>
-        <h3>Set two keys</h3>
-        <p>A text model that pulls facts out of what you save:
-        <code>OPENAI_API_KEY</code> (or Anthropic, or Ollama). A decision model that
-        decides which names are one thing, with calibrated probabilities:
-        <code>MEMRY_DECISION_PROVIDER=jev</code> and a TypeSafe key in
-        <code>MEMRY_DECISION_API_KEY</code>. Memry does not start without both. To let
-        the text model decide instead, set <code>MEMRY_DECISION_PROVIDER=llm</code>;
-        merges then wait for you.</p></div>
+        <h3>Add a text model and a decision model</h3>
+        <p>You need a text model that extracts facts from what you save:
+        <code>OPENAI_API_KEY</code> (or Anthropic, or Ollama). You also need a decision
+        model that returns a calibrated probability for questions like whether two names
+        belong to one thing: <code>MEMRY_DECISION_PROVIDER=jev</code> and a TypeSafe key
+        in <code>MEMRY_DECISION_API_KEY</code>. Memry doesn't start without both. With
+        <code>MEMRY_DECISION_PROVIDER=llm</code>, Memry sends those questions to the text
+        model and you confirm every merge yourself.</p></div>
       <div class="stage"><span class="num">03 · CONNECT</span>
         <h3>Plug into your agent</h3>
-        <p>Claude Code: <code>claude mcp add memry -e OPENAI_API_KEY=… -e
+        <p>In Claude Code, run <code>claude mcp add memry -e OPENAI_API_KEY=… -e
         MEMRY_DECISION_PROVIDER=jev -e MEMRY_DECISION_API_KEY=… -- memry mcp</code>.
-        Claude Desktop, Cursor, Windsurf: add the <code>memry mcp</code> command, with
-        the same variables, to your MCP config.</p></div>
+        In Claude Desktop, Cursor or Windsurf, add the <code>memry mcp</code> command with
+        the same variables to your MCP config.</p></div>
       <div class="stage"><span class="num">04 · USE</span>
         <h3>Just talk</h3>
         <p>Tell your agent something worth keeping, then ask about it in a fresh
@@ -309,14 +309,14 @@ footer a{color:var(--dim)}
         <p>Similar names aren't merged just because they look alike. Memry waits until there's enough evidence to know they're the same person, or until you confirm it yourself.</p></div>
       <div class="feat"><h3>MCP-native</h3>
         <p>Connect any MCP client over stdio or streamable HTTP. No client-specific memory integration to build or maintain.</p></div>
-      <div class="feat"><h3>Words and meaning, together</h3>
-        <p>Every search combines keyword matching with embeddings, then weighs recency and importance, so a memory is found whether the question repeats its words or only its meaning.</p></div>
+      <div class="feat"><h3>Memry searches by keywords and by meaning at once</h3>
+        <p>Memry ranks each result by how well it matches your words, how close it is in meaning, how recent it is and how important it is, so you find a memory whether you use its words in your question or only its meaning.</p></div>
       <div class="feat"><h3>Forgetting built in</h3>
         <p>Old trivia gradually matters less, so stale details stop crowding out what matters without being deleted from your history.</p></div>
       <div class="feat"><h3>Bring your own models.</h3>
         <p>Use Anthropic, OpenAI or Ollama for extraction, and choose between hosted or local embeddings. Memry doesn't lock your memory to one model provider.</p></div>
-      <div class="feat"><h3>The judgement calls go to a model built for them.</h3>
-        <p>Working out whether two people with the same name are the same person is a choice between three answers, not a writing task. Memry sends those questions to a model built for decisions rather than prose, TypeSafe Jev, and because it returns a real probability rather than a number it reports about itself, duplicates are merged without asking you.</p></div>
+      <div class="feat"><h3>Memry sends the judgement calls to a model built for them</h3>
+        <p>Working out whether two people with the same name are the same person means picking one of three answers. Memry sends those questions to TypeSafe Jev, a model built for this kind of question. Jev returns a calibrated probability for each answer, so Memry merges duplicates on its own.</p></div>
       <div class="feat"><h3>Benchmark it yourself</h3>
         <p>A built-in eval harness (recall@k, MRR, latency) runs offline in CI. Format LoCoMo or LongMemEval into JSONL and compare configs honestly.</p></div>
     </div>
@@ -434,7 +434,7 @@ ctx = store.reconstruct_context(
           <li>REST API + dashboard + MCP endpoint in one process</li>
           <li>Bearer-token auth with <code class="inlinecode">MEMRY_API_KEY</code></li>
           <li>Knowledge backup = <code class="inlinecode">memry export</code>; account servers also back up <code class="inlinecode">auth.db</code></li>
-          <li>Fully offline with Ollama, the text model then making the decisions</li>
+          <li>Runs fully offline with Ollama when you set <code class="inlinecode">MEMRY_DECISION_PROVIDER=llm</code></li>
         </ul>
       </div>
       <div>

@@ -298,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = Config.load()
         _print(cfg.redacted())
         for item in model_requirements(cfg):
-            print(f"missing for memry serve / memry mcp: {item}", file=sys.stderr)
+            print(f"not set yet for memry serve / memry mcp: {item}", file=sys.stderr)
         return 0
 
     if args.command == "account":

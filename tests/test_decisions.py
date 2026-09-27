@@ -52,9 +52,10 @@ def jev(handler, **cfg) -> JevDecider:
 
 # ---------------------------------------------------------------- selection
 def test_the_flag_is_off_by_default():
-    """A store that configures nothing must not acquire a decision provider,
-    and must not route decisions to its text model: that takes a choice (a
-    server refuses to start without one, see config.require_models)."""
+    """Memry gives a store built in code without settings no decision
+    provider, and sends none of its decision questions to the text model; that
+    takes a setting. A server does not start without one
+    (config.require_models)."""
     assert Config().decision.provider is None
     assert build_decider(DecisionConfig(), NoneLLM()).available is False
     assert build_decider(DecisionConfig(), FakeLLM()).name == "none"

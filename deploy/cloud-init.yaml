@@ -7,10 +7,11 @@
 #
 # Edit MEMRY_DOMAIN to your domain (DNS A record pointing at the new server)
 # for automatic HTTPS, or remove it to serve plain HTTP on port 80.
-# Required: a text model key (OPENAI_API_KEY, or ANTHROPIC_API_KEY) and the
-# decision model (MEMRY_DECISION_PROVIDER=jev with a TypeSafe key in
-# MEMRY_DECISION_API_KEY). MEMRY_DECISION_PROVIDER=llm lets the text model
-# decide instead, only on purpose: no entity then merges without you.
+# Give the installer a text model key (OPENAI_API_KEY, or ANTHROPIC_API_KEY)
+# and the decision model (MEMRY_DECISION_PROVIDER=jev with a TypeSafe key in
+# MEMRY_DECISION_API_KEY). With MEMRY_DECISION_PROVIDER=llm, set on purpose,
+# Memry sends the decision questions to the text model and you confirm every
+# entity merge yourself.
 #
 # After boot, the generated API key is in /opt/memry/.env on the server.
 

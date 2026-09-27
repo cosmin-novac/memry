@@ -473,8 +473,9 @@ class JevDecider(Decider):
 
 
 def build_decider(cfg: DecisionConfig, llm: LLM) -> Decider:
-    """Pick the decision provider. Unset (a store built in code; a server
-    refuses it, see ``config.require_models``) behaves as "none"."""
+    """Pick the decision provider. Memry treats an unset provider (a store built
+    in code; a server does not start with one, see ``config.require_models``) as
+    "none"."""
     if cfg.provider == "jev":
         decider: Decider = JevDecider(cfg)
     elif cfg.provider in (None, "none"):

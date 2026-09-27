@@ -5,15 +5,15 @@ Knowledge lives in `memry.db`; runtime accounts and OAuth live in the adjacent `
 Keeping them separate prevents knowledge restore/reset operations from changing login data.
 A complete server backup must include both files.
 
-## Models
+## The two models needed when setting up the server
 
-A Memry server needs two models, and `memry serve` and `memry mcp` refuse to start
-without them, saying what is missing:
+Before you start a Memry server, set a text model and a decision model. Without either
+one, `memry serve` and `memry mcp` don't start and print the setting that is still empty.
 
-| | What it does | Set |
+| | What Memry uses it for | Setting |
 |---|---|---|
-| Text model | Pulls facts and names out of what you save, writes descriptions | `OPENAI_API_KEY` (default model `gpt-6-luna`), or `ANTHROPIC_API_KEY`, or `MEMRY_LLM_PROVIDER=ollama` |
-| Decision model | Decides whether two names are one thing, what a name is, whether a memory replaces another, what a search result is worth | `MEMRY_DECISION_PROVIDER=jev` and `MEMRY_DECISION_API_KEY` (a [TypeSafe](https://typesafe.ai) key) |
+| Text model | Extracting facts and names from what you save, and writing entity descriptions | `OPENAI_API_KEY` (default model `gpt-6-luna`), or `ANTHROPIC_API_KEY`, or `MEMRY_LLM_PROVIDER=ollama` |
+| Decision model | Decision questions, such as whether two names belong to one thing, what kind of thing a name is, whether an old memory is out of date once you save a new one and how relevant a search result is | `MEMRY_DECISION_PROVIDER=jev` and `MEMRY_DECISION_API_KEY` (a [TypeSafe](https://typesafe.ai) key) |
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -21,14 +21,17 @@ export MEMRY_DECISION_PROVIDER=jev
 export MEMRY_DECISION_API_KEY=...
 ```
 
-The decision model has to be a System One model like Jev: it answers each question with
-a probability per option that is calibrated, so Memry can merge duplicates on its own at
-thresholds measured for it. A text model can be told to make these decisions instead, but
-only on purpose: `MEMRY_DECISION_PROVIDER=llm`. Its confidence is a number it reports
-about itself, so no entity then merges without you; every merge waits under **Upkeep**.
-The server logs a warning at start when it runs that way.
+Use a System One model like Jev as the decision model. For every decision question Jev
+returns a calibrated probability per answer, and Memry merges duplicates on its own at the
+thresholds measured for Jev.
 
-`memry config` prints the resolved configuration and anything a server would miss.
+If you set `MEMRY_DECISION_PROVIDER=llm`, Memry sends these questions to the text model.
+Nobody has calibrated a text model's confidence scores, so Memry then never merges two
+entities on its own, and you confirm every merge under Upkeep in the dashboard. The server
+logs a warning at start in that mode.
+
+`memry config` prints the resolved configuration and lists any model setting that is
+still empty.
 
 ## Option 1 - bare (recommended for personal use)
 
@@ -51,9 +54,8 @@ docker compose up -d --build
 ```
 
 The compose file mounts a named volume at `/data` and reads the same `MEMRY_*`
-environment variables from `.env` (copy [`.env.example`](../.env.example)): the API key,
-the text model and the decision model are required. See
-[`docker-compose.yml`](../docker-compose.yml).
+environment variables from `.env` (copy [`.env.example`](../.env.example) and set the API
+key and both models). See [`docker-compose.yml`](../docker-compose.yml).
 
 Docker automatically reuses the package layer for source-only updates. A first build or
 a change to `requirements-docker.txt` installs all dependencies; normal code and dashboard
@@ -182,22 +184,22 @@ rerouted.
 
 Connecting ChatGPT this way: [connect-chatgpt.md](connect-chatgpt.md).
 
-## Typed decisions
+## Where Memry sends its decision questions
 
-Parts of the pipeline do not need a text model. Deciding whether two people called Jonas
-are the same person is a choice between `same`, `different` and `unsure`, and Memry
-already gates automatic merges on the confidence attached to it. Without a decision
-provider that confidence is a number the text model was asked to report about itself,
-which nothing calibrates.
+For some steps of the pipeline you don't need a text model. Deciding whether two people
+called Jonas are the same person means picking `same`, `different` or `unsure`, and Memry
+merges automatically only above a confidence threshold. When Memry sends these questions to
+a text model, that confidence is a number the model writes about its own answer, and nobody
+calibrates it.
 
-`MEMRY_DECISION_PROVIDER` selects who answers those questions:
+You set where Memry sends those questions with `MEMRY_DECISION_PROVIDER`:
 
 | Value | Behaviour |
 |---|---|
-| `jev` | [TypeSafe Jev](https://typesafe.ai), a System One model that answers typed questions directly and returns a calibrated probability per option. What a server expects. |
-| `llm` | Chosen on purpose only: the same questions, typed, answered by the configured text model. An answer outside the declared options is rejected rather than accepted. No entity merges without you. |
-| `none` | Chosen on purpose only: no typed questions; the text model's older prompt path, and the passes that need a decision provider are off. No entity merges without you. |
-| unset | A server refuses to start (see [Models](#models)). |
+| `jev` | [TypeSafe Jev](https://typesafe.ai), a System One model. For each decision question it returns a calibrated probability per answer, and Memry merges duplicates on its own at the measured thresholds. |
+| `llm` | Memry sends the same decision questions to the configured text model and rejects any answer outside the declared options. Set it only on purpose: you then confirm every entity merge yourself. |
+| `none` | Memry sends no decision questions, uses the text model's older prompts and skips the upkeep passes built on a decision provider. Set it only on purpose: you then confirm every entity merge yourself. |
+| unset | The server doesn't start (see [the two models needed when setting up the server](#the-two-models-needed-when-setting-up-the-server)). |
 
 ```bash
 export MEMRY_DECISION_PROVIDER=jev
@@ -206,9 +208,10 @@ export MEMRY_DECISION_MODEL=jev-latest   # optional
 export MEMRY_DECISION_BASE_URL=...       # optional, for a proxy
 ```
 
-Jev is a hosted API, so these questions leave the machine, the same trade as a hosted
-text model. It does not replace one: extraction still needs a text model. A fully offline
-server (Ollama) has to choose `MEMRY_DECISION_PROVIDER=llm` and review merges itself.
+Jev is a hosted API, so Memry sends these questions to TypeSafe's servers, the same way it
+sends what you save to a hosted text model. You still need a text model for extraction. On
+a fully offline server with Ollama, set `MEMRY_DECISION_PROVIDER=llm` and confirm merges
+yourself.
 
 The provider can never fail a write. A transport error, a rate limit, a malformed reply
 or an answer outside the declared options all read as "no answer", and the caller falls
@@ -247,8 +250,8 @@ so the gate has to sit high and little gets automated. Override with
 gpt-5.6-luna got 52 verdicts safe, better than gpt-5-mini's 49, and put its worst wrong
 "same" at 0.98, above any threshold. There is no number that is safe for a model that
 has not been run against the labelled set, so for any text model other than gpt-5-mini,
-gpt-5.6-luna and the OpenAI default gpt-6-luna included,
-every proposed merge waits for you under **Upkeep** when the text model decides. To measure your own
+gpt-5.6-luna and the OpenAI default gpt-6-luna included, you confirm every proposed merge
+under Upkeep when Memry sends the decision questions to the text model. To measure your own
 model, run `evals/identity_benchmark.py llm --model <name>` and set the gate it reports
 with `MEMRY_DECISION_MERGE_CONFIDENCE`. A confident "different" still blocks an
 obvious-looking merge at 0.95 whatever the gate, so raising the gate never makes merging
@@ -323,10 +326,11 @@ For local single-machine use, prefer stdio (`memry mcp`) - no port, no auth surf
 | Default Anthropic extraction | `ANTHROPIC_API_KEY` + `pip install "memry[anthropic]"` (defaults to the fast, lower-cost `claude-haiku-4-5`) |
 | Larger Anthropic model | `MEMRY_LLM_MODEL=claude-opus-4-8` (explicitly trades more latency and cost for extraction quality) |
 | OpenAI end-to-end | `OPENAI_API_KEY` (LLM `gpt-6-luna`, embeddings `text-embedding-3-small`) |
-| Previous OpenAI default | `MEMRY_LLM_MODEL=gpt-5.6-luna` (the only text model measured to improve re-ranking) |
+| Previous OpenAI default | `MEMRY_LLM_MODEL=gpt-5.6-luna` (the only text model measured for re-ranking) |
 | Fully offline | `MEMRY_LLM_PROVIDER=ollama` + `MEMRY_EMBEDDING_PROVIDER=ollama` (e.g. `llama3.1`, `nomic-embed-text`) + `MEMRY_DECISION_PROVIDER=llm` |
 
-Every server also needs the decision model (see [Models](#models)).
+You also need a decision model for every server (see
+[the two models needed when setting up the server](#the-two-models-needed-when-setting-up-the-server)).
 
 After switching embedding providers, run `memry reindex` once to re-embed the store.
 
@@ -487,8 +491,8 @@ write path and in the backfill:
 
 gpt-5-mini dates work logs and price checks after being told not to, which is one reason
 it is not the OpenAI default; gpt-5.6-luna also read the 160 memories four times faster.
-gpt-6-luna, the default now, has not been measured on this set; the decision provider's
-veto applies to it the same way. A wrong
+gpt-6-luna, the default now, has not been measured on this set; Memry applies the decision
+provider's veto to its dates the same way. A wrong
 `when` is worse than none, so the veto applies whenever a decision provider is configured.
 Requiring the provider to say "event" was tried first and lost a fifth of the real events
 for no gain in precision.
