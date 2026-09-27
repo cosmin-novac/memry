@@ -83,7 +83,6 @@ from .intelligence.identity import (
     judged_tag_merges,
     judges_pairs,
     name_vectors,
-    parallel,
 )
 from .intelligence.extraction import (
     VOCABULARY_LIMIT,
@@ -1313,6 +1312,8 @@ class MemoryStore:
             return results
         if not self.decider.available or len(results) < 2:
             return results
+        if any("judged" in r.signals for r in results):
+            return results  # the linked search already asked the same question
         pool = results[: max(cfg.rerank_pool, 2)]
         answers = self.decider.decide(
             f"QUESTION: {query}",
@@ -1373,7 +1374,11 @@ class MemoryStore:
         strongly it is about the entity the query names (``aboutness``). The
         candidates are the text ranking's and, for every entity linked at
         ``FAMILY_MIN`` or more, the ``FAMILY_TOP`` of its memories that best
-        state the property. A query naming no hub keeps the text ranking."""
+        state the property. A query naming no hub keeps the text ranking.
+
+        With ``relational_relevance = "jev"`` the decision provider then judges
+        whether each of the first ``decision.rerank_pool`` answers the
+        question, and that replaces the similarity for them."""
         cfg = self.config.retrieval
         seeds = [e for e in detect_query_entities(self.backend, scope, query, longest=True)
                  if self._is_hub(e)]
@@ -1401,46 +1406,51 @@ class MemoryStore:
             for memory in sorted(members, key=lambda m: -similarity(vectors, m.id))[:FAMILY_TOP]:
                 pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
         vectors = self._property_vectors(list(pool))
-        judged = (self._judged_relevance(mask_names(query, names), pool)
-                  if cfg.relational_relevance == "jev" else {})
+        entities = {mid: self.backend.entities_of_memory(mid) for mid in pool}
         scored = []
         for mid, result in pool.items():
-            relevance = judged.get(mid, similarity(vectors, mid))
-            about = aboutness([act.get(e.id) for e in self.backend.entities_of_memory(mid)])
+            relevance = similarity(vectors, mid)
+            about = aboutness([act.get(e.id) for e in entities[mid]])
             result.signals = {**result.signals, "property": round(relevance, 4),
                               "about": round(about, 3)}
             scored.append((relevance ** cfg.relational_sharpness * about, result.score, result))
         scored.sort(key=lambda item: (-item[0], -item[1]))
-        return [result for _, _, result in scored]
+        ranked = [result for _, _, result in scored]
+        if cfg.relational_relevance != "jev":
+            return ranked
+        # The decision provider judges the shortlist; the judged come first,
+        # since its answers and cosine similarities are on different scales.
+        shortlist = ranked[: max(self.config.decision.rerank_pool, 2)]
+        # The names of the entities the links reach read "it", since
+        # aboutness accounts for them; any other name stays, as it can be the
+        # answer ("uses Redis") or a different entity ("Bildy Bakery").
+        family = [n for entity_id in act for n in self.backend.entity_aliases(entity_id)]
+        judged = self._judged_relevance(mask_names(query, names), [
+            (r.memory.id, mask_names(r.memory.content, family,
+                                     keep=[e.name for e in entities[r.memory.id]
+                                           if e.id not in act]))
+            for r in shortlist])
+        if not judged:
+            return ranked
+        for result in shortlist:
+            if result.memory.id in judged:
+                result.signals = {**result.signals, "judged": round(judged[result.memory.id], 4)}
+        shortlist.sort(key=lambda r: ("judged" not in r.signals,
+                                      -r.signals.get("judged", 0.0) * r.signals["about"]))
+        return shortlist + ranked[len(shortlist):]
 
-    def _judged_relevance(
-        self, asked: str, pool: dict[str, SearchResult]
-    ) -> dict[str, float]:
-        """P(the memory states what the question asks) from the decision
-        provider, the question and each memory with entity names replaced by
-        "it". Up to 128 memories a call, calls side by side. A memory the
-        provider did not answer for is left out, and keeps its vector score."""
-        if not self.decider.available:
+    def _judged_relevance(self, asked: str, memories: list[tuple[str, str]]) -> dict[str, float]:
+        """P(the memory answers the question) from the decision provider, for
+        (memory id, text) pairs, in one call. A memory the provider did not
+        answer for is left out."""
+        if not self.decider.available or not memories:
             return {}
-        items = []
-        for mid, result in pool.items():
-            names = [e.name for e in self.backend.entities_of_memory(mid)]
-            items.append((mid, mask_names(result.memory.content, names)))
-        chunks = [items[i:i + 128] for i in range(0, len(items), 128)]
-
-        def ask(chunk):
-            answers = self.decider.decide(
-                f"QUESTION: {asked}",
-                {f"m{i}": Noul(instructions="This memory states what the question asks "
-                                            f"about. Memory: {text}")
-                 for i, (_, text) in enumerate(chunk)})
-            return {mid: float(answers[f"m{i}"].value) for i, (mid, _) in enumerate(chunk)
-                    if answers[f"m{i}"].available}
-
-        judged: dict[str, float] = {}
-        for part in parallel(ask, chunks):
-            judged.update(part)
-        return judged
+        answers = self.decider.decide(
+            f"QUESTION: {asked}",
+            {f"m{i}": Noul(instructions=f"This memory answers the question. Memory: {text}")
+             for i, (_, text) in enumerate(memories)})
+        return {mid: float(answers[f"m{i}"].value) for i, (mid, _) in enumerate(memories)
+                if answers[f"m{i}"].available}
 
     def _property_vectors(self, memory_ids: list[str]) -> dict[str, np.ndarray]:
         """Property vectors, and the ordinary vector for a memory saved before

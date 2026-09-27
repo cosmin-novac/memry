@@ -464,7 +464,7 @@ def _store_with(decider, **decision):
 def test_rerank_blends_with_the_hybrid_order_rather_than_replacing_it():
     """Ordering purely by relevance measured worse than doing nothing: the
     hybrid rank carries recency, decay, anchors and relation hops with it."""
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
                for i in range(4)]
     # the model mildly prefers the last candidate; a 35% blend should not be
     # enough to drag it past the top of the hybrid order
@@ -478,7 +478,7 @@ def test_rerank_blends_with_the_hybrid_order_rather_than_replacing_it():
 
 
 def test_rerank_pushes_a_clear_non_answer_to_the_back():
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
                for i in range(3)]
     stub = _stub(lambda k, q: Answer(0.02 if k == "m0" else 0.9, {}, 0.9, True))
     store = _store_with(stub)
@@ -488,7 +488,7 @@ def test_rerank_pushes_a_clear_non_answer_to_the_back():
 
 
 def test_rerank_leaves_the_order_alone_when_the_provider_cannot_answer():
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
                for i in range(3)]
     for decider in (NoneDecider(), _stub(lambda k, q: Answer())):
         store = _store_with(decider)
@@ -509,7 +509,7 @@ def test_rerank_follows_the_provider_unless_configured():
     assert JevDecider(DecisionConfig(provider="jev", api_key="k")).reranks_by_default is True
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64),
                         decider=_stub(lambda k, q: Answer(0.01, {}, 0.9, True)))
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
                for i in range(3)]
     assert store._rerank("q", results) == results
     store.close()
@@ -639,7 +639,7 @@ def test_rerank_cannot_be_forced_onto_a_provider_that_did_not_earn_it():
     baseline the setting is refused."""
     from memry.config import Config
 
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
                for i in range(3)]
     reversing = _stub(lambda k, q: Answer(int(k[1:]) / 10.0, {}, 0.9, True))
 
@@ -656,7 +656,7 @@ def test_rerank_cannot_be_forced_onto_a_provider_that_did_not_earn_it():
 def test_rerank_can_be_turned_off_where_it_is_on():
     from memry.config import Config
 
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
                for i in range(3)]
     stub = _stub(lambda k, q: Answer(int(k[1:]) / 10.0, {}, 0.9, True))
     stub.reranks_by_default = True
@@ -686,7 +686,7 @@ def test_rerank_may_be_turned_on_for_a_text_model_measured_to_help():
     assert LLMDecider(luna).may_rerank and not LLMDecider(luna).reranks_by_default
     assert not LLMDecider(mini).may_rerank
 
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})()})()
+    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
                for i in range(3)]
     reversing = _stub(lambda k, q: Answer(int(k[1:]) / 10.0, {}, 0.9, True))
     reversing.may_rerank = True                     # measured to help...

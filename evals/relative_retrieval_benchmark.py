@@ -403,6 +403,8 @@ def main() -> None:
     parser.add_argument("--jev", action="store_true",
                         help="give the store Jev as its decision provider without re-ranking "
                              "(TYPESAFE_API_KEY), for the linked jev mode")
+    parser.add_argument("--links", nargs="*", default=["none", "oracle", "measured"],
+                        help="which compared pairs to build stores with")
     parser.add_argument("--rerank", action="store_true",
                         help="Jev re-ranks each search (TYPESAFE_API_KEY), on the families "
                              "where the text ranking and the links disagree, fewer modes")
@@ -460,13 +462,11 @@ def main() -> None:
 
         texts += [mask_names(m["text"], masked_names(world, m)) for m in world["memories"]]
         embedder.warm(texts)
-        if args.rerank or args.jev:
-            keep = ("inherit", "override", "sibling", "override_worded", "sibling_worded",
-                    "event_inherit", "event_override", "single_fact", "multi_hop")
-            world["queries"] = {f: q[:25] for f, q in world["queries"].items() if f in keep}
+        if args.rerank or args.jev:  # 25 queries a family: a Jev call each
+            world["queries"] = {f: q[:25] for f, q in world["queries"].items()}
         print(f"\n===== {len(world['memories'])} memories, embedder {embedder.model_id} =====",
               flush=True)
-        for links in ("none", "oracle", "measured"):
+        for links in args.links:
             if args.jev:
                 decider = jev_judge()
             store, memory_ids = build_store(world, embedder, links, answers, decider=decider)

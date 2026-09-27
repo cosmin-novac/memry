@@ -415,21 +415,35 @@ NO_ENTITY = LOW
 _POSSESSIVE = "(?:'s|\u2019s)?"
 
 
-def mask_names(text: str, names: Iterable[str]) -> str:
+def mask_names(text: str, names: Iterable[str], keep: Iterable[str] = ()) -> str:
     """``text`` with each of ``names`` replaced by "it" ("its" for a
-    possessive), longest first, matched as whole words in any case."""
-    for name in sorted({n.strip() for n in names if n and n.strip()}, key=len, reverse=True):
-        pattern = re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)" + _POSSESSIVE, re.IGNORECASE)
-        text = pattern.sub(lambda m: "its" if m.group(0)[len(name):] else "it", text)
-    return text
+    possessive), matched as whole words in any case, the longest name first.
+    A name in ``keep`` stays as written, and so does a shorter name inside it
+    ("Bildy Bakery" keeps its "bildy")."""
+    masked = {n.strip().lower() for n in names if n and n.strip()}
+    every = masked | {n.strip().lower() for n in keep if n and n.strip()}
+    if not masked:
+        return text
+    pattern = re.compile(
+        r"(?<!\w)(" + "|".join(re.escape(n) for n in sorted(every, key=len, reverse=True))
+        + r")(?!\w)(" + _POSSESSIVE + ")", re.IGNORECASE)
+
+    def swap(match: re.Match) -> str:
+        if match.group(1).lower() not in masked:
+            return match.group(0)
+        return "its" if match.group(2) else "it"
+
+    return pattern.sub(swap, text)
 
 
 def aboutness(activations: list[float | None]) -> float:
     """How strongly a memory is about what the query names, from the
     activation of each entity it names (None for an entity the links do not
     reach): the strongest linked one, ``LOW`` if it names only unlinked ones,
-    ``NO_ENTITY`` if it names none."""
+    ``NO_ENTITY`` if it names none. A link, however weak, never ranks below no
+    link: a version Jev linked at 0.4 (0.28 on the way down) is still more
+    likely about the product than a memory about something else."""
     linked = [a for a in activations if a is not None]
     if linked:
-        return max(linked)
+        return max(max(linked), LOW)
     return LOW if activations else NO_ENTITY

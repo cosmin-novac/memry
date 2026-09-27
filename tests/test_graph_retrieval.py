@@ -397,24 +397,30 @@ def test_names_are_masked_as_whole_words():
         "Where does it store its data?"
     assert mask_names("bildy's database moved; rebuildy stays", ["bildy"]) == \
         "its database moved; rebuildy stays"
+    assert mask_names("Bildy Bakery sells bildy stickers", ["bildy"], keep=["Bildy Bakery"]) == \
+        "Bildy Bakery sells it stickers"
     assert aboutness([None, 0.72]) == 0.72  # the strongest linked entity
     assert aboutness([None]) == 0.3          # only entities the links do not reach
+    assert aboutness([0.1]) == 0.3           # a weak link is never below no link
     assert aboutness([]) == 0.3              # no entity: about something else too
 
 
-def test_linked_search_can_ask_the_decision_provider_what_states_the_property(store, family):
+def test_linked_search_can_ask_the_decision_provider_what_answers(store, family):
     """With ``relational_relevance = "jev"`` the provider's probability that a
-    memory states what the question asks replaces the vector similarity. It
-    sees the question and the memories with the names replaced by "it"."""
+    memory answers the question replaces the vector similarity for the
+    shortlist, and the search does not ask it a second time to re-rank. The
+    names the links reach read "it"; another entity's name stays."""
     from memry.providers.decisions import Answer, Answers, NoneDecider
 
-    seen = []
+    seen, asked = [], []
 
     class Judge(NoneDecider):
         available = True
+        may_rerank = reranks_by_default = True
 
         def decide(self, state, questions):
             seen.append(state)
+            asked.extend(q.instructions for q in questions.values())
             return Answers({key: Answer(0.9 if "runs on" in q.instructions else 0.1, {}, 0.9, True)
                             for key, q in questions.items()})
 
@@ -423,5 +429,7 @@ def test_linked_search_can_ask_the_decision_provider_what_states_the_property(st
     store.config.retrieval.relational_relevance = "jev"
     top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=2)
     assert top[0].memory.content == "bildy runs on Linux and macOS"
-    assert top[0].signals["property"] == pytest.approx(0.9)
-    assert seen == ["QUESTION: Which systems does it run on?"]
+    assert top[0].signals["judged"] == pytest.approx(0.9)
+    assert seen == ["QUESTION: Which systems does it run on?"]  # one call, no re-rank
+    assert "This memory answers the question. Memory: it runs on Linux and macOS" in asked
+    assert "This memory answers the question. Memory: Bildy Bakery sells sourdough" in asked
