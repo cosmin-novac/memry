@@ -405,6 +405,22 @@ def test_names_are_masked_as_whole_words():
     assert aboutness([]) == 0.3              # no entity: about something else too
 
 
+def test_linked_search_keeps_the_names_of_a_memory_the_links_do_not_reach(store, family):
+    """Only names the links account for are masked. A memory about something
+    else is compared by its ordinary vector: with every name masked, "Lena Blum
+    works on Project Ekmibo" reads "It works on it", as empty as a question
+    that asks no property, and would outscore the family on a roll-up."""
+    _linked(store)
+    kaven = _entity(store, "Kaven planner")
+    other = _memory(store, "Kaven planner is popular with bildy fans", [kaven.id])
+    store.backend.set_property_vectors({other.id: [0.0, 1.0, 0.0, 0.0, 0.1]},
+                                       store.embedder.model_id)  # as if it ran on systems
+    results = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=20)
+    stranger = next(r for r in results if r.memory.id == other.id)
+    assert stranger.signals["property"] < 0.2  # its own vector, not the masked one
+    assert results[0].memory.content == "bildy runs on Linux and macOS"
+
+
 def test_linked_search_can_ask_the_decision_provider_what_answers(store, family):
     """With ``relational_relevance = "jev"`` the provider's probability that a
     memory answers the question replaces the vector similarity for the
@@ -429,7 +445,45 @@ def test_linked_search_can_ask_the_decision_provider_what_answers(store, family)
     store.config.retrieval.relational_relevance = "jev"
     top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=2)
     assert top[0].memory.content == "bildy runs on Linux and macOS"
-    assert top[0].signals["judged"] == pytest.approx(0.9)
+    assert top[0].signals["judged"] == pytest.approx(0.9 * (1 - 0.1))  # v4's own: no answer
     assert seen == ["QUESTION: Which systems does it run on?"]  # one call, no re-rank
-    assert "This memory answers the question. Memory: it runs on Linux and macOS" in asked
-    assert "This memory answers the question. Memory: Bildy Bakery sells sourdough" in asked
+    ask = "Someone who reads only this memory can answer the question. Memory: "
+    assert ask + "it runs on Linux and macOS" in asked
+    assert ask + "Bildy Bakery sells sourdough" in asked
+
+
+def test_a_versions_own_answer_overrides_its_things_with_the_decision_provider(store, family):
+    """An answer reached by a step up (the thing's) counts only as far as the
+    version's own memories do not answer: the version's change wins even when
+    the provider is surer of the thing's plainer wording."""
+    from memry.providers.decisions import Answer, Answers, NoneDecider
+
+    class Judge(NoneDecider):
+        available = True
+
+        def decide(self, state, questions):
+            def value(text):
+                return 0.6 if "Postgres" in text else 0.9 if "SQLite" in text else 0.05
+            return Answers({key: Answer(value(q.instructions), {}, 0.9, True)
+                            for key, q in questions.items()})
+
+    _linked(store)
+    store.decider = Judge()
+    store.config.retrieval.relational_relevance = "jev"
+    top = store.search("Where does bildy v4 store its data?", user_id="ada", limit=3)
+    assert top[0].memory.content == "bildy v4 stores its data in Postgres"
+    thing = next(r for r in top if r.memory.content == "bildy stores its data in SQLite")
+    assert thing.signals["overridden"] == pytest.approx(0.6)
+    assert thing.signals["judged"] == pytest.approx(0.9 * 0.4)
+
+
+def test_only_steps_up_count_as_inherited(store, family):
+    """The thing and siblings through it are reached by a step up from a
+    version; a thing's versions and parts are reached by steps down."""
+    from memry.intelligence.graph_retrieval import activation_paths
+
+    _, above = activation_paths(store.backend, [family["bildy v4"]], depth=2)
+    assert {family["bildy"], family["bildy v3"]} <= above
+    assert family["bildy v4"] not in above
+    _, above = activation_paths(store.backend, [family["bildy"]], depth=1)
+    assert above == set()

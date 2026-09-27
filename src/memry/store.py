@@ -67,6 +67,7 @@ from .intelligence.graph_retrieval import (
     LINK_MODES,
     aboutness,
     activation,
+    activation_paths,
     detect_query_entities,
     inherited_questions,
     link_factor,
@@ -1369,8 +1370,8 @@ class MemoryStore:
         self, query: str, scope: Scope, results: list[SearchResult], include_invalid: bool,
     ) -> list[SearchResult]:
         """Score each candidate by how well it states the property asked
-        (similarity of the question and the memory with the entity names
-        replaced by "it") to the power ``relational_sharpness``, times how
+        (similarity of the question and the memory with the names of the
+        entities the links reach replaced by "it") to the power ``relational_sharpness``, times how
         strongly it is about the entity the query names (``aboutness``). The
         candidates are the text ranking's and, for every entity linked at
         ``FAMILY_MIN`` or more, the ``FAMILY_TOP`` of its memories that best
@@ -1378,14 +1379,16 @@ class MemoryStore:
 
         With ``relational_relevance = "jev"`` the decision provider then judges
         whether each of the first ``decision.rerank_pool`` answers the
-        question, and that replaces the similarity for them."""
+        question, and that replaces the similarity for them. An answer from a
+        thing the query's entity belongs to then counts only as far as none of
+        the entity's own memories answers (a version's own change wins)."""
         cfg = self.config.retrieval
         seeds = [e for e in detect_query_entities(self.backend, scope, query, longest=True)
                  if self._is_hub(e)]
         if not seeds:
             return results
-        act = activation(self.backend, seeds, depth=cfg.relational_depth, mode="directed",
-                         relation=LINKED_RELATION)
+        act, above = activation_paths(self.backend, seeds, depth=cfg.relational_depth,
+                                      mode="directed", relation=LINKED_RELATION)
         names = [n for seed in seeds for n in self.backend.entity_aliases(seed)]
         asked = np.asarray(self.embedder.embed([mask_names(query, names)])[0], dtype=np.float32)
         asked /= float(np.linalg.norm(asked)) or 1.0
@@ -1405,8 +1408,15 @@ class MemoryStore:
             vectors = self._property_vectors([m.id for m in members])
             for memory in sorted(members, key=lambda m: -similarity(vectors, m.id))[:FAMILY_TOP]:
                 pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
-        vectors = self._property_vectors(list(pool))
+        # Only the names the links account for are masked: a memory naming an
+        # entity they reach is compared by its property vector, any other by
+        # its ordinary one, names kept ("Lena Blum works on Project Ekmibo"
+        # would otherwise read "It works on it", as empty as "What do I know
+        # about it?").
         entities = {mid: self.backend.entities_of_memory(mid) for mid in pool}
+        reached = [mid for mid in pool if any(e.id in act for e in entities[mid])]
+        vectors = self._property_vectors(reached)
+        vectors.update(self.backend.vectors_of([mid for mid in pool if mid not in vectors]))
         scored = []
         for mid, result in pool.items():
             relevance = similarity(vectors, mid)
@@ -1432,9 +1442,21 @@ class MemoryStore:
             for r in shortlist])
         if not judged:
             return ranked
+        # What is true of the thing a seed belongs to holds for the seed only
+        # where the seed says nothing else: an answer reached by a step up
+        # counts as far as none of the seed's own memories answers.
+        own = [judged[mid] for mid in judged if any(e.id in seeds for e in entities[mid])]
+        overridden = max(own, default=0.0)
         for result in shortlist:
-            if result.memory.id in judged:
-                result.signals = {**result.signals, "judged": round(judged[result.memory.id], 4)}
+            mid = result.memory.id
+            if mid not in judged:
+                continue
+            value = judged[mid]
+            linked = [e.id for e in entities[mid] if e.id in act]
+            if linked and max(linked, key=act.get) in above:
+                value *= 1.0 - overridden
+                result.signals = {**result.signals, "overridden": round(overridden, 4)}
+            result.signals = {**result.signals, "judged": round(value, 4)}
         shortlist.sort(key=lambda r: ("judged" not in r.signals,
                                       -r.signals.get("judged", 0.0) * r.signals["about"]))
         return shortlist + ranked[len(shortlist):]
@@ -1447,7 +1469,8 @@ class MemoryStore:
             return {}
         answers = self.decider.decide(
             f"QUESTION: {asked}",
-            {f"m{i}": Noul(instructions=f"This memory answers the question. Memory: {text}")
+            {f"m{i}": Noul(instructions="Someone who reads only this memory can answer the "
+                                        f"question. Memory: {text}")
              for i, (_, text) in enumerate(memories)})
         return {mid: float(answers[f"m{i}"].value) for i, (mid, _) in enumerate(memories)
                 if answers[f"m{i}"].available}

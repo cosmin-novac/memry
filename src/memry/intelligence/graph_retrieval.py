@@ -311,8 +311,19 @@ def activation(
     seeds: 1.0 for a seed, the product of the factors along the best path for
     the rest. "undirected" follows relations and version and part links at the
     belongs bar alike, 0.9 a step, as relations were always followed."""
+    return activation_paths(backend, seeds, depth=depth, mode=mode, relation=relation)[0]
+
+
+def activation_paths(
+    backend: MemoryBackend, seeds: list[str], *, depth: int = 2, mode: str = "directed",
+    relation: float = RELATION,
+) -> tuple[dict[str, float], set[str]]:
+    """``activation``, and the entities whose best path took a step up (the
+    thing or the whole a seed belongs to, and siblings through them): what is
+    true of those holds for a seed only where the seed says nothing else."""
     directed = mode == "directed"
     best: dict[str, float] = {seed: 1.0 for seed in seeds}
+    up: set[str] = set()
     # A path is a state as well as a place: whether it has gone up to a thing
     # decides whether a step down reaches a sibling.
     seen: dict[tuple[str, bool], float] = {(seed, False): 1.0 for seed in seeds}
@@ -324,11 +335,11 @@ def activation(
         reached: dict[tuple[str, bool], float] = {}
         for (node, went_up), act in frontier.items():
             for link in links:
-                for other, factor, up, down in _steps(link, node, directed, relation):
-                    if down and went_up:
+                for other, factor, step_up, step_down in _steps(link, node, directed, relation):
+                    if step_down and went_up:
                         factor *= TURN
                     value = act * factor
-                    state = (other, went_up or up)
+                    state = (other, went_up or step_up)
                     if value >= FLOOR and value > reached.get(state, 0.0):
                         reached[state] = value
         frontier = {}
@@ -336,8 +347,13 @@ def activation(
             if value > seen.get(state, 0.0):
                 seen[state] = value
                 frontier[state] = value
-                best[state[0]] = max(best.get(state[0], 0.0), value)
-    return best
+                if value > best.get(state[0], 0.0):
+                    best[state[0]] = value
+                    if state[1]:
+                        up.add(state[0])
+                    else:
+                        up.discard(state[0])
+    return best, up - set(seeds)
 
 
 def linked_memories(
