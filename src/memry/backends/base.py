@@ -503,6 +503,14 @@ class MemoryBackend(ABC):
         from ``embedding_model`` when given."""
         return {}
 
+    def unlabelled_vector_ids(self, scope: Scope) -> list[str]:
+        """Valid memories that have a vector but no embedding model on it."""
+        return []
+
+    def consolidated_memories(self, scope: Scope) -> list["Memory"]:
+        """Valid memories made by consolidating others."""
+        return []
+
     def set_property_vectors(
         self, vectors: dict[str, list[float]], embedding_model: str,
         hashes: dict[str, str] | None = None,

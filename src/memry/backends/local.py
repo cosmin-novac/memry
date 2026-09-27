@@ -1694,6 +1694,27 @@ class LocalBackend(MemoryBackend):
             )
         return out
 
+    def unlabelled_vector_ids(self, scope: Scope) -> list[str]:
+        clause, params = _scope_clause(scope)
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT id FROM memories WHERE {clause} AND invalid_at IS NULL "
+                "AND embedding IS NOT NULL AND embedding_model IS NULL",
+                params,
+            ).fetchall()
+        return [row["id"] for row in rows]
+
+    def consolidated_memories(self, scope: Scope) -> list[Memory]:
+        clause, params = _scope_clause(scope)
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {_MEMORY_COLS} FROM memories WHERE {clause} AND invalid_at IS NULL "
+                "AND metadata LIKE '%consolidated_from%'",
+                params,
+            ).fetchall()
+        memories = [_row_to_memory(r) for r in rows]
+        return [m for m in memories if (m.metadata or {}).get("consolidated_from")]
+
     def set_property_vectors(
         self, vectors: dict[str, list[float]], embedding_model: str,
         hashes: dict[str, str] | None = None,

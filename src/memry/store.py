@@ -3225,7 +3225,11 @@ class MemoryStore:
         embedding = (
             self.embedder.embed([content])[0] if self.embedder.dimensions else None
         )
+        if embedding:
+            # vector search reads only vectors labelled with the current model
+            merged.embedding_model = self.embedder.model_id
         stored = self.backend.insert_memory(merged, embedding=embedding)
+        self._carry_mentions(stored.id, [m.id for m in memories])
         self.backend.add_event(MemoryEvent(
             memory_id=stored.id, event="ADD", new_content=content,
             reason=f"consolidated {len(memories)} duplicate memories",
@@ -3239,6 +3243,42 @@ class MemoryStore:
                 reason=f"consolidated into {stored.id}",
             ))
         return stored.id
+
+    def _carry_mentions(self, memory_id: str, originals: list[str]) -> None:
+        """The entities its originals mention, onto a consolidated memory, so
+        it stays on those entities' pages and in their links."""
+        seen: set[str] = set()
+        for original in originals:
+            for entity in self.backend.entities_of_memory(original):
+                if entity.id not in seen:
+                    seen.add(entity.id)
+                    self.backend.add_mention(EntityMention(
+                        entity_id=entity.id, memory_id=memory_id, surface=entity.name))
+
+    def repair_consolidated(self, *, user_id: str | None = None) -> dict[str, int]:
+        """Memories consolidated before the merge kept their vector's model and
+        their originals' mentions: re-embed those stored without a model (the
+        model that made them is unknown) and give back the mentions."""
+        scope = Scope(user_id=user_id)
+        embedded = 0
+        unlabelled = self.backend.unlabelled_vector_ids(scope)
+        if unlabelled and self.embedder.dimensions:
+            memories = [m for m in (self.backend.get_memory(i) for i in unlabelled) if m]
+            for start in range(0, len(memories), 64):
+                batch = memories[start:start + 64]
+                for memory, vector in zip(batch, self.embedder.embed([m.content for m in batch])):
+                    if vector:
+                        self.backend.update_memory(
+                            memory.id, embedding=vector,
+                            embedding_model=self.embedder.model_id, touch=False)
+                        embedded += 1
+        mentioned = 0
+        for memory in self.backend.consolidated_memories(scope):
+            originals = (memory.metadata or {}).get("consolidated_from") or []
+            if originals and not self.backend.entities_of_memory(memory.id):
+                self._carry_mentions(memory.id, list(originals))
+                mentioned += bool(self.backend.entities_of_memory(memory.id))
+        return {"re_embedded": embedded, "mentions_restored": mentioned}
 
     def semantic_tag_duplicates(
         self, *, user_id: str | None = None, threshold: float = 0.93
@@ -3816,6 +3856,7 @@ class MemoryStore:
         remembered, so the model is asked about each one once.
         """
         with self._pass_lock("consolidation", user_id):
+            repaired = self.repair_consolidated(user_id=user_id)
             seen_lists = self._upkeep_get("consolidation:seen", user_id, [])
             seen = {frozenset(ids) for ids in seen_lists}
             result = self.consolidate_memories(
@@ -3824,7 +3865,8 @@ class MemoryStore:
             )
             pending = self._upkeep_get("consolidation:pending", user_id, [])
             known = {frozenset(entry["memory_ids"]) for entry in pending}
-            outcome = {"scanned": result["scanned"], "judged": 0, "merged": 0, "queued": 0}
+            outcome = {"scanned": result["scanned"], "judged": 0, "merged": 0, "queued": 0,
+                       **{key: n for key, n in repaired.items() if n}}
             for group in result["groups"]:
                 ids = frozenset(group["memory_ids"])
                 seen_lists.append(sorted(ids))
