@@ -13,7 +13,7 @@ backends, LLMs, and embedders are all replaceable underneath it.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -70,9 +70,9 @@ from .intelligence.graph_retrieval import (
     activation_paths,
     detect_query_entities,
     inherited_questions,
+    homes_of,
     link_factor,
     linked_memories,
-    links_of,
     mask_names,
     relational_memory_ids,
     specificity,
@@ -332,6 +332,11 @@ def _when_within(
     return when_overlaps(
         (memory.metadata or {}).get(WHEN_KEY), when_since, when_until
     )
+
+
+def _text_hash(text: str) -> str:
+    """Identifies a property vector's masked text, to tell when it changed."""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
 class MemoryStore:
@@ -660,7 +665,21 @@ class MemoryStore:
                 self._recheck_proposals(
                     scope, open_before, {entity.id for entity in resolved.values()}
                 )
+        if self._linked_search_on():
+            self._property_vectors_after_save(
+                [a.memory_id for a in actions if a.event != "NONE" and a.memory_id])
         return actions
+
+    def _property_vectors_after_save(self, memory_ids: list[str]) -> None:
+        """Property vectors of memories just saved or edited, once their
+        mentions are attached. A failure never fails the save: the weekly
+        refresh computes what is missing."""
+        if not memory_ids:
+            return
+        try:
+            self.refresh_property_vectors(memory_ids=memory_ids)
+        except Exception as exc:
+            log.warning("property vectors not computed on save: %s", exc)
 
     def _open_proposals_to_recheck(self, scope: Scope) -> list[MergeProposal]:
         """Open proposals a save may compare again, or none when the provider
@@ -1419,7 +1438,8 @@ class MemoryStore:
         entities = {mid: self.backend.entities_of_memory(mid) for mid in pool}
         reached = [mid for mid in pool if any(e.id in act for e in entities[mid])]
         vectors = self._property_vectors(reached)
-        vectors.update(self.backend.vectors_of([mid for mid in pool if mid not in vectors]))
+        vectors.update(self.backend.vectors_of([mid for mid in pool if mid not in vectors],
+                                               self.embedder.model_id))
         scored = []
         for mid, result in pool.items():
             relevance = similarity(vectors, mid)
@@ -1444,11 +1464,8 @@ class MemoryStore:
             linked = [e.id for e in entities[result.memory.id] if e.id in act]
             if linked:
                 about_whom[result.memory.id] = max(linked, key=act.get)
-        subjects = sorted(set(about_whom.values()))
-        line = {entity_id: {entity_id} for entity_id in subjects}
-        for link in links_of(self.backend, subjects, graded=True):
-            if link.kind in ("kind", "part") and link.p >= 0.5 and link.child in line:
-                line[link.child].add(link.parent)
+        line = {entity_id: {entity_id} | homes for entity_id, homes
+                in homes_of(self.backend, sorted(set(about_whom.values()))).items()}
         aliases = {entity_id: self.backend.entity_aliases(entity_id)
                    for entity_id in set().union(*line.values())}
         texts = []
@@ -1507,11 +1524,79 @@ class MemoryStore:
     def _property_vectors(self, memory_ids: list[str]) -> dict[str, np.ndarray]:
         """Property vectors, and the ordinary vector for a memory saved before
         property vectors existed."""
-        vectors = self.backend.property_vectors_of(memory_ids)
+        vectors = self.backend.property_vectors_of(memory_ids, self.embedder.model_id)
         missing = [mid for mid in memory_ids if mid not in vectors]
         if missing:
-            vectors.update(self.backend.vectors_of(missing))
+            vectors.update(self.backend.vectors_of(missing, self.embedder.model_id))
         return vectors
+
+    def _linked_search_on(self) -> bool:
+        """Property vectors are computed only while the linked search, which
+        alone reads them, is on: they are a second vector per memory."""
+        return self.config.retrieval.relational_fusion == "linked"
+
+    def _masked_texts(
+        self, contents: dict[str, str], entities: dict[str, list[str]]
+    ) -> dict[str, str]:
+        """Each memory's text with every alias of its entities, and of the
+        things those belong to (``graph_retrieval.HOME_P``), read as "it"."""
+        homes = homes_of(self.backend, sorted({e for ids in entities.values() for e in ids}))
+        aliases: dict[str, list[str]] = {}
+        masked = {}
+        for memory_id, content in contents.items():
+            named = set(entities.get(memory_id, ()))
+            for entity_id in list(named):
+                named |= homes.get(entity_id, set())
+            for entity_id in named - aliases.keys():
+                aliases[entity_id] = self.backend.entity_aliases(entity_id)
+            masked[memory_id] = mask_names(
+                content, [n for entity_id in named for n in aliases[entity_id]])
+        return masked
+
+    def refresh_property_vectors(
+        self, *, user_id: str | None = None, memory_ids: list[str] | None = None
+    ) -> int:
+        """Embed the property vector of each valid memory whose masked text is
+        new, changed (a merge, a rename, a new home) or was embedded by another
+        model, in batches of 64. A memory whose masked text is its text gets no
+        row: search reads its ordinary vector, which is the same. With
+        ``memory_ids`` only those memories (a save); otherwise every memory of
+        the namespace that names an entity (the weekly upkeep, a backfill).
+        Returns how many it embedded."""
+        if not self.embedder.dimensions:
+            return 0
+        entities: dict[str, list[str]] = defaultdict(list)
+        if memory_ids is None:
+            scope = Scope(user_id=user_id)
+            for entity_id, memory_id in self.backend.entity_memory_links(scope):
+                entities[memory_id].append(entity_id)
+            contents = {m.id: m.content
+                        for m in self.backend.list_memories(scope, limit=10_000_000)
+                        if m.id in entities}
+        else:
+            contents = {}
+            for memory_id in memory_ids:
+                memory = self.backend.get_memory(memory_id)
+                if memory is not None and memory.invalid_at is None:
+                    contents[memory_id] = memory.content
+                    entities[memory_id] = [e.id for e in self.backend.entities_of_memory(memory_id)]
+        masked = self._masked_texts(contents, entities)
+        stored = self.backend.property_vector_hashes(list(masked))
+        model = self.embedder.model_id
+        unmasked = [mid for mid, text in masked.items() if text == contents[mid] and mid in stored]
+        if unmasked:
+            self.backend.delete_property_vectors(unmasked)
+        due = [(mid, text) for mid, text in masked.items()
+               if text != contents[mid] and stored.get(mid) != (_text_hash(text), model)]
+        embedded = 0
+        for start in range(0, len(due), 64):
+            batch = due[start:start + 64]
+            vectors = self.embedder.embed([text for _, text in batch])
+            rows = {mid: vector for (mid, _), vector in zip(batch, vectors) if vector}
+            self.backend.set_property_vectors(
+                rows, model, {mid: _text_hash(text) for mid, text in batch if mid in rows})
+            embedded += len(rows)
+        return embedded
 
     def _is_hub(self, entity_id: str) -> bool:
         """Whether an entity counts as one a query can name: a hub by the
@@ -1993,6 +2078,8 @@ class MemoryStore:
                     actor="user",
                 )
             )
+            if self._linked_search_on():
+                self._property_vectors_after_save([memory_id])
         return updated
 
     def delete(
@@ -3708,6 +3795,16 @@ class MemoryStore:
                 self._upkeep_set("last:durability", user_id,
                                  {"at": now.isoformat(timespec="seconds"), "result": result})
                 ran["durability"] = result
+        if dedup_due and self._linked_search_on():
+            # After this week's merges and new homes: re-embed the memories
+            # whose masked names changed. Nothing to embed is no run.
+            try:
+                embedded = self.refresh_property_vectors(user_id=user_id)
+            except Exception as exc:
+                log.warning("property vector refresh failed: %s", exc)
+                embedded = 0
+            if embedded:
+                ran["property_vectors"] = {"embedded": embedded}
         return ran
 
     def run_consolidation_pass(self, *, user_id: str | None = None) -> dict[str, Any]:
@@ -4017,6 +4114,9 @@ class MemoryStore:
         rebuild = getattr(self.backend, "rebuild_ann", None)
         if rebuild is not None:
             rebuild(self.embedder.model_id, self.embedder.dimensions)
+        if self._linked_search_on():
+            for user_id in self.backend.distinct_user_ids() or [None]:
+                self.refresh_property_vectors(user_id=user_id)
         return count
 
     def stats(self) -> dict[str, Any]:

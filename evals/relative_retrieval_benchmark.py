@@ -59,7 +59,6 @@ import sys
 import time
 from collections import defaultdict
 
-import numpy as np
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
@@ -281,15 +280,6 @@ def build_world(size: int, seed: int = 7) -> dict:
             "queries": dict(queries), "types": types}
 
 
-def masked_names(world: dict, memory: dict) -> list[str]:
-    """The names replaced by "it" in a memory's property vector: its entities'
-    and the things they belong to, since a version's memory often names its
-    thing ("With its third release, Kaven planner moved ...")."""
-    parents = {child: parent for child, parent, kind in world["pairs"]
-               if kind in ("version", "occurrence", "component")}
-    return list(memory["entities"]) + [parents[e] for e in memory["entities"] if e in parents]
-
-
 def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed: int = 3,
                 decider=None):
     """The world in a fresh store, with compared pairs as ``links`` says.
@@ -312,11 +302,6 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
         for name in m["entities"]:
             store.backend.add_mention(EntityMention(entity_id=ids[name], memory_id=memory.id,
                                                     surface=name))
-    from memry.intelligence.graph_retrieval import mask_names
-
-    masked = [mask_names(m["text"], masked_names(world, m)) for m in world["memories"]]
-    store.backend.set_property_vectors(dict(zip(memory_ids, embedder.embed(masked))),
-                                       embedder.model_id)
     for subject, predicate, obj in world["relations"]:
         store.backend.add_relation(Relation(subject=ids[subject], predicate=predicate,
                                             object=ids[obj], user_id=USER))
@@ -335,6 +320,9 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
         store.backend.add_proposal(MergeProposal(
             entity_a=ids[child], entity_b=ids[parent], user_id=USER, confidence=same,
             different=different, belongs=belongs, compared_step=1))
+    # as Memry computes them: each memory's entities and what those belong to
+    # (at the links just stored) read "it"
+    store.refresh_property_vectors(user_id=USER)
     return store, memory_ids
 
 
@@ -464,9 +452,6 @@ def main() -> None:
         world = build_world(size)
         texts = [m["text"] for m in world["memories"]]
         texts += [q for items in world["queries"].values() for q, _, _ in items]
-        from memry.intelligence.graph_retrieval import mask_names
-
-        texts += [mask_names(m["text"], masked_names(world, m)) for m in world["memories"]]
         embedder.warm(texts)
         if args.rerank or args.jev:  # 25 queries a family: a Jev call each
             world["queries"] = {f: q[:25] for f, q in world["queries"].items()}

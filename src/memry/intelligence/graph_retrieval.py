@@ -431,6 +431,22 @@ NO_ENTITY = LOW
 _POSSESSIVE = "(?:'s|\u2019s)?"
 
 
+#: A thing an entity more likely than not belongs to reads "it" in that
+#: entity's memories too ("The first release of bildy" in bildy v1's).
+HOME_P = 0.5
+
+
+def homes_of(backend: MemoryBackend, entity_ids: list[str]) -> dict[str, set[str]]:
+    """The entities each of these is a kind or a part of at ``HOME_P`` or more."""
+    homes: dict[str, set[str]] = {entity_id: set() for entity_id in entity_ids}
+    ids = sorted(homes)
+    for start in range(0, len(ids), 400):
+        for link in links_of(backend, ids[start:start + 400], graded=True):
+            if link.kind in ("kind", "part") and link.p >= HOME_P and link.child in homes:
+                homes[link.child].add(link.parent)
+    return homes
+
+
 def mask_names(text: str, names: Iterable[str], keep: Iterable[str] = ()) -> str:
     """``text`` with each of ``names`` replaced by "it" ("its" for a
     possessive), matched as whole words in any case, the longest name first.

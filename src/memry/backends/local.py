@@ -74,10 +74,13 @@ CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(user_id, agent_id, run
 
 -- A memory with its own entity names replaced by "it", embedded: what it says
 -- about whatever it is about. Derived, like the ANN index, so not in backups.
+-- masked_hash identifies the masked text, so a refresh re-embeds only what
+-- changed.
 CREATE TABLE IF NOT EXISTS memory_property_vectors (
     memory_id TEXT PRIMARY KEY,
     embedding BLOB NOT NULL,
-    embedding_model TEXT
+    embedding_model TEXT,
+    masked_hash TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_invalid ON memories(invalid_at);
 CREATE INDEX IF NOT EXISTS idx_memories_pending_enrichment
@@ -386,6 +389,12 @@ class LocalBackend(MemoryBackend):
             self._db.execute("ALTER TABLE entity_proposals ADD COLUMN different REAL")
         if "belongs" not in proposal_columns:
             self._db.execute("ALTER TABLE entity_proposals ADD COLUMN belongs TEXT")
+        vector_columns = {
+            row["name"]
+            for row in self._db.execute("PRAGMA table_info(memory_property_vectors)").fetchall()
+        }
+        if "masked_hash" not in vector_columns:
+            self._db.execute("ALTER TABLE memory_property_vectors ADD COLUMN masked_hash TEXT")
 
     def _topic_locked(self, name: str, scope: Scope, provenance: str = "memory") -> Topic:
         display = name.strip()
@@ -936,6 +945,8 @@ class LocalBackend(MemoryBackend):
                 self._db.execute("DELETE FROM entity_mentions WHERE memory_id = ?", (memory_id,))
                 self._db.execute("DELETE FROM memory_topics WHERE memory_id = ?", (memory_id,))
                 self._db.execute("DELETE FROM relations WHERE memory_id = ?", (memory_id,))
+                self._db.execute(
+                    "DELETE FROM memory_property_vectors WHERE memory_id = ?", (memory_id,))
                 if entity_ids:
                     placeholders = ",".join("?" * len(entity_ids))
                     self._db.execute(
@@ -1665,45 +1676,82 @@ class LocalBackend(MemoryBackend):
             (r["id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows
         ]
 
-    def vectors_of(self, memory_ids: list[str]) -> dict[str, np.ndarray]:
+    def vectors_of(
+        self, memory_ids: list[str], embedding_model: str | None = None
+    ) -> dict[str, np.ndarray]:
+        model_clause = " AND embedding_model = ?" if embedding_model else ""
         out: dict[str, np.ndarray] = {}
         for start in range(0, len(memory_ids), 500):
             chunk = memory_ids[start:start + 500]
             with self._lock:
                 rows = self._db.execute(
                     f"SELECT id, embedding FROM memories WHERE id IN ({','.join('?' * len(chunk))}) "
-                    "AND embedding IS NOT NULL",
-                    chunk,
+                    f"AND embedding IS NOT NULL{model_clause}",
+                    [*chunk, *([embedding_model] if embedding_model else [])],
                 ).fetchall()
             out.update(
                 (r["id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows
             )
         return out
 
-    def set_property_vectors(self, vectors: dict[str, list[float]], embedding_model: str) -> None:
+    def set_property_vectors(
+        self, vectors: dict[str, list[float]], embedding_model: str,
+        hashes: dict[str, str] | None = None,
+    ) -> None:
+        hashes = hashes or {}
         with self._lock:
             self._db.executemany(
                 "INSERT OR REPLACE INTO memory_property_vectors "
-                "(memory_id, embedding, embedding_model) VALUES (?,?,?)",
-                [(mid, np.asarray(v, dtype=np.float32).tobytes(), embedding_model)
+                "(memory_id, embedding, embedding_model, masked_hash) VALUES (?,?,?,?)",
+                [(mid, np.asarray(v, dtype=np.float32).tobytes(), embedding_model,
+                  hashes.get(mid))
                  for mid, v in vectors.items()],
             )
             self._db.commit()
 
-    def property_vectors_of(self, memory_ids: list[str]) -> dict[str, np.ndarray]:
+    def property_vectors_of(
+        self, memory_ids: list[str], embedding_model: str | None = None
+    ) -> dict[str, np.ndarray]:
+        model_clause = " AND embedding_model = ?" if embedding_model else ""
         out: dict[str, np.ndarray] = {}
         for start in range(0, len(memory_ids), 500):
             chunk = memory_ids[start:start + 500]
             with self._lock:
                 rows = self._db.execute(
                     "SELECT memory_id, embedding FROM memory_property_vectors "
-                    f"WHERE memory_id IN ({','.join('?' * len(chunk))})",
-                    chunk,
+                    f"WHERE memory_id IN ({','.join('?' * len(chunk))}){model_clause}",
+                    [*chunk, *([embedding_model] if embedding_model else [])],
                 ).fetchall()
             out.update(
                 (r["memory_id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows
             )
         return out
+
+    def property_vector_hashes(
+        self, memory_ids: list[str]
+    ) -> dict[str, tuple[str | None, str | None]]:
+        out: dict[str, tuple[str | None, str | None]] = {}
+        for start in range(0, len(memory_ids), 500):
+            chunk = memory_ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT memory_id, masked_hash, embedding_model FROM memory_property_vectors "
+                    f"WHERE memory_id IN ({','.join('?' * len(chunk))})",
+                    chunk,
+                ).fetchall()
+            out.update((r["memory_id"], (r["masked_hash"], r["embedding_model"])) for r in rows)
+        return out
+
+    def delete_property_vectors(self, memory_ids: list[str]) -> None:
+        with self._lock:
+            for start in range(0, len(memory_ids), 500):
+                chunk = memory_ids[start:start + 500]
+                self._db.execute(
+                    "DELETE FROM memory_property_vectors "
+                    f"WHERE memory_id IN ({','.join('?' * len(chunk))})",
+                    chunk,
+                )
+            self._db.commit()
 
     def session_memories(
         self, memory: Memory, *, hours: float = 3.0, limit: int = 50
@@ -2799,6 +2847,7 @@ class LocalBackend(MemoryBackend):
             for table in (
                 "memory_topics", "topic_relations", "topics", "memories", "episodes",
                 "memory_events", "entities", "entity_mentions", "entity_proposals", "ann_keys",
+                "memory_property_vectors",
             ):
                 self._db.execute(f"DELETE FROM {table}")
             self._db.commit()

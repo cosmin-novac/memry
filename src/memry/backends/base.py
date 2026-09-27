@@ -496,18 +496,38 @@ class MemoryBackend(ABC):
         """
         return []
 
-    def vectors_of(self, memory_ids: list[str]) -> dict[str, "np.ndarray"]:
-        """The stored embedding of each of these memories that has one."""
+    def vectors_of(
+        self, memory_ids: list[str], embedding_model: str | None = None
+    ) -> dict[str, "np.ndarray"]:
+        """The stored embedding of each of these memories that has one, only
+        from ``embedding_model`` when given."""
         return {}
 
-    def set_property_vectors(self, vectors: dict[str, list[float]], embedding_model: str) -> None:
+    def set_property_vectors(
+        self, vectors: dict[str, list[float]], embedding_model: str,
+        hashes: dict[str, str] | None = None,
+    ) -> None:
         """Store each memory's property vector: its text with its own entity
-        names replaced by "it", embedded (``graph_retrieval.mask_names``)."""
+        names replaced by "it", embedded (``graph_retrieval.mask_names``), and
+        a hash of that masked text."""
         return None
 
-    def property_vectors_of(self, memory_ids: list[str]) -> dict[str, "np.ndarray"]:
-        """The property vector of each of these memories that has one."""
+    def property_vectors_of(
+        self, memory_ids: list[str], embedding_model: str | None = None
+    ) -> dict[str, "np.ndarray"]:
+        """The property vector of each of these memories that has one, only
+        from ``embedding_model`` when given."""
         return {}
+
+    def property_vector_hashes(
+        self, memory_ids: list[str]
+    ) -> dict[str, tuple[str | None, str | None]]:
+        """(masked text hash, embedding model) of each stored property vector."""
+        return {}
+
+    def delete_property_vectors(self, memory_ids: list[str]) -> None:
+        """Drop these memories' property vectors."""
+        return None
 
     def session_memories(
         self, memory: Memory, *, hours: float = 3.0, limit: int = 50

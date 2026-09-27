@@ -10,6 +10,7 @@
     memry stats                   store statistics
     memry sweep                   decay sweep (soft-forget stale memories)
     memry reindex                 re-embed all memories
+    memry backfill-property-vectors  property vectors for the linked search
     memry export / import         lossless backup/restore; legacy JSON imports
     memry config                  print resolved configuration
     memry eval --dataset <path>   run the retrieval eval harness
@@ -262,6 +263,13 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
+    p = sub.add_parser(
+        "backfill-property-vectors",
+        help="embed each memory with its entity names masked, for the linked search "
+             "(only what is missing or changed)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+
     p = sub.add_parser("export", help="export a lossless JSON backup to stdout")
     _scope_args(p)
 
@@ -442,6 +450,12 @@ def main(argv: list[str] | None = None) -> int:
                 [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
             )
             _print([store.restore_context_labels(user_id=uid, dry_run=args.dry_run)
+                    for uid in namespaces])
+        elif args.command == "backfill-property-vectors":
+            namespaces = (
+                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
+            )
+            _print([{"user": uid, "embedded": store.refresh_property_vectors(user_id=uid)}
                     for uid in namespaces])
         elif args.command == "reindex":
             count = store.reindex()
