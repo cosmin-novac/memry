@@ -106,6 +106,11 @@ Extract:
   task you were asked to do ("corrected full version", "2-3 improved versions").
   If it has no name of its own, leave it out. An empty entity list is fine and
   is much better than a wrong one.
+  When the conversation names two or more different things by the same name
+  (two invoices numbered 2024-117 from different senders, a "PR #42" in two
+  repositories), give each a name of its own: the shared name and what tells
+  them apart in the conversation ("Invoice 2024-117 from LexNova GmbH"). Use
+  that name for the thing in every fact, also in a fact that names only one.
 - procedural learnings (how the user wants things done)
 
 Do NOT extract:
