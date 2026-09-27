@@ -242,7 +242,9 @@ footer a{color:var(--dim)}
         <code>OPENAI_API_KEY</code> (or Anthropic, or Ollama). A decision model that
         decides which names are one thing, with calibrated probabilities:
         <code>MEMRY_DECISION_PROVIDER=jev</code> and a TypeSafe key in
-        <code>MEMRY_DECISION_API_KEY</code>. Memry does not start without both.</p></div>
+        <code>MEMRY_DECISION_API_KEY</code>. Memry does not start without both. To let
+        the text model decide instead, set <code>MEMRY_DECISION_PROVIDER=llm</code>;
+        merges then wait for you.</p></div>
       <div class="stage"><span class="num">03 · CONNECT</span>
         <h3>Plug into your agent</h3>
         <p>Claude Code: <code>claude mcp add memry -e OPENAI_API_KEY=… -e
