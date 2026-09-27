@@ -1815,7 +1815,7 @@ async function loadEntities(){
   const [entities,relations,proposals]=await Promise.all([
     api('/api/v1/entities?limit=100000&include_merged=true'),
     api('/api/v1/relations?limit=2000'),
-    api('/api/v1/entities/proposals?limit=1000')]);
+    api('/api/v1/entities/proposals?asked=true')]);
   knowledgeNames={};entities.forEach(entity=>knowledgeNames[entity.id]=entity.name);
   const names=entities.filter(entity=>!entity.merged_into);
   const active=showAllNames?names:names.filter(entity=>entity.hub);
@@ -1830,7 +1830,7 @@ async function loadEntities(){
   document.getElementById('proplist').innerHTML=proposals.length?proposals.map(proposal=>`<div class="tagrow"><span class="name">
     <b>${esc(knowledgeNames[proposal.entity_a]||proposal.entity_a)}</b> and <b>${esc(knowledgeNames[proposal.entity_b]||proposal.entity_b)}</b></span>
     <button class="act" onclick='decideProposal(${JSON.stringify(proposal.id)},"confirm",this)'>merge</button>
-    <button class="act del" onclick='decideProposal(${JSON.stringify(proposal.id)},"reject",this)'>keep separate</button></div>`).join(''):'<div class="empty">No open merge proposals.</div>';
+    <button class="act del" onclick='decideProposal(${JSON.stringify(proposal.id)},"reject",this)'>keep separate</button></div>`).join(''):'<div class="empty">Nothing to decide. Memry compares a waiting pair again once one of its two entities has more memories.</div>';
 }
 // Where this entity belongs and what belongs to it. Both are worked out from
 // the memories, so there is nothing here to file by hand.
@@ -3461,12 +3461,18 @@ def create_app(
         )
 
     async def list_proposals(request: Request) -> Response:
+        """Open merge proposals. ``asked=true`` lists only the pairs Upkeep asks a
+        person about, leaving out the pairs Memry compares again on new evidence."""
         q = request.query_params
-        proposals = store.merge_proposals(
-            user_id=_p(request).namespace(q.get("user_id")),
-            status=q.get("status", "proposed"),
-            limit=int(q.get("limit", "100")),
-        )
+        user_id = _p(request).namespace(q.get("user_id"))
+        if q.get("asked") == "true":
+            proposals = store.proposals_for_a_person(user_id)
+        else:
+            proposals = store.merge_proposals(
+                user_id=user_id,
+                status=q.get("status", "proposed"),
+                limit=int(q.get("limit", "100")),
+            )
         return JSONResponse([p.model_dump() for p in proposals])
 
     def _proposal_guard(request: Request):

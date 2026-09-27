@@ -3495,7 +3495,7 @@ class MemoryStore:
             entity = self.backend.get_entity(entity_id)
             return entity.name if entity is not None else entity_id
 
-        for proposal in self._proposals_for_a_person(user_id):
+        for proposal in self.proposals_for_a_person(user_id):
             items.append({
                 "kind": "proposal", "id": proposal.id,
                 "title": f"{entity_name(proposal.entity_a)} and {entity_name(proposal.entity_b)}",
@@ -3586,7 +3586,7 @@ class MemoryStore:
             self._upkeep_set("tag_split:count", user_id, splits_listed)
         return items
 
-    def _proposals_for_a_person(self, user_id: str | None) -> list[MergeProposal]:
+    def proposals_for_a_person(self, user_id: str | None) -> list[MergeProposal]:
         """Entity pairs Upkeep asks a person about. With a calibrated judge,
         none: a pair it could not settle waits for new evidence and is
         compared again, since a person would be guessing from the same facts."""
@@ -3604,7 +3604,7 @@ class MemoryStore:
         waiting = {entity.id for entity, _ in self._screen_rows(user_id)}
         waiting |= {p["id"] for p in self._upkeep_get("entity_review:pending", user_id, [])}
         return (
-            len(self._proposals_for_a_person(user_id))
+            len(self.proposals_for_a_person(user_id))
             + len(self._upkeep_get("conflict:pending", user_id, []))
             + len(self._upkeep_get("consolidation:pending", user_id, []))
             + len(waiting)

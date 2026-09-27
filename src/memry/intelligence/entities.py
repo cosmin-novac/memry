@@ -937,10 +937,18 @@ def resolve_open_proposals(
             )
             outcome["kept"] += 1
     # The judge's calls are independent, so they run side by side; the store
-    # is changed one pair at a time afterwards.
+    # is changed one pair at a time afterwards. A pair of one name raised
+    # before P(different) was stored is asked once more, for the rule below.
     decided = parallel(
-        lambda item: compare(judge, backend, item[1], item[2], item[0].compared_step), pending
+        lambda item: compare(
+            judge, backend, item[1], item[2],
+            0 if _one_name(item[1], item[2]) and item[0].different is None
+            else item[0].compared_step,
+        ),
+        pending,
     )
+    namesakes: list[tuple[float, MergeProposal, Entity, Entity]] = []
+    held_apart: list[tuple[str, str]] = []
     for (proposal, entity_a, entity_b), verdict in zip(pending, decided):
         if (verdict.action == "merge" and auto_confirm
                 and merge_pair(backend, entity_a, entity_b)):
@@ -950,23 +958,84 @@ def resolve_open_proposals(
             backend.set_proposal_status(proposal.id, "rejected")
             outcome["rejected"] += 1
         else:
-            if verdict.probabilities is not None:
+            probabilities = verdict.probabilities
+            if probabilities is not None:
                 backend.update_proposal_judgement(
-                    proposal.id, confidence=verdict.probabilities["same"],
-                    reason=pair_reason(judge, verdict.probabilities),
+                    proposal.id, confidence=probabilities["same"],
+                    reason=pair_reason(judge, probabilities),
                     compared_step=verdict.step,
-                    different=verdict.probabilities["different"],
+                    different=probabilities["different"],
                 )
             elif verdict.step != proposal.compared_step:  # a step with nothing to ask
                 backend.update_proposal_judgement(
                     proposal.id, confidence=proposal.confidence, reason=proposal.reason,
                     compared_step=verdict.step,
                 )
+            same, different = ((probabilities["same"], probabilities["different"])
+                               if probabilities is not None
+                               else (proposal.confidence, proposal.different))
+            if auto_confirm and _one_name(entity_a, entity_b) and different is not None:
+                if different < judge.pair_apart_probability:
+                    namesakes.append((same, proposal, entity_a, entity_b))
+                    continue
+                held_apart.append((entity_a.id, entity_b.id))
             outcome["kept"] += 1
+    if namesakes:
+        joined = join_namesakes(backend, scope, namesakes, held_apart)
+        outcome["confirmed"] += joined
+        outcome["kept"] += len(namesakes) - joined
     if proposal_ids is None and auto_confirm and judge is not None:
         outcome["chosen"] = choose_among_candidates(
             backend=backend, scope=scope, apart=judge.pair_apart_probability)
     return outcome
+
+
+def _one_name(a: Entity, b: Entity) -> bool:
+    return bool(a.normalized) and a.normalized == b.normalized
+
+
+def join_namesakes(
+    backend: MemoryBackend,
+    scope: Scope,
+    pairs: list[tuple[float, MergeProposal, Entity, Entity]],
+    held_apart: list[tuple[str, str]] = (),
+) -> int:
+    """Join open pairs of one name that the judge has not said are different.
+
+    A mention of a name the store already has joins the likeliest entity of
+    that name unless the judge says "different" (``resolve_mentions``).
+    Entities of one name that split before that rule existed waited for the
+    merge bar instead, and with one memory each they never reached it: six
+    "FacTShirt" entities in a real store. Here they get the same rule, the
+    likeliest pair first. Two entities kept apart, by the judge (P(different)
+    at the apart bar) or by a person, are never joined through a third."""
+    involved = {backend.resolve_entity_id(entity.id)
+                for _, _, a, b in pairs for entity in (a, b)}
+    apart = list(held_apart) + [
+        (p.entity_a, p.entity_b)
+        for p in backend.list_proposals(scope, status="rejected", limit=100_000)
+        if backend.resolve_entity_id(p.entity_a) in involved
+        and backend.resolve_entity_id(p.entity_b) in involved
+    ]
+    joined = 0
+    for _, proposal, a, b in sorted(pairs, key=lambda item: -item[0]):
+        first, second = backend.resolve_entity_id(a.id), backend.resolve_entity_id(b.id)
+        if first is None or second is None:
+            continue
+        if first != second:
+            if any({backend.resolve_entity_id(x), backend.resolve_entity_id(y)} == {first, second}
+                   for x, y in apart):
+                continue
+            keep, drop = backend.get_entity(first), backend.get_entity(second)
+            if keep is None or drop is None:
+                continue
+            if backend.count_entity_memories(drop.id) > backend.count_entity_memories(keep.id):
+                keep, drop = drop, keep
+            if not merge_pair(backend, keep, drop):
+                continue
+        backend.set_proposal_status(proposal.id, "confirmed")
+        joined += 1
+    return joined
 
 
 def choose_among_candidates(
@@ -1005,10 +1074,11 @@ def choose_among_candidates(
     for thin_id, pairs in options.items():
         if any(p.compared_step != CONTEXT_STEP for p, _ in pairs):
             continue
-        options = [(p, other) for p, other in pairs if p.different is not None and p.different < apart]
-        if len(options) < 2:
+        open_pairs = [(p, other) for p, other in pairs
+                      if p.different is not None and p.different < apart]
+        if len(open_pairs) < 2:
             continue
-        ranked = sorted(options, key=lambda pair: -pair[0].confidence)
+        ranked = sorted(open_pairs, key=lambda pair: -pair[0].confidence)
         (best, keep_id), (second, _) = ranked[0], ranked[1]
         if best.confidence < CHOICE_FLOOR or best.confidence - second.confidence < CHOICE_LEAD:
             continue

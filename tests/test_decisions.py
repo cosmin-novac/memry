@@ -1478,3 +1478,72 @@ def test_a_memory_naming_both_entities_is_not_evidence_they_are_one():
     assert len(store.entities(user_id="ada")) == 2
     assert judge.states == []
     store.close()
+
+
+def _one_name_pairs(store, names, pairs, compared_step=2):
+    """Entities ``names`` (one memory each) and open pairs between them, as
+    (index, index, P(same), P(different) or None when never stored)."""
+    from memry.models import MergeProposal
+
+    entities = [_entity_with(store, name, [f"{name} note {i}"]) for i, name in enumerate(names)]
+    for first, second, same, different in pairs:
+        store.backend.add_proposal(MergeProposal(
+            entity_a=entities[first].id, entity_b=entities[second].id, user_id="ada",
+            confidence=same, compared_step=compared_step, different=different))
+    return entities
+
+
+@pytest.mark.parametrize("same, different, joined", [
+    (0.60, 0.20, True),    # the judge did not say "different": one entity
+    (0.20, 0.70, False),   # it did: two
+])
+def test_entities_of_one_name_join_unless_the_judge_says_different(same, different, joined):
+    """Two "FacTShirt" entities split before a known name joined its entity,
+    and one memory each never reached the merge bar. Their pair never had
+    P(different) stored, so it is asked once more, and it joins on the rule a
+    save uses."""
+    store, _, judge = _judged_store(lambda state: (same, different))
+    first, second = _one_name_pairs(store, ["FacTShirt", "FacTShirt"],
+                                    [(0, 1, 0.5, None)])
+    store.resolve_entities(user_id="ada")
+    assert judge.states  # asked again: nothing about "different" was stored
+    together = store.backend.resolve_entity_id(first.id) == store.backend.resolve_entity_id(second.id)
+    assert together is joined
+    store.close()
+
+
+def test_a_pair_of_one_name_uses_the_stored_answer():
+    store, _, judge = _judged_store(lambda state: (0.5, 0.2))
+    first, second = _one_name_pairs(store, ["FacTShirt", "FacTShirt"], [(0, 1, 0.6, 0.2)])
+    store.resolve_entities(user_id="ada")
+    assert not judge.states
+    assert store.backend.resolve_entity_id(second.id) == first.id or \
+        store.backend.resolve_entity_id(first.id) == second.id
+    store.close()
+
+
+def test_different_names_still_wait_for_the_merge_bar():
+    store, _, _ = _judged_store(lambda state: (0.6, 0.2))
+    camera, numbered = _one_name_pairs(store, ["camera", "Camera 92573"], [(0, 1, 0.6, 0.2)])
+    store.resolve_entities(user_id="ada")
+    assert store.backend.resolve_entity_id(numbered.id) == numbered.id
+    assert store.backend.resolve_entity_id(camera.id) == camera.id
+    store.close()
+
+
+def test_two_entities_kept_apart_are_never_joined_through_a_third():
+    """A and C were kept separate by a person; A~B and B~C are open. A and B
+    join (the likelier pair), and B~C waits, since joining it would join A
+    and C."""
+    from memry.models import MergeProposal
+
+    store, _, _ = _judged_store(lambda state: (0.5, 0.2))
+    a, b, c = _one_name_pairs(store, ["FacTShirt"] * 3,
+                              [(0, 1, 0.7, 0.1), (1, 2, 0.6, 0.2)])
+    store.backend.add_proposal(MergeProposal(
+        entity_a=a.id, entity_b=c.id, user_id="ada", confidence=0.5, status="rejected"))
+    store.resolve_entities(user_id="ada")
+    resolve = store.backend.resolve_entity_id
+    assert resolve(a.id) == resolve(b.id)
+    assert resolve(a.id) != resolve(c.id)
+    store.close()

@@ -740,3 +740,25 @@ def test_the_name_screen_runs_on_its_own_over_rest_and_says_so_without_a_provide
             assert done.json()["skipped"] == -1, "no provider: nothing asked, nothing changed"
     finally:
         s.close()
+
+
+def test_the_entity_tab_lists_only_the_pairs_memry_asks_about(client):
+    """With a calibrated judge a pair it could not settle waits for more
+    memories, and nobody is asked; the full list still has it."""
+    from memry.models import MergeProposal
+    from memry.providers.decisions import NoneDecider
+
+    s = client.store
+    a = s.backend.insert_entity(Entity(name="camera", normalized="camera", user_id="ada"))
+    b = s.backend.insert_entity(Entity(name="Camera 92573", normalized="camera 92573",
+                                       user_id="ada"))
+    s.backend.add_proposal(MergeProposal(entity_a=a.id, entity_b=b.id, user_id="ada"))
+    asked = "/api/v1/entities/proposals?asked=true&user_id=ada"
+    assert len(client.get(asked).json()) == 1  # no judge: a person decides
+
+    class Calibrated(NoneDecider):
+        available = calibrated = True
+
+    s.decider = Calibrated()
+    assert client.get(asked).json() == []
+    assert len(client.get("/api/v1/entities/proposals?user_id=ada").json()) == 1
