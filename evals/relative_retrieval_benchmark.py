@@ -591,7 +591,7 @@ def _person_fillers(who: str, rnd: random.Random) -> list[str]:
               w=who, v=rnd.choice(TEAMS)),
         _pick(rnd, ["{w} reports to {v}.", "{w}'s manager is {v}."], w=who, v=person(rnd)),
         _pick(rnd, ["{w} speaks {v} and {x}.", "{w} is fluent in {v} and {x}."],
-              w=who, v=rnd.choice(LANGUAGES_SPOKEN), x=rnd.choice(LANGUAGES_SPOKEN)),
+              w=who, **dict(zip("vx", rnd.sample(LANGUAGES_SPOKEN, 2)))),
         _pick(rnd, ["{w} cycles to work.", "{w} takes the train to the office."], w=who),
         _pick(rnd, ["{w} is in the office on {v}s.", "{w} comes in on {v}s."],
               w=who, v=rnd.choice(DAYS)),
