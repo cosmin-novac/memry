@@ -54,6 +54,7 @@ import json
 import os
 import pathlib
 import random
+import re
 import statistics
 import sys
 import time
@@ -1112,6 +1113,102 @@ def build_world_dense(size: int, seed: int = 11, owner: bool = False) -> dict:
             "queries": dict(queries), "types": types}
 
 
+# Tags as an agent writes them when it saves (the real store: 1 to 3 a memory,
+# the most specific a median 7 members): a topic, sometimes a synonym of it or
+# none, a detail, a broad tag. Topics, not answer sets: the car topic holds
+# prices beside insurance, dealers and test drives.
+TOPIC_TAGS = {
+    "car": [("car search", .55), ("cars", .2), ("car purchase", .1)],
+    "groceries": [("groceries", .55), ("spending", .2), ("household", .1)],
+    "spending": [("spending", .5), ("household", .15)],
+    "restaurants": [("restaurants", .6), ("food", .2), ("dining out", .05)],
+}
+SUBTOPICS = ["implementation", "billing", "deployment", "planning", "design", "security",
+             "performance", "meetings", "hiring", "docs", "testing", "support"]
+PERSONAL = ["home", "health", "family", "work", "travel", "hobbies", "books", "fitness",
+            "admin", "friends", "food", "shopping"]
+
+
+def _weighted(rnd: random.Random, options: list[tuple[str, float]]) -> str | None:
+    x = rnd.random()
+    for tag, share in options:
+        if x < share:
+            return tag
+        x -= share
+    return None
+
+
+def _owner_topic(text: str) -> str | None:
+    if re.search(r"groceries|Groceries", text):
+        return "groceries"
+    if any(f"{brand} {model}" in text for brand, model in CAR_MODELS):
+        return "car"
+    if re.search(r"spent \d+ euros on|euro refund from", text):
+        return "spending"
+    if re.search(r"liked the food at|loved dinner at|did not like the food at|disappointing|"
+                 r"had lunch at", text):
+        return "restaurants"
+    return None
+
+
+def tag_world(world: dict, seed: int = 21) -> None:
+    """Gives every memory 1 to 3 tags (``m["tags"]``)."""
+    rnd = random.Random(seed)
+    parent = {child: par for child, par, kind in world["pairs"]
+              if kind in ("version", "component", "occurrence")}
+
+    def root(name: str) -> str:
+        while name in parent:
+            name = parent[name]
+        return name
+
+    details: dict[str, list[str]] = defaultdict(lambda: rnd.sample(SUBTOPICS, 6))
+
+    for m in world["memories"]:
+        text, names = m["text"], m["entities"]
+        topic = _owner_topic(text)
+        tags: list[str] = []
+        if topic:
+            tags.append(_weighted(rnd, TOPIC_TAGS[topic]))
+            if topic == "car":
+                detail = {"costs": ("prices", .3), "quoted": ("prices", .3),
+                          "Insurance": ("insurance", .5), "test drove": ("test drives", .4)}
+                for word, (tag, share) in detail.items():
+                    if word in text and rnd.random() < share:
+                        tags.append(tag)
+                if rnd.random() < .25:
+                    tags.append(next(brand.lower() for brand, model in CAR_MODELS
+                                     if f"{brand} {model}" in text))
+            if topic == "groceries" and rnd.random() < .3:
+                tags.append(next((s.lower() for s in SHOPS if s in text), None))
+            money = topic in ("groceries", "spending") or re.search(r"costs|quoted|Insurance", text)
+            if money and rnd.random() < .5:
+                tags.append("financial")
+            if topic == "restaurants" and rnd.random() < .3:
+                tags.append("personal")
+        elif names and names[0] != OWNER:
+            thing = root(names[0])
+            kind = world["types"].get(thing, "")
+            tags.append(thing.lower() if rnd.random() < .8 else
+                        names[0].lower() if rnd.random() < .5 else None)
+            if rnd.random() < .7:  # a task within the thing, like "bildy-billing"
+                tags.append(f"{thing.split()[0].lower()}-{rnd.choice(details[thing])}")
+            elif rnd.random() < .3:
+                tags.append(rnd.choice(SUBTOPICS))
+            if rnd.random() < .4:
+                tags.append({"person": "people", "event": "events"}.get(kind, "engineering"))
+        elif names:  # the owner's own life
+            tags += rnd.sample(PERSONAL, rnd.choice([1, 1, 2]))
+            if rnd.random() < .3:
+                tags.append("personal")
+        else:  # notes on a topic word
+            word = re.match(r"Note on (\w+)", text)
+            tags.append(word.group(1) if word and rnd.random() < .6 else None)
+            tags.append(rnd.choice(["planning", "engineering"]))
+        tags = list(dict.fromkeys(t for t in tags if t))[:3]
+        m["tags"] = tags or ["personal" if OWNER in text else "engineering"]
+
+
 def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed: int = 3,
                 decider=None, property_dimensions: int | None = None):
     """The world in a fresh store, with compared pairs as ``links`` says.
@@ -1131,7 +1228,7 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
     for m, vector in zip(world["memories"], vectors):
         memory = store.backend.insert_memory(
             Memory(content=m["text"], user_id=USER, created_at=stamp, updated_at=stamp,
-                   embedding_model=embedder.model_id),
+                   embedding_model=embedder.model_id, categories=m.get("tags", [])),
             embedding=vector)
         memory_ids.append(memory.id)
         for name in m["entities"]:
