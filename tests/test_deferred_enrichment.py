@@ -12,11 +12,17 @@ from conftest import FakeLLM, fact, facts_response, mcp_call
 
 from memry.config import Config
 from memry.enrichment import EnrichmentWorker
+from memry.intelligence.extraction import COVERAGE_SYSTEM
 from memry.mcp_server import INSTRUCTIONS, create_server
 from memry.models import parse_ts
 from memry.providers.embeddings import HashEmbedder
 from memry.rest import create_app
 from memry.store import MemoryStore
+
+
+def _audit(*missing: str) -> str:
+    """The coverage audit's answer, which runs after every distillation."""
+    return json.dumps({"missing": list(missing)})
 
 
 def _store(db_path: str, llm: FakeLLM) -> MemoryStore:
@@ -61,7 +67,7 @@ def test_pending_save_is_recovered_after_restart(tmp_path):
     first.close()
 
     llm = FakeLLM([
-        facts_response(fact("Marcus prefers concise answers")),
+        facts_response(fact("Marcus prefers concise answers")), _audit(),
     ])
     second = _store(path, llm)
     outcome = second.process_pending_enrichments()
@@ -93,8 +99,8 @@ def test_failed_enrichment_keeps_active_raw_memory_for_retry(tmp_path):
 
 def test_worker_batch_limit_preserves_independent_pending_records(tmp_path):
     llm = FakeLLM([
-        facts_response(fact("Fact one")),
-        facts_response(fact("Fact two")),
+        facts_response(fact("Fact one")), _audit(),
+        facts_response(fact("Fact two")), _audit(),
     ])
     store = _store(str(tmp_path / "memry.db"), llm)
     for number in ("one", "two", "three"):
@@ -113,7 +119,7 @@ def test_worker_batch_limit_preserves_independent_pending_records(tmp_path):
 
 def test_two_minute_quiet_period_delays_enrichment(tmp_path):
     llm = FakeLLM([
-        facts_response(fact("Marcus prefers concise answers")),
+        facts_response(fact("Marcus prefers concise answers")), _audit(),
     ])
     store = _store(str(tmp_path / "memry.db"), llm)
     saved = store.add_deferred(
@@ -132,7 +138,7 @@ def test_two_minute_quiet_period_delays_enrichment(tmp_path):
 
     assert early == {"claimed": 0, "succeeded": 0, "failed": 0, "errors": []}
     assert ready == {"claimed": 1, "succeeded": 1, "failed": 0, "errors": []}
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2  # extraction and the coverage audit
     store.close()
 
 
@@ -148,6 +154,7 @@ def test_related_pending_saves_are_extracted_as_one_context(tmp_path):
                 categories=["regression testing"],
             ),
         ),
+        _audit(),
     ])
     store = _store(str(tmp_path / "memry.db"), llm)
     metadata = {
@@ -176,7 +183,7 @@ def test_related_pending_saves_are_extracted_as_one_context(tmp_path):
     )
 
     assert outcome == {"claimed": 2, "succeeded": 2, "failed": 0, "errors": []}
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2  # one extraction for both, and the coverage audit
     prompt = llm.calls[0][1]
     assert "Local tool tests cover deterministic behavior." in prompt
     assert "E2E tests cover final agent quality." in prompt
@@ -207,7 +214,9 @@ def test_lost_context_labels_are_restored_from_the_saves(tmp_path):
     the save's episode; a save without a label leaves nothing to restore."""
     llm = FakeLLM([
         facts_response(fact("The kitchen needs new sockets."), fact("Tiles arrive on Friday.")),
+        _audit(),
         facts_response(fact("The user likes green tea.")),
+        _audit(),
     ])
     store = _store(str(tmp_path / "memry.db"), llm)
     store.add_deferred("Kitchen: new sockets, tiles on Friday.", user_id="ada", run_id="r1",
@@ -238,6 +247,7 @@ def test_same_scope_burst_coalesces_without_explicit_context(tmp_path):
             fact("Fact one in the shared client burst."),
             fact("Fact two in the shared client burst."),
         ),
+        _audit(),
     ])
     store = _store(str(tmp_path / "memry.db"), llm)
     first = store.add_deferred("Fact one", user_id="marcus", run_id="run-1")
@@ -251,7 +261,7 @@ def test_same_scope_burst_coalesces_without_explicit_context(tmp_path):
 
     assert outcome["claimed"] == 2
     assert outcome["succeeded"] == 2
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2  # one extraction for both, and the coverage audit
     assert set(first.episode_ids + second.episode_ids) == {
         episode_id
         for memory in store.get_all(user_id="marcus", run_id="run-1")
@@ -292,7 +302,7 @@ def test_hosted_mcp_worker_enriches_after_ack(tmp_path, monkeypatch):
         lambda store: EnrichmentWorker(store, quiet_seconds=0),
     )
     llm = FakeLLM([
-        facts_response(fact("Ada lives in Berlin")),
+        facts_response(fact("Ada lives in Berlin")), _audit(),
     ])
     store = _store(str(tmp_path / "memry.db"), llm)
     with TestClient(create_app(store), base_url="http://127.0.0.1:8787") as client:
@@ -307,4 +317,39 @@ def test_hosted_mcp_worker_enriches_after_ack(tmp_path, monkeypatch):
 
         assert store.stats()["pending_enrichments"] == 0
         assert [m.content for m in store.get_all()] == ["Ada lives in Berlin"]
+    store.close()
+
+
+def test_the_coverage_audit_runs_after_distillation(tmp_path):
+    """The deferred save (the MCP default) is audited as a direct save is:
+    after distillation, one call compares the saved text with the facts, and
+    a gap is reported and noted where the raw text went."""
+    llm = FakeLLM([
+        facts_response(fact("The skill fills timesheets")),
+        _audit("must edit XML directly rather than openpyxl"),
+    ])
+    store = _store(str(tmp_path / "memry.db"), llm)
+    raw = store.add_deferred(
+        "The skill fills timesheets and must edit XML directly rather than openpyxl.",
+        user_id="u").actions[0].memory_id
+
+    result = store.distill(raw)
+
+    assert llm.calls[1][0] == COVERAGE_SYSTEM
+    assert "STORED FACTS:\n- The skill fills timesheets" in llm.calls[1][1]
+    assert result.warnings and "XML directly" in result.warnings[0]
+    distilled = next(e for e in store.history(raw) if e.event == "SUPERSEDE")
+    assert distilled.reason == ("distilled with its context into 1 fact(s); not captured "
+                                "as facts: must edit XML directly rather than openpyxl")
+    store.close()
+
+
+def test_the_worker_audits_what_it_distilled(tmp_path):
+    llm = FakeLLM([facts_response(fact("Ada lives in Berlin")), _audit()])
+    store = _store(str(tmp_path / "memry.db"), llm)
+    store.add_deferred("Ada lives in Berlin", user_id="ada")
+
+    assert store.process_pending_enrichments()["succeeded"] == 1
+    assert llm.calls[1][0] == COVERAGE_SYSTEM
+    assert llm.responses == []
     store.close()

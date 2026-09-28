@@ -226,11 +226,6 @@ SESSION_HOURS = 3.0
 OWNER_CANDIDATES = 3
 
 
-def pair_step(count: int) -> int:
-    """The funnel step a pair whose smaller side has ``count`` memories is at."""
-    return max((step for step in PAIR_STEPS if count >= step), default=0)
-
-
 def memories_shown(step: int) -> int:
     """Memories shown per side at a step: 10, and 50 at the last step. Jev reads
     long profiles: one contradicting fact placed last among 100 facts still gave
@@ -701,22 +696,6 @@ def pair_state(a: Profile, b: Profile) -> str:
                    "conversations that saved its facts; they name neither entity.")
     return ("Two entries from one person's long-term memory store." + header
             + "\n\n" + side("A", a) + "\n\n" + side("B", b))
-
-
-def judge_pair(decider: Decider, a: Profile, b: Profile) -> dict[str, float] | None:
-    """P(same), P(different) and P(unsure), averaged over both orders. None
-    when the judge did not answer both."""
-    def ask(state: str):
-        return decider.decide(state, {"pair": PAIR_QUESTION})["pair"]
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        answers = list(pool.map(ask, (pair_state(a, b), pair_state(b, a))))
-    if not all(answer.available and answer.probabilities for answer in answers):
-        return None
-    return {
-        option: sum(answer.probabilities.get(option, 0.0) for answer in answers) / 2
-        for option in PAIR_QUESTION.criteria
-    }
 
 
 def judge_pair_and_belongs(

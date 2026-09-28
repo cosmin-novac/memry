@@ -6,7 +6,10 @@ superseded* (kept for audit + time-travel), never destroyed.
 
 Decisions:
 - ADD      - genuinely new information -> new memory
-- UPDATE   - refines/extends an existing memory -> rewrite it in place
+- UPDATE   - refines/extends an existing memory -> rewrite it in place with
+             the merged text the text model writes. When nothing wrote that
+             text (no text model), the existing memory is kept and superseded
+             by the new one, so no text is lost.
 - DELETE   - contradicts an existing memory -> invalidate old, add new,
              link old.superseded_by -> new.id  (temporal supersede).
              Only where little is at stake: see ``held_back``. Otherwise both
@@ -127,6 +130,28 @@ def _decide_action(
     }
 
 
+#: Appended to the reconcile prompt when a decision provider has already
+#: chosen UPDATE: the text model only writes the merged sentence.
+MERGE_REQUEST = ('The action is decided: UPDATE memory [0]. Reply with action "UPDATE", '
+                 "target 0 and, as content, the merged replacement text.")
+
+
+def write_merged(llm: LLM, existing: str, new: str) -> str | None:
+    """The merged text for an UPDATE a decision provider chose, written by
+    the text model with the prompt the no-provider path uses. None when there
+    is no text model, it failed, or it wrote nothing."""
+    if not llm.available:
+        return None
+    state = f"EXISTING memories:\n[0] {existing}\n\nNEW fact:\n{new}\n\n{MERGE_REQUEST}"
+    try:
+        raw = llm.complete(RECONCILE_SYSTEM, state, json_schema=RECONCILE_SCHEMA)
+    except Exception:  # a provider hiccup must not cost the save its text
+        return None
+    parsed = parse_lenient_json(raw)
+    content = parsed.get("content") if isinstance(parsed, dict) else None
+    return content.strip() if isinstance(content, str) and content.strip() else None
+
+
 #: Metadata key on a memory that was kept beside the one it contradicts.
 CONFLICT_KEY = "conflict"
 
@@ -168,8 +193,13 @@ def reconcile_candidate(
     retrieval_cfg: RetrievalConfig | None = None,
     supersede_cfg: SupersedeConfig | None = None,
     prepare_update: Callable[[str, str], dict[str, Any]] | None = None,
+    created_at: str | None = None,
 ) -> AddAction:
-    """Apply one candidate fact against the store and return what happened."""
+    """Apply one candidate fact against the store and return what happened.
+
+    ``created_at`` is the time of the save (``MemoryStore.add``): a new
+    memory's ``created_at``, ``updated_at`` and ``valid_from``, and the
+    ``updated_at`` of a memory an UPDATE rewrites. The clock when None."""
 
     # Fast path: exact duplicate needs no LLM round-trip.
     norm = _normalize(candidate.content)
@@ -183,6 +213,7 @@ def reconcile_candidate(
             )
 
     decision: dict[str, Any] = {"action": "ADD", "target": None, "content": None, "reason": "new information"}
+    judged: dict[str, Any] | None = None
     if similar:
         listing = "\n".join(
             f"[{i}] {r.memory.content}" for i, r in enumerate(similar)
@@ -217,8 +248,19 @@ def reconcile_candidate(
             reason=reason or "already known",
         )
 
+    # An UPDATE rewrites the target with merged text. The decision provider
+    # chooses the action only, so the text model writes that text; when
+    # nothing wrote it, overwriting the target with the new fact alone would
+    # lose what only the target said, so the new memory supersedes it instead.
+    superseding = False
+    new_content = ""
     if action == "UPDATE" and target is not None:
-        new_content = str(decision.get("content") or candidate.content)
+        new_content = str(decision.get("content") or "").strip()
+        if not new_content and judged is not None:
+            new_content = write_merged(llm, target.content, candidate.content) or ""
+        superseding = not new_content
+
+    if action == "UPDATE" and target is not None and not superseding:
         embedding = _embed_or_none(embedder, new_content)
         merged_sources = list(dict.fromkeys(target.source_episode_ids + episode_ids))
         prepared = prepare_update(target.id, new_content) if prepare_update else {}
@@ -236,9 +278,12 @@ def reconcile_candidate(
             embedding_model=embedder.model_id if embedding else None,
             importance=max(target.importance, candidate.importance),
             source_episode_ids=merged_sources,
+            touch=created_at is None,
             **extra,
             **prepared,
         )
+        if created_at is not None:
+            backend.set_memory_timestamp(target.id, created_at)
         backend.add_event(
             MemoryEvent(
                 memory_id=target.id,
@@ -270,13 +315,14 @@ def reconcile_candidate(
         user_id=scope.user_id,
         agent_id=scope.agent_id,
         run_id=scope.run_id,
-        importance=candidate.importance,
+        importance=(max(target.importance, candidate.importance)
+                    if superseding and target is not None else candidate.importance),
         categories=candidate.categories,
         entities=candidate.entities,
         metadata=metadata,
         source_episode_ids=episode_ids,
-        created_at=utcnow(),
-        updated_at=utcnow(),
+        created_at=created_at or utcnow(),
+        updated_at=created_at or utcnow(),
     )
     embedding = _embed_or_none(embedder, candidate.content)
     if embedding:
@@ -291,6 +337,8 @@ def reconcile_candidate(
                 f"kept beside memory {target.id}, which it contradicts, "
                 f"because {held}. {reason}".strip()
                 if held and target is not None
+                else f"updates memory {target.id}, which it supersedes. {reason}".strip()
+                if superseding and target is not None
                 else reason or "new information"
             ),
         )
@@ -305,7 +353,7 @@ def reconcile_candidate(
             conflicts_with=target.id,
         )
 
-    if action == "DELETE" and target is not None:
+    if (action == "DELETE" or superseding) and target is not None:
         backend.invalidate_memory(target.id, superseded_by=stored.id)
         backend.add_event(
             MemoryEvent(
@@ -313,11 +361,15 @@ def reconcile_candidate(
                 event="SUPERSEDE",
                 old_content=target.content,
                 new_content=stored.content,
-                reason=reason or "contradicted by new information",
+                reason=(
+                    "updated by new information, with no merged text written: "
+                    f"kept and superseded. {reason}".strip()
+                    if superseding else reason or "contradicted by new information"
+                ),
             )
         )
         return AddAction(
-            event="DELETE",
+            event="SUPERSEDE" if superseding else "DELETE",
             memory_id=stored.id,
             content=stored.content,
             reason=reason or f"superseded memory {target.id}",

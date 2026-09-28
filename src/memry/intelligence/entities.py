@@ -628,7 +628,8 @@ def resolve_mentions(
     lookup = Scope(user_id=scope.user_id) if scope.user_id is not None else scope
     # A name the store has never seen is screened before it becomes an entity:
     # mechanically first (free, certain), then one typed question per name. A
-    # name that already has an entity is left alone; upkeep reviews those.
+    # name that already has an entity is left alone; upkeep reviews those
+    # without a verdict (one made here is stored on the entity it creates).
     cleaned = [s.strip() for s in surfaces if s and s.strip()]
     owner_name = owner.name.strip().casefold() if owner is not None else None
     unseen = [
@@ -738,6 +739,9 @@ def resolve_mentions(
             target = max(likely, key=lambda option: option[0])[1]
             proposals = []
         if target is None:
+            # The screen's verdict is kept on the new entity, as the weekly
+            # screen keeps its own: that pass asks only about names without one.
+            verdict = verdicts.get(normalized)
             target = backend.insert_entity(
                 Entity(
                     name=surface,
@@ -746,6 +750,7 @@ def resolve_mentions(
                     user_id=scope.user_id,
                     agent_id=scope.agent_id,
                     run_id=scope.run_id,
+                    metadata={"screen": {**verdict, "at": utcnow()}} if verdict else {},
                 )
             )
             for proposal in proposals:

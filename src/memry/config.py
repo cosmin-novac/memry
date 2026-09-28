@@ -167,8 +167,11 @@ class RetrievalConfig(BaseModel):
     relational_sharpness: float = 1.0
     #: "linked" fusion: what judges whether a memory states the property asked.
     #: "vector": the property vectors, compared in memory. "jev": the decision
-    #: provider judges the first ``decision.rerank_pool`` in one call.
-    relational_relevance: str = "vector"
+    #: provider judges the first ``decision.rerank_pool`` in one call. "auto"
+    #: (the default): "jev" where the decision provider re-ranks (Jev, unless
+    #: ``decision.rerank`` is false, or a text model measured to help with
+    #: ``decision.rerank`` true), else "vector" (``MemoryStore.relevance_mode``).
+    relational_relevance: Literal["auto", "vector", "jev"] = "auto"
     #: "linked" fusion: how many leading numbers of each vector the property
     #: comparison keeps (None: all). The v3 OpenAI models are trained so a
     #: vector cut short still works; property vectors are stored this short.
@@ -213,6 +216,12 @@ class SupersedeConfig(BaseModel):
 
 class DecayConfig(BaseModel):
     enabled: bool = True
+    #: The durability pass: the decision provider estimates, per memory,
+    #: whether it matters for days, months or years, and decay reads that in
+    #: place of the type's half-life. Off unless set (MEMRY_DURABILITY): the
+    #: config is the only way to put it in the upkeep cycle or to run it now;
+    #: a stored dashboard switch alone cannot.
+    durability: bool = False
     half_life_days: float = 90.0
     floor: float = 0.15  # decayed importance never drops below floor * importance
     # Memory type shapes how fast a memory fades. Episodic memories are dated
@@ -422,6 +431,7 @@ def _from_env() -> dict[str, Any]:
         data.setdefault("tags", {})["enabled"] = tag_enabled.lower() not in (
             "0", "false", "off", "no",
         )
+    put("decay", "durability", _bool(e("MEMRY_DURABILITY")))
     tag_interval = e("MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS")
     if tag_interval:
         try:

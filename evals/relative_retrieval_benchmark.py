@@ -1333,7 +1333,7 @@ def _asks_decider(store: MemoryStore, relational: bool) -> bool:
     if not getattr(decider, "available", False):
         return False
     rerank = cfg.decision.rerank if cfg.decision.rerank is not None else decider.reranks_by_default
-    judged = relational and cfg.retrieval.relational_relevance == "jev"
+    judged = relational and store.relevance_mode() == "jev"
     return judged or bool(rerank and getattr(decider, "may_rerank", True))
 
 

@@ -177,84 +177,44 @@ def _node(node_id: str, entity_type: str | None = None, **kw) -> Node:
                 entity_type=entity_type, **kw)
 
 
-def _links(*pairs: tuple[str, str]) -> list[tuple[str, str]]:
-    return list(pairs)
-
-
 PART_AND_PROJECT = [_node("part"), _node("nimbus", "project")]
-THREE_SHARED = _links(("part", "m1"), ("part", "m2"), ("part", "m3"),
-                      ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m3"))
 
 
-def test_a_stated_part_of_wins_over_the_anchor_it_co_occurs_with():
+def test_a_stated_part_of_makes_a_home():
     nodes = [*PART_AND_PROJECT, _node("atlas", "project")]
-    links = [*THREE_SHARED, ("atlas", "m7"), ("atlas", "m8"), ("atlas", "m9")]
 
-    homes = derive_homes(nodes, links, [("part", "part_of", "atlas")])
+    homes = derive_homes(nodes, [("part", "part_of", "atlas")])
 
     assert homes == {"part": {"id": "atlas", "share": 1.0, "source": "relation"}}
 
 
-def test_co_mention_needs_a_high_share_and_an_anchor_with_some_history():
-    assert derive_homes(PART_AND_PROJECT, THREE_SHARED, []) == {
-        "part": {"id": "nimbus", "share": 1.0, "source": "co-mention"}}
-    # the anchor itself is too thin: two memories is not a home
-    thin = _links(("part", "m1"), ("part", "m2"), ("nimbus", "m1"), ("nimbus", "m2"))
-    assert derive_homes(PART_AND_PROJECT, thin, []) == {}
-    # present in half the part's memories: below HOME_MIN_SHARE
-    half = _links(*[("part", f"m{i}") for i in (1, 2, 3, 4)],
-                  ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m9"))
-    assert derive_homes(PART_AND_PROJECT, half, []) == {}
+def test_appearing_together_makes_no_home():
+    """Homes from co-mention measured 68% right and were removed: a part that
+    rides along with a project in every memory has no home until a relation
+    or the judge gives it one."""
+    assert derive_homes(PART_AND_PROJECT, []) == {}
+    assert derive_homes(PART_AND_PROJECT, [("part", "mentioned_with", "nimbus")]) == {}
 
 
-def test_an_organization_is_a_home_only_when_a_relation_says_so():
+def test_an_organization_is_a_home_when_a_relation_says_so():
     nodes = [_node("part"), _node("acme", "organization")]
-    links = _links(("part", "m1"), ("part", "m2"), ("part", "m3"),
-                   ("acme", "m1"), ("acme", "m2"), ("acme", "m3"))
 
-    assert derive_homes(nodes, links, []) == {}
-    assert derive_homes(nodes, links, [("part", "part_of", "acme")]) == {
+    assert derive_homes(nodes, [("part", "part_of", "acme")]) == {
         "part": {"id": "acme", "share": 1.0, "source": "relation"}}
 
 
-def test_two_anchors_tied_for_the_top_leave_the_part_unhomed():
-    nodes = [_node("part"), _node("nimbus", "project"), _node("atlas", "project")]
-    links = _links(("part", "m1"), ("part", "m2"),
-                   ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m3"),
-                   ("atlas", "m1"), ("atlas", "m2"), ("atlas", "m3"))
+def test_a_person_or_a_place_is_no_home_even_when_a_relation_says_so():
+    nodes = [_node("part"), _node("ada", "person"), _node("berlin", "place")]
 
-    assert derive_homes(nodes, links, []) == {}
-
-
-def test_a_part_seen_once_needs_the_anchor_to_itself():
-    # NOTE: the explicit once-seen guard at structure.py:170 is unreachable -
-    # with one memory every count is 1, so a second home-capable anchor always
-    # trips the tie check three lines above it first. The outcome the rule
-    # wanted is what happens, so this pins the behaviour, not the branch.
-    nodes = [_node("part"), _node("nimbus", "project"), _node("acme", "organization")]
-    shared_memory = _links(("part", "m1"),
-                           ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m3"),
-                           ("acme", "m1"), ("acme", "m7"), ("acme", "m8"))
-    assert derive_homes(nodes, shared_memory, []) == {}
-
-    alone = _links(("part", "m1"),
-                   ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m3"))
-    assert derive_homes(nodes, alone, []) == {
-        "part": {"id": "nimbus", "share": 1.0, "source": "co-mention"}}
-
-
-def test_an_anchor_typed_node_never_gets_a_home_from_co_mention():
-    nodes = [_node("ada", "person"), _node("nimbus", "project")]
-    links = _links(("ada", "m1"), ("ada", "m2"), ("ada", "m3"),
-                   ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m3"))
-
-    assert derive_homes(nodes, links, []) == {}
+    assert derive_homes(nodes, [("part", "part_of", "ada"),
+                                ("part", "part_of", "berlin")]) == {}
 
 
 def test_home_is_one_level_so_a_home_keeps_none_of_its_own():
     nodes = [_node("part"), _node("nimbus", "project"), _node("atlas", "project")]
 
-    homes = derive_homes(nodes, THREE_SHARED, [("nimbus", "part_of", "atlas")])
+    homes = derive_homes(nodes, [("part", "part_of", "nimbus"),
+                                 ("nimbus", "part_of", "atlas")])
 
     assert set(homes) == {"part"}, "nimbus is a home, so it loses its own"
     assert homes["part"]["id"] == "nimbus"
@@ -311,6 +271,27 @@ def test_two_unhomed_names_of_the_same_kind_merge():
 
     assert [step["action"] for step in plan] == ["merge"]
     assert plan[0]["reason"] == "same name and nothing sets them apart"
+
+
+def test_a_pair_held_apart_is_never_merged_on_its_name():
+    """The rule of dd2c0e7 (``entities.join_namesakes``) holds in the
+    structure pass too: a pair the judge or a person held apart stays apart
+    however little sets it apart otherwise, under the same home as well."""
+    for homes in ({}, {"a": {"id": "nimbus"}, "b": {"id": "nimbus"}}):
+        plan = same_name_plan(_pair(type_a="concept", type_b="concept"), homes,
+                              apart=[("b", "a")])
+        assert [step["action"] for step in plan] == ["separate"]
+        assert plan[0]["reason"] == "held apart by the judge or by you"
+
+
+def test_two_held_apart_are_not_joined_through_a_third():
+    nodes = [*_pair(type_a="concept", type_b="concept"),
+             Node(id="c", name="privacy policy", normalized="privacy policy",
+                  entity_type="concept", memories=2)]
+    plan = same_name_plan(nodes, {}, apart=[("b", "c")])
+
+    assert [(step["other"], step["action"]) for step in plan] == [
+        ("c", "merge"), ("b", "separate")]
 
 
 # -------------------------------------------------------- screen_names / gate
@@ -408,6 +389,30 @@ def test_a_name_the_store_already_knows_is_not_screened_again(backend_store):
     assert resolved["nimbus"].id == existing.id
 
 
+def test_a_name_screened_at_save_is_not_asked_again_in_the_weekly_pass(backend_store):
+    """The save's verdict is stored on the entity it creates, as the weekly
+    screen stores its own, so that pass asks only about names without one."""
+    memory = _write(backend_store, "Nimbus shipped just under the deadline")
+    decider = FakeScreener({"nimbus": ("named_thing", 0.88),
+                            "deadline": ("value_or_fragment", 0.5)})
+
+    resolved = _resolve(backend_store, memory, ["Nimbus", "deadline"], decider)
+
+    assert decider.asked == ["Nimbus", "deadline"]
+    nimbus = backend_store.backend.get_entity(resolved["nimbus"].id).metadata["screen"]
+    assert (nimbus["verdict"], nimbus["probability"]) == ("named_thing", 0.88)
+    assert nimbus["at"]
+    deadline = backend_store.backend.get_entity(resolved["deadline"].id).metadata["screen"]
+    assert deadline["verdict"] == "value_or_fragment"  # below the gate: kept, and noted
+    structure = backend_store.entity_structure(user_id="ada")
+    assert structure[resolved["nimbus"].id]["why"] == "a named thing"
+
+    backend_store.decider = decider
+    assert backend_store.run_name_screen(user_id="ada") == {
+        "screened": 0, "queued": 0, "skipped": 0}
+    assert decider.asked == ["Nimbus", "deadline"]
+
+
 # ------------------------------------------------------------------- the store
 @pytest.fixture
 def store():
@@ -431,15 +436,19 @@ def _mention(store, entity: Entity, memory: Memory) -> None:
     )
 
 
-def _seed_part_and_home(store, user_id: str = "ada") -> dict[str, Entity]:
-    """A project seen three times, a part that rides along, and a duplicate
-    pair that shares a name in memories no anchor touches."""
+def _seed_part_and_home(store, user_id: str = "ada", stated: bool = True) -> dict[str, Entity]:
+    """A project seen three times, a part that rides along (``stated``: and
+    that a relation says is part of it), and a duplicate pair that shares a
+    name in memories no anchor touches."""
     nimbus = _entity(store, "Nimbus", "project", user_id)
     worker = _entity(store, "sync worker", None, user_id)
     for i in range(3):
         memory = _write(store, f"Nimbus sync worker note {i}", user_id)
         _mention(store, nimbus, memory)
         _mention(store, worker, memory)
+    if stated:
+        store.backend.add_relation(Relation(subject=worker.id, predicate="part_of",
+                                            object=nimbus.id, user_id=user_id))
     policy_a = _entity(store, "privacy policy", "concept", user_id)
     policy_b = _entity(store, "privacy policy", "concept", user_id)
     for entity in (policy_a, policy_b):
@@ -472,7 +481,7 @@ def test_a_dry_run_reports_the_whole_plan_and_applies_none_of_it(store):
     assert outcome["merged"] == 1
     assert [(step["action"], step["name"]) for step in outcome["plan"]] == [
         ("merge", "privacy policy")]
-    assert outcome["home_list"] == [("sync worker", "Nimbus", 1.0, "co-mention")]
+    assert outcome["home_list"] == [("sync worker", "Nimbus", 1.0, "relation")]
     # nothing was written: no metadata, no merge
     for entity in store.entities(user_id="ada", limit=100):
         assert not (entity.metadata or {}).get("home")
@@ -488,13 +497,46 @@ def test_the_real_pass_records_the_home_merges_the_duplicate_and_settles(store):
     assert outcome["homes_changed"] == 1 and outcome["merged"] == 1
     home = store.backend.get_entity(seeded["worker"].id).metadata["home"]
     assert home == {"id": seeded["nimbus"].id, "name": "Nimbus",
-                    "share": 1.0, "source": "co-mention"}
+                    "share": 1.0, "source": "relation"}
     _duplicate_pair(store, seeded)
     # a home has no home of its own, and the anchor is not a part
     assert not (store.backend.get_entity(seeded["nimbus"].id).metadata or {}).get("home")
 
     again = store.run_structure_pass(user_id="ada")
     assert again["homes_changed"] == 0 and again["merged"] == 0
+
+
+def test_a_part_that_only_appears_with_a_project_has_no_home(store):
+    seeded = _seed_part_and_home(store, stated=False)
+
+    structure = store.entity_structure(user_id="ada")
+    assert structure[seeded["worker"].id]["home"] is None
+    outcome = store.run_structure_pass(user_id="ada")
+    assert outcome["homes"] == 0
+    assert "home" not in (store.backend.get_entity(seeded["worker"].id).metadata or {})
+
+
+@pytest.mark.parametrize("status,different,merged", [
+    ("rejected", None, False),   # the judge's "apart", or a person's "keep separate"
+    ("proposed", 0.5, False),    # P(different) at the apart bar, still waiting
+    ("proposed", 0.93, False),
+    ("proposed", 0.49, True),    # under the bar: nothing sets them apart
+    ("proposed", None, True),    # never compared
+])
+def test_the_structure_pass_never_merges_a_pair_the_judge_held_apart(
+        store, status, different, merged):
+    from memry.models import MergeProposal
+
+    seeded = _seed_part_and_home(store)
+    store.backend.add_proposal(MergeProposal(
+        entity_a=seeded["a"].id, entity_b=seeded["b"].id, user_id="ada",
+        status=status, different=different))
+
+    outcome = store.run_structure_pass(user_id="ada")
+
+    states = [store.backend.get_entity(seeded[key].id).merged_into for key in ("a", "b")]
+    assert (outcome["merged"], outcome["separate"]) == ((1, 0) if merged else (0, 1))
+    assert any(states) is merged
 
 
 def test_entity_structure_reports_hub_status_and_the_home_it_derived(store):
@@ -700,7 +742,7 @@ def test_running_the_structure_pass_dry_over_rest_changes_nothing(client):
     body = result.json()
     assert body["dry_run"] is True
     assert [step["action"] for step in body["plan"]] == ["merge"]
-    assert body["home_list"] == [["sync worker", "Nimbus", 1.0, "co-mention"]]
+    assert body["home_list"] == [["sync worker", "Nimbus", 1.0, "relation"]]
     assert client.store.backend.get_entity(seeded["b"].id).merged_into is None
     assert not (client.store.backend.get_entity(seeded["worker"].id).metadata or {})
 
@@ -773,16 +815,15 @@ def test_a_judged_version_gets_a_home_of_any_type_but_a_person_or_a_place():
              _node("district", "place"), _node("city", "place")]
     judged = [("plan v3", "plan", 0.93), ("fest 2025", "fest", 0.88),
               ("ana", "family", 0.95), ("district", "city", 0.9)]
-    assert derive_homes(nodes, [], [], judged) == {
+    assert derive_homes(nodes, [], judged) == {
         "plan v3": {"id": "plan", "share": 0.93, "source": "judged"},
         "fest 2025": {"id": "fest", "share": 0.88, "source": "judged"},
     }
 
 
-def test_a_stated_part_of_wins_over_a_judged_home_and_a_judged_home_over_co_mention():
+def test_a_stated_part_of_wins_over_a_judged_home():
     nodes = [*PART_AND_PROJECT, _node("atlas", "project"), _node("orion", "project")]
-    links = [*THREE_SHARED, ("atlas", "m7"), ("atlas", "m8"), ("atlas", "m9")]
-    assert derive_homes(nodes, links, [("part", "part_of", "atlas")],
+    assert derive_homes(nodes, [("part", "part_of", "atlas")],
                         [("part", "orion", 0.9)])["part"]["source"] == "relation"
-    assert derive_homes(nodes, links, [], [("part", "orion", 0.9)]) == {
+    assert derive_homes(nodes, [], [("part", "orion", 0.9)]) == {
         "part": {"id": "orion", "share": 0.9, "source": "judged"}}

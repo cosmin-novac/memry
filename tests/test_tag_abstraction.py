@@ -13,7 +13,6 @@ from memry.config import Config
 from memry.intelligence.clustering import propose_synthetic_tags
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
-from memry.rest import _tag_run_due
 from memry.store import MemoryStore
 
 
@@ -199,9 +198,11 @@ def test_propose_rejects_synthetic_members():
 
 
 # ---------------------------------------------------------------- scheduler due
-def test_tag_run_due():
+def test_a_pass_is_due_once_its_interval_has_passed():
+    from memry.store import _due
+
     now = _dt("2026-07-24T00:00:00+00:00")
-    assert _tag_run_due(None, 7.0, now) is True                       # never run
-    assert _tag_run_due("2026-07-16T00:00:00+00:00", 7.0, now) is True   # 8 days
-    assert _tag_run_due("2026-07-20T00:00:00+00:00", 7.0, now) is False  # 4 days
-    assert _tag_run_due("not-a-date", 7.0, now) is True                  # unparseable
+    assert _due(None, 7.0, now) is True                       # never run
+    assert _due("2026-07-16T00:00:00+00:00", 7.0, now) is True   # 8 days
+    assert _due("2026-07-20T00:00:00+00:00", 7.0, now) is False  # 4 days
+    assert _due("not-a-date", 7.0, now) is True                  # unparseable

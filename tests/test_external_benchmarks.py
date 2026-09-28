@@ -183,26 +183,28 @@ def test_verbatim_ingest_one_memory_per_turn_with_session_time_and_turn():
     assert photo.metadata["bench"] == {
         "dataset": "locomo", "conversation": "conv-mini-1", "session_id": "session_1",
         "session_date": "1:56 pm on 8 May, 2023", "sessions": ["session_1"], "turns": ["D1:3"]}
-    assert "when" not in photo.metadata  # created_at was written: no fallback
+    assert photo.valid_from == photo.created_at
+    assert "when" not in photo.metadata  # --when never, the default
     last = by_turn["D2:4"]
     assert last.run_id == "session_2" and last.created_at == "2023-05-25T19:30:03+00:00"
-    assert ingested.created_at_set
+    # the save's episode carries the session's time too
+    [episode] = [e for e in store.episodes(user_id=xb.BENCH_USER, limit=100)
+                 if e.id in photo.source_episode_ids]
+    assert episode.created_at == "2023-05-08T13:56:02+00:00"
     assert ingested.turns_of(photo) == {"D1:3"}
     assert ingested.units_of(last, "session") == {"session_2"}
     store.close()
 
 
-def test_session_date_goes_to_when_when_created_at_cannot_be_written(monkeypatch):
-    conv = xb.load_longmemeval(LONGMEMEVAL)[0]
-    monkeypatch.setattr(xb, "_set_created_at", lambda store, memory_id, stamp: False)
-    store = verbatim_store()
-    ingested = xb.ingest(store, conv, dataset="longmemeval")
-    memories = store.get_all(user_id=xb.BENCH_USER, limit=100)
-    assert not ingested.created_at_set
-    assert {m.metadata["when"]["start"] for m in memories} == {"2023-05-20", "2023-05-22"}
-    # updated_at, which recency and the context read, still carries the date
-    assert {m.updated_at[:10] for m in memories} == {"2023-05-20", "2023-05-22"}
-    store.close()
+def test_the_harness_writes_through_the_store_api_only():
+    """``add(created_at=, memory_metadata=, now=)`` replaced the harness's own
+    writes: no private database access, no clock patching."""
+    import inspect
+
+    source = inspect.getsource(xb)
+    for gone in ("_set_created_at", "extraction_clock", "._db", "._lock",
+                 "set_memory_timestamp", "update_memory"):
+        assert gone not in source, gone
 
 
 def test_when_always_and_never():
@@ -446,17 +448,12 @@ class RuleLLM(LLM):
 
 
 def test_extract_mode_traces_memories_to_their_session_and_dates_extraction():
-    from datetime import datetime
-
-    from memry.intelligence import extraction
-
     conv = xb.load_locomo(LOCOMO)[0]
     llm = RuleLLM()
     store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(128))
     ingested = xb.ingest(store, conv, mode="extract", unit="session", dataset="locomo")
-    # extraction resolved dates against each session's day, then got its clock back
+    # extraction resolved dates against each session's day (add's ``now``)
     assert llm.todays == ["2023-05-08", "2023-05-25"]
-    assert extraction.datetime is datetime
     memories = store.get_all(user_id=xb.BENCH_USER, limit=100)
     assert len(memories) == 8
     session_1 = {"D1:1", "D1:2", "D1:3", "D1:4"}

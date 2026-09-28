@@ -60,7 +60,8 @@ key and both models). See [`docker-compose.yml`](../docker-compose.yml).
 
 Docker automatically reuses the package layer for source-only updates. A first build or
 a change to `requirements-docker.txt` installs all dependencies; normal code and dashboard
-updates install only Memry itself. To deliberately refresh every package:
+updates install only Memry itself. The image includes usearch (the `ann` extra), so it
+builds the ANN index once a store passes the threshold. To deliberately refresh every package:
 
 ```bash
 docker compose build --no-cache memry
@@ -228,11 +229,11 @@ merge-proposal review under **Upkeep** matters as much as it did before.
 |---|---|
 | Entity identity | The verdict and the confidence the automatic-merge gate reads. |
 | Entity typing | One question per name in a single call, instead of one call per batch through the text model. |
-| Reconcile | The action and its target. Writing the merged sentence for an UPDATE still needs the text model. A contradiction only replaces a memory on its own where little is at stake; see below. |
-| How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. |
+| Reconcile | The action and its target. The text model writes the merged sentence for an UPDATE; without one, the old memory is kept and superseded by the new one, so no text is lost. A contradiction only replaces a memory on its own where little is at stake; see below. |
+| How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. Off unless `MEMRY_DURABILITY=1` (`decay.durability`), for the scheduler and "run now" alike; the score does not move a memory's `updated_at`. |
 | Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. Word-for-word duplicates merge on their own; a merge the model proposed waits under Upkeep, because that judgement has not been measured. |
 | Tag drift | Suggestions only, for review under Upkeep. Never applied automatically. |
-| Search re-ranking | On with Jev, off otherwise, and only for a search the linked search did not order (a question naming nothing Memry knows, or a tag or entity filter). `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna), and is refused for one that was not. |
+| Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna), and is refused for one that was not. Where it is on, `retrieval.relational_relevance` "auto" (the default) has the provider judge the first 20 of a search without a tag or entity filter, in the linked search's order when the question names a hub and in the text ranking's otherwise; the 0.35 blend then runs only for a filtered search. `"vector"` leaves the linked search to the property vectors and the blend to every search it did not order. |
 
 ### The settings, and where they came from
 
@@ -279,7 +280,8 @@ is ordered by the linked search instead (see `docs/architecture.md`, read path),
 follows the links from it directed and weighted, one link deep; that is the only link
 mode (`retrieval.relational_mode` "directed", `relational_fusion` "linked"), and a config
 naming a removed one ("typed", "undirected", "rescue", "weighted", "inherit", "gated") is
-refused at startup. Its order is not re-ranked.
+refused at startup. Its order is not re-ranked; where re-ranking is on, the provider
+judges its first 20 instead (`retrieval.relational_relevance` "auto", see the table).
 
 It is on by default with Jev. With a text model it depends on which one, measured over
 the same 228 memories and 90 questions: gpt-5.6-luna lifted recall@3 from 0.933 to 0.956
@@ -298,7 +300,7 @@ was asked. A question carrying no information still gets a confident-looking rep
 
 | Situation | Setting |
 |---|---|
-| Faster vector search past ~5k memories | `pip install "memry[ann]"` - a usearch HNSW sidecar supplies candidates above the configured threshold; `memry reindex` rebuilds it |
+| Faster vector search past ~5k memories | `pip install "memry[ann]"` (the Docker image has it) - a usearch HNSW sidecar supplies candidates above the configured threshold; `memry reindex` rebuilds it |
 | Many agents or devices sharing memory | Point every client at the same `memry serve` URL. They share one server process and one SQLite store. |
 | Several server replicas or machines writing one store | Unsupported. Do not point multiple Memry processes at the same database file. This would require a separately reviewed storage architecture. |
 
@@ -392,7 +394,7 @@ Upkeep runs on its own and asks only for what it will not decide: it lists the e
 merges below the gate, the memory merges a model proposed, the tag pairs that look like one
 subject split in two, and the names the model judged not to be entities, each with a yes
 and a no. Everything else (entity self-healing, word-for-word duplicate consolidation, and
-durability scoring when a decision provider is configured) runs on its interval, records what it changed, and can be paused with one switch.
+durability scoring when a decision provider is configured and `MEMRY_DURABILITY=1` is set) runs on its interval, records what it changed, and can be paused with one switch.
 `POST /api/v1/maintenance/run/<pass>` runs any pass now.
 
 ### Hubs, homes and shared names
@@ -410,11 +412,10 @@ earned it.
   The map asks for a little more: a planet is a hub that came up in at least two memories,
   and a person is one from the first mention. On the store above the hubs alone were 1,424
   planets, 610 of them things seen exactly once.
-- **A home** is the project or product a part belongs to, shown as
-  `AI-Flow / privacy policy`. A stated `part_of` relation sets it. Otherwise one project or
-  product has to appear in at least 70% of the part's memories, and a part seen once needs
-  that project to be the only project, product or organization in its memory. An
-  organization becomes a home only through a stated relation.
+- **A home** is the project, product or organization a part belongs to, shown as
+  `AI-Flow / privacy policy`. A stated `part_of` relation sets it, or the comparison below.
+  Appearing together in memories does not: homes from co-mention measured 68% right (86%
+  restricted) and are no longer derived.
 - **A version or a part** gets a home from the comparison itself. Whenever Memry compares
   two entities with Jev, it asks in the same call whether one is a version, a dated
   occurrence or a part of the other. At 0.80 or more, "bildy v4" gets "bildy" as its home
@@ -423,14 +424,17 @@ earned it.
   this way.
 - **A shared name** is read through home. Two entities with the same name under different
   homes are never proposed for merging. Two with the same name and nothing setting them
-  apart are merged. Two people are never merged on a name alone.
+  apart are merged. Two people are never merged on a name alone, and two that the judge or
+  you kept apart (a rejected pair, or P(different) of 0.5 or more) are never merged on
+  their name, nor joined through a third.
 
 New names are screened before they become entities. Measurements and counts ("250 ms",
 "22 tests") are dropped by rule. With a decision provider, each new name gets one typed
 question in the memory it came from, and a name judged a value or a role with at least 0.80
-probability is not made an entity. The phrase stays on the memory. Names already in the
-store get the same question during upkeep, and the ones judged a value or a role wait under
-**Upkeep** for a yes or a no.
+probability is not made an entity. The phrase stays on the memory, and a name that does
+become an entity keeps its verdict. Names in the store without a verdict get the same
+question during upkeep, and the ones judged a value or a role wait under **Upkeep** for a
+yes or a no.
 
 An entity is never deleted. When you or a rule removes a name, Memry retires it, and
 **Upkeep > Archive > Removed names** lists it with the reason and a restore button.
@@ -443,8 +447,8 @@ every merge the pass would make, and changes nothing.
 | Name screen at the 0.80 gate | 360 labelled names | screened out 31, none of them a real thing; clean from 0.70 up |
 | Hub rule using the provider's verdict | 360 labelled names | 72% of hubs are real things, and 98% of real things are hubs |
 | Hub rule, first draft: type, or two memories, or a relation | the same names | 52% and 88% |
-| Home, as shipped | 141 labelled homes | 86% correct |
-| Home from co-mention alone | the same homes | 68% correct, and 47% when the home is an organization |
+| Home from co-mention, restricted (no longer derived) | 141 labelled homes | 86% correct |
+| Home from co-mention alone (no longer derived) | the same homes | 68% correct, and 47% when the home is an organization |
 | Same name, not a person, nothing setting them apart | 78 past merge decisions | all 78 had been confirmed |
 | Version or part at 0.80 | 427 pairs: the identity benchmark and 271 generated | no true merge held back; no wrong home outside web domains and handles; none pointing the wrong way |
 

@@ -15,11 +15,13 @@ goes into a fresh in-memory store through ``MemoryStore.add``:
             through the episodes it came from, so with whole sessions a
             memory counts for every turn of its session.
 
-Every memory gets its session's date as its time: created_at and updated_at
-(``add`` takes no time, so both are written after the save, see
-``_set_created_at``), and ``metadata["when"] = {"start": "YYYY-MM-DD"}`` when
-created_at cannot be written (--when always: on every new memory).
-``metadata["bench"]`` names the conversation, session and turns it came from.
+Every save carries its session's date: ``add(created_at=...)`` makes it the
+episodes' and new memories' created_at, updated_at and valid_from (and the
+updated_at of a memory a save rewrites), and ``add(now=...)`` makes it the day
+extraction resolves "yesterday" against. With --when always a new memory
+without a "when" of its own gets ``metadata["when"] = {"start": "YYYY-MM-DD"}``.
+``metadata["bench"]`` (``add(memory_metadata=...)``) names the conversation,
+session and turns a new memory came from.
 
 Every question is asked through ``MemoryStore.search`` (user "bench", the top
 20) and scored without a model:
@@ -81,8 +83,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -93,7 +94,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 
 from memry.config import Config, EmbeddingConfig  # noqa: E402
-from memry.models import AddAction, Memory  # noqa: E402
+from memry.models import Memory  # noqa: E402
 from memry.providers.embeddings import Embedder, HashEmbedder, OpenAIEmbedder  # noqa: E402
 from memry.providers.llm import LLM, NoneLLM, build_llm  # noqa: E402
 from memry.store import MemoryStore  # noqa: E402
@@ -126,7 +127,7 @@ ABSTAIN_ANSWER = "Not mentioned in the conversation"
 
 INGEST_MODES = ("verbatim", "extract")
 EXTRACT_UNITS = ("session", "turn")
-WHEN_POLICIES = ("fallback", "always", "never")
+WHEN_POLICIES = ("never", "always")
 
 
 class FormatError(ValueError):
@@ -470,7 +471,6 @@ class Ingested:
     session_of_turn: dict[str, str]
     turn_of_episode: dict[str, str] = field(default_factory=dict)
     turns_of_memory: dict[str, set[str]] = field(default_factory=dict)
-    created_at_set: bool = True
     seconds: float = 0.0
     warnings: list[str] = field(default_factory=list)
 
@@ -496,82 +496,13 @@ def make_store(mode: str, embedder: Embedder, *, llm: LLM | None = None) -> Memo
     return MemoryStore(Config.load(db_path=":memory:"), llm=llm, embedder=embedder)
 
 
-def _set_created_at(store: MemoryStore, memory_id: str, stamp: str) -> bool:
-    """Write a memory's created_at. Neither ``MemoryStore.add`` nor the
-    backend's ``update_memory`` takes one (add stamps the wall clock), so on a
-    LocalBackend the row is written directly; False on any other backend."""
-    backend = store.backend
-    db, lock = getattr(backend, "_db", None), getattr(backend, "_lock", None)
-    if not isinstance(db, sqlite3.Connection) or lock is None:
-        return False
-    with lock:
-        cur = db.execute("UPDATE memories SET created_at = ? WHERE id = ?", (stamp, memory_id))
-        db.commit()
-    return cur.rowcount == 1
-
-
-@contextmanager
-def extraction_clock(moment: datetime | None) -> Iterator[None]:
-    """While it is open, extraction's "today" is ``moment``. Extraction
-    resolves "yesterday" against ``datetime.now()`` and ``add`` takes no
-    reference time, so without this a 2023 session's dates would come out in
-    the year the benchmark runs. Does nothing when the module has no clock to
-    replace."""
-    from memry.intelligence import extraction
-
-    real = getattr(extraction, "datetime", None)
-    if moment is None or not (isinstance(real, type) and issubclass(real, datetime)):
-        yield
-        return
-
-    class SessionClock(real):  # type: ignore[misc,valid-type]
-        @classmethod
-        def now(cls, tz=None):
-            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
-
-    extraction.datetime = SessionClock
-    try:
-        yield
-    finally:
-        extraction.datetime = real
-
-
-def _record(ingested: Ingested, action: AddAction, session: Session, keys: list[str],
-            moment: datetime | None, dataset: str, when: str) -> None:
-    """Trace the memory an action landed on to its turns and give it its
-    session's time."""
-    store = ingested.store
-    ingested.turns_of_memory.setdefault(action.memory_id, set()).update(keys)
-    memory = store.backend.get_memory(action.memory_id)
-    if memory is None:
-        return
-    meta = dict(memory.metadata or {})
-    bench = dict(meta.get("bench") or {})
-    bench.setdefault("dataset", dataset)
-    bench.setdefault("conversation", ingested.conversation.conv_id)
-    bench.setdefault("session_id", session.session_id)
-    bench.setdefault("session_date", session.date_text)
-    bench["sessions"] = list(dict.fromkeys([*bench.get("sessions", []), session.session_id]))
-    bench["turns"] = list(dict.fromkeys([*bench.get("turns", []), *keys]))
-    meta["bench"] = bench
-    new = action.event in ("ADD", "DELETE")  # DELETE: a new memory replaced an old one
-    stamped = False
-    if moment is not None and action.event != "NONE":
-        stamp = moment.isoformat(timespec="seconds")
-        if new:
-            stamped = _set_created_at(store, memory.id, stamp)
-            ingested.created_at_set = ingested.created_at_set and stamped
-        store.backend.set_memory_timestamp(memory.id, stamp)  # updated_at
-    wants_when = when == "always" or (when == "fallback" and not stamped)
-    if moment is not None and new and wants_when and not meta.get("when"):
-        meta["when"] = {"start": moment.date().isoformat()}
-    store.backend.update_memory(memory.id, metadata=meta, touch=False)
-
-
 def ingest(store: MemoryStore, conversation: Conversation, *, mode: str = "verbatim",
-           unit: str = "session", when: str = "fallback", dataset: str = "") -> Ingested:
+           unit: str = "session", when: str = "never", dataset: str = "") -> Ingested:
     """Save a conversation session by session, as ``mode`` says (see the
-    module docstring). The turns of a session are a second apart."""
+    module docstring). The turns of a session are a second apart; each save
+    carries its time (``created_at``, ``now``) and its memories' bench
+    metadata (``memory_metadata``). A memory is traced to the turns of every
+    save that landed on it."""
     if mode not in INGEST_MODES or unit not in EXTRACT_UNITS or when not in WHEN_POLICIES:
         raise ValueError(f"mode {mode!r}, unit {unit!r}, when {when!r}")
     ingested = Ingested(store, conversation, session_of_turn={
@@ -585,18 +516,23 @@ def ingest(store: MemoryStore, conversation: Conversation, *, mode: str = "verba
             moment = session.date + timedelta(seconds=offset) if session.date else None
             offset += len(group)
             keys = [t.key for t in group]
-            meta = {"bench": {"dataset": dataset, "conversation": conversation.conv_id,
-                              "session_id": session.session_id,
-                              "session_date": session.date_text, "turns": keys}}
+            bench = {"dataset": dataset, "conversation": conversation.conv_id,
+                     "session_id": session.session_id, "session_date": session.date_text,
+                     "sessions": [session.session_id], "turns": keys}
+            meta: dict[str, Any] = {"bench": bench}
+            own: dict[str, Any] = {"bench": bench}
+            if moment is not None and when == "always":
+                own["when"] = {"start": moment.date().isoformat()}
+            dated = {"created_at": moment.isoformat(timespec="seconds") if moment else None,
+                     "memory_metadata": own}
             if mode == "verbatim":
                 result = store.add(group[0].text, user_id=BENCH_USER, run_id=session.session_id,
-                                   metadata=meta, infer=False, memory_type="episodic")
+                                   metadata=meta, infer=False, memory_type="episodic", **dated)
             else:
                 meta["context"] = f"{conversation.label}, {session.date_text}".strip(", ")
-                with extraction_clock(moment):
-                    result = store.add([{"role": t.role, "content": t.raw} for t in group],
-                                       user_id=BENCH_USER, run_id=session.session_id,
-                                       metadata=meta, infer=True)
+                result = store.add([{"role": t.role, "content": t.raw} for t in group],
+                                   user_id=BENCH_USER, run_id=session.session_id,
+                                   metadata=meta, infer=True, now=moment, **dated)
             if len(result.episode_ids) != len(group):
                 ingested.warnings.append(
                     f"{conversation.conv_id} {keys[0]}: {len(group)} turns but "
@@ -605,7 +541,7 @@ def ingest(store: MemoryStore, conversation: Conversation, *, mode: str = "verba
                 ingested.turn_of_episode.update(zip(result.episode_ids, keys))
             for action in result.actions:
                 if action.memory_id:
-                    _record(ingested, action, session, keys, moment, dataset, when)
+                    ingested.turns_of_memory.setdefault(action.memory_id, set()).update(keys)
             ingested.warnings.extend(f"{conversation.conv_id} {keys[0]}: {w}"
                                      for w in result.warnings)
     ingested.seconds = time.perf_counter() - started
@@ -937,7 +873,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                   unit: str = "session", embedder: Embedder | None = None, k: int = 10,
                   questions: int | None = None, answer_llm: LLM | None = None,
                   judge: Judge = containment_judge, use_context: bool = False,
-                  when: str = "fallback",
+                  when: str = "never",
                   store_factory: Callable[[], MemoryStore] | None = None,
                   log: Callable[[str], None] | None = None) -> dict[str, Any]:
     """Ingest each conversation into a fresh store, ask its questions, and
@@ -962,8 +898,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
             memories = len(store.get_all(user_id=BENCH_USER, limit=1_000_000))
             stores.append({"conversation": conv.conv_id, "sessions": len(conv.sessions),
                            "turns": len(conv.turns), "memories": memories,
-                           "questions": len(asked), "ingest_seconds": round(ingested.seconds, 2),
-                           "created_at_set": ingested.created_at_set})
+                           "questions": len(asked), "ingest_seconds": round(ingested.seconds, 2)})
             warnings.extend(ingested.warnings)
             for question in asked:
                 rows.append(ask(ingested, question, k=k, answer_llm=answer_llm, judge=judge,
@@ -975,9 +910,6 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
     if mode == "extract" and unit == "session":
         notes.append("extract by session: a memory counts for every turn of the session it "
                      "came from, so turn-level recall is session-level recall")
-    if stores and not all(s["created_at_set"] for s in stores):
-        notes.append("created_at could not be written on this backend: the session date is "
-                     "in updated_at and metadata['when'] only")
     return {
         "dataset": dataset,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1031,9 +963,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--judge", default=None,
                         help="module:function(question, gold, prediction) -> bool "
                              "(default: containment)")
-    parser.add_argument("--when", choices=WHEN_POLICIES, default="fallback",
-                        help="write metadata['when'] = session date: when created_at cannot "
-                             "be written (default), on every new memory, or never")
+    parser.add_argument("--when", choices=WHEN_POLICIES, default="never",
+                        help="write metadata['when'] = session date on every new memory "
+                             "without one of its own (always), or not (never, the default)")
     parser.add_argument("--out", default=None,
                         help=f"results file (default ${DATA_ENV}/results/<dataset>_<time>.json)")
     return parser.parse_args(argv)

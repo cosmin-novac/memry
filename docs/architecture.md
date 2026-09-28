@@ -238,7 +238,10 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    a pair it rules out (P(different) of 0.9 or more, provisional) is recorded as
    rejected and not looked at again. Then it compares every open pair that reached a
    new step. When the owner merges with a person, the person
-   keeps the name and becomes the owner. It also removes orphan entities.
+   keeps the name and becomes the owner. It also removes orphan entities. The structure
+   pass (`same_name_plan`) merges entities of one name only where nothing sets them
+   apart: a pair kept apart (a rejected proposal, or P(different) of 0.5 or more) is
+   never merged there, nor joined through a third.
 7. **Descriptions** are built from up to 50 memories when an entity is opened or recalled
    into context, not on the save path.
 
@@ -292,8 +295,11 @@ The default `save_memories(infer=true)` path is intentionally split at the safe 
    label (before 28066d1 the label was lost; `memry restore-context`, or
    `POST /api/v1/memories/restore-context`, puts it back from the episodes, with
    `--dry-run` / `{"dry_run": true}` to count first). On success, reconcile the
-   facts and supersede the raw pending memories. If extraction finds no facts, keep the raw
-   memories and clear their pending markers.
+   facts, run the coverage audit a direct save gets (one text-model call naming input
+   details no stored fact captured; a gap is noted on each raw memory's SUPERSEDE event)
+   and supersede the raw pending memories. If extraction finds no facts, keep the raw
+   memories and clear their pending markers. The quiet period counts from when a save was
+   queued, whatever `created_at` it was given.
 5. On provider or processing failure, keep every raw memory active, record the error on
    each record, and retry with exponential backoff capped at five minutes. After a process
    restart, the worker discovers the same pending rows, including interrupted work.
@@ -308,13 +314,27 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
 
 1. Store raw input as episodes before inference.
 2. With an LLM, extract small candidate memories, types, importance, topics, entities, and
-   possible relations. Without an LLM, store the input verbatim.
-3. Retrieve similar active memories in the same scope and reconcile each candidate as add,
-   update, supersede, or no-op.
+   possible relations, offered the user's tags from every run. Without an LLM, store the
+   input verbatim.
+3. Retrieve similar active memories of the same user and agent, across runs (a fact saved
+   again in another session is a duplicate, as entity lookup already read it), and
+   reconcile each candidate as add, update, supersede, or no-op. An UPDATE's merged
+   sentence is written by the text model, also when a decision provider chose the action;
+   when none is written, the old memory is kept and superseded by the new one instead of
+   being overwritten with the new fact alone.
 4. Store or update the memory, normalized topic links, embedding, and FTS row.
-5. Resolve entity mentions conservatively. Alias matches only narrow the candidates.
+5. Resolve entity mentions conservatively. Alias matches only narrow the candidates. A new
+   name's screen verdict is kept on the entity it creates, so the weekly screen skips it.
 6. Store evidence-grounded relations whose endpoints resolved in that memory.
 7. Append audit events.
+8. With an LLM, the coverage audit names input details no stored fact captured, as a
+   warning on the result.
+
+`add` (and `add_deferred`) take `created_at` (the episodes' and new memories' time and
+`valid_from`, and the `updated_at` of a memory the save rewrites), `memory_metadata`
+(merged into every memory the save produces; a key Memry sets, such as "when", is kept)
+and `now` (the day extraction and the when-check read as today). They exist for replaying
+dated conversations (`evals/external_benchmarks.py`).
 
 When existing memory text is edited manually or rewritten by reconciliation, Memry analyzes
 the final text before committing the change and replaces that memory's entity-name snapshot
@@ -343,15 +363,19 @@ For a normal text query:
    the entity named. This is the only link mode; the earlier "typed" and "undirected"
    walks and the "rescue", "weighted", "inherit" and "gated" fusions were removed, and a
    config naming one is refused.
-6. With `relational_relevance = "jev"`, the decision model judges the first 20 of that
+6. With `relational_relevance = "jev"` (the default "auto" is "jev" where the decision
+   provider re-ranks: Jev unless `decision.rerank` is off, or a text model measured to help
+   with it on; "vector" elsewhere), the decision model judges the first 20 of that
    order in one call and says whether the question asks for one property and whether it
    needs several memories. A question with one answer, or about everything, is answered
    from that call. A question needing several (a list, a total, a comparison) gets one more
    call on up to `set_pool` (80) memories not judged yet: those filed under the topics
    (tags) the first 20 share, a small topic most of them carry counting most, or, when
    they share none, the order past the first 20. The set's members from both calls come
-   first and are returned past the limit, up to 100. The 0.35 re-rank blend runs only on
-   a search the linked search did not order.
+   first and are returned past the limit, up to 100. In this mode a question naming no hub
+   is judged the same way, in the text ranking's order. The 0.35 re-rank blend runs only
+   on a search that was neither ordered by the linked search nor judged (a tag or entity
+   filter, or `relational=False`).
 7. Context reconstruction may prepend a bounded, lazily refreshed entity description and
    then packs exact memories into the remaining token budget.
 

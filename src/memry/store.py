@@ -43,7 +43,6 @@ from .intelligence.context import build_context, estimate_tokens
 from .intelligence.decay import (
     DURABILITY_KEY,
     decay_sweep,
-    effective_importance,
     score_durability,
 )
 from .intelligence.entities import (
@@ -138,6 +137,13 @@ _ENRICHMENT_BATCH_SIZE = 8
 _ENRICHMENT_MAX_BACKOFF_SECONDS = 300
 
 
+def _queued_at(memory: Memory) -> datetime:
+    """When a pending save was queued: the quiet period counts from it. A save
+    given an earlier ``created_at`` (``add_deferred``) still waits its turn."""
+    job = (memory.metadata or {}).get(_ENRICHMENT_KEY) or {}
+    return parse_ts(job.get("queued_at") or memory.created_at)
+
+
 def _ingestion_context(metadata: dict[str, Any] | None) -> str:
     return " ".join(str((metadata or {}).get("context") or "").split())[:200]
 
@@ -149,6 +155,18 @@ def _keep_context(candidates: list[CandidateFact], context: str) -> None:
     if context:
         for candidate in candidates:
             candidate.metadata.setdefault("context", context)
+
+
+def _with_memory_metadata(
+    candidates: list[CandidateFact], memory_metadata: dict[str, Any] | None
+) -> None:
+    """Merge a save's ``memory_metadata`` into every candidate's metadata. A
+    key Memry set for the memory itself (its "when", its "context", a pending
+    marker) is kept: the caller's value fills in, it does not overwrite."""
+    if not memory_metadata:
+        return
+    for candidate in candidates:
+        candidate.metadata = {**memory_metadata, **(candidate.metadata or {})}
 
 
 def _client_tag_hints(
@@ -353,6 +371,17 @@ def _similarity(asked: np.ndarray, vector: np.ndarray | None) -> float:
     return max(float(vector @ asked) / (float(np.linalg.norm(vector)) or 1.0), 0.0)
 
 
+def _across_runs(scope: Scope) -> Scope:
+    """A save's scope as the lookups across one person's saves read it: the
+    whole user (with the agent), not one run. Reconcile candidates and the tag
+    vocabulary use it; topic canonicalization and entity lookup
+    (``entities.resolve_mentions``) read the whole user too. A duplicate saved
+    in another session is still a duplicate."""
+    if scope.user_id is None:
+        return scope
+    return Scope(user_id=scope.user_id, agent_id=scope.agent_id)
+
+
 def _in_scope(memory: Memory, scope: Scope) -> bool:
     """Whether a memory belongs to the scope searched (a field left None in
     the scope matches any)."""
@@ -404,12 +433,25 @@ class MemoryStore:
         memory_type: MemoryType = "semantic",
         importance: float = 0.5,
         categories: list[str] | None = None,
+        created_at: str | None = None,
+        memory_metadata: dict[str, Any] | None = None,
+        now: datetime | None = None,
     ) -> AddResult:
         """Record raw content and derive memories from it.
 
         ``infer=True`` runs extraction + reconciliation (needs an LLM;
         degrades to verbatim mode without one). ``infer=False`` stores the
         content directly as a single memory - the "just save this fact" path.
+
+        ``metadata`` goes to the episodes. ``memory_metadata`` is merged into
+        every memory the save produces (a key Memry sets itself, such as
+        "when", is kept). ``created_at`` (ISO 8601) is the time of the save:
+        the episodes' and new memories' ``created_at``, ``updated_at`` and
+        ``valid_from``, and the ``updated_at`` of a memory it rewrites.
+        ``now`` is the reference date extraction resolves "yesterday"
+        against, and the when-confirmation reads as the day of writing,
+        instead of the clock. All three are for replaying dated
+        conversations, as the benchmarks do.
         """
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         messages = (
@@ -423,6 +465,7 @@ class MemoryStore:
                 agent_id=agent_id,
                 run_id=run_id,
                 metadata=metadata or {},
+                **({"created_at": created_at} if created_at else {}),
             )
             for m in messages
             if (m.get("content") or "").strip()
@@ -452,6 +495,7 @@ class MemoryStore:
                 candidates = extract_facts(
                     self.llm,
                     messages,
+                    now=now,
                     vocabulary=self._tag_vocabulary(
                         scope,
                         text="\n".join(
@@ -466,7 +510,7 @@ class MemoryStore:
                         "\n".join(str(m.get("content") or "") for m in messages),
                     ),
                 )
-                self._confirm_candidate_whens(candidates)
+                self._confirm_candidate_whens(candidates, now=now)
             except Exception as exc:
                 # Provider outage / exhausted credits must not lose the save:
                 # degrade to verbatim, tell the caller, and flag the memories
@@ -479,23 +523,32 @@ class MemoryStore:
             candidates = self._pending_verbatim(messages)
 
         _keep_context(candidates, _ingestion_context(metadata))
-        actions = self._apply_candidates(candidates, scope, episode_ids)
+        _with_memory_metadata(candidates, memory_metadata)
+        actions = self._apply_candidates(candidates, scope, episode_ids, created_at=created_at)
 
-        # Post-write audit: extraction is lossy and non-deterministic, and a
-        # dropped constraint is invisible in a "success" response. One cheap
-        # LLM pass compares input against what landed and reports the gap.
-        if infer and self.llm.available and actions:
-            stored = [a.content for a in actions if a.content]
-            try:
-                missing = verify_coverage(self.llm, messages, stored)
-            except Exception:
-                missing = []  # audit is best-effort; never fail the save
-            if missing:
-                warnings.append(
-                    "some details were not captured as facts; consider saving "
-                    "them explicitly: " + "; ".join(missing)
-                )
+        missing = self._coverage_gaps(messages, actions) if infer else []
+        if missing:
+            warnings.append(
+                "some details were not captured as facts; consider saving "
+                "them explicitly: " + "; ".join(missing)
+            )
         return AddResult(episode_ids=episode_ids, actions=actions, warnings=warnings)
+
+    def _coverage_gaps(
+        self, messages: list[dict[str, str]], actions: list[AddAction]
+    ) -> list[str]:
+        """Post-write audit: extraction is lossy and non-deterministic, and a
+        dropped constraint is invisible in a "success" response. One cheap LLM
+        pass compares the input against what landed and names the gap. Run
+        after a direct save and after distillation (the deferred save), with a
+        text model and something written; best-effort, it never fails a save."""
+        if not (self.llm.available and actions):
+            return []
+        stored = [a.content for a in actions if a.content]
+        try:
+            return verify_coverage(self.llm, messages, stored)
+        except Exception:
+            return []
 
     def add_deferred(
         self,
@@ -508,17 +561,25 @@ class MemoryStore:
         memory_type: MemoryType = "episodic",
         importance: float = 0.5,
         categories: list[str] | None = None,
+        created_at: str | None = None,
+        memory_metadata: dict[str, Any] | None = None,
+        now: datetime | None = None,
     ) -> AddResult:
         """Durably save raw text for managed background enrichment.
 
         This path performs no provider calls. The episode and searchable pending
         memory are committed before the caller receives the result; the pending
         metadata is the restart-safe work marker consumed by the server worker.
+        ``created_at``, ``memory_metadata`` and ``now`` mean what they mean for
+        ``add``: they apply to the pending memory and are kept with the work
+        marker for the distillation that follows. The quiet period counts from
+        when the save was queued, whatever ``created_at`` says.
         """
         text = content.strip()
         if not text:
             return AddResult()
         queued_at = utcnow()
+        stamp = created_at or queued_at
         episode = Episode(
             content=text,
             role="user",
@@ -526,15 +587,18 @@ class MemoryStore:
             agent_id=agent_id,
             run_id=run_id,
             metadata=metadata or {},
-            created_at=queued_at,
+            created_at=stamp,
         )
-        pending_metadata = dict(metadata or {})
+        pending_metadata = {**(memory_metadata or {}), **(metadata or {})}
         pending_metadata["pending_distillation"] = True
-        pending_metadata[_ENRICHMENT_KEY] = {
-            "status": "pending",
-            "attempts": 0,
-            "queued_at": queued_at,
-        }
+        job: dict[str, Any] = {"status": "pending", "attempts": 0, "queued_at": queued_at}
+        if created_at:
+            job["created_at"] = created_at
+        if memory_metadata:
+            job["memory_metadata"] = dict(memory_metadata)
+        if now is not None:
+            job["now"] = now.isoformat()
+        pending_metadata[_ENRICHMENT_KEY] = job
         memory = Memory(
             content=text,
             memory_type=memory_type,
@@ -545,8 +609,8 @@ class MemoryStore:
             categories=clean_tags(categories),
             metadata=pending_metadata,
             source_episode_ids=[episode.id],
-            created_at=queued_at,
-            updated_at=queued_at,
+            created_at=stamp,
+            updated_at=stamp,
         )
         self.backend.add_episodes([episode])
         self.backend.insert_memory(memory)
@@ -627,6 +691,7 @@ class MemoryStore:
         episode_ids: list[str],
         *,
         exclude_ids: set[str] | None = None,
+        created_at: str | None = None,
     ) -> list[AddAction]:
         """Reconcile candidates into the store (shared by add and distill).
 
@@ -647,7 +712,7 @@ class MemoryStore:
                 backend=self.backend,
                 embedder=self.embedder,
                 query=candidate.content,
-                scope=scope,
+                scope=_across_runs(scope),
                 limit=self.config.retrieval.reconcile_similarity_limit,
                 cfg=self.config.retrieval,
             )
@@ -667,6 +732,7 @@ class MemoryStore:
                 prepare_update=lambda memory_id, final_content: (
                     self._reanalyze_edited_entities(memory_id, final_content, scope)
                 ),
+                created_at=created_at,
             )
             actions.append(action)
             if action.conflicts_with and action.memory_id:
@@ -1064,13 +1130,8 @@ class MemoryStore:
         bursts: list[list[Memory]] = []
         for related in groups.values():
             burst: list[Memory] = []
-            for memory in sorted(related, key=lambda item: item.created_at):
-                if (
-                    burst
-                    and parse_ts(memory.created_at)
-                    - parse_ts(burst[-1].created_at)
-                    > quiet
-                ):
+            for memory in sorted(related, key=_queued_at):
+                if burst and _queued_at(memory) - _queued_at(burst[-1]) > quiet:
                     bursts.append(burst)
                     burst = []
                 burst.append(memory)
@@ -1080,7 +1141,7 @@ class MemoryStore:
         for group in bursts:
             if summary["claimed"] >= batch_limit:
                 break
-            if max(parse_ts(memory.created_at) for memory in group) > cutoff:
+            if max(_queued_at(memory) for memory in group) > cutoff:
                 continue
             remaining = batch_limit - summary["claimed"]
             claimed: list[Memory] = []
@@ -1208,9 +1269,18 @@ class MemoryStore:
                 for episode_id in memory.source_episode_ids
             )
         )
+        # What the saves asked of their memories (add_deferred): the latest
+        # time and reference date given, and every memory_metadata merged.
+        jobs = [memory.metadata.get(_ENRICHMENT_KEY) or {} for memory in active]
+        created_at = max((j["created_at"] for j in jobs if j.get("created_at")), default=None)
+        now = max((parse_ts(j["now"]) for j in jobs if j.get("now")), default=None)
+        memory_metadata: dict[str, Any] = {}
+        for job in jobs:
+            memory_metadata.update(job.get("memory_metadata") or {})
         candidates = extract_facts(
             self.llm,
             messages,
+            now=now,
             vocabulary=self._tag_vocabulary(
                 first_scope,
                 text="\n".join(memory.content for memory in active),
@@ -1222,7 +1292,7 @@ class MemoryStore:
                 first_scope, "\n".join(memory.content for memory in active)
             ),
         )
-        self._confirm_candidate_whens(candidates)
+        self._confirm_candidate_whens(candidates, now=now)
         if not candidates:
             for memory in active:
                 metadata = self._clear_enrichment_metadata(memory.metadata)
@@ -1235,11 +1305,13 @@ class MemoryStore:
             )
 
         _keep_context(candidates, context)
+        _with_memory_metadata(candidates, memory_metadata)
         actions = self._apply_candidates(
             candidates,
             first_scope,
             episode_ids,
             exclude_ids={memory.id for memory in active},
+            created_at=created_at,
         )
         landed = sum(1 for action in actions if action.event != "NONE")
         new_id = next(
@@ -1250,6 +1322,19 @@ class MemoryStore:
             ),
             None,
         )
+        # The same audit as a direct save. Nobody waits on a deferred save, so
+        # the gap is also noted where the raw text goes: its SUPERSEDE event.
+        missing = self._coverage_gaps(messages, actions)
+        warnings = []
+        gap = ""
+        if missing:
+            warnings.append(
+                "some details were not captured as facts; consider saving "
+                "them explicitly: " + "; ".join(missing)
+            )
+            gap = "; not captured as facts: " + "; ".join(missing)
+            log.warning("distillation of %s did not capture: %s",
+                        ", ".join(m.id for m in active), "; ".join(missing))
         for memory in active:
             invalidated = self.backend.invalidate_memory(
                 memory.id, superseded_by=new_id
@@ -1267,10 +1352,10 @@ class MemoryStore:
                     memory_id=memory.id,
                     event="SUPERSEDE",
                     old_content=memory.content,
-                    reason=f"distilled with its context into {landed} fact(s)",
+                    reason=f"distilled with its context into {landed} fact(s){gap}",
                 )
             )
-        return AddResult(episode_ids=episode_ids, actions=actions)
+        return AddResult(episode_ids=episode_ids, actions=actions, warnings=warnings)
 
     def distill(
         self, memory_id: str, *, owner_prefix: str | None = None
@@ -1342,6 +1427,26 @@ class MemoryStore:
         members = sum(1 for r in results if r.signals.get("member"))
         return self._rerank(query, results)[:max(limit, min(members, SET_RESULT_CAP))]
 
+    def _reranks(self) -> bool:
+        """Whether the decision provider re-ranks. The setting decides where it
+        is set; otherwise the provider's default stands. Either way a provider
+        that was not measured to beat no re-ranking cannot be talked into it:
+        through gpt-5-mini the same work scored below the baseline at ten
+        seconds a search."""
+        cfg = self.config.decision
+        wanted = cfg.rerank if cfg.rerank is not None else self.decider.reranks_by_default
+        return bool(wanted and self.decider.may_rerank)
+
+    def relevance_mode(self) -> str:
+        """What judges relevance in the linked search: ``retrieval.
+        relational_relevance``, with "auto" read as "jev" where the decision
+        provider re-ranks (``_reranks``: Jev by default, a text model measured
+        to help when ``decision.rerank`` is on) and as "vector" elsewhere."""
+        mode = self.config.retrieval.relational_relevance
+        if mode != "auto":
+            return mode
+        return "jev" if self._reranks() else "vector"
+
     def _rerank(self, query: str, results: list[SearchResult]) -> list[SearchResult]:
         """Let a relevance judgement adjust the hybrid order, not replace it.
 
@@ -1358,12 +1463,7 @@ class MemoryStore:
         its own order stands, judged or not.
         """
         cfg = self.config.decision
-        # The setting decides where it is set; otherwise the provider's default
-        # stands. Either way a provider that was not measured to beat no
-        # re-ranking cannot be talked into it: through gpt-5-mini the same work
-        # scored below the baseline at ten seconds a search.
-        wanted = cfg.rerank if cfg.rerank is not None else self.decider.reranks_by_default
-        if not wanted or not self.decider.may_rerank:
+        if not self._reranks():
             return results
         if not self.decider.available or len(results) < 2:
             return results
@@ -1403,7 +1503,8 @@ class MemoryStore:
         ``FAMILY_TOP`` of its memories that best state the property. A query
         naming no hub keeps the text ranking.
 
-        With ``relational_relevance = "jev"`` the decision provider then judges
+        With ``relational_relevance = "jev"`` (or "auto" with a provider that
+        re-ranks, ``relevance_mode``) the decision provider then judges
         whether each of the first ``decision.rerank_pool`` answers the
         question, and that replaces the similarity for them
         (``_judge_in_rounds``). An answer from a thing the query's entity
@@ -1420,8 +1521,9 @@ class MemoryStore:
             owner = self.owner_entity(scope.user_id)
             if owner is not None and self._is_hub(owner.id):
                 seeds, first_person = [owner.id], True
+        judges = self.relevance_mode() == "jev"
         if not seeds:
-            if cfg.relational_relevance == "jev":
+            if judges:
                 return self._judge_in_rounds(query, results, scope, include_invalid)
             return results
         act, above = activation_paths(self.backend, seeds, depth=cfg.relational_depth,
@@ -1452,7 +1554,7 @@ class MemoryStore:
             scored.append((relevance ** cfg.relational_sharpness * about, result.score, result))
         scored.sort(key=lambda item: (-item[0], -item[1]))
         ranked = [result for _, _, result in scored]
-        if cfg.relational_relevance != "jev":
+        if not judges:
             return ranked
         return self._judge_in_rounds(question if len(seeds) == 1 else query, ranked, scope,
                                      include_invalid, link={"act": act, "above": above,
@@ -2003,7 +2105,7 @@ class MemoryStore:
         when it is the 300th most common tag.
         """
         try:
-            counts = self.backend.topic_mention_counts(scope)
+            counts = self.backend.topic_mention_counts(_across_runs(scope))
         except Exception:
             return []
         if not counts:
@@ -2615,13 +2717,16 @@ class MemoryStore:
                     summary["typed"] += 1
         return summary
 
-    def _confirm_candidate_whens(self, candidates: list[Any]) -> None:
+    def _confirm_candidate_whens(
+        self, candidates: list[Any], *, now: datetime | None = None
+    ) -> None:
         """Drop an extracted "when" the checks in intelligence/when.py do not
-        believe. The text model proposes a date; it is not taken at its word."""
+        believe. The text model proposes a date; it is not taken at its word.
+        ``now`` is the day of writing (the clock unless a save gave one)."""
         dated = [c for c in candidates if (c.metadata or {}).get(WHEN_KEY)]
         if not dated:
             return
-        today = utcnow()
+        today = now.isoformat(timespec="seconds") if now is not None else utcnow()
         kept = confirm_whens(
             self.decider,
             [{"content": c.content, "recorded_at": today} for c in dated],
@@ -3638,8 +3743,17 @@ class MemoryStore:
         delayed this morning" and "allergic to penicillin" the same because both
         are semantic. A per-fact estimate replaces that guess; anything still
         unscored keeps the old behaviour.
+
+        Off unless ``decay.durability`` is set, whoever asks (the scheduler,
+        "run now", the REST route). The score is housekeeping: it is written
+        without moving the memory's ``updated_at``, which drives recency and
+        decay age.
         """
         outcome: dict[str, Any] = {"scored": 0, "skipped": 0, "provider": self.decider.name}
+        if not self.config.decay.durability:
+            outcome["skipped"] = -1
+            outcome["off"] = "decay.durability is off (MEMRY_DURABILITY)"
+            return outcome
         if not self.decider.available:
             outcome["skipped"] = -1
             log.info("durability: no decision provider configured, nothing scored")
@@ -3660,7 +3774,7 @@ class MemoryStore:
                 continue
             metadata = dict(memory.metadata or {})
             metadata[DURABILITY_KEY] = round(score, 3)
-            self.backend.update_memory(memory.id, metadata=metadata)
+            self.backend.update_memory(memory.id, metadata=metadata, touch=False)
             outcome["scored"] += 1
         outcome["ms"] = round((time.time() - started) * 1000)
         log.info(
@@ -3674,6 +3788,9 @@ class MemoryStore:
         if key == "tag_abstraction" and not self.config.tags.enabled:
             # Synthetic parent tags are off unless the config switches them on
             # (MEMRY_TAG_ABSTRACTION); a stored toggle alone cannot.
+            return False
+        if key == "durability" and not self.config.decay.durability:
+            # Likewise the durability pass (MEMRY_DURABILITY).
             return False
         override = self.backend.get_meta(f"maintenance:{key}:enabled")
         if override is not None:
@@ -3732,7 +3849,26 @@ class MemoryStore:
             for e in entities
         ]
         triples = [(r.subject, r.predicate, r.object) for r in relations]
-        return entities, nodes, links, triples, self._judged_homes(scope)
+        return entities, nodes, triples, self._judged_homes(scope)
+
+    def _held_apart(self, scope: Scope) -> list[tuple[str, str]]:
+        """Entity pairs the judge or a person held apart: a rejected proposal
+        (the judge's "apart", or a person's "keep separate"), or one whose
+        latest comparison gave P(different) at the judge's apart bar, which
+        waits before ``identity.APART_STEP`` without being rejected. The rule
+        ``entities.join_namesakes`` keeps, for the structure pass."""
+        bar = self.decider.pair_apart_probability
+        pairs: list[tuple[str, str]] = []
+        for status in ("rejected", "proposed"):
+            for proposal in self.backend.list_proposals(scope, status=status, limit=100_000):
+                if status == "proposed" and (proposal.different is None
+                                             or proposal.different < bar):
+                    continue
+                a = self.backend.resolve_entity_id(proposal.entity_a)
+                b = self.backend.resolve_entity_id(proposal.entity_b)
+                if a is not None and b is not None and a != b:
+                    pairs.append((a, b))
+        return pairs
 
     def _judged_homes(self, scope: Scope) -> list[tuple[str, str, float]]:
         """(child, parent, probability) for every compared pair the decision
@@ -3758,8 +3894,8 @@ class MemoryStore:
         Computed on request and never stored, so a phrase seen a second time is
         a hub the next time anyone looks, and nothing has to be kept in step.
         """
-        entities, nodes, links, triples, judged = self._structure_inputs(user_id)
-        homes = derive_homes(nodes, links, triples, judged)
+        entities, nodes, triples, judged = self._structure_inputs(user_id)
+        homes = derive_homes(nodes, triples, judged)
         names = {node.id: node.name for node in nodes}
         screens = {e.id: (e.metadata or {}).get("screen") for e in entities}
         out: dict[str, dict[str, Any]] = {}
@@ -3802,8 +3938,8 @@ class MemoryStore:
         less evidence, exactly as a confirmed proposal does. ``dry_run=True``
         changes nothing and returns the full plan instead.
         """
-        entities, nodes, links, triples, judged = self._structure_inputs(user_id)
-        homes = derive_homes(nodes, links, triples, judged)
+        entities, nodes, triples, judged = self._structure_inputs(user_id)
+        homes = derive_homes(nodes, triples, judged)
         names = {node.id: node.name for node in nodes}
         outcome: dict[str, Any] = {
             "homes": len(homes), "homes_changed": 0,
@@ -3827,7 +3963,7 @@ class MemoryStore:
                 metadata.pop("home", None)
             self.backend.set_entity_metadata(entity.id, metadata)
 
-        plan = same_name_plan(nodes, homes)
+        plan = same_name_plan(nodes, homes, self._held_apart(Scope(user_id=user_id)))
         tally = {"merge": "merged", "ask": "asked", "separate": "separate"}
         for step in plan:
             outcome[tally[step["action"]]] += 1
@@ -3853,8 +3989,9 @@ class MemoryStore:
 
         The verdict is a note on the entity and nothing more: a name judged a
         value or a role shows up under Upkeep for a yes or a no, and a name
-        judged a named thing is a hub. A name already screened is not asked
-        about again.
+        judged a named thing is a hub. A name already screened, here or when
+        the save that created it screened it (``entities.resolve_mentions``),
+        is not asked about again.
         """
         outcome: dict[str, Any] = {"screened": 0, "queued": 0, "skipped": 0}
         if not self.decider.available:
@@ -3971,7 +4108,7 @@ class MemoryStore:
                 self.backend.set_meta(_consolidation_run_key(user_id), stamp)
             else:
                 raise ValueError(f"unknown pass: {key}")
-            if record:
+            if record and not result.get("off"):  # a pass that is off did not run
                 self._upkeep_set(f"last:{key}", user_id, {"at": stamp, "result": result})
             return result
 
@@ -4311,9 +4448,6 @@ class MemoryStore:
     # ------------------------------------------------------------------
     def decay_sweep(self, threshold: float = 0.1) -> list[str]:
         return decay_sweep(self.backend, self.config.decay, threshold=threshold)
-
-    def effective_importance(self, memory: Memory) -> float:
-        return effective_importance(memory, self.config.decay)
 
     def reindex(self) -> int:
         """Re-embed every memory with the currently configured embedder, then

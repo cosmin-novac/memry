@@ -418,6 +418,74 @@ def test_linked_search_can_ask_the_decision_provider_what_answers(store, family)
     assert ask + "Bildy Bakery sells sourdough" in asked
 
 
+class _JevLike:
+    """A decision provider that re-ranks by default, as Jev does, and answers
+    every memory question 0.5; counts its calls."""
+
+    name, available = "jev", True
+    may_rerank = reranks_by_default = True
+
+    def __init__(self):
+        self.calls = 0
+
+    def decide(self, state, questions):
+        from memry.providers.decisions import Answer, Answers
+
+        self.calls += 1
+        return Answers({key: Answer(1.0 if key == "property" else 0.0 if key == "several"
+                                    else 0.5, {}, 0.9, True) for key in questions})
+
+    def close(self):
+        pass
+
+
+def test_the_decision_provider_that_reranks_judges_the_linked_search_by_default(store, family):
+    """``relational_relevance`` is "auto" unless set: with a provider that
+    re-ranks (Jev) a question naming a hub is judged; with none it is not, and
+    "vector" set explicitly keeps the provider out of it."""
+    assert Config().retrieval.relational_relevance == "auto"
+    _linked(store)
+    question = "Which systems does bildy v4 run on?"
+    plain = store.search(question, user_id="ada", limit=3)  # no decision provider
+    assert store.relevance_mode() == "vector"
+    assert all("about" in r.signals and "judged" not in r.signals for r in plain)
+
+    store.decider = jev = _JevLike()
+    assert store.relevance_mode() == "jev"
+    judged = store.search(question, user_id="ada", limit=3)
+    assert jev.calls == 1 and all("judged" in r.signals for r in judged)
+
+    store.config.retrieval.relational_relevance = "vector"
+    assert store.relevance_mode() == "vector"
+    kept = store.search(question, user_id="ada", limit=3)
+    assert jev.calls == 1  # neither judged nor re-ranked after the linked search
+    assert not any("judged" in r.signals for r in kept)
+
+
+def test_auto_relevance_follows_the_rerank_setting():
+    """"auto" is "jev" exactly where the provider re-ranks: Jev unless
+    ``decision.rerank`` is off, a text model measured to help only when it is
+    on, a provider never measured never."""
+    from memry.config import DecisionConfig
+
+    def mode(rerank, reranks_by_default, may_rerank):
+        cfg = Config(db_path=":memory:")
+        cfg.decision = DecisionConfig(rerank=rerank)
+        decider = _JevLike()
+        decider.reranks_by_default, decider.may_rerank = reranks_by_default, may_rerank
+        s = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(16), decider=decider)
+        try:
+            return s.relevance_mode()
+        finally:
+            s.close()
+
+    assert mode(None, True, True) == "jev"      # Jev
+    assert mode(False, True, True) == "vector"  # Jev with re-ranking turned off
+    assert mode(None, False, True) == "vector"  # a text model measured to help...
+    assert mode(True, False, True) == "jev"     # ...once re-ranking is turned on
+    assert mode(True, False, False) == "vector"  # never measured: refused
+
+
 def test_a_versions_own_answer_overrides_its_things_with_the_decision_provider(store, family):
     """An answer reached by a step up (the thing's) counts only as far as the
     version's own memories do not answer: the version's change wins even when

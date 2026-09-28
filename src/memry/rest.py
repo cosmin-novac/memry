@@ -62,7 +62,7 @@ from .intelligence.when import next_occurrence, parse_when
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
 from .oauth import MEMRY_SCOPE, MemryOAuthProvider
 from .principal import ADMIN, Principal
-from .store import MemoryStore, _due
+from .store import MemoryStore
 
 SESSION_COOKIE = "memry_session"
 
@@ -2350,12 +2350,6 @@ color:var(--warn);border-radius:8px;padding:.5rem .7rem;font-size:.85rem;margin-
 </form></body></html>"""
 
 
-def _tag_run_due(last_run: str | None, interval_days: float, now: datetime) -> bool:
-    """Has ``interval_days`` elapsed since the last run? Kept for callers; the
-    scheduler's own checks live in ``MemoryStore.run_upkeep_cycle``."""
-    return _due(last_run, interval_days, now)
-
-
 MCP_ORIGIN_KEY = "memry.mcp_origin"
 
 
@@ -3030,8 +3024,9 @@ def create_app(
                     "durability", "How long facts stay relevant",
                     "Estimates whether each memory matters for days, months or "
                     "years, and forgetting uses that instead of one rate per "
-                    "memory type. Needs a decision provider.",
-                    needs_decider=True,
+                    "memory type. Needs a decision provider, and is off unless "
+                    "MEMRY_DURABILITY is set.",
+                    needs_decider=True, toggleable=store.config.decay.durability,
                 ),
                 entry(
                     "consolidation", "Memory consolidation",

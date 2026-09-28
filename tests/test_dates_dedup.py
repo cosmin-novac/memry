@@ -67,12 +67,3 @@ def test_repair_keeps_a_real_edit_time(store):
     store.repair_updated_at(user_id="u")
     # the genuine edit time is preserved (>= created), not reset to creation
     assert store.get(m.id).updated_at == edited
-
-
-def test_maintenance_due_check():
-    from datetime import datetime, timezone
-    from memry.rest import _tag_run_due
-    now = datetime(2026, 7, 24, tzinfo=timezone.utc)
-    assert _tag_run_due(None, 7.0, now) is True
-    assert _tag_run_due("2026-07-10T00:00:00+00:00", 7.0, now) is True
-    assert _tag_run_due("2026-07-22T00:00:00+00:00", 7.0, now) is False

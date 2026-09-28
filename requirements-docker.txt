@@ -1,5 +1,6 @@
 # Runtime container dependencies. Keep in sync with pyproject.toml; the test
 # suite enforces this so Docker never reuses an incomplete dependency layer.
+# usearch (the "ann" extra) lets the image build the ANN sidecar index.
 mcp>=1.28.1,<2
 anyio>=4.0
 pydantic>=2.7
@@ -9,3 +10,4 @@ starlette>=0.37
 uvicorn>=0.30
 python-multipart>=0.0.9
 anthropic>=0.40
+usearch>=2.12

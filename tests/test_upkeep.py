@@ -180,6 +180,7 @@ def test_accepting_an_entity_review_removes_only_the_entity(store):
 
 # --------------------------------------------------------------- the cycle
 def test_cycle_scores_durability_when_a_decider_is_configured(store):
+    store.config.decay.durability = True
     store.decider = FakeDecider(1.5)
     store.add("Allergic to penicillin", user_id="ada", infer=False)
 
@@ -192,7 +193,47 @@ def test_cycle_scores_durability_when_a_decider_is_configured(store):
     assert store.decider.calls == 1
 
 
+def test_the_durability_pass_is_off_unless_configured(store):
+    """Neither the scheduler nor "run now" scores durability unless
+    ``decay.durability`` is set; a stored dashboard switch alone cannot turn
+    it on, and a pass that is off leaves no record of a run."""
+    from memry.intelligence.decay import DURABILITY_KEY
+
+    assert Config().decay.durability is False
+    store.decider = FakeDecider(1.5)
+    store.add("Allergic to penicillin", user_id="ada", infer=False)
+    store.set_maintenance_enabled("durability", True)
+    assert not store.maintenance_enabled("durability")
+    assert "durability" not in store.run_upkeep_cycle(user_id="ada")
+    outcome = store.run_upkeep_pass("durability", user_id="ada")
+    assert outcome["scored"] == 0 and "off" in outcome
+    assert store.last_pass_run("durability", "ada") is None
+    assert DURABILITY_KEY not in (store.get_all(user_id="ada")[0].metadata or {})
+
+    store.config.decay.durability = True
+    assert store.maintenance_enabled("durability")
+    assert store.run_upkeep_pass("durability", user_id="ada")["scored"] == 1
+
+
+def test_a_durability_score_does_not_move_updated_at(store, monkeypatch):
+    """The score is housekeeping: ``updated_at`` drives recency and decay age,
+    and a pass that bumped it made every scored memory look new."""
+    from memry import models
+    from memry.intelligence.decay import DURABILITY_KEY
+
+    store.config.decay.durability = True
+    store.decider = FakeDecider(1.5)
+    memory_id = store.add("Allergic to penicillin", user_id="ada", infer=False).actions[0].memory_id
+    before = store.get(memory_id)
+    monkeypatch.setattr(models, "utcnow", lambda: "2099-01-01T00:00:00+00:00")  # a later clock
+    assert store.score_memory_durability(user_id="ada")["scored"] == 1
+    after = store.get(memory_id)
+    assert DURABILITY_KEY in after.metadata
+    assert after.updated_at == before.updated_at
+
+
 def test_pausing_stops_every_pass(store):
+    store.config.decay.durability = True
     store.decider = FakeDecider()
     store.add("Allergic to penicillin", user_id="ada", infer=False)
     store.set_upkeep_paused(True)

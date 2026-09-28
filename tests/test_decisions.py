@@ -451,6 +451,60 @@ def test_reconcile_abstention_leaves_the_text_model_in_charge():
     assert _decide_action(_stub(lambda k, q: Answer()), "state", count=2) is None
 
 
+def _updating(llm):
+    """A store whose decision provider answers UPDATE of the first similar
+    memory, holding "Ada works at Northwind"."""
+    decider = _stub(lambda k, q: Answer("UPDATE" if k == "action" else "0", {}, 0.95, True))
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64),
+                        decider=decider)
+    first = store.add("Ada works at Northwind", user_id="u", infer=False).actions[0]
+    return store, first.memory_id
+
+
+def test_an_update_under_a_decision_provider_has_the_text_model_write_the_merge():
+    """The provider chooses the action; the merged sentence is the text
+    model's, asked with the reconcile prompt, and replaces the target's text."""
+    from conftest import decision, facts_response
+    from memry.intelligence.reconcile import MERGE_REQUEST, RECONCILE_SYSTEM
+
+    llm = FakeLLM()
+    store, target = _updating(llm)
+    merged = "Ada works at Northwind as a data engineer since 2024"
+    llm.queue(decision("UPDATE", target=0, content=merged), facts_response())
+    result = store.add("Ada is a data engineer there since 2024", user_id="u", infer=False)
+
+    assert [(a.event, a.memory_id) for a in result.actions] == [("UPDATE", target)]
+    assert store.get(target).content == merged
+    system, prompt = llm.calls[0]
+    assert system == RECONCILE_SYSTEM and MERGE_REQUEST in prompt
+    assert "[0] Ada works at Northwind" in prompt
+    assert "Ada is a data engineer there since 2024" in prompt
+    store.close()
+
+
+@pytest.mark.parametrize("llm", ["none", "silent"])
+def test_an_update_nobody_could_write_keeps_the_target_and_supersedes_it(llm):
+    """Without a text model (or with one that writes nothing) the target is
+    not overwritten with the new fact alone: it is kept, superseded by the
+    new memory, and can be brought back."""
+    from conftest import decision
+
+    fake = FakeLLM([decision("ADD")]) if llm == "silent" else NoneLLM()
+    store, target = _updating(fake)
+    result = store.add("Ada is a data engineer there", user_id="u", infer=False)
+
+    action = result.actions[0]
+    assert action.event == "SUPERSEDE" and action.memory_id != target
+    old = store.get(target)
+    assert old.content == "Ada works at Northwind"
+    assert old.invalid_at is not None and old.superseded_by == action.memory_id
+    assert store.get(action.memory_id).content == "Ada is a data engineer there"
+    assert [m.content for m in store.get_all(user_id="u")] == ["Ada is a data engineer there"]
+    assert [e.event for e in store.history(target)] == ["ADD", "SUPERSEDE"]
+    assert [row["memory"].id for row in store.replaced(user_id="u")] == [target]
+    store.close()
+
+
 # ---------------------------------------------------------------- re-ranking
 def _store_with(decider, **decision):
     from memry.config import Config
@@ -556,6 +610,7 @@ def test_durability_pass_scores_and_says_what_it_did(caplog):
     stub = _stub(lambda k, q: Answer(1.9, {}, 0.8, True))
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(),
                         embedder=HashEmbedder(64), decider=stub)
+    store.config.decay.durability = True
     store.add("Ada is allergic to penicillin", user_id="u", infer=False)
     store.add("The train was delayed this morning", user_id="u", infer=False)
 
@@ -575,6 +630,7 @@ def test_durability_pass_without_a_provider_changes_nothing():
     from memry.intelligence.decay import DURABILITY_KEY
 
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    store.config.decay.durability = True
     store.add("Ada is allergic to penicillin", user_id="u", infer=False)
     assert store.score_memory_durability(user_id="u")["scored"] == 0
     assert DURABILITY_KEY not in (store.get_all(user_id="u", limit=5)[0].metadata or {})

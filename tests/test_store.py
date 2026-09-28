@@ -4,6 +4,8 @@ import json
 
 from conftest import decision, fact, facts_response
 
+from memry.models import Scope
+
 
 def coverage(*missing: str) -> str:
     return json.dumps({"missing": list(missing)})
@@ -344,3 +346,127 @@ def test_stats_counts_forgotten_memories_without_listing_them(verbatim_store):
     stats = verbatim_store.stats()
     assert stats["forgotten_memories"] == len(verbatim_store.forgotten(user_id="ada")) == 1
     assert stats["invalidated_memories"] == 2
+
+
+# ------------------------------------------------ one person's saves, any run
+def test_a_duplicate_saved_in_another_run_is_found_by_reconcile(verbatim_store):
+    """Reconcile looks across the user's runs, as entity lookup does: the same
+    fact saved in a second session is a duplicate, not a second memory. The
+    agent still separates."""
+    first = verbatim_store.add("Ada likes green tea", user_id="ada", run_id="r1", infer=False)
+    again = verbatim_store.add("Ada likes green tea", user_id="ada", run_id="r2", infer=False)
+    assert again.actions[0].event == "NONE"
+    assert again.actions[0].memory_id == first.actions[0].memory_id
+    other = verbatim_store.add("Ada likes green tea", user_id="ada", agent_id="bot",
+                               run_id="r3", infer=False)
+    assert other.actions[0].event == "ADD"
+    assert len(verbatim_store.get_all(user_id="ada")) == 2
+
+
+def test_the_tag_vocabulary_offered_includes_topics_from_other_runs(store, fake_llm):
+    store.add("Kitchen sockets are ordered", user_id="ada", run_id="r1", infer=False,
+              categories=["kitchen renovation"])
+    store.add("Ada likes green tea", user_id="bob", run_id="r2", infer=False,
+              categories=["tea"])  # another person's topic is never offered
+    assert store._tag_vocabulary(Scope(user_id="ada", run_id="r2")) == ["kitchen renovation"]
+
+    fake_llm.queue(facts_response(fact("The tiles arrive on Friday")), coverage())
+    store.add("Tiles arrive on Friday", user_id="ada", run_id="r2")
+    prompt = fake_llm.calls[0][1]
+    assert "kitchen renovation" in prompt and '"tea"' not in prompt
+
+
+def test_a_tag_is_canonicalized_against_topics_from_other_runs(verbatim_store):
+    verbatim_store.add("Kitchen sockets are ordered", user_id="ada", run_id="r1",
+                       infer=False, categories=["kitchen renovation"])
+    verbatim_store.add("Tiles arrive on Friday", user_id="ada", run_id="r2",
+                       infer=False, categories=["kitchen-renovation"])
+    tags = {m.content: m.categories for m in verbatim_store.get_all(user_id="ada")}
+    assert tags["Tiles arrive on Friday"] == ["kitchen renovation"]
+
+
+# ------------------------------------------- replaying a dated conversation
+STAMP = "2023-05-08T13:56:02+00:00"
+
+
+def _dated(content, when=None):
+    return {**fact(content), "when": when}
+
+
+def test_add_takes_the_time_of_the_save_and_metadata_for_its_memories(verbatim_store):
+    result = verbatim_store.add("Maya adopted a cat", user_id="ada", infer=False,
+                                metadata={"context": "chat"}, created_at=STAMP,
+                                memory_metadata={"bench": {"turns": ["D1:3"]}})
+    memory = verbatim_store.get(result.actions[0].memory_id)
+    assert memory.created_at == memory.updated_at == memory.valid_from == STAMP
+    assert memory.metadata["bench"] == {"turns": ["D1:3"]}
+    assert memory.metadata["context"] == "chat"
+    [episode] = verbatim_store.episodes(user_id="ada")
+    assert episode.created_at == STAMP and episode.metadata == {"context": "chat"}
+
+
+def test_extraction_reads_now_and_every_extracted_memory_gets_the_save_time(store, fake_llm):
+    from datetime import datetime, timezone
+
+    fake_llm.queue(
+        facts_response(
+            _dated("Maya adopted a cat on 2023-05-07",
+                   {"start": "2023-05-07", "end": None, "recurrence": None}),
+            # the write date read back from a text that names none: dropped,
+            # which only happens when the day of writing is ``now``
+            _dated("Maya is happy", {"start": "2023-05-08", "end": None, "recurrence": None}),
+        ),
+        coverage(),
+    )
+    result = store.add("Yesterday I adopted a cat, I am so happy", user_id="ada",
+                       created_at=STAMP, now=datetime(2023, 5, 8, 13, 56, tzinfo=timezone.utc),
+                       memory_metadata={"bench": {"session": "s1"},
+                                        "when": {"start": "2023-05-08", "by": "session"}})
+
+    assert "Today's date is 2023-05-08" in fake_llm.calls[0][0]
+    memories = {m.content: m for m in (store.get(a.memory_id) for a in result.actions)}
+    assert all(m.created_at == m.updated_at == m.valid_from == STAMP for m in memories.values())
+    assert all(m.metadata["bench"] == {"session": "s1"} for m in memories.values())
+    # the memory's own "when" is kept; the caller's fills in where it had none
+    assert memories["Maya adopted a cat on 2023-05-07"].metadata["when"]["start"] == "2023-05-07"
+    assert memories["Maya is happy"].metadata["when"] == {"start": "2023-05-08", "by": "session"}
+
+
+def test_a_rewrite_is_stamped_with_the_time_of_the_save(store, fake_llm):
+    fake_llm.queue(facts_response(fact("User works at Northwind")), coverage())
+    target = store.add("I work at Northwind", user_id="ada", created_at=STAMP).actions[0]
+    fake_llm.queue(
+        facts_response(fact("User works at Northwind as a data engineer")),
+        decision("UPDATE", target=0, content="User works at Northwind as a data engineer"),
+        facts_response(),
+        coverage(),
+    )
+    later = "2023-05-25T19:30:00+00:00"
+    result = store.add("I'm a data engineer there", user_id="ada", created_at=later)
+    assert result.actions[0].event == "UPDATE"
+    updated = store.get(target.memory_id)
+    assert (updated.created_at, updated.updated_at) == (STAMP, later)
+
+
+def test_a_deferred_save_keeps_its_time_metadata_and_date_for_distillation(store, fake_llm):
+    from datetime import datetime, timezone
+
+    raw = store.add_deferred("Maya adopted a cat yesterday", user_id="ada", created_at=STAMP,
+                             memory_metadata={"bench": {"session": "s1"}},
+                             now=datetime(2023, 5, 8, tzinfo=timezone.utc))
+    pending = store.get(raw.actions[0].memory_id)
+    assert pending.created_at == pending.valid_from == STAMP
+    assert pending.metadata["bench"] == {"session": "s1"}
+    [episode] = store.episodes(user_id="ada")
+    assert episode.created_at == STAMP
+    # the quiet period counts from when it was queued, not from created_at
+    assert store.process_pending_enrichments(quiet_seconds=120)["claimed"] == 0
+
+    fake_llm.queue(facts_response(fact("Maya adopted a cat on 2023-05-07")), coverage())
+    assert store.process_pending_enrichments(quiet_seconds=0)["succeeded"] == 1
+    assert "Today's date is 2023-05-08" in fake_llm.calls[0][0]
+    [distilled] = store.get_all(user_id="ada")
+    assert distilled.content == "Maya adopted a cat on 2023-05-07"
+    assert distilled.created_at == distilled.updated_at == distilled.valid_from == STAMP
+    assert distilled.metadata["bench"] == {"session": "s1"}
+    assert "_enrichment" not in store.get(pending.id).metadata

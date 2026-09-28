@@ -15,14 +15,16 @@ deletes anything:
   memories mention. Everything else stays a phrase on its memory: searchable,
   linked, and never stored as "not a hub", so the answer changes as soon as
   the evidence does.
-* **Home is one level, and derived.** A part belongs to the project or product
-  it keeps appearing with. A stated ``part_of`` relation wins, and is the only
-  way an organization becomes a home: a company co-occurs with everything its
-  owner does, which says nothing about what belongs to it.
+* **Home is one level, and derived.** A part belongs where a stated
+  membership relation (``part_of`` and the like) puts it, or else where the
+  decision provider answered it is a version or a part of another entity.
+  Appearing together is not enough: homes from co-mention measured 68% right
+  (47% for an organization) and were removed.
 
 * **A shared name is read through home.** Same name under the same home is the
   same thing. Same name under different homes is two things and no question.
-  People are never merged on a name alone.
+  People are never merged on a name alone, and a pair the judge or a person
+  held apart is never merged, nor joined through a third.
 
 Each rule was scored against 360 names, 141 homes and 310 past merge decisions
 from a real store, labelled by an independent reader (see
@@ -30,7 +32,8 @@ from a real store, labelled by an independent reader (see
 ("anchor, or two memories, or a relation") was right about 52% of the names it
 promoted: recurrence finds topics like "billing", not things. Using the
 provider's verdict it is 72% at 98% recall. Homes from co-mention alone were
-68% right; restricted as described above, 86%.
+68% right, 86% restricted to a project or product at a share of 0.7; they are
+no longer derived.
 
 Everything here is pure: lists in, plans out. The store applies the plans, so
 a dry run is the same code with the last step left out.
@@ -38,7 +41,7 @@ a dry run is the same code with the last step left out.
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -51,9 +54,6 @@ HOME_TYPES = frozenset({"project", "product", "organization"})
 #: Types that never get a home and are never one, whatever a judge answered
 #: (kept equal to ``identity.HOMELESS_TYPES``).
 HOMELESS_TYPES = frozenset({"person", "place"})
-#: Types that can become a home from co-mention alone. An organization needs a
-#: stated relation: as a co-mentioned home it measured 47% right.
-COMENTION_HOME_TYPES = frozenset({"project", "product"})
 #: Verdicts of the name screen (intelligence/entities.py) that are not things.
 SCREEN_SKIPS = frozenset({"role", "value_or_fragment"})
 #: Probability a skip verdict needs before anything believes it: the write
@@ -67,11 +67,6 @@ PART_PREDICATES = frozenset({
     "part_of", "belongs_to", "feature_of", "component_of", "module_of",
     "section_of", "included_in", "subproject_of", "version_of",
 })
-
-#: Share of a part's memories one anchor must appear in to be its home.
-HOME_MIN_SHARE = 0.7
-#: An anchor seen fewer times than this is too thin to be anyone's home.
-HOME_MIN_ANCHOR_MEMORIES = 3
 
 
 @dataclass(frozen=True)
@@ -122,38 +117,19 @@ def is_hub(
 
 def derive_homes(
     nodes: Iterable[Node],
-    links: Iterable[tuple[str, str]],
     relations: Iterable[tuple[str, str, str]],
     judged: Iterable[tuple[str, str, float]] = (),
-    *,
-    min_share: float = HOME_MIN_SHARE,
-    min_anchor_memories: int = HOME_MIN_ANCHOR_MEMORIES,
 ) -> dict[str, dict[str, Any]]:
     """Where each part belongs: ``{entity_id: {"id", "share", "source"}}``.
 
-    ``links`` are (entity_id, memory_id) over active memories; ``relations``
-    are (subject, predicate, object). ``judged`` are (child, parent,
-    probability): pairs a decision provider answered that the child is a
-    version or a part of the parent, at ``identity.BELONGS_BAR`` or above. One
-    level only: a home has no home, so a chain cannot form and nothing needs a
-    tree.
+    ``relations`` are (subject, predicate, object); ``judged`` are (child,
+    parent, probability): pairs a decision provider answered that the child
+    is a version or a part of the parent, at ``identity.BELONGS_BAR`` or
+    above. A stated membership wins over a judged one. Appearing in the same
+    memories gives no home. One level only: a home has no home, so a chain
+    cannot form and nothing needs a tree.
     """
     by_id = {node.id: node for node in nodes}
-    entity_memories: dict[str, set[str]] = defaultdict(set)
-    memory_entities: dict[str, set[str]] = defaultdict(set)
-    for entity_id, memory_id in links:
-        if entity_id in by_id:
-            entity_memories[entity_id].add(memory_id)
-            memory_entities[memory_id].add(entity_id)
-
-    def can_be_home(entity_id: str) -> bool:
-        node = by_id.get(entity_id)
-        return (
-            node is not None
-            and node.entity_type in HOME_TYPES
-            and len(entity_memories[entity_id]) >= min_anchor_memories
-        )
-
     homes: dict[str, dict[str, Any]] = {}
     # 1. a stated membership wins over anything inferred
     for subject, predicate, obj in relations:
@@ -164,8 +140,7 @@ def derive_homes(
 
     # 2. then what the judge answered, likeliest first. A version of a
     # document or a dated occurrence of an event is a home as well: the judge
-    # read both sides, where co-mention only counts memories. A person or a
-    # place is never a home and never has one.
+    # read both sides. A person or a place is never a home and never has one.
     for child, parent, probability in sorted(judged, key=lambda item: -item[2]):
         child_node, parent_node = by_id.get(child), by_id.get(parent)
         if (child_node is None or parent_node is None or child == parent
@@ -174,49 +149,28 @@ def derive_homes(
             continue
         homes.setdefault(child, {"id": parent, "share": round(probability, 2), "source": "judged"})
 
-    # 3. otherwise the anchor it keeps appearing with
-    for node in by_id.values():
-        if node.id in homes or node.entity_type in ANCHOR_TYPES:
-            continue
-        memories = entity_memories[node.id]
-        if not memories:
-            continue
-        counts: Counter[str] = Counter()
-        for memory_id in memories:
-            for other in memory_entities[memory_id]:
-                if other != node.id and can_be_home(other):
-                    counts[other] += 1
-        if not counts:
-            continue
-        ranked = counts.most_common(2)
-        top, shared = ranked[0]
-        share = shared / len(memories)
-        if share < min_share or by_id[top].entity_type not in COMENTION_HOME_TYPES:
-            continue
-        # Two anchors tied for the top cannot both be home; leave it unhomed.
-        # This is also what keeps a part seen once honest: with one memory
-        # every count is 1, so any second anchor in it, a company included,
-        # is a tie, and that reading measured a coin toss (48% right).
-        if len(ranked) > 1 and ranked[1][1] == shared:
-            continue
-        homes[node.id] = {"id": top, "share": round(share, 2), "source": "co-mention"}
-
     # one level only: whoever is a home keeps none of its own
     used = {home["id"] for home in homes.values()}
     return {entity_id: home for entity_id, home in homes.items() if entity_id not in used}
 
 
 def same_name_plan(
-    nodes: Iterable[Node], homes: dict[str, dict[str, Any]]
+    nodes: Iterable[Node], homes: dict[str, dict[str, Any]],
+    apart: Iterable[tuple[str, str]] = (),
 ) -> list[dict[str, Any]]:
     """What to do with entities that share a normalized name.
 
     Returns one step per pair, against the member kept:
     ``{"action": "merge"|"ask"|"separate", "keep", "other", "reason"}``.
+    ``apart`` are pairs the judge or a person held apart (a rejected
+    proposal, or P(different) at the judge's apart bar): such a pair is
+    never merged, and neither is a member held apart from one already merged
+    into the kept member, so two kept apart are never joined through a third.
     """
     groups: dict[str, list[Node]] = defaultdict(list)
     for node in nodes:
         groups[node.normalized or node.name.strip().lower()].append(node)
+    held = {frozenset(pair) for pair in apart}
 
     def home_of(node: Node) -> str | None:
         home = homes.get(node.id)
@@ -229,8 +183,13 @@ def same_name_plan(
         # the best-evidenced member is the one kept; oldest breaks ties
         members = sorted(members, key=lambda n: (-n.memories, -n.relations, n.created_at, n.id))
         keep = members[0]
+        joined = {keep.id}  # the kept member and whatever merges into it
         for other in members[1:]:
             step = {"keep": keep.id, "other": other.id, "name": keep.name}
+            if any(frozenset((other.id, member)) in held for member in joined):
+                plan.append({**step, "action": "separate",
+                             "reason": "held apart by the judge or by you"})
+                continue
             if "person" in (keep.entity_type, other.entity_type):
                 plan.append({**step, "action": "ask",
                              "reason": "a person is never merged on a name alone"})
@@ -250,6 +209,7 @@ def same_name_plan(
                 plan.append({**step, "action": "ask",
                              "reason": "same name, but typed as different kinds of thing"})
                 continue
+            joined.add(other.id)
             plan.append({**step, "action": "merge",
                          "reason": "same name under the same home" if home_a
                          else "same name and nothing sets them apart"})
