@@ -113,6 +113,18 @@ def parse_ts(ts: str) -> datetime:
     return dt
 
 
+def later_ts(current: str | None, stamp: str) -> str:
+    """The later of two ISO 8601 times, compared as times (a time without a
+    zone is UTC); ``stamp`` when ``current`` is None. A time that does not
+    parse compares as text."""
+    if not current:
+        return stamp
+    try:
+        return stamp if parse_ts(stamp) > parse_ts(current) else current
+    except (ValueError, TypeError):
+        return max(current, stamp)
+
+
 class Scope(BaseModel):
     """Memory scoping, mem0-compatible: any combination of user/agent/run.
 
@@ -169,6 +181,13 @@ class Memory(BaseModel):
         return Scope(user_id=self.user_id, agent_id=self.agent_id, run_id=self.run_id)
 
 
+#: What took a memory out of use, on its SUPERSEDE event (``MemoryEvent.kind``):
+#: a newer memory contradicting it, an update kept beside the newer memory
+#: with no merged text written, a merge of duplicates, or the distilling of a
+#: raw saved message.
+SUPERSEDE_KINDS: tuple[str, ...] = ("contradiction", "update", "consolidation", "distillation")
+
+
 class MemoryEvent(BaseModel):
     """Audit-trail entry for a memory mutation."""
 
@@ -180,6 +199,10 @@ class MemoryEvent(BaseModel):
     reason: str | None = None
     actor: str = "system"  # "system" | "user" | "decay" | ...
     created_at: str = Field(default_factory=utcnow)
+    #: One of ``SUPERSEDE_KINDS`` on a SUPERSEDE event, recorded since the
+    #: kind was a column; None on other events and on older rows, whose kind
+    #: is read from ``reason`` (``store._is_contradiction``).
+    kind: str | None = None
 
 
 class CandidateFact(BaseModel):

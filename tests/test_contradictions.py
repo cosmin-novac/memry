@@ -68,7 +68,7 @@ def test_saying_the_new_one_is_right_replaces_the_old_one(store, fake_llm):
     assert store.get(old.id).superseded_by == new_id
     assert CONFLICT_KEY not in store.get(new_id).metadata
     event = store.history(old.id)[-1]
-    assert (event.event, event.actor) == ("SUPERSEDE", "user")
+    assert (event.event, event.actor, event.kind) == ("SUPERSEDE", "user", "contradiction")
 
 
 def test_both_can_be_true(store, fake_llm):

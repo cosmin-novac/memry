@@ -121,15 +121,24 @@ preserve old claims instead of pretending that the latest claim erased history.
 The product and dashboard call deterministic classification labels such as `liver health`
 or `2026 taxes` **tags**. The existing Python/REST field remains `categories`, and the memory's
 JSON `categories` list stays the record every filter, backup and export reads. Each tag is also
-an entity of type `topic` (one per user and normalized tag, created on first use) and each
-tagged memory mentions it, so tags, people, products and projects are one kind of thing with
-one merge machinery: a tag merge is an entity merge plus a rewrite of the `categories` column,
-and whatever writes the column brings the mentions in line. A merge rewrites the column of
-invalid memories too, and a column still naming a merged tag is mentioned under the topic it
-went into, so restoring a memory never brings a merged tag back. Tag counts and the vocabulary
-offered to extraction are read from the topic entities. The normalized `topics` table plus
-the indexed `memory_topics` join remain the filter index derived from the column (and the
-record the first open of an upgraded database, or `memry tags-to-things`, migrates from).
+an entity of type `topic` (one active one per user and normalized tag, held by a partial
+unique index, created on first use) and each tagged memory mentions it, so tags, people,
+products and projects are one kind of thing with one merge machinery: a tag merge is an
+entity merge plus a rewrite of the `categories` column, and whatever writes the column
+brings the mentions in line. A merge resolves the names merged away among the active
+topics only, never through a merged one's tombstone, and never renames a survivor: a name
+asked for that has no active topic gets a new one and the others fold into it, so every
+name merged away keeps its tombstone (a rename is such a merge; a name found to be a named
+thing takes what is merged into it into that thing). A merge rewrites the column of invalid
+memories too, and a column still naming a merged tag (a restored backup, an import) is
+mentioned under, and indexed for the filters under, the topic it went into, so restoring a
+memory never brings a merged tag back and the counts and the filters agree; a filter on the
+name merged away finds nothing. A save and an update write a merged tag as its survivor in
+the column itself. Tag counts and the vocabulary offered to extraction are read from the
+topic entities. The normalized `topics` table plus the indexed `memory_topics` join remain
+the filter index derived from the column (and the record the first open of an upgraded
+database, or `memry tags-to-things`, migrates from, committing user by user and marking
+the migration done after the last, so an open stopped midway resumes where it stopped).
 A topic entity is never a hub, is never masked in a property vector, and is never found by
 a name lookup; a tag and a named thing of the same name are compared by the entity identity
 funnel, two tags by the tag question.
@@ -319,15 +328,21 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
 2. With an LLM, extract small candidate memories, types, importance, topics, entities, and
    possible relations, offered the user's tags from every run. Without an LLM, store the
    input verbatim.
-3. Retrieve similar active memories in the save's scope (user, agent and run), and
-   reconcile each candidate as add, update, supersede, or no-op. A fact saved again under
-   another run is added to that run, so a search of the run finds it; the consolidation
-   pass merges duplicates across runs. (Tags, topic canonicalization and entity lookup
-   read the whole user.) An UPDATE's merged sentence is written by the text model, also
-   when a decision provider chose the action; when none is written, the old memory is kept
-   and superseded by the new one instead of being overwritten with the new fact alone.
-   The Archive lists that old memory as replaced (not contradicted), and its undo brings
-   it back beside the newer one.
+3. Retrieve similar active memories of the user across runs (with the agent), and
+   reconcile each candidate as add, update, supersede, or no-op. What a decision does
+   depends on where the memory it matched lives. In the save's own run: as decided. In
+   another run: a contradiction supersedes that memory and adds the new one to the save's
+   run; a no-op or an update adds the new memory to the save's run anyway and leaves the
+   other run's memory alone, so a search of the run finds what was said in it (the
+   consolidation pass may merge the duplicate later). An exact duplicate is skipped
+   without asking only within the save's run. (Tags, topic canonicalization and entity
+   lookup read the whole user too.) An UPDATE's merged sentence is written by the text
+   model, also when a decision provider chose the action; when none is written, the old
+   memory is kept and superseded by the new one instead of being overwritten with the new
+   fact alone. The Archive lists that old memory as replaced (not contradicted), and its
+   undo brings it back beside the newer one. Each SUPERSEDE event records its `kind`
+   (contradiction, update, consolidation or distillation), which the Archive reads; an
+   event from before the column is classified by its reason.
 4. Store or update the memory, normalized topic links, embedding, and FTS row.
 5. Resolve entity mentions conservatively. Alias matches only narrow the candidates. A new
    name's screen verdict is kept on the entity it creates, so the weekly screen skips it.
@@ -337,8 +352,10 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    warning on the result.
 
 `add` (and `add_deferred`) take `created_at` (the episodes' and new memories' time and
-`valid_from`, the `updated_at` of a memory the save rewrites, and the `invalid_at` and
-`updated_at` of one it supersedes, a distilled raw memory included), `memory_metadata`
+`valid_from`, the `updated_at` of a memory the save rewrites, the `invalid_at` of one it
+supersedes, a distilled raw memory included, and the time of the events the save records;
+a rewritten or superseded memory keeps a later `updated_at` it has, so
+`repair_updated_at` reads the same times), `memory_metadata`
 (merged into every memory the save produces; a key Memry sets, such as "when", is kept)
 and `now` (the day extraction and the when-check read as today). They exist for replaying
 dated conversations (`evals/external_benchmarks.py`).
@@ -365,11 +382,12 @@ For a normal text query:
    question speaks in the first person and the owner is one), the linked search runs: it
    follows the links from that entity, directed and weighted by kind, direction and
    probability (`relational_depth`, 1 by default), adds the best memories of each entity
-   linked strongly enough, and orders every candidate by how well it states the property
-   asked (its property vector, entity names read as "it") times how strongly it is about
-   the entity named. This is the only link mode; the earlier "typed" and "undirected"
-   walks and the "rescue", "weighted", "inherit" and "gated" fusions were removed, and a
-   config naming one is refused.
+   linked strongly enough (read within the user, agent and run searched before the newest
+   500 are taken, as the set pool's topic scan is), and orders every candidate by how well
+   it states the property asked (its property vector, entity names read as "it") times how
+   strongly it is about the entity named. This is the only link mode; the earlier "typed"
+   and "undirected" walks and the "rescue", "weighted", "inherit" and "gated" fusions were
+   removed, and a config naming one is refused.
 6. With `relational_relevance = "jev"` (the default "auto" is "jev" where the decision
    provider re-ranks: Jev unless `decision.rerank` is off, or a text model measured to help
    with it on; "vector" elsewhere), the decision model judges the first 20 of that

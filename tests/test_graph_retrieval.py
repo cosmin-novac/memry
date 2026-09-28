@@ -859,3 +859,33 @@ def test_the_linked_search_keeps_to_the_run_searched(store):
     assert tea.id not in {r.memory.id for r in in_run}
     everywhere = store.search("What does Ada like?", user_id="ada", limit=10)
     assert tea.id in {r.memory.id for r in everywhere}
+
+
+def test_a_runs_memories_of_a_large_entity_reach_the_linked_search(store):
+    """Ada has 600 memories; the run searched owns only the oldest 50, which
+    the text ranking cannot find (no word of the question, no vector). The
+    family candidates keep to the run before the newest ``FAMILY_SCAN`` are
+    taken, so the search of the run still finds them."""
+    from memry.intelligence.graph_retrieval import FAMILY_SCAN
+
+    ada = store.backend.insert_entity(
+        Entity(name="Ada", normalized="ada", user_id="ada", run_id="s1"))
+
+    def remember(content, run_id, day):
+        stamp = f"2023-{1 + day // 28:02d}-{1 + day % 28:02d}T00:00:00+00:00"
+        memory = store.backend.insert_memory(Memory(
+            content=content, user_id="ada", run_id=run_id, created_at=stamp,
+            updated_at=stamp))
+        store.backend.add_mention(EntityMention(entity_id=ada.id, memory_id=memory.id,
+                                                surface="Ada"))
+        return memory
+
+    own = {remember(f"Enjoys sourdough bread number {i}", "s1", i // 10).id for i in range(50)}
+    for i in range(550):
+        remember(f"Other session note {i}", "s2", 10 + i // 10)
+    assert 550 > FAMILY_SCAN - 50
+    _linked(store)
+    assert {m.id for m in store.backend.entity_memories(
+        ada.id, limit=FAMILY_SCAN, scope=Scope(user_id="ada", run_id="s1"))} == own
+    found = store.search("What does Ada like?", user_id="ada", run_id="s1", limit=10)
+    assert len(found) == 10 and {r.memory.id for r in found} <= own

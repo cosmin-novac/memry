@@ -84,9 +84,12 @@ class MemoryBackend(ABC):
         self, memory_id: str, *, superseded_by: str | None = None, at: str | None = None
     ) -> Memory | None:
         """Temporal soft-delete: mark the memory as no longer valid. ``at``
-        (ISO 8601) is when, the memory's ``invalid_at`` and ``updated_at``: a
-        replayed save's time (``MemoryStore.add(created_at=...)``); the clock
-        when None."""
+        (ISO 8601) is when, the memory's ``invalid_at``: a replayed save's time
+        (``MemoryStore.add(created_at=...)``); the clock when None. Its
+        ``updated_at`` becomes the later of its own and ``at``, never earlier,
+        so a replayed save older than the memory's last change does not move
+        it back. Whoever records the SUPERSEDE event gives it ``at`` as its
+        time, which ``MemoryStore.repair_updated_at`` reads."""
 
     def revalidate_memory(self, memory_id: str) -> "Memory | None":
         """Undo an invalidation: the memory is believed true again."""
@@ -368,16 +371,15 @@ class MemoryBackend(ABC):
     # with its ``categories`` column; one that does not returns None from the
     # counts, and the store counts the column instead.
     def topic_entity(
-        self, name: str, scope: Scope, *, create: bool = True
+        self, name: str, scope: Scope, *, create: bool = True, follow_merged: bool = False
     ) -> Entity | None:
-        """The topic entity of tag ``name`` for ``scope.user_id``, created when
-        missing and ``create``; for a tag merged away, the entity it went into
-        (another topic, or a named thing)."""
-        return None
-
-    def rename_topic(self, entity_id: str, name: str) -> Entity | None:
-        """Rename a topic entity to another tag, keeping its id; None when it
-        is not an active topic entity."""
+        """The active topic entity of tag ``name`` for ``scope.user_id``,
+        created when missing and ``create`` (one per user and name, however
+        many processes create it at once). A tag merged away has none; with
+        ``follow_merged`` it resolves to the entity it went into (another
+        topic, or a named thing), as a memory's column naming it is filed
+        there. Merges resolve their names without it, so a name merged away
+        is never merged again through its tombstone."""
         return None
 
     def topic_mention_counts(
@@ -499,9 +501,13 @@ class MemoryBackend(ABC):
         return []
 
     def entity_memories(
-        self, entity_id: str, limit: int = 10, *, include_invalid: bool = False
+        self, entity_id: str, limit: int = 10, *, include_invalid: bool = False,
+        scope: Scope | None = None,
     ) -> list[Memory]:
-        """Memories that mention this entity. Active evidence is the default."""
+        """Memories that mention this entity, newest first. Active evidence is
+        the default. ``scope`` keeps to the memories of that user, agent and
+        run (a field None matches any) before ``limit`` counts, so a run's
+        memories of an entity other runs mention far more are still read."""
         return []
 
     def count_entity_memories(self, entity_id: str) -> int:

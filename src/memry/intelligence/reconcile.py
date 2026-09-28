@@ -17,6 +17,12 @@ Decisions:
              decides under Upkeep.
 - NONE     - duplicate / already known -> skip
 
+The memories compared are the user's across runs (``store._across_runs``).
+Where the one acted on belongs to another run than the save, a DELETE still
+supersedes it, but a NONE or an UPDATE leaves it alone and adds the new fact
+to the save's run: a search of that run must find what was said in it, and
+the consolidation pass merges such duplicates later.
+
 Without an LLM, reconciliation degrades to exact-duplicate detection.
 """
 
@@ -34,6 +40,7 @@ from ..models import (
     MemoryEvent,
     Scope,
     SearchResult,
+    later_ts,
     utcnow,
 )
 from ..providers.embeddings import Embedder
@@ -186,6 +193,14 @@ def held_back(
     return None
 
 
+def in_save_scope(memory: Memory, scope: Scope) -> bool:
+    """Whether a memory belongs to the save's own scope (its run, agent and
+    user; a field the save leaves None matches any). NONE and UPDATE act only
+    on such a memory (``reconcile_candidate``)."""
+    return all(getattr(scope, field) is None or getattr(memory, field) == getattr(scope, field)
+               for field in ("user_id", "agent_id", "run_id"))
+
+
 def reconcile_candidate(
     *,
     candidate: CandidateFact,
@@ -203,15 +218,23 @@ def reconcile_candidate(
 ) -> AddAction:
     """Apply one candidate fact against the store and return what happened.
 
+    ``similar`` may hold memories of other runs of the user than the save's
+    (``scope``): a DELETE supersedes one of them, a NONE or an UPDATE of one
+    adds the new fact to the save's run and leaves it alone
+    (``in_save_scope``).
+
     ``created_at`` is the time of the save (``MemoryStore.add``): a new
     memory's ``created_at``, ``updated_at`` and ``valid_from``, the
-    ``updated_at`` of a memory an UPDATE rewrites, and the ``invalid_at`` and
-    ``updated_at`` of one it supersedes. The clock when None."""
+    ``updated_at`` of a memory an UPDATE rewrites (never moved back), the
+    ``invalid_at`` of one it supersedes, and the time of the events recorded.
+    The clock when None."""
+    stamped: dict[str, Any] = {"created_at": created_at} if created_at else {}
 
-    # Fast path: exact duplicate needs no LLM round-trip.
+    # Fast path: an exact duplicate in the save's own run needs no LLM
+    # round-trip. One of another run is asked about like any other memory.
     norm = _normalize(candidate.content)
     for result in similar:
-        if _normalize(result.memory.content) == norm:
+        if _normalize(result.memory.content) == norm and in_save_scope(result.memory, scope):
             return AddAction(
                 event="NONE",
                 memory_id=result.memory.id,
@@ -246,6 +269,12 @@ def reconcile_candidate(
         action = "ADD"  # malformed decision -> safest fallback
 
     reason = str(decision.get("reason") or "")
+    if action in ("NONE", "UPDATE") and target is not None and not in_save_scope(target, scope):
+        # another run's memory says it already: the fact is added to this
+        # run, so a search of the run finds it, and that memory is left alone
+        reason = (f"{action} of memory {target.id} of another run, left as it is; "
+                  f"added to this run. {reason}").strip()
+        action, target = "ADD", None
 
     if action == "NONE":
         return AddAction(
@@ -290,7 +319,9 @@ def reconcile_candidate(
             **prepared,
         )
         if created_at is not None:
-            backend.set_memory_timestamp(target.id, created_at)
+            # a replayed save older than the memory's last change does not
+            # move its updated_at back
+            backend.set_memory_timestamp(target.id, later_ts(target.updated_at, created_at))
         backend.add_event(
             MemoryEvent(
                 memory_id=target.id,
@@ -298,6 +329,7 @@ def reconcile_candidate(
                 old_content=target.content,
                 new_content=new_content,
                 reason=reason or "refined by new information",
+                **stamped,
             )
         )
         return AddAction(event="UPDATE", memory_id=target.id, content=new_content, reason=reason)
@@ -348,6 +380,7 @@ def reconcile_candidate(
                 if superseding and target is not None
                 else reason or "new information"
             ),
+            **stamped,
         )
     )
 
@@ -373,6 +406,8 @@ def reconcile_candidate(
                     f"{UPDATE_SUPERSEDE_REASON}: kept and superseded. {reason}".strip()
                     if superseding else reason or "contradicted by new information"
                 ),
+                kind="update" if superseding else "contradiction",
+                **stamped,
             )
         )
         return AddAction(

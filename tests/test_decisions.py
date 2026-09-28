@@ -516,7 +516,7 @@ def test_an_update_kept_and_superseded_is_no_contradiction_and_undo_keeps_both()
     newer = store.add("Ada is a data engineer there", user_id="u", infer=False).actions[0]
     assert newer.event == "SUPERSEDE"
     [event] = [e for e in store.history(target) if e.event == "SUPERSEDE"]
-    assert not _is_contradiction(event)
+    assert event.kind == "update" and not _is_contradiction(event)
     [row] = store.replaced(user_id="u")
     assert (row["memory"].id, row["contradiction"]) == (target, False)
     assert store.undo_replacement(target)  # keep_new=False, as the plain undo sends
@@ -543,9 +543,52 @@ def test_a_contradiction_is_listed_as_one_and_its_undo_forgets_the_newer():
     assert new.event == "DELETE"
     [row] = store.replaced(user_id="u")
     assert (row["memory"].id, row["contradiction"]) == (old, True)
+    assert [e.kind for e in store.history(old) if e.event == "SUPERSEDE"] == ["contradiction"]
     assert store.undo_replacement(old)
     assert store.get(new.memory_id).invalid_at is not None
     store.close()
+
+
+def test_a_supersedes_kind_is_recorded_and_read_before_its_reason(tmp_path):
+    """What took a memory out of use is recorded in the event's ``kind``: a row
+    of kind "update" is no contradiction whatever its reason says, and one of
+    kind "contradiction" is one. A row from before the column (added at open)
+    has no kind and is classified by its reason, as before."""
+    import sqlite3
+
+    from memry.backends.local import LocalBackend
+    from memry.intelligence.reconcile import UPDATE_SUPERSEDE_REASON
+    from memry.models import MemoryEvent
+    from memry.store import _is_contradiction, _is_update_supersede
+
+    path = tmp_path / "events.db"
+    LocalBackend(str(path)).close()
+    with sqlite3.connect(path) as db:  # the database as it was before the column
+        db.execute("ALTER TABLE memory_events DROP COLUMN kind")
+        for event_id, reason in (("old-update", f"{UPDATE_SUPERSEDE_REASON}: kept and superseded."),
+                                 ("old-contradiction", "moved cities"),
+                                 ("old-merge", "consolidated into m2")):
+            db.execute("INSERT INTO memory_events (id, memory_id, event, reason, actor, created_at) "
+                       "VALUES (?, 'm', 'SUPERSEDE', ?, 'system', ?)",
+                       (event_id, reason, "2023-01-01T00:00:00+00:00"))
+    backend = LocalBackend(str(path))
+    try:
+        backend.add_event(MemoryEvent(memory_id="m", event="SUPERSEDE", id="new-update",
+                                      reason="contradicted by new information", kind="update"))
+        backend.add_event(MemoryEvent(memory_id="m", event="SUPERSEDE", id="new-contradiction",
+                                      reason="consolidated into m3", kind="contradiction"))
+        events = {e.id: e for e in backend.history("m")}
+    finally:
+        backend.close()
+    assert {event_id: event.kind for event_id, event in events.items()} == {
+        "old-update": None, "old-contradiction": None, "old-merge": None,
+        "new-update": "update", "new-contradiction": "contradiction"}
+    classified = {event_id: (_is_contradiction(event), _is_update_supersede(event))
+                  for event_id, event in events.items()}
+    assert classified == {
+        "new-update": (False, True), "new-contradiction": (True, False),
+        "old-update": (False, True), "old-contradiction": (True, False),
+        "old-merge": (False, False)}
 
 
 # ---------------------------------------------------------------- re-ranking

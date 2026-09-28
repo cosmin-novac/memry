@@ -117,6 +117,8 @@ def test_superseded_memories_are_kept_and_linked(store):
     dropped = [m for m in everything if m.invalid_at is not None]
     assert len(dropped) == 3
     assert {m.superseded_by for m in dropped} == {merged_memory.id}
+    assert {e.kind for m in dropped for e in store.history(m.id)
+            if e.event == "SUPERSEDE"} == {"consolidation"}
     # the merged record inherits the earliest creation date of the family
     assert merged_memory.created_at == min(m.created_at for m in dropped)
 

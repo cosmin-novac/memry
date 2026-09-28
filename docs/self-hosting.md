@@ -359,8 +359,9 @@ memry tags-to-things --dry-run   # tags to topic entities (done at first open): 
 Tags are entities of type `topic`. A database or backup from before that change keeps its
 tags in the `categories` column and the legacy `topics`/`memory_topics` tables, which every
 filter still reads. The first open of such a database gives each tag its topic entity and
-each tagged memory its mention, so the Tags page and the tag counts see them, and records
-that it did so; `memry tags-to-things [--user USER]` runs the same migration by hand. It
+each tagged memory its mention, so the Tags page and the tag counts see them, committing
+user by user and recording that it did so after the last (an open stopped midway picks up
+where it stopped); `memry tags-to-things [--user USER]` runs the same migration by hand. It
 only reads the legacy tables, and a second run changes nothing.
 
 When accounts or OAuth are enabled, also back up `auth.db` with `memry.db`. The JSON export

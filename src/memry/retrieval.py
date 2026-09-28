@@ -52,7 +52,7 @@ def hybrid_search(
         if entity_id:
             allowed = {
                 memory.id for memory in backend.entity_memories(
-                    entity_id, limit=n, include_invalid=include_invalid
+                    entity_id, limit=n, include_invalid=include_invalid, scope=scope
                 )
             }
             native = [(memory, score) for memory, score in native if memory.id in allowed]

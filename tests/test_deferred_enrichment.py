@@ -341,6 +341,7 @@ def test_the_coverage_audit_runs_after_distillation(tmp_path):
     distilled = next(e for e in store.history(raw) if e.event == "SUPERSEDE")
     assert distilled.reason == ("distilled with its context into 1 fact(s); not captured "
                                 "as facts: must edit XML directly rather than openpyxl")
+    assert distilled.kind == "distillation"
     store.close()
 
 

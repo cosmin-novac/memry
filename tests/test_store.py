@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from conftest import decision, fact, facts_response
 
 from memry.models import Scope
@@ -350,10 +351,9 @@ def test_stats_counts_forgotten_memories_without_listing_them(verbatim_store):
 
 # ------------------------------------------------ one person's saves, any run
 def test_a_duplicate_saved_in_another_run_is_added_to_that_run(verbatim_store):
-    """Reconcile stays within the save's run: the same fact saved in a second
-    session is a memory of that session, so a search of the session finds it
-    (the consolidation pass merges duplicates across runs). Within one run it
-    is a duplicate."""
+    """An exact duplicate of another run's memory is added to the save's run,
+    so a search of that run finds it (the consolidation pass merges duplicates
+    across runs). Within one run it is a duplicate."""
     first = verbatim_store.add("Ada likes green tea", user_id="ada", run_id="r1", infer=False)
     again = verbatim_store.add("Ada likes green tea", user_id="ada", run_id="r2", infer=False)
     assert again.actions[0].event == "ADD"
@@ -365,6 +365,69 @@ def test_a_duplicate_saved_in_another_run_is_added_to_that_run(verbatim_store):
     assert same_run.actions[0].event == "NONE"
     assert same_run.actions[0].memory_id == again.actions[0].memory_id
     assert len(verbatim_store.get_all(user_id="ada")) == 2
+
+
+def test_a_contradiction_from_another_run_supersedes_and_lands_in_the_saves_run(
+        store, fake_llm):
+    """Reconcile reads the user's memories across runs: "I moved to Amsterdam"
+    saved under s2 contradicts "I live in Munich" of s1, which it supersedes.
+    The new memory is s2's; a search of the user returns Amsterdam alone."""
+    fake_llm.queue(facts_response(fact("User lives in Munich")), coverage())
+    munich = store.add("I live in Munich", user_id="ada", run_id="s1").actions[0]
+    fake_llm.queue(facts_response(fact("User lives in Amsterdam")),
+                   decision("DELETE", target=0, reason="moved cities"), coverage())
+    moved = store.add("I moved to Amsterdam", user_id="ada", run_id="s2").actions[0]
+    assert moved.event == "DELETE"
+    retired = store.get(munich.memory_id)
+    assert retired.invalid_at is not None and retired.superseded_by == moved.memory_id
+    assert store.get(moved.memory_id).run_id == "s2"
+    found = store.search("Where does the user live?", user_id="ada", limit=5)
+    assert [r.memory.content for r in found] == ["User lives in Amsterdam"]
+    in_run = store.search("Where does the user live?", user_id="ada", run_id="s2", limit=5)
+    assert [r.memory.id for r in in_run] == [moved.memory_id]
+    assert fake_llm.responses == []
+
+
+@pytest.mark.parametrize("answer", [
+    decision("NONE", target=0),
+    decision("UPDATE", target=0, content="User likes green tea and jasmine tea"),
+])
+def test_another_runs_memory_already_saying_it_is_left_alone_and_the_fact_added(
+        store, fake_llm, answer):
+    """A NONE or an UPDATE against a memory of another run adds the new fact
+    to the save's run and leaves the other run's memory as it was, so a
+    search of the save's run finds the fact. An exact duplicate of another
+    run's memory is asked about like any other fact."""
+    fake_llm.queue(facts_response(fact("User likes green tea")), coverage())
+    first = store.add("I like green tea", user_id="ada", run_id="s1").actions[0]
+    fake_llm.queue(facts_response(fact("User likes green tea")), answer, coverage())
+    again = store.add("I like green tea", user_id="ada", run_id="s2").actions[0]
+    assert again.event == "ADD" and again.memory_id != first.memory_id
+    kept = store.get(first.memory_id)
+    assert (kept.content, kept.invalid_at, kept.run_id) == ("User likes green tea", None, "s1")
+    assert [e.event for e in store.history(first.memory_id)] == ["ADD"]
+    added = store.get(again.memory_id)
+    assert (added.content, added.run_id) == ("User likes green tea", "s2")
+    found = store.search("green tea", user_id="ada", run_id="s2", limit=5)
+    assert [r.memory.id for r in found] == [again.memory_id]
+    assert fake_llm.responses == []  # the other run's memory was asked about
+
+
+def test_within_one_run_none_and_update_act_on_the_runs_memory(store, fake_llm):
+    fake_llm.queue(facts_response(fact("User likes green tea")), coverage())
+    first = store.add("I like green tea", user_id="ada", run_id="s1").actions[0]
+    fake_llm.queue(facts_response(fact("User enjoys green tea")),
+                   decision("NONE", target=0), coverage())
+    same = store.add("I enjoy green tea", user_id="ada", run_id="s1").actions[0]
+    assert (same.event, same.memory_id) == ("NONE", first.memory_id)
+    merged = "User likes green tea, brewed at 80 degrees"
+    fake_llm.queue(facts_response(fact("User brews green tea at 80 degrees")),
+                   decision("UPDATE", target=0, content=merged), facts_response(), coverage())
+    rewrite = store.add("I brew it at 80 degrees", user_id="ada", run_id="s1").actions[0]
+    assert (rewrite.event, rewrite.memory_id) == ("UPDATE", first.memory_id)
+    assert store.get(first.memory_id).content == merged
+    assert [m.id for m in store.get_all(user_id="ada")] == [first.memory_id]
+    assert fake_llm.responses == []
 
 
 def test_the_tag_vocabulary_offered_includes_topics_from_other_runs(store, fake_llm):
@@ -466,6 +529,35 @@ def test_a_memory_a_dated_save_supersedes_goes_out_of_use_at_the_save_time(store
     retired = store.get(old.memory_id)
     assert retired.superseded_by == result.actions[0].memory_id
     assert (retired.created_at, retired.invalid_at, retired.updated_at) == (STAMP, later, later)
+
+
+def test_a_dated_supersede_never_moves_updated_at_back_and_repair_agrees(store, fake_llm):
+    """A memory changed live at T2 and then superseded by a replayed save dated
+    T1 < T2 goes out of use at T1 and keeps updated_at T2. Every event the
+    replay records carries T1, so ``repair_updated_at`` reads the same times
+    and changes nothing."""
+    from memry.models import MemoryEvent
+
+    fake_llm.queue(facts_response(fact("User lives in Munich")), coverage())
+    munich = store.add("I live in Munich", user_id="ada", created_at=STAMP).actions[0].memory_id
+    live = "2023-06-01T09:00:00+00:00"  # T2: a change made live, after the replayed save
+    store.backend.update_memory(munich, content="User lives in Munich, Germany", touch=False)
+    store.backend.set_memory_timestamp(munich, live)
+    store.backend.add_event(MemoryEvent(
+        memory_id=munich, event="UPDATE", old_content="User lives in Munich",
+        new_content="User lives in Munich, Germany", actor="user", created_at=live))
+    replayed = "2023-05-25T19:30:00+00:00"  # T1
+    fake_llm.queue(facts_response(fact("User lives in Amsterdam")),
+                   decision("DELETE", target=0, reason="moved cities"), coverage())
+    moved = store.add("I moved to Amsterdam", user_id="ada", created_at=replayed).actions[0]
+    assert moved.event == "DELETE"
+    retired = store.get(munich)
+    assert (retired.invalid_at, retired.updated_at) == (replayed, live)
+    [supersede] = [e for e in store.history(munich) if e.event == "SUPERSEDE"]
+    assert supersede.created_at == replayed
+    assert store.repair_updated_at(user_id="ada") == {"fixed": 0}
+    assert store.get(munich).updated_at == live
+    assert store.get(moved.memory_id).updated_at == replayed
 
 
 def test_a_deferred_save_keeps_its_time_metadata_and_date_for_distillation(store, fake_llm):

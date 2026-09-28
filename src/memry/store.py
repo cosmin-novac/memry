@@ -291,14 +291,21 @@ def _forgetting_trigger(event: Any) -> str:
 
 def _is_update_supersede(event: MemoryEvent) -> bool:
     """A SUPERSEDE of an UPDATE nobody could write a merged text for: the newer
-    memory adds to the old one, which is kept and was never contradicted."""
+    memory adds to the old one, which is kept and was never contradicted. Read
+    from the event's ``kind``; an older row without one, from its reason."""
+    if event.kind is not None:
+        return event.kind == "update"
     return (event.reason or "").startswith(UPDATE_SUPERSEDE_REASON)
 
 
 def _is_contradiction(event: MemoryEvent) -> bool:
     """A SUPERSEDE that reconciliation made because the new memory contradicts
     the old one, as opposed to a merge of duplicates, the distilling of a raw
-    message or an update kept and superseded, which record their own reasons."""
+    message or an update kept and superseded. Read from the event's ``kind``
+    (``models.SUPERSEDE_KINDS``); an older row without one is classified by
+    the reason those others record."""
+    if event.kind is not None:
+        return event.kind == "contradiction"
     reason = event.reason or ""
     return not (
         reason.startswith("consolidated into")
@@ -385,22 +392,17 @@ def _similarity(asked: np.ndarray, vector: np.ndarray | None) -> float:
 
 def _across_runs(scope: Scope) -> Scope:
     """A save's scope as the lookups across one person's saves read it: the
-    whole user (with the agent), not one run. The tag vocabulary offered to
-    extraction uses it; topic canonicalization and entity lookup
-    (``entities.resolve_mentions``) read the whole user too. Reconcile does
-    not: its candidates are the save's own scope, run included, so a fact
-    saved under a run is a memory of that run that a search of the run finds
-    (the consolidation pass merges duplicates across runs)."""
+    whole user (with the agent), not one run. Reconcile's candidates and the
+    tag vocabulary offered to extraction use it; topic canonicalization and
+    entity lookup (``entities.resolve_mentions``) read the whole user too.
+    Reconcile then acts by where the memory it matched lives
+    (``reconcile.reconcile_candidate``): a contradiction supersedes a memory
+    of any run, but a duplicate or an update of another run's memory adds the
+    fact to the save's run, so a search of the run finds it (the
+    consolidation pass merges duplicates across runs)."""
     if scope.user_id is None:
         return scope
     return Scope(user_id=scope.user_id, agent_id=scope.agent_id)
-
-
-def _in_scope(memory: Memory, scope: Scope) -> bool:
-    """Whether a memory belongs to the scope searched (a field left None in
-    the scope matches any)."""
-    return all(getattr(scope, field) is None or getattr(memory, field) == getattr(scope, field)
-               for field in ("user_id", "agent_id", "run_id"))
 
 
 def _text_hash(text: str) -> str:
@@ -461,8 +463,10 @@ class MemoryStore:
         every memory the save produces (a key Memry sets itself, such as
         "when", is kept). ``created_at`` (ISO 8601) is the time of the save:
         the episodes' and new memories' ``created_at``, ``updated_at`` and
-        ``valid_from``, the ``updated_at`` of a memory it rewrites, and the
-        ``invalid_at`` and ``updated_at`` of one it supersedes.
+        ``valid_from``, the ``updated_at`` of a memory it rewrites, the
+        ``invalid_at`` of one it supersedes, and the time of the events it
+        records. A memory it rewrites or supersedes keeps a later
+        ``updated_at`` it has (``repair_updated_at`` reads the same).
         ``now`` is the reference date extraction resolves "yesterday"
         against, and the when-confirmation reads as the day of writing,
         instead of the clock. All three are for replaying dated
@@ -660,21 +664,30 @@ class MemoryStore:
     def _canonicalize_obvious_topics(
         self, candidates: list[CandidateFact], scope: Scope
     ) -> None:
-        """Write each incoming tag as the obvious canonical form (singular,
-        plural, spacing) it shares with the user's topic entities, and fold a
-        stored variant into it (``_merge_topics``)."""
+        """Write each candidate's tags as a save stores them (``_canonical_tags``)."""
+        tags = self._canonical_tags([candidate.categories for candidate in candidates], scope)
+        for candidate, canonical in zip(candidates, tags):
+            candidate.categories = canonical
+
+    def _canonical_tags(self, tag_lists: list[list[str]], scope: Scope) -> list[list[str]]:
+        """Each list of tags as the store writes it, on a save and on an
+        update alike: each tag in the obvious canonical form (singular,
+        plural, spacing) it shares with the user's topic entities, folding a
+        stored variant into it (``_merge_topics``), and a tag merged into
+        another topic written as that topic, so the column names the tag its
+        memory is counted and filtered under."""
         incoming = {
-            str(category).strip().casefold()
-            for candidate in candidates
-            for category in candidate.categories
-            if str(category).strip()
+            str(tag).strip().casefold()
+            for tags in tag_lists
+            for tag in tags
+            if str(tag).strip()
         }
         if not incoming:
-            return
+            return [list(tags) for tags in tag_lists]
+        user = Scope(user_id=scope.user_id)
         existing = {
             topic.normalized
-            for topic in self.backend.list_entities(
-                Scope(user_id=scope.user_id), limit=1_000_000, kind="topic")
+            for topic in self.backend.list_entities(user, limit=1_000_000, kind="topic")
             if topic.user_id == scope.user_id
         }
         groups = obvious_canonical_merges(
@@ -688,16 +701,24 @@ class MemoryStore:
             stored_variants = (variants - {canonical}) & existing
             if stored_variants:
                 self._merge_topics(scope.user_id, stored_variants, canonical, exact_user=True)
-        for candidate in candidates:
+        for name in {replacements.get(tag, tag) for tag in incoming}:
+            survivor = self.backend.topic_entity(name, user, create=False, follow_merged=True)
+            if (survivor is not None and survivor.entity_type == TOPIC_TYPE
+                    and survivor.normalized != name):
+                replacements[name] = survivor.normalized  # merged away: its survivor
+        rewritten_lists: list[list[str]] = []
+        for tags in tag_lists:
             rewritten: list[str] = []
             seen: set[str] = set()
-            for raw in candidate.categories:
+            for raw in tags:
                 normalized = str(raw).strip().casefold()
                 canonical = replacements.get(normalized, normalized)
+                canonical = replacements.get(canonical, canonical)
                 if canonical and canonical not in seen:
                     seen.add(canonical)
                     rewritten.append(canonical)
-            candidate.categories = rewritten
+            rewritten_lists.append(rewritten)
+        return rewritten_lists
 
     def _apply_candidates(
         self,
@@ -723,14 +744,13 @@ class MemoryStore:
         excluded: set[str] = set(exclude_ids or ())
         actions: list[AddAction] = []
         for candidate in candidates:
-            # the save's own scope, run included: reconciled across runs, a
-            # fact of this run would land as NONE on another run's memory and
-            # a search of this run would not find it
+            # the user's memories across runs; the save's own scope (run
+            # included) decides what a match may do (``reconcile_candidate``)
             similar = hybrid_search(
                 backend=self.backend,
                 embedder=self.embedder,
                 query=candidate.content,
-                scope=scope,
+                scope=_across_runs(scope),
                 limit=self.config.retrieval.reconcile_similarity_limit,
                 cfg=self.config.retrieval,
             )
@@ -1371,6 +1391,8 @@ class MemoryStore:
                     event="SUPERSEDE",
                     old_content=memory.content,
                     reason=f"distilled with its context into {landed} fact(s){gap}",
+                    kind="distillation",
+                    **({"created_at": created_at} if created_at else {}),
                 )
             )
         return AddResult(episode_ids=episode_ids, actions=actions, warnings=warnings)
@@ -1557,9 +1579,10 @@ class MemoryStore:
         for entity_id, strength in act.items():
             if strength < FAMILY_MIN:
                 continue
-            # an entity's memories span runs: only those of the scope searched
-            members = [m for m in self.backend.entity_memories(entity_id, limit=FAMILY_SCAN)
-                       if (include_invalid or m.invalid_at is None) and _in_scope(m, scope)]
+            # an entity's memories span runs: only those of the scope
+            # searched, kept to in SQL before the newest FAMILY_SCAN are taken
+            members = self.backend.entity_memories(
+                entity_id, limit=FAMILY_SCAN, include_invalid=include_invalid, scope=scope)
             vectors = self._property_vectors([m.id for m in members])
             for memory in sorted(members,
                                  key=lambda m: -_similarity(asked, vectors.get(m.id)))[:FAMILY_TOP]:
@@ -1768,11 +1791,12 @@ class MemoryStore:
         for topic_id, count in carried.items():
             if count < SET_SHARED:
                 continue
+            # the scope searched is kept to in SQL, before the newest SET_SCAN
             filed = self.backend.entity_memories(topic_id, limit=SET_SCAN,
-                                                 include_invalid=include_invalid)
+                                                 include_invalid=include_invalid, scope=scope)
             share = count / max(self.backend.count_entity_memories(topic_id), len(filed), 1)
             for memory in filed:
-                if memory.id in done or not _in_scope(memory, scope):
+                if memory.id in done:
                     continue
                 memories[memory.id] = memory
                 walk[memory.id] += share
@@ -2244,7 +2268,9 @@ class MemoryStore:
         if not _owned(old, owner_prefix):
             return None
         if categories is not None:
-            categories = clean_tags(categories)
+            # written as a save writes them: the column names the tags the
+            # memory is counted and filtered under
+            [categories] = self._canonical_tags([clean_tags(categories)], old.scope())
         entity_update: dict[str, Any] = {}
         if content is not None and content != old.content:
             entity_update = self._reanalyze_edited_entities(
@@ -2443,6 +2469,7 @@ class MemoryStore:
                 memory_id=old.id, event="SUPERSEDE", old_content=old.content,
                 new_content=new.content, actor="user",
                 reason=f"you confirmed that memory {new.id} replaces it",
+                kind="contradiction",
             ))
         elif decision == "decline":  # the old one is right
             self.backend.invalidate_memory(new.id)
@@ -3371,15 +3398,23 @@ class MemoryStore:
         self, user_id: str | None, remove: set[str], into: str | None, *,
         exact_user: bool = False,
     ) -> int:
-        """Merge tags the way entities merge: each tag in ``remove`` that is a
-        topic entity of ``user_id`` is folded into the topic entity of
+        """Merge tags the way entities merge: each tag in ``remove`` that is an
+        active topic entity of ``user_id`` is folded into the topic entity of
         ``into`` (``MemoryBackend.merge_entities``: its mentions move, its id
         redirects), then the ``categories`` column is rewritten
         (``retag_topics``), which brings every rewritten memory's mentions in
-        line with its column. A rename to a tag that has no entity yet renames
-        the entity instead, so it keeps its id. ``into`` None drops the tags.
-        Returns how many memories changed, or None when the backend keeps no
-        tag index."""
+        line with its column. ``into`` None drops the tags. Returns how many
+        memories changed, or None when the backend keeps no tag index.
+
+        The names merged away resolve among the active topics only, never
+        through a tombstone: a name merged away before names nothing to merge
+        again ("taxes" into "tax", then "taxes" into "levies" leaves "tax"
+        alone). And no survivor is renamed: when ``into`` has no active topic
+        it gets one of its own and the others fold into it, so every name
+        merged away keeps its tombstone and a column still naming it is filed
+        under the survivor. A tag found to be a named thing ("bildy" the tag
+        into "Bildy" the product) takes what is merged into it into that
+        thing."""
         scope = Scope(user_id=user_id)
         wanted = {str(tag).strip().lower() for tag in remove if str(tag).strip()}
         target = str(into).strip().lower() if into and str(into).strip() else None
@@ -3389,22 +3424,20 @@ class MemoryStore:
                     self.backend.topic_entity(tag, scope, create=False)
                     for tag in sorted(wanted - {target})
                 )
-                if other is not None and other.entity_type == TOPIC_TYPE
+                if other is not None
             ]
-            keep = self.backend.topic_entity(target, scope, create=False)
-            if (keep is not None and keep.entity_type == TOPIC_TYPE
-                    and keep.normalized != target):
-                # ``target`` was merged into this topic before. Merged back
-                # the other way ("tax" into "taxes", then "taxes" into "tax")
-                # the topic takes the name back; asked for by other tags, the
-                # name gets a topic of its own again
-                keep = (self.backend.rename_topic(keep.id, target)
-                        if keep.normalized in wanted else None)
-            if keep is None and variants:
-                keep = self.backend.rename_topic(variants.pop(0).id, target)
-            for other in variants:
-                if keep is not None and other.id != keep.id:
-                    self.backend.merge_entities(keep.id, other.id)
+            if variants:
+                keep = self.backend.topic_entity(target, scope, create=False)
+                if keep is None:
+                    merged = self.backend.topic_entity(target, scope, create=False,
+                                                       follow_merged=True)
+                    if merged is not None and merged.entity_type != TOPIC_TYPE:
+                        keep = merged  # the named thing the tag was found to be
+                if keep is None:
+                    keep = self.backend.topic_entity(target, scope)
+                for other in variants:
+                    if keep is not None and other.id != keep.id:
+                        self.backend.merge_entities(keep.id, other.id)
         return self.backend.retag_topics(scope, wanted, target, exact_user=exact_user)
 
     def _entities_named(
@@ -3549,7 +3582,7 @@ class MemoryStore:
             self.backend.add_event(MemoryEvent(
                 memory_id=memory.id, event="SUPERSEDE",
                 old_content=memory.content, new_content=content,
-                reason=f"consolidated into {stored.id}",
+                reason=f"consolidated into {stored.id}", kind="consolidation",
             ))
         return stored.id
 
