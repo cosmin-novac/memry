@@ -156,10 +156,11 @@ def test_backfill_relations_is_gated_and_idempotent(store):
 
     ada = _entity(store, "Ada")
     helios = _entity(store, "Helios")
-    m2 = _memory(store, "Ada works on Helios.", [ada.id, helios.id])
+    _memory(store, "Ada works on Helios.", [ada.id, helios.id])
     _memory(store, "Ada is tired today.", [ada.id])  # single entity -> skipped
 
-    llm = FakeLLM(); store.llm = llm
+    llm = FakeLLM()
+    store.llm = llm
     llm.queue(_json.dumps({"relations": [
         {"subject": "Ada", "predicate": "works on", "object": "Helios"}]}))
     res = store.backfill_relations(user_id="ada")
@@ -686,3 +687,111 @@ def test_set_members_split_where_the_scores_separate():
     # three tiers: the liked, the merely visited, noise; the top tier is the set
     assert set_members({**liked, **lunch, **dict(zip("pqrst", [0.05, 0.04, 0.03, 0.02, 0.02]))}) \
         == set(liked)
+
+
+class _Reading(_RoundJudge):
+    """``_RoundJudge`` that keeps each question it was asked and each memory as
+    it read it (the questions keyed "m...")."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.states, self.read = [], []
+
+    def decide(self, state, questions):
+        self.states.append(state)
+        self.read += [q.instructions.split("Memory: ", 1)[1] for key, q in questions.items()
+                      if key.startswith("m")]
+        return super().decide(state, questions)
+
+
+def test_a_question_naming_several_things_keeps_their_names(store):
+    """"Did Ilva Marsh like Olive Kitchen?" names two things, and "it" could be
+    either: the question and the memories the provider reads keep both names
+    ("Did it like it?" asks nothing). A question naming one thing reads "it"
+    for it, and another entity's name stays."""
+    import re
+
+    ilva, olive = _entity(store, "Ilva Marsh"), _entity(store, "Olive Kitchen")
+    _memory(store, "Ilva Marsh liked the food at Olive Kitchen", [ilva.id, olive.id])
+    _memory(store, "Ilva Marsh had lunch at Olive Kitchen with Kai", [ilva.id, olive.id])
+    _memory(store, "Ilva Marsh lives in Lisbon", [ilva.id])
+    _linked(store)
+    store.config.retrieval.relational_relevance = "jev"
+
+    store.decider = judge = _Reading(specific=0.9, several=0.1, scores={"liked": 0.9})
+    top = store.search("Did Ilva Marsh like Olive Kitchen?", user_id="ada", limit=5)
+    assert top[0].signals["about"] == 1.0  # the linked search ran, from both
+    assert judge.states == ["QUESTION: Did Ilva Marsh like Olive Kitchen?"]
+    assert "Ilva Marsh liked the food at Olive Kitchen" in judge.read
+    assert "Ilva Marsh had lunch at Olive Kitchen with Kai" in judge.read
+    assert not any(re.search(r"\bits?\b", text) for text in judge.read)
+
+    store.decider = judge = _Reading(specific=0.9, several=0.1, scores={"lives": 0.9})
+    store.search("Where does Ilva Marsh live?", user_id="ada", limit=5)
+    assert judge.states == ["QUESTION: Where does it live?"]
+    assert "it lives in Lisbon" in judge.read
+    assert "it liked the food at Olive Kitchen" in judge.read
+
+
+def test_only_a_hub_starts_the_linked_search(store, monkeypatch):
+    """A common word stored as an entity with one memory ("budget") is no hub:
+    a question containing the word does not start the linked search there. A
+    named thing two memories mention ("Harlow") is one and does."""
+    import memry.store as store_module
+
+    budget, harlow = _entity(store, "budget"), _entity(store, "Harlow")
+    _memory(store, "The budget for the offsite is 4,000 euros", [budget.id])
+    _memory(store, "Harlow runs on Linux", [harlow.id])
+    _memory(store, "Harlow stores its data in SQLite", [harlow.id])
+    _linked(store)
+    assert not store._is_hub(budget.id) and store._is_hub(harlow.id)
+    seeded = []
+    spread = store_module.activation_paths
+
+    def seeds_of(backend, seeds, **kwargs):
+        seeded.append(set(seeds))
+        return spread(backend, seeds, **kwargs)
+
+    monkeypatch.setattr(store_module, "activation_paths", seeds_of)
+    results = store.search("What is the budget?", user_id="ada", limit=10)
+    assert results and not any("about" in r.signals for r in results)  # the text ranking
+    assert seeded == []
+    results = store.search("What is the budget for Harlow?", user_id="ada", limit=10)
+    assert seeded == [{harlow.id}]
+    about = {r.memory.content: r.signals["about"] for r in results}
+    assert about["Harlow runs on Linux"] == 1.0
+
+
+def test_a_relation_counts_half_in_the_linked_search(store):
+    """Ada works on Helios, but "Helios is written in Rust" says nothing about
+    Ada: the linked search follows an extracted relation at
+    ``LINKED_RELATION`` (0.5), not at the 0.9 the other modes give it. A
+    memory about Helios is about Ada's question at 0.5; Ada's own at 1.0."""
+    from memry.intelligence.graph_retrieval import (
+        LINKED_RELATION, RELATION, aboutness, activation, activation_paths)
+
+    ada, helios = _entity(store, "Ada"), _entity(store, "Helios")
+    store.backend.add_relation(Relation(subject=ada.id, predicate="works_on",
+                                        object=helios.id, user_id="ada"))
+    own = _memory(store, "Ada prefers dark mode", [ada.id])
+    _memory(store, "Ada likes short answers", [ada.id])
+    rust = _memory(store, "Helios is written in Rust", [helios.id])
+
+    assert LINKED_RELATION == 0.5
+    act, above = activation_paths(store.backend, [ada.id], depth=1, mode="directed",
+                                  relation=LINKED_RELATION)
+    assert act == {ada.id: 1.0, helios.id: pytest.approx(0.5)}
+    assert above == set()  # a relation is no step up
+    assert activation(store.backend, [ada.id], depth=1)[helios.id] == pytest.approx(RELATION)
+
+    def about(memory):
+        return aboutness([act.get(e.id) for e in store.backend.entities_of_memory(memory.id)])
+
+    assert about(rust) == pytest.approx(0.5)
+    assert about(own) == 1.0
+    # and so the store's linked search weighs them
+    _linked(store)
+    results = store.search("What does Ada prefer?", user_id="ada", limit=10)
+    signals = {r.memory.id: r.signals["about"] for r in results}
+    assert signals[rust.id] == pytest.approx(0.5)
+    assert signals[own.id] == 1.0

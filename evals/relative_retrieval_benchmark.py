@@ -1314,34 +1314,120 @@ MODES = [
 ]
 
 
+def _asks_decider(store: MemoryStore, relational: bool) -> bool:
+    """Whether a search asks the decision provider (Jev), as ``MemoryStore``
+    decides it: to re-rank, or in the linked search to judge relevance."""
+    decider, cfg = store.decider, store.config
+    if not getattr(decider, "available", False):
+        return False
+    rerank = cfg.decision.rerank if cfg.decision.rerank is not None else decider.reranks_by_default
+    judged = (relational and cfg.retrieval.relational_fusion == "linked"
+              and cfg.retrieval.relational_relevance == "jev")
+    return judged or bool(rerank and getattr(decider, "may_rerank", True))
+
+
 def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dict:
+    """Per family, over the top 10 of the limit-10 search: ``mrr``, ``recall``
+    and ``wrong_first``. Over the full ranking (below):
+
+    * ``r20``: the share of the gold in its top 20 (what the decision provider
+      judges in production), mean over the questions;
+    * ``linked``: the share of questions the linked search ran on (its results
+      carry the "about" signal);
+    * for a family with gold sets (more than one memory), over those
+      questions: ``set_at20``, ``set_at40``, ``set_at100``, the share of the
+      set in the top 20, 40 and 100, and ``precision``, the share of the
+      results marked "member" that are gold (None where no result is marked;
+      only a judged set question marks them), with ``set_n`` such questions.
+
+    The full ranking is what ``MemoryStore._search_linked`` returned on a
+    second search at limit 100 (its text ranking 500 deep), or where the
+    linked search did not run that search's own results. A search that asks
+    the decision provider is not run a second time (it would be judged again):
+    its ranking is the limit-10 search's own."""
     label, relational, rmode, depth, fusion = mode[:5]
     cfg = store.config.retrieval
     cfg.relational_mode, cfg.relational_depth, cfg.relational_fusion = rmode, depth, fusion
     if len(mode) > 5:
         cfg.relational_sharpness = mode[5]
     cfg.relational_relevance = mode[6] if len(mode) > 6 else "vector"
+    index = {mid: k for k, mid in enumerate(memory_ids)}
+    once = _asks_decider(store, relational)
+    seen: dict[str, list] = {}
+    inner = store._search_linked
+
+    def capture(*args, **kwargs):
+        seen["ranked"] = inner(*args, **kwargs)
+        return seen["ranked"]
+
+    store._search_linked = capture
     out: dict[str, dict[str, float]] = {}
-    for family, items in queries.items():
-        mrr, recall, wrong_first, ms = [], [], [], []
-        for query, gold, wrong in items:
-            started = time.perf_counter()
-            got = [r.memory.id for r in store.search(query, user_id=USER, limit=10,
-                                                     relational=relational)]
-            ms.append((time.perf_counter() - started) * 1000)
-            gold_ids = {memory_ids[k] for k in gold}
-            wrong_ids = {memory_ids[k] for k in wrong}
-            first_gold = next((r for r, m in enumerate(got) if m in gold_ids), None)
-            mrr.append(1.0 / (first_gold + 1) if first_gold is not None else 0.0)
-            recall.append(len(gold_ids & set(got)) / min(len(gold_ids), 10))
-            if wrong_ids:
-                first_wrong = next((r for r, m in enumerate(got) if m in wrong_ids), None)
-                wrong_first.append(first_wrong is not None and (
-                    first_gold is None or first_wrong < first_gold))
-        out[family] = {"mrr": statistics.mean(mrr), "recall": statistics.mean(recall),
-                       "wrong_first": statistics.mean(wrong_first) if wrong_first else None,
-                       "ms": statistics.median(ms), "n": len(items)}
+    try:
+        for family, items in queries.items():
+            mrr, recall, wrong_first, ms = [], [], [], []
+            r20, linked, sets, precision = [], [], [], []
+            for query, gold, wrong in items:
+                seen.clear()
+                started = time.perf_counter()
+                results = store.search(query, user_id=USER, limit=10, relational=relational)
+                got = [r.memory.id for r in results]
+                ms.append((time.perf_counter() - started) * 1000)
+                gold_ids = {memory_ids[k] for k in gold}
+                wrong_ids = {memory_ids[k] for k in wrong}
+                first_gold = next((r for r, m in enumerate(got) if m in gold_ids), None)
+                mrr.append(1.0 / (first_gold + 1) if first_gold is not None else 0.0)
+                recall.append(len(gold_ids & set(got)) / min(len(gold_ids), 10))
+                if wrong_ids:
+                    first_wrong = next((r for r, m in enumerate(got) if m in wrong_ids), None)
+                    wrong_first.append(first_wrong is not None and (
+                        first_gold is None or first_wrong < first_gold))
+                # the full ranking
+                if not once:
+                    seen.clear()
+                    results = store.search(query, user_id=USER, limit=100, relational=relational)
+                ranked = seen.get("ranked") or results
+                top = [index[r.memory.id] for r in ranked]
+                gold_set = set(gold)
+                r20.append(len(gold_set & set(top[:20])) / len(gold_set))
+                linked.append(any("about" in r.signals for r in ranked))
+                if len(gold_set) > 1:
+                    sets.append([len(gold_set & set(top[:k])) / len(gold_set) for k in (20, 40, 100)])
+                    members = [k for k, r in zip(top, ranked) if r.signals.get("member")]
+                    if members:
+                        precision.append(sum(k in gold_set for k in members) / len(members))
+            out[family] = {"mrr": statistics.mean(mrr), "recall": statistics.mean(recall),
+                           "wrong_first": statistics.mean(wrong_first) if wrong_first else None,
+                           "ms": statistics.median(ms), "n": len(items),
+                           "r20": statistics.mean(r20),
+                           "linked": statistics.mean(map(float, linked))}
+            if sets:
+                out[family].update({
+                    "set_n": len(sets),
+                    **{f"set_at{k}": statistics.mean(s[i] for s in sets)
+                       for i, k in enumerate((20, 40, 100))},
+                    "precision": statistics.mean(precision) if precision else None})
+    finally:
+        del store._search_linked  # the method again
     return out
+
+
+#: The per-family table's columns, as ``score`` names them.
+COLUMNS = ["n", "mrr", "recall", "wrong_first", "r20", "linked", "set_at20", "set_at40",
+           "set_at100", "precision"]
+
+
+def family_table(res: dict) -> str:
+    """``score``'s result as a table, one family a row ("-": not measured)."""
+    rows = [["family"] + COLUMNS]
+    for family, v in res.items():
+        if family.startswith("_"):
+            continue
+        rows.append([family] + [
+            "-" if v.get(c) is None else str(v[c]) if c == "n" else f"{v[c]:.2f}"
+            for c in COLUMNS])
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    return "\n".join("  " + r[0].ljust(widths[0]) + "".join(
+        cell.rjust(w + 2) for cell, w in zip(r[1:], widths[1:])) for r in rows)
 
 
 #: Families scored by recall@10 (many memories answer them); the rest by MRR.
@@ -1372,6 +1458,9 @@ def main() -> None:
     parser.add_argument("--rerank", action="store_true",
                         help="Jev re-ranks each search (TYPESAFE_API_KEY), on the families "
                              "where the text ranking and the links disagree, fewer modes")
+    parser.add_argument("--tags", action="store_true",
+                        help="tag every memory as an agent does when it saves (tag_world); "
+                             "the store keeps the tags as the memories' categories")
     args = parser.parse_args()
     decider = None
     modes = [m for m in MODES if not args.modes or m[0] in args.modes]
@@ -1422,6 +1511,8 @@ def main() -> None:
     for size in sizes:
         world = (build_world_dense(size, owner=args.owner) if args.world == "dense"
                  else build_world(size))
+        if args.tags:
+            tag_world(world)
         texts = [m["text"] for m in world["memories"]]
         if says is not None:
             missing = sum(str(k) not in says for k in range(len(texts)))
@@ -1457,6 +1548,7 @@ def main() -> None:
                     + (f"/{v['wrong_first']:.2f}" if v["wrong_first"] is not None else "")
                     for f, v in res.items() if not f.startswith("_"))
                     + f"  jev/search {res['_jev_calls_per_search']:.2f}", flush=True)
+                print(family_table(res), flush=True)
             store.close()
     if args.out:
         pathlib.Path(args.out).write_text(json.dumps(results, indent=1))
