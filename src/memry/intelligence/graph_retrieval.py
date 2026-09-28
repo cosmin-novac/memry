@@ -471,7 +471,7 @@ ANSWER_BAR = 0.5
 SET_BAR = 0.5
 MEMBER_FLOOR = 0.07  # non-members of the traced sets scored 0.06 or less
 ONE_ROUNDS = 3
-SET_ROUNDS = 5
+SET_ROUNDS = 3  # measured: rounds 4 and 5 added no right member, only wrong ones
 SET_RESULT_CAP = 100
 
 
