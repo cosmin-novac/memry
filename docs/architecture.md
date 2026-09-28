@@ -156,9 +156,9 @@ tables and config keys (`lib/sync.ts`, `canUserSync`, `BILDY_AWS_S3_BUCKET`). Bo
 large, coherent groups in ordinary use.
 
 **The type does not affect search ranking.** Nothing in retrieval reads it: hybrid scoring
-uses vectors, BM25, recency and importance; relational expansion follows typed *relations*
-between entities, which are a different thing from the entity's own type. An `entity_id`
-filter selects specific entities, never a type. Three things do use it:
+uses vectors, BM25, recency and importance; the linked search follows *relations* and
+compared pairs between entities, which are a different thing from the entity's own type.
+An `entity_id` filter selects specific entities, never a type. Three things do use it:
 
 1. **Disambiguation guardrail.** A known type conflict blocks an automatic merge, so a
    `document` never silently absorbs a `person` that happens to share its name. Absent or
@@ -268,8 +268,9 @@ changes. Active linked memories remain the evidence returned with the hub.
 ### Relations
 
 Entity relations are typed subject-predicate-object edges with an optional evidence memory.
-Invalidating or deleting that evidence also invalidates or removes the relation. Search
-traverses a bounded relation neighborhood only when the query resolves to a known entity.
+Invalidating or deleting that evidence also invalidates or removes the relation. The linked
+search follows relations, with the version and part links of compared pairs, only when the
+query names a known entity (one link deep by default).
 They are shown under the entity they describe, which is also where they are used from: an
 edge only means something next to the thing it connects.
 
@@ -333,9 +334,25 @@ For a normal text query:
    scoring; the optional usearch HNSW sidecar supplies candidates above its threshold.
 3. Reciprocal Rank Fusion combines the candidate lists.
 4. Relevance is blended with recency and importance according to configuration.
-5. If canonical or alias candidate lookup resolves a query entity, bounded typed-relation
-   traversal can add otherwise unreachable multi-hop evidence.
-6. Context reconstruction may prepend a bounded, lazily refreshed entity description and
+5. If canonical or alias candidate lookup resolves a query entity that is a hub (or the
+   question speaks in the first person and the owner is one), the linked search runs: it
+   follows the links from that entity, directed and weighted by kind, direction and
+   probability (`relational_depth`, 1 by default), adds the best memories of each entity
+   linked strongly enough, and orders every candidate by how well it states the property
+   asked (its property vector, entity names read as "it") times how strongly it is about
+   the entity named. This is the only link mode; the earlier "typed" and "undirected"
+   walks and the "rescue", "weighted", "inherit" and "gated" fusions were removed, and a
+   config naming one is refused.
+6. With `relational_relevance = "jev"`, the decision model judges the first 20 of that
+   order in one call and says whether the question asks for one property and whether it
+   needs several memories. A question with one answer, or about everything, is answered
+   from that call. A question needing several (a list, a total, a comparison) gets one more
+   call on up to `set_pool` (80) memories not judged yet: those filed under the topics
+   (tags) the first 20 share, a small topic most of them carry counting most, or, when
+   they share none, the order past the first 20. The set's members from both calls come
+   first and are returned past the limit, up to 100. The 0.35 re-rank blend runs only on
+   a search the linked search did not order.
+7. Context reconstruction may prepend a bounded, lazily refreshed entity description and
    then packs exact memories into the remaining token budget.
 
 The ANN file is a cache. SQLite remains authoritative, ANN candidates are exact-rescored,

@@ -1,6 +1,6 @@
-"""Relational retrieval: typed-relation traversal recovers the multi-hop
-answers that hybrid search structurally cannot reach, without disturbing the
-ranking of direct lookups.
+"""Relational retrieval: the linked search follows the links from the
+query's entities and recovers the multi-hop answers that hybrid search
+structurally cannot reach, without disturbing the ranking of direct lookups.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def test_multi_hop_answer_is_recovered(store, graph):
                          user_id="ada", relational=False, limit=5)
     assert graph["m_uses"].id not in {r.memory.id for r in plain}
 
-    # with relational fusion on (default), the hop-reachable answer surfaces
+    # with the linked search on (default), the hop-reachable answer surfaces
     fused = store.search("What tool does Ada use for her work?",
                          user_id="ada", limit=5)
     assert graph["m_uses"].id in {r.memory.id for r in fused}
@@ -189,40 +189,35 @@ def test_query_entity_detection_uses_bounded_candidate_lookup(store, monkeypatch
     ) == [entity.id]
 
 
-# ------------------------------------------------- fusion cannot evict the top
-def test_relational_fusion_never_displaces_the_strongest_hybrid_hits(store, graph):
+# ------------------------------------------- the links cannot evict the top
+def test_the_linked_search_never_displaces_the_strongest_hybrid_hits(store, graph):
     """Graph distance may fill the page but not take it over.
 
     Measured on a 456-memory store with a dense entity graph, an unprotected
     fusion let buried graph neighbours leapfrog correct answers and cost 0.18
-    recall@10 on ordinary queries, while protecting the top hybrid results kept
-    multi-hop hit@10 unchanged at 0.917.
+    recall@10 on ordinary queries. The linked search weighs a memory by how
+    strongly it is about the entity asked, so a neighbour reached through a
+    relation (``LINKED_RELATION``) fills the page after hybrid's own top hits
+    about Ada, which keep their order.
     """
-    protect = store.config.retrieval.relational_protect_top
-    assert protect > 0
-
     query = "Ada preference preference"
-    plain = store.search(query, user_id="ada", relational=False, limit=protect)
-    fused = store.search(query, user_id="ada", relational=True, limit=10)
-    # the protected prefix is exactly hybrid's own ranking, in order
-    assert [r.memory.id for r in fused[:len(plain)]] == [r.memory.id for r in plain]
+    plain = store.search(query, user_id="ada", relational=False, limit=5)
+    linked = store.search(query, user_id="ada", relational=True, limit=10)
+    assert [r.memory.id for r in linked[:len(plain)]] == [r.memory.id for r in plain]
+    assert graph["m_uses"].id in {r.memory.id for r in linked[len(plain):]}
 
 
-def test_protection_is_configurable_and_zero_restores_old_behaviour(graph):
-    from memry.config import Config, RetrievalConfig
+def test_multi_hop_works_at_the_default_depth(store, graph):
+    """The linked search goes one link deep by default: the multi-hop answer
+    names Helios, one relation from Ada, and is about her question at the
+    relation's weight."""
+    from memry.intelligence.graph_retrieval import LINKED_RELATION
 
-    cfg = Config(db_path=":memory:", retrieval=RetrievalConfig(relational_protect_top=0))
-    s = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(96))
-    try:
-        assert s.config.retrieval.relational_protect_top == 0
-    finally:
-        s.close()
-
-
-def test_multi_hop_still_works_with_protection_on(store, graph):
-    """The protection must not cost the feature its reason to exist."""
-    fused = store.search("What tool does Ada use for her work?", user_id="ada", limit=5)
-    assert graph["m_uses"].id in {r.memory.id for r in fused}
+    assert store.config.retrieval.relational_depth == 1
+    linked = store.search("What tool does Ada use for her work?", user_id="ada", limit=5)
+    found = {r.memory.id: r for r in linked}
+    assert graph["m_uses"].id in found
+    assert found[graph["m_uses"].id].signals["about"] == pytest.approx(LINKED_RELATION)
 
 
 # ------------------------------------------- versions, parts and siblings
@@ -260,7 +255,7 @@ def family(store):
 def test_a_version_takes_its_things_memories_and_little_of_its_siblings(store, family):
     from memry.intelligence.graph_retrieval import DOWN_KIND, TURN, UP_KIND, activation
 
-    act = activation(store.backend, [family["bildy v4"]], depth=2, mode="directed")
+    act = activation(store.backend, [family["bildy v4"]], depth=2)
     assert act[family["bildy v4"]] == 1.0
     assert act[family["bildy"]] == pytest.approx(UP_KIND * 0.9)
     assert act[family["bildy v3"]] == pytest.approx(UP_KIND * 0.9 * DOWN_KIND * 0.9 * TURN)
@@ -271,62 +266,15 @@ def test_a_version_takes_its_things_memories_and_little_of_its_siblings(store, f
 def test_a_thing_takes_its_versions_and_parts(store, family):
     from memry.intelligence.graph_retrieval import activation
 
-    act = activation(store.backend, [family["bildy"]], depth=1, mode="directed")
+    act = activation(store.backend, [family["bildy"]], depth=1)
     assert {name for name, eid in family.items() if act.get(eid, 0) >= 0.5} == {
         "bildy", "bildy v3", "bildy v4", "bildy sync service"}
 
 
-def test_undirected_reaches_siblings_as_strongly_as_the_thing(store, family):
-    from memry.intelligence.graph_retrieval import activation
-
-    act = activation(store.backend, [family["bildy v4"]], depth=2, mode="undirected")
-    assert act[family["bildy v3"]] > 0.5
-    assert family["Bildy Bakery"] not in act
-
-
-def test_weighted_fusion_puts_a_versions_own_memory_first(store, family):
-    store.config.retrieval.relational_mode = "directed"
-    store.config.retrieval.relational_fusion = "weighted"
-    top = store.search("Where does bildy v4 store its data?", user_id="ada", limit=3)
-    assert top[0].memory.content == "bildy v4 stores its data in Postgres"
-    contents = [r.memory.content for r in top]
-    assert contents.index("bildy stores its data in SQLite") < len(contents)
-
-
-def test_search_keeps_its_old_path_by_default(store):
+def test_the_linked_search_is_the_default(store):
     cfg = store.config.retrieval
     assert (cfg.relational_mode, cfg.relational_depth, cfg.relational_fusion) == (
-        "typed", 2, "rescue")
-
-
-def test_a_question_about_a_version_is_also_asked_of_its_thing(store, family):
-    from memry.intelligence.graph_retrieval import inherited_questions
-    from memry.models import Scope
-
-    assert inherited_questions(store.backend, Scope(user_id="ada"),
-                               "Which systems does bildy v4 run on?") == [
-        ("Which systems does bildy run on?", family["bildy"])]
-    # a part inherits nothing: its whole is not asked
-    assert inherited_questions(store.backend, Scope(user_id="ada"),
-                               "Who maintains the bildy sync service?") == []
-    store.config.retrieval.relational_mode = "directed"
-    store.config.retrieval.relational_fusion = "inherit"
-    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
-    assert "bildy runs on Linux and macOS" in [r.memory.content for r in top[:2]]
-
-
-def test_how_a_memory_is_weighed_by_the_entities_it_names():
-    from memry.intelligence.graph_retrieval import LOW, link_factor, specificity
-
-    # names nothing: its text alone decides
-    assert link_factor([]) == 1.0
-    # the entity asked about, or its thing: the text decides between them
-    assert link_factor([1.0]) == link_factor([0.72]) == 1.0
-    # a sibling version or an unrelated entity falls back
-    assert link_factor([0.0]) == LOW
-    assert LOW < link_factor([0.11]) < 1.0
-    # gated: among memories that answer, the version's own before its thing's
-    assert specificity([1.0]) > specificity([0.72]) > specificity([0.11]) > specificity([])
+        "directed", 1, "linked")
 
 
 def _with_property_vectors(store):
@@ -383,6 +331,22 @@ def test_linked_search_takes_the_things_fact_where_the_version_has_none(store, f
     top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
     assert top[0].memory.content == "bildy runs on Linux and macOS"
     assert top[0].signals["about"] == pytest.approx(0.72)
+
+
+def test_the_linked_search_rescues_a_linked_memory_the_text_ranking_buried(store, family):
+    """Notes that repeat the question's words but are about nothing the store
+    knows bury the thing's answer in the text ranking; the linked search lifts
+    it back to the top, since it is about bildy v4's thing and states the
+    property asked."""
+    for i in range(30):
+        _memory(store, f"Question {i}: which systems does bildy v4 run on? Ask again", [])
+    _linked(store)
+    plain = [r.memory.content for r in
+             store.search("Which systems does bildy v4 run on?", user_id="ada", limit=10,
+                          relational=False)]
+    assert "bildy runs on Linux and macOS" not in plain
+    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
+    assert top[0].memory.content == "bildy runs on Linux and macOS"
 
 
 def test_linked_search_keeps_the_text_ranking_when_the_query_names_no_hub(store, family):
@@ -584,8 +548,8 @@ def test_a_question_in_the_first_person_is_about_the_owner(store, family):
 
 
 class _RoundJudge:
-    """A decision provider for the rounds: counts its calls, answers the
-    meta questions as told and scores a memory by the words it contains."""
+    """A decision provider for the judging calls: counts its calls, answers
+    the meta questions as told and scores a memory by the words it contains."""
 
     available = True
     may_rerank = reranks_by_default = False
@@ -640,10 +604,11 @@ def _shopping(store):
     return prices
 
 
-def test_a_question_needing_several_memories_collects_the_set_in_rounds(store):
-    """"Which car is the cheapest?" needs every price. After the first round
-    the next come from the memories nearest the prices found, until a round
-    adds none; all of them are returned, more than the limit."""
+def test_a_set_question_whose_first_share_no_topic_reads_the_ranking_on(store):
+    """"Which car is the cheapest?" needs every price. Nothing in this store is
+    tagged, so the memories of the first call share no topic: the second call
+    judges the ranking past them, up to ``retrieval.set_pool``. Every price is
+    a member, and all of them are returned, more than the limit."""
     prices = _shopping(store)
     judge = _RoundJudge(specific=0.9, several=0.9, scores={"costs": 0.12})
     store.decider = judge
@@ -651,17 +616,21 @@ def test_a_question_needing_several_memories_collects_the_set_in_rounds(store):
     members = [r for r in results if r.signals.get("member")]
     assert {r.memory.id for r in members} == {m.id for m in prices}
     assert len(results) >= len(prices) > 5
-    assert results[0].signals["rounds"] == judge.calls >= 3  # the last round found nothing
+    assert results[0].signals["rounds"] == judge.calls == 2
+    assert results[0].signals["pool"] == 36 - 4  # every memory past the first four
 
 
-def test_a_one_answer_question_reads_on_only_while_nothing_answers(store):
+def test_a_one_answer_question_is_answered_from_the_first_call(store):
+    """Reading on while nothing answered found nothing 5 of 5 times it ran: a
+    question with one answer makes one call, answered or not."""
     _shopping(store)
     store.decider = _RoundJudge(specific=0.9, several=0.1, scores={"Carmodel3 costs": 0.9})
     store.search("How much does the Carmodel3 cost?", user_id="ada", limit=5)
-    assert store.decider.calls == 1  # the answer was in the first round
+    assert store.decider.calls == 1  # the answer was in the first call
     store.decider = _RoundJudge(specific=0.9, several=0.1, scores={})
-    store.search("How much does the Carmodel99 cost?", user_id="ada", limit=5)
-    assert store.decider.calls == 3  # nothing answers: two more rounds, then stop
+    results = store.search("How much does the Carmodel99 cost?", user_id="ada", limit=5)
+    assert store.decider.calls == 1  # nothing scores 0.5, and still no second call
+    assert results[0].signals["rounds"] == 1 and results[0].signals["pool"] == 0
 
 
 def test_a_question_about_everything_does_not_read_on(store):
@@ -765,7 +734,7 @@ def test_only_a_hub_starts_the_linked_search(store, monkeypatch):
 def test_a_relation_counts_half_in_the_linked_search(store):
     """Ada works on Helios, but "Helios is written in Rust" says nothing about
     Ada: the linked search follows an extracted relation at
-    ``LINKED_RELATION`` (0.5), not at the 0.9 the other modes give it. A
+    ``LINKED_RELATION`` (0.5), not at the walk's default ``RELATION`` (0.9). A
     memory about Helios is about Ada's question at 0.5; Ada's own at 1.0."""
     from memry.intelligence.graph_retrieval import (
         LINKED_RELATION, RELATION, aboutness, activation, activation_paths)
@@ -778,7 +747,7 @@ def test_a_relation_counts_half_in_the_linked_search(store):
     rust = _memory(store, "Helios is written in Rust", [helios.id])
 
     assert LINKED_RELATION == 0.5
-    act, above = activation_paths(store.backend, [ada.id], depth=1, mode="directed",
+    act, above = activation_paths(store.backend, [ada.id], depth=1,
                                   relation=LINKED_RELATION)
     assert act == {ada.id: 1.0, helios.id: pytest.approx(0.5)}
     assert above == set()  # a relation is no step up

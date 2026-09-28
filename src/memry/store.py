@@ -60,29 +60,21 @@ from .intelligence.entities import (
     synthesize_entity_description,
 )
 from .intelligence.graph_retrieval import (
-    ANSWER_BAR,
     FAMILY_MIN,
     FAMILY_SCAN,
     FAMILY_TOP,
     LINKED_RELATION,
-    LINK_MODES,
-    ONE_ROUNDS,
     SET_BAR,
     SET_RESULT_CAP,
-    SET_ROUNDS,
+    SET_SCAN,
+    SET_SHARED,
     aboutness,
-    activation,
     activation_paths,
     detect_query_entities,
-    inherited_questions,
     homes_of,
-    link_factor,
-    linked_memories,
     mask_first_person,
     mask_names,
-    relational_memory_ids,
     set_members,
-    specificity,
     speaks_in_first_person,
 )
 from .intelligence.identity import (
@@ -349,6 +341,23 @@ def _cut(vector: list[float], keep: int | None) -> list[float]:
         return vector
     short = np.asarray(vector[:keep], dtype=np.float32)
     return (short / (float(np.linalg.norm(short)) or 1.0)).tolist()
+
+
+def _similarity(asked: np.ndarray, vector: np.ndarray | None) -> float:
+    """Cosine of a memory's vector and the question's (already of length one),
+    the vector cut to the question's length; 0 for a missing or shorter one
+    and for an opposite one."""
+    if vector is None or vector.shape[0] < asked.shape[0]:
+        return 0.0
+    vector = vector[: asked.shape[0]]  # an ordinary vector is cut like the question
+    return max(float(vector @ asked) / (float(np.linalg.norm(vector)) or 1.0), 0.0)
+
+
+def _in_scope(memory: Memory, scope: Scope) -> bool:
+    """Whether a memory belongs to the scope searched (a field left None in
+    the scope matches any)."""
+    return all(getattr(scope, field) is None or getattr(memory, field) == getattr(scope, field)
+               for field in ("user_id", "agent_id", "run_id"))
 
 
 def _text_hash(text: str) -> str:
@@ -687,9 +696,8 @@ class MemoryStore:
                 self._recheck_proposals(
                     scope, open_before, {entity.id for entity in resolved.values()}
                 )
-        if self._linked_search_on():
-            self._property_vectors_after_save(
-                [a.memory_id for a in actions if a.event != "NONE" and a.memory_id])
+        self._property_vectors_after_save(
+            [a.memory_id for a in actions if a.event != "NONE" and a.memory_id])
         return actions
 
     def _property_vectors_after_save(self, memory_ids: list[str]) -> None:
@@ -1320,10 +1328,10 @@ class MemoryStore:
             categories=categories,
             entity_id=entity_id,
         )
-        # Relational fusion: add memories reachable by typed relations from the
-        # query's entities (multi-hop answers hybrid alone scores at zero).
+        # The linked search: the memories of the entities linked to the query's
+        # join the ranking (multi-hop answers hybrid alone scores at zero).
         if relational and not categories and not entity_id:
-            results = self._relational(query, scope, results, include_invalid)
+            results = self._search_linked(query, scope, results, include_invalid)
         if since or until:
             results = [r for r in results if _within(r.memory.created_at, since, until)]
         if when_since or when_until:
@@ -1345,7 +1353,9 @@ class MemoryStore:
         however well it matched.
 
         One call covers the whole shortlist. A provider that abstains or fails
-        leaves the order exactly as it found it.
+        leaves the order exactly as it found it. It runs only where the linked
+        search did not (no result carries its "about"): after the linked search
+        its own order stands, judged or not.
         """
         cfg = self.config.decision
         # The setting decides where it is set; otherwise the provider's default
@@ -1357,8 +1367,8 @@ class MemoryStore:
             return results
         if not self.decider.available or len(results) < 2:
             return results
-        if any("judged" in r.signals for r in results):
-            return results  # the linked search already asked the same question
+        if any("about" in r.signals or "judged" in r.signals for r in results):
+            return results  # the linked search ordered them, or already asked the same
         pool = results[: max(cfg.rerank_pool, 2)]
         answers = self.decider.decide(
             f"QUESTION: {query}",
@@ -1380,36 +1390,6 @@ class MemoryStore:
         ordered.sort()
         return [r for _d, _s, _i, r in ordered] + results[len(pool):]
 
-    def _relational(
-        self, query: str, scope: Scope, results: list[SearchResult], include_invalid: bool,
-    ) -> list[SearchResult]:
-        """Join the memories linked to the query's entities to the text ranking,
-        as ``retrieval.relational_mode``, ``relational_depth`` and
-        ``relational_fusion`` say (``intelligence/graph_retrieval.py``)."""
-        cfg = self.config.retrieval
-        if cfg.relational_fusion == "linked":
-            return self._search_linked(query, scope, results, include_invalid)
-        if cfg.relational_mode in LINK_MODES:
-            rel_ids, act = linked_memories(self.backend, scope, query,
-                                           depth=cfg.relational_depth, mode=cfg.relational_mode)
-        else:
-            rel_ids = relational_memory_ids(self.backend, scope, query,
-                                            hops=cfg.relational_depth)
-            act = {}
-        if cfg.relational_fusion in ("inherit", "gated") and cfg.relational_mode == "directed":
-            results = self._with_inherited(query, scope, results, include_invalid)
-        if cfg.relational_fusion == "gated" and rel_ids and act:
-            results = self._gate_specific(results, act)
-            return self._fuse_relational(results, rel_ids, include_invalid)
-        if cfg.relational_fusion in ("weighted", "inherit") and rel_ids:
-            if not act:
-                act = activation(self.backend, detect_query_entities(self.backend, scope, query),
-                                 depth=cfg.relational_depth, mode="undirected")
-            return self._fuse_weighted(results, rel_ids, act, include_invalid)
-        if rel_ids:
-            return self._fuse_relational(results, rel_ids, include_invalid)
-        return results
-
     def _search_linked(
         self, query: str, scope: Scope, results: list[SearchResult], include_invalid: bool,
     ) -> list[SearchResult]:
@@ -1417,17 +1397,20 @@ class MemoryStore:
         (similarity of the question and the memory with the names of the
         entities the links reach replaced by "it") to the power ``relational_sharpness``, times how
         strongly it is about the entity the query names (``aboutness``). The
-        candidates are the text ranking's and, for every entity linked at
-        ``FAMILY_MIN`` or more, the ``FAMILY_TOP`` of its memories that best
-        state the property. A query naming no hub keeps the text ranking.
+        links are followed directed and weighted, ``relational_depth`` deep
+        (``graph_retrieval.activation_paths``). The candidates are the text
+        ranking's and, for every entity linked at ``FAMILY_MIN`` or more, the
+        ``FAMILY_TOP`` of its memories that best state the property. A query
+        naming no hub keeps the text ranking.
 
         With ``relational_relevance = "jev"`` the decision provider then judges
         whether each of the first ``decision.rerank_pool`` answers the
-        question, and that replaces the similarity for them. An answer from a
-        thing the query's entity belongs to then counts only as far as none of
-        the entity's own memories answers (a version's own change wins). Both
-        count to the power of P(the question asks for one property): on "Show
-        everything about it" aboutness alone orders the list."""
+        question, and that replaces the similarity for them
+        (``_judge_in_rounds``). An answer from a thing the query's entity
+        belongs to then counts only as far as none of the entity's own
+        memories answers (a version's own change wins). Both count to the
+        power of P(the question asks for one property): on "Show everything
+        about it" aboutness alone orders the list."""
         cfg = self.config.retrieval
         seeds = [e for e in detect_query_entities(self.backend, scope, query, longest=True)
                  if self._is_hub(e)]
@@ -1442,21 +1425,12 @@ class MemoryStore:
                 return self._judge_in_rounds(query, results, scope, include_invalid)
             return results
         act, above = activation_paths(self.backend, seeds, depth=cfg.relational_depth,
-                                      mode="directed", relation=LINKED_RELATION)
+                                      relation=LINKED_RELATION)
         names = [n for seed in seeds for n in self.backend.entity_aliases(seed)]
         question = mask_names(query, names)
         if first_person:
             question = mask_first_person(question)
-        asked = np.asarray(self.embedder.embed([question])[0], dtype=np.float32)
-        asked = asked[: cfg.property_dimensions or len(asked)]
-        asked /= float(np.linalg.norm(asked)) or 1.0
-
-        def similarity(vectors: dict[str, np.ndarray], mid: str) -> float:
-            vector = vectors.get(mid)
-            if vector is None or vector.shape[0] < asked.shape[0]:
-                return 0.0
-            vector = vector[: asked.shape[0]]  # an ordinary vector is cut like the question
-            return max(float(vector @ asked) / (float(np.linalg.norm(vector)) or 1.0), 0.0)
+        asked = self._asked_vector(question)
 
         pool: dict[str, SearchResult] = {r.memory.id: r for r in results}
         for entity_id, strength in act.items():
@@ -1465,22 +1439,14 @@ class MemoryStore:
             members = [m for m in self.backend.entity_memories(entity_id, limit=FAMILY_SCAN)
                        if include_invalid or m.invalid_at is None]
             vectors = self._property_vectors([m.id for m in members])
-            for memory in sorted(members, key=lambda m: -similarity(vectors, m.id))[:FAMILY_TOP]:
+            for memory in sorted(members,
+                                 key=lambda m: -_similarity(asked, vectors.get(m.id)))[:FAMILY_TOP]:
                 pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
-        # Only the names the links account for are masked: a memory naming an
-        # entity they reach is compared by its property vector, any other by
-        # its ordinary one, names kept ("Lena Blum works on Project Ekmibo"
-        # would otherwise read "It works on it", as empty as "What do I know
-        # about it?").
-        entities = {mid: self.backend.entities_of_memory(mid) for mid in pool}
-        reached = [mid for mid in pool if any(e.id in act for e in entities[mid])]
-        vectors = self._property_vectors(reached)
-        vectors.update(self.backend.vectors_of([mid for mid in pool if mid not in vectors],
-                                               self.embedder.model_id))
+        entities: dict[str, list[Entity]] = {}
+        scores = self._linked_scores(asked, list(pool), act, entities)
         scored = []
         for mid, result in pool.items():
-            relevance = similarity(vectors, mid)
-            about = aboutness([act.get(e.id) for e in entities[mid]])
+            relevance, about = scores[mid]
             result.signals = {**result.signals, "property": round(relevance, 4),
                               "about": round(about, 3)}
             scored.append((relevance ** cfg.relational_sharpness * about, result.score, result))
@@ -1491,7 +1457,38 @@ class MemoryStore:
         return self._judge_in_rounds(question if len(seeds) == 1 else query, ranked, scope,
                                      include_invalid, link={"act": act, "above": above,
                                                             "seeds": set(seeds),
-                                                            "entities": entities})
+                                                            "entities": entities,
+                                                            "asked": asked})
+
+    def _asked_vector(self, question: str) -> np.ndarray:
+        """The question's vector as the property comparison reads it: cut to
+        ``retrieval.property_dimensions`` and of length one."""
+        asked = np.asarray(self.embedder.embed([question])[0], dtype=np.float32)
+        asked = asked[: self.config.retrieval.property_dimensions or len(asked)]
+        asked /= float(np.linalg.norm(asked)) or 1.0
+        return asked
+
+    def _linked_scores(
+        self, asked: np.ndarray, memory_ids: list[str], act: dict[str, float],
+        entities: dict[str, list[Entity]],
+    ) -> dict[str, tuple[float, float]]:
+        """(property similarity to ``asked``, aboutness) of each memory, as the
+        linked search scores it. Only the names the links account for are
+        masked: a memory naming an entity they reach is compared by its
+        property vector, any other by its ordinary one, names kept ("Lena Blum
+        works on Project Ekmibo" would otherwise read "It works on it", as
+        empty as "What do I know about it?"). ``entities`` caches each memory's
+        entities and is filled in."""
+        for mid in memory_ids:
+            if mid not in entities:
+                entities[mid] = self.backend.entities_of_memory(mid)
+        reached = [mid for mid in memory_ids if any(e.id in act for e in entities[mid])]
+        vectors = self._property_vectors(reached)
+        vectors.update(self.backend.vectors_of([mid for mid in memory_ids if mid not in vectors],
+                                               self.embedder.model_id))
+        return {mid: (_similarity(asked, vectors.get(mid)),
+                      aboutness([act.get(e.id) for e in entities[mid]]))
+                for mid in memory_ids}
 
     def _judge_in_rounds(
         self, question: str, ranked: list[SearchResult], scope: Scope, include_invalid: bool,
@@ -1499,13 +1496,14 @@ class MemoryStore:
     ) -> list[SearchResult]:
         """The decision provider judges the first ``decision.rerank_pool`` of
         the ranking, and with them what kind of question it is, in one call:
-        - about everything ("Show everything about X"): that is all;
-        - one answer: while nothing reaches ``ANSWER_BAR``, the next as many
-          of the ranking, at most ``ONE_ROUNDS`` rounds;
+        - about everything ("Show everything about X") or with one answer
+          ("Where does Ada live?"): that is all;
         - several ("Which car is the cheapest?", "How much did I spend on
-          groceries?"): while the last round added a member, the unjudged
-          memories nearest the members found (``_nearest_unjudged``), at most
-          ``SET_ROUNDS`` rounds; every member comes first.
+          groceries?"): one more call judges up to ``retrieval.set_pool``
+          memories more (``_set_pool``), and the members of the set
+          (``set_members`` over both calls' scores) come first.
+        The "rounds" signal says how many calls were made (1 or 2), "pool" how
+        many memories the second judged.
         ``link`` carries the linked search's activation: then "it" stands for
         each memory's own entity, aboutness weighs the order and a thing's
         answer yields to its version's own. Without it (a question naming
@@ -1561,37 +1559,25 @@ class MemoryStore:
             return ranked
         found: dict[str, SearchResult] = {r.memory.id: r for r in ranked}
         extra: list[SearchResult] = []
-        rounds = 1
+        rounds, pooled = 1, 0
 
         members: set[str] = set()
         if specific >= 0.5 and several >= SET_BAR:
-            members = set_members(judged)
-            while members and rounds < SET_ROUNDS:
-                batch = [r for r in self._nearest_unjudged(members, judged, scope,
-                                                           include_invalid, size)]
-                if not batch:
-                    break
+            try:
+                asked = link["asked"] if link else self._asked_vector(question)
+            except Exception:  # embedding service down: the batch keeps its order
+                asked = None
+            batch = self._set_pool(ranked, size, judged, scope, include_invalid,
+                                   asked=asked, act=act, entities=entities)
+            if batch:
                 for result in batch:
                     if result.memory.id not in found:
                         found[result.memory.id] = result
                         extra.append(result)
                 got, _, _ = judge(batch, False)
-                rounds += 1
+                rounds, pooled = 2, len(batch)
                 judged.update(got)
-                added = set_members(judged) - members
-                if not added:
-                    break
-                members |= added
             members = set_members(judged)
-        elif specific >= 0.5 and max(judged.values()) < ANSWER_BAR:
-            start = size
-            while rounds < ONE_ROUNDS and start < len(ranked):
-                got, _, _ = judge(ranked[start:start + size], False)
-                start += size
-                rounds += 1
-                judged.update(got)
-                if got and max(got.values()) >= ANSWER_BAR:
-                    break
         # What is true of the thing a seed belongs to holds for the seed only
         # where the seed says nothing else: an answer reached by a step up
         # counts as far as none of the seed's own memories answers. Both
@@ -1611,52 +1597,79 @@ class MemoryStore:
                 result.signals = {**result.signals, "about": round(about, 3)}
             result.signals = {**result.signals, "judged": round(value ** specific, 4),
                               "specific": round(specific, 4), "several": round(several, 4),
-                              "rounds": rounds, **({"member": True} if mid in members else {})}
+                              "rounds": rounds, "pool": pooled,
+                              **({"member": True} if mid in members else {})}
             order.append((mid not in members, -(value ** specific) * about, result))
         order.sort(key=lambda item: (item[0], item[1]))
         return [result for *_, result in order] + [
             r for r in ranked + extra if r.memory.id not in judged]
 
-    def _nearest_unjudged(
-        self, members: set[str], judged: dict[str, float], scope: Scope, include_invalid: bool,
-        size: int,
+    def _set_pool(
+        self, ranked: list[SearchResult], size: int, judged: dict[str, float], scope: Scope,
+        include_invalid: bool, *, asked: np.ndarray | None, act: dict[str, float],
+        entities: dict[str, list[Entity]],
     ) -> list[SearchResult]:
-        """The ``size`` unjudged memories nearest the members of a set found so
-        far: half by memory vector (the store's vector search from the
-        members' centroid), half by property vector among the nearest 200.
-        Members of a set are the same kind of fact ("It costs 21,000 euros"),
-        so they sit closer to each other than to the question: measured,
-        after a first round the 40 nearest held 76 to 100% of the rest of a
-        set, the next 40 of the ranking 29 to 36%."""
-        model = self.embedder.model_id
+        """What the second call of a question needing several memories judges:
+        at most ``retrieval.set_pool`` memories not judged yet.
 
-        def centre(vectors: list[np.ndarray]) -> np.ndarray | None:
-            shapes = {v.shape for v in vectors}
-            if not vectors or len(shapes) != 1:
-                return None
-            unit = [v / (float(np.linalg.norm(v)) or 1.0) for v in vectors]
-            mean = np.mean(unit, axis=0)
-            return mean / (float(np.linalg.norm(mean)) or 1.0)
-
-        memory_centre = centre(list(self.backend.vectors_of(sorted(members), model).values()))
-        if memory_centre is None:
+        The members of a set are the same kind of fact and filed under the same
+        topics (tags). So the topics that at least ``SET_SHARED`` of the first
+        ``size`` of the ranking carry are gathered, and every memory filed
+        under one of them (its newest ``SET_SCAN``) scores, over those topics,
+        how many of the first carry the topic over how many memories the topic
+        has: a small topic most of them share counts most. The best are taken,
+        a tie by the property ranking. Measured on the dense world's set
+        questions, those held 85 to 100% of each set within 100 candidates.
+        When the first share no topic (or every memory under the topics they
+        share is judged), the ranking past them is taken instead. Either way
+        the batch is ordered as the linked search orders (the property
+        similarity to ``asked``, to the power ``relational_sharpness``, times
+        aboutness)."""
+        budget = max(self.config.retrieval.set_pool, 0)
+        if not budget:
             return []
-        hits = self.backend.vector_search(memory_centre.tolist(), model, scope,
-                                          limit=200 + len(judged),
-                                          include_invalid=include_invalid)
-        pool = [memory for memory, _ in hits if memory.id not in judged]
-        picked = pool[: size // 2]
-        member_props = self._property_vectors(sorted(members))
-        prop_centre = centre(list(member_props.values()))
-        if prop_centre is not None:
-            rest = [m for m in pool if m not in picked]
-            props = self._property_vectors([m.id for m in rest])
-            rest.sort(key=lambda m: -float(props[m.id] @ prop_centre)
-                      if m.id in props and props[m.id].shape == prop_centre.shape else 1.0)
-            picked += rest[: size - len(picked)]
+        sharpness = self.config.retrieval.relational_sharpness
+
+        def linked_order(memory_ids: list[str]) -> dict[str, float]:
+            if asked is None:
+                return dict.fromkeys(memory_ids, 0.0)
+            scores = self._linked_scores(asked, memory_ids, act, entities)
+            return {mid: relevance ** sharpness * about
+                    for mid, (relevance, about) in scores.items()}
+
+        first = [r.memory.id for r in ranked[:size]]
+        done = set(first) | set(judged)
+        carried = Counter(topic.id for mid in first
+                          for topic in self.backend.entities_of_memory(mid, kind="topic"))
+        walk: dict[str, float] = defaultdict(float)
+        memories: dict[str, Memory] = {}
+        for topic_id, count in carried.items():
+            if count < SET_SHARED:
+                continue
+            filed = self.backend.entity_memories(topic_id, limit=SET_SCAN,
+                                                 include_invalid=include_invalid)
+            share = count / max(self.backend.count_entity_memories(topic_id), len(filed), 1)
+            for memory in filed:
+                if memory.id in done or not _in_scope(memory, scope):
+                    continue
+                memories[memory.id] = memory
+                walk[memory.id] += share
+        if walk:
+            best = sorted(walk, key=lambda mid: -walk[mid])
+            if len(best) > budget:
+                edge = round(walk[best[budget - 1]], 9)
+                chosen = [mid for mid in best if round(walk[mid], 9) > edge]
+                tied = [mid for mid in best if round(walk[mid], 9) == edge]
+                by_property = linked_order(tied)
+                tied.sort(key=lambda mid: -by_property[mid])
+                best = chosen + tied[: budget - len(chosen)]
+            known = {r.memory.id: r for r in ranked}
+            batch = [known.get(mid) or SearchResult(memory=memories[mid], score=0.0)
+                     for mid in best]
         else:
-            picked = pool[:size]
-        return [SearchResult(memory=memory, score=0.0) for memory in picked]
+            batch = [r for r in ranked[size:] if r.memory.id not in done][:budget]
+        order = linked_order([r.memory.id for r in batch])
+        return sorted(batch, key=lambda r: -order[r.memory.id])
 
     def _judged_relevance(
         self, asked: str, memories: list[tuple[str, str]], meta: bool = True,
@@ -1703,11 +1716,6 @@ class MemoryStore:
         """The embedding model and length a property vector was stored at: a
         vector of another model or length is not read, and is re-embedded."""
         return f"{self.embedder.model_id}#{self.config.retrieval.property_dimensions or 'all'}"
-
-    def _linked_search_on(self) -> bool:
-        """Property vectors are computed only while the linked search, which
-        alone reads them, is on: they are a second vector per memory."""
-        return self.config.retrieval.relational_fusion == "linked"
 
     def _masked_texts(
         self, contents: dict[str, str], entities: dict[str, list[str]]
@@ -1795,124 +1803,6 @@ class MemoryStore:
         return is_hub(entity.entity_type, self.backend.count_entity_memories(entity_id),
                       len(self.backend.relations_of([entity_id])),
                       (entity.metadata or {}).get("screen"))
-
-    def _with_inherited(
-        self, query: str, scope: Scope, results: list[SearchResult], include_invalid: bool,
-    ) -> list[SearchResult]:
-        """Add the thing's memories that answer the query asked of the thing a
-        named version belongs to (``graph_retrieval.inherited_questions``),
-        each with the text score it earned on that question."""
-        have = {r.memory.id: r for r in results}
-        for asked, parent_id in inherited_questions(self.backend, scope, query):
-            for r in hybrid_search(backend=self.backend, embedder=self.embedder, query=asked,
-                                   scope=scope, limit=len(results) or 40,
-                                   cfg=self.config.retrieval, include_invalid=include_invalid):
-                if parent_id not in {e.id for e in self.backend.entities_of_memory(r.memory.id)}:
-                    continue
-                known = have.get(r.memory.id)
-                if known is None or r.score > known.score:
-                    have[r.memory.id] = r
-        return sorted(have.values(), key=lambda r: -r.score)
-
-    def _gate_specific(
-        self, results: list[SearchResult], act: dict[str, float]
-    ) -> list[SearchResult]:
-        """Among the memories whose vector similarity is within
-        ``relational_gate`` of the best, the most specific to what the query
-        names first (``graph_retrieval.specificity``); the rest after them,
-        weighed as "weighted" fusion weighs them. "Where does bildy v3 store its
-        data?": v3's own "moved to Postgres" before bildy's "stores its data in
-        SQLite". "Which platforms does bildy v3 run on?": v3 has no memory on
-        that, so bildy's answers, and v3's release date is not in the running."""
-        gate = self.config.retrieval.relational_gate
-        vector = {r.memory.id: float(r.signals.get("vector", 0.0) or 0.0) for r in results}
-        best = max(vector.values(), default=0.0)
-        entities = {r.memory.id: [act.get(e.id, 0.0) for e in
-                                  self.backend.entities_of_memory(r.memory.id)]
-                    for r in results}
-
-        def key(r: SearchResult):
-            acts = entities[r.memory.id]
-            if best > 0 and vector[r.memory.id] >= best - gate:
-                return (0, -specificity(acts), -r.score)
-            return (1, 0.0, -r.score * link_factor(acts))
-
-        ranked = sorted(results, key=key)
-        for r in ranked:
-            r.signals = {**r.signals, "specific": round(specificity(entities[r.memory.id]), 3)}
-        return ranked
-
-    def _fuse_weighted(
-        self,
-        hybrid_results: list[SearchResult],
-        rel_ids: list[str],
-        act: dict[str, float],
-        include_invalid: bool,
-    ) -> list[SearchResult]:
-        """Weigh the text ranking by whether each memory is about the entities
-        the query is about (``graph_retrieval.link_factor``), then rescue the
-        linked memories it buried, as "rescue" fusion does. The first orders
-        what the text found: a memory about a sibling version or another
-        product falls back. The second finds what no text matches: the tool a
-        person's project uses."""
-        factors = {r.memory.id: link_factor([act.get(e.id, 0.0)
-                                             for e in self.backend.entities_of_memory(r.memory.id)])
-                   for r in hybrid_results}
-        reordered = sorted(hybrid_results, key=lambda r: -r.score * factors[r.memory.id])
-        for r in reordered:
-            r.signals = {**r.signals, "linked": round(factors[r.memory.id], 3)}
-        return self._fuse_relational(reordered, rel_ids, include_invalid)
-
-    def _fuse_relational(
-        self,
-        hybrid_results: list[SearchResult],
-        rel_ids: list[str],
-        include_invalid: bool,
-    ) -> list[SearchResult]:
-        """RRF-fuse hybrid results (ranked by relevance) with relational
-        candidates (ranked by graph distance).
-
-        The graph boost is what makes multi-hop work: the answer to "what tool
-        does Ada use?" is usually present but buried, and lifting it is the
-        whole point. The same lift is also the cost, because on an ordinary
-        query a buried graph neighbour can leapfrog the correct answer:
-        ``1/(k+relrank)`` added to ``1/(k+hybridrank)`` can exceed the score of
-        hybrid's own top hit.
-
-        Measured on a 456-memory store with a dense entity graph, the two
-        effects share one mechanism and no weighting or injection cap separates
-        them. Reserving the strongest hybrid results does: graph distance
-        competes for the rest of the page but can never evict a top direct
-        answer. That keeps multi-hop hit@10 at 0.917 (against 0.417 for hybrid
-        alone) while ordinary recall@10 returns to 0.649 from 0.474.
-        """
-        k = 60
-        rescue = 10  # only rescue memories hybrid buried (rank >= this) or missed
-        protect = max(0, self.config.retrieval.relational_protect_top)
-        pinned = [r for r in hybrid_results[:protect]]
-        pinned_ids = {r.memory.id for r in pinned}
-        hybrid_rank = {r.memory.id: rank for rank, r in enumerate(hybrid_results)}
-        score: dict[str, float] = {}
-        for rank, r in enumerate(hybrid_results):
-            score[r.memory.id] = 1.0 / (k + rank)
-        for rank, mid in enumerate(rel_ids):
-            hr = hybrid_rank.get(mid)
-            # A memory hybrid already ranked highly needs no graph boost; adding
-            # it would let a well-ranked neighbor outrank the true direct answer.
-            # Only the buried/absent (the multi-hop answers) get rescued.
-            if hr is None or hr >= rescue:
-                score[mid] = score.get(mid, 0.0) + 1.0 / (k + rank)
-        have: dict[str, SearchResult] = {r.memory.id: r for r in hybrid_results}
-        for mid in rel_ids:
-            if mid not in have:
-                memory = self.backend.get_memory(mid)
-                if memory is not None and (include_invalid or memory.invalid_at is None):
-                    have[mid] = SearchResult(memory=memory, score=0.0)
-        fused = sorted(have.values(), key=lambda r: -score.get(r.memory.id, 0.0))
-        ranked = pinned + [r for r in fused if r.memory.id not in pinned_ids]
-        for r in ranked:
-            r.signals = {**r.signals, "fused": round(score.get(r.memory.id, 0.0), 5)}
-        return ranked
 
     def reconstruct_context(
         self,
@@ -2269,8 +2159,7 @@ class MemoryStore:
                     actor="user",
                 )
             )
-            if self._linked_search_on():
-                self._property_vectors_after_save([memory_id])
+            self._property_vectors_after_save([memory_id])
         return updated
 
     def delete(
@@ -4126,7 +4015,7 @@ class MemoryStore:
                 self._upkeep_set("last:durability", user_id,
                                  {"at": now.isoformat(timespec="seconds"), "result": result})
                 ran["durability"] = result
-        if dedup_due and self._linked_search_on():
+        if dedup_due:
             # After this week's merges and new homes: re-embed the memories
             # whose masked names changed. Nothing to embed is no run.
             try:
@@ -4447,9 +4336,8 @@ class MemoryStore:
         rebuild = getattr(self.backend, "rebuild_ann", None)
         if rebuild is not None:
             rebuild(self.embedder.model_id, self.embedder.dimensions)
-        if self._linked_search_on():
-            for user_id in self.backend.distinct_user_ids() or [None]:
-                self.refresh_property_vectors(user_id=user_id)
+        for user_id in self.backend.distinct_user_ids() or [None]:
+            self.refresh_property_vectors(user_id=user_id)
         return count
 
     def stats(self) -> dict[str, Any]:

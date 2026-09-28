@@ -26,7 +26,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 DEFAULT_DIR = Path.home() / ".memry"
 
@@ -127,7 +127,18 @@ class EmbeddingConfig(BaseModel):
         return self.model or DEFAULT_EMBEDDING_MODELS.get(self.provider, "")
 
 
+#: Link modes that search no longer has, per setting: a config naming one is
+#: refused with a message saying so.
+REMOVED_RELATIONAL: dict[str, tuple[str, ...]] = {
+    "relational_mode": ("typed", "undirected"),
+    "relational_fusion": ("rescue", "weighted", "gated", "inherit"),
+}
+
+
 class RetrievalConfig(BaseModel):
+    # an assignment is validated too, so a removed mode cannot be set later
+    model_config = ConfigDict(validate_assignment=True)
+
     rrf_k: int = 60
     vector_weight: float = 1.0
     keyword_weight: float = 1.0
@@ -137,32 +148,19 @@ class RetrievalConfig(BaseModel):
     recency_half_life_days: float = 30.0
     candidate_multiplier: int = 3
     reconcile_similarity_limit: int = 5
-    # How many top hybrid results relational fusion may never displace. Graph
-    # distance is a much weaker relevance signal than semantic+lexical match, so
-    # without this a buried graph neighbour can outrank the correct answer. 0
-    # restores the unprotected behaviour.
-    relational_protect_top: int = 5
     #: How search follows links from the entities a query names
-    #: (``intelligence/graph_retrieval.py``): "typed" follows extracted
-    #: relations both ways, nearest first, as it always has; "undirected" also
-    #: follows version and part links at the belongs bar; "directed" weighs
-    #: every link by its kind, its direction and the judge's probability.
-    relational_mode: str = "typed"
+    #: (``intelligence/graph_retrieval.py``): "directed" weighs every link by
+    #: its kind, its direction and the judge's probability. The only value:
+    #: "typed" and "undirected" were removed (``REMOVED_RELATIONAL``).
+    relational_mode: Literal["directed"] = "directed"
     #: How many links a search follows from the query's entities.
-    relational_depth: int = 2
-    #: How the linked memories join the text ranking: "rescue" adds only what
-    #: the text ranking buried; "weighted" weighs every candidate by how
-    #: strongly its entities are linked to the query's; "inherit" also asks
-    #: the query of the thing a named version belongs to (directed mode);
-    #: "gated" does that and puts the most specific memory first among those
-    #: that answer the question (``relational_gate``); "linked" scores every
+    relational_depth: int = 1
+    #: How the linked memories join the text ranking: "linked" scores every
     #: candidate, and the best of each linked entity's memories, by how well it
     #: states the property asked times how strongly it is about the entity the
-    #: query names (``graph_retrieval``, "linked" search).
-    relational_fusion: str = "rescue"
-    #: "gated" fusion: a memory answers the question when its vector
-    #: similarity is within this much of the best one found.
-    relational_gate: float = 0.05
+    #: query names (``store._search_linked``). The only value: it beat the
+    #: typed search on every family of the relative retrieval benchmark.
+    relational_fusion: Literal["linked"] = "linked"
     #: "linked" fusion: the power the property similarity is raised to before
     #: it is multiplied by how strongly the memory is about the query's entity.
     #: 1 measured best: 2 and 3 lost the versions whose change is worded as one.
@@ -175,6 +173,22 @@ class RetrievalConfig(BaseModel):
     #: comparison keeps (None: all). The v3 OpenAI models are trained so a
     #: vector cut short still works; property vectors are stored this short.
     property_dimensions: int | None = None
+    #: A question that needs several memories (a list, a total, a comparison)
+    #: has at most this many more judged in one further call, after the first
+    #: ``decision.rerank_pool``: the memories filed under the topics the first
+    #: ones share (``store._set_pool``). Measured, those held 85 to 100% of
+    #: each set within 100 candidates.
+    set_pool: int = 80
+
+    @field_validator("relational_mode", "relational_fusion", mode="before")
+    @classmethod
+    def _not_removed(cls, value: Any, info: ValidationInfo) -> Any:
+        if value in REMOVED_RELATIONAL.get(info.field_name, ()):
+            only = "directed" if info.field_name == "relational_mode" else "linked"
+            raise ValueError(
+                f"retrieval.{info.field_name} {value!r} was removed; the only value is "
+                f"{only!r}")
+        return value
 
 
 class SupersedeConfig(BaseModel):

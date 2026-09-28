@@ -232,7 +232,7 @@ merge-proposal review under **Upkeep** matters as much as it did before.
 | How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. |
 | Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. Word-for-word duplicates merge on their own; a merge the model proposed waits under Upkeep, because that judgement has not been measured. |
 | Tag drift | Suggestions only, for review under Upkeep. Never applied automatically. |
-| Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna), and is refused for one that was not. |
+| Search re-ranking | On with Jev, off otherwise, and only for a search the linked search did not order (a question naming nothing Memry knows, or a tag or entity filter). `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna), and is refused for one that was not. |
 
 ### The settings, and where they came from
 
@@ -274,8 +274,12 @@ undone there. The three thresholds are `MEMRY_SUPERSEDE_PROTECT_IMPORTANCE`,
 **Re-ranking** blends the relevance judgement with the hybrid rank at 0.35 rather than
 replacing it, and pushes anything under 0.15 to the back. Replacing the hybrid rank
 outright measured worse than not re-ranking at all, because that rank already carries
-recency, decayed importance, entity anchors and the typed-relation hops multi-hop
-questions depend on.
+recency, decayed importance and entity anchors. A question naming something Memry knows
+is ordered by the linked search instead (see `docs/architecture.md`, read path), which
+follows the links from it directed and weighted, one link deep; that is the only link
+mode (`retrieval.relational_mode` "directed", `relational_fusion` "linked"), and a config
+naming a removed one ("typed", "undirected", "rescue", "weighted", "inherit", "gated") is
+refused at startup. Its order is not re-ranked.
 
 It is on by default with Jev. With a text model it depends on which one, measured over
 the same 228 memories and 90 questions: gpt-5.6-luna lifted recall@3 from 0.933 to 0.956

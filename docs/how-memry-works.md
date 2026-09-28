@@ -91,14 +91,13 @@ question:
 
    This nails direct lookups ("what does Ada prefer?") and "about X" queries.
 
-2. **Relational traversal** — for questions whose answer shares no words with the
+2. **The linked search** — for questions whose answer shares no words with the
    query ("what tool does Ada use for work?", answered by a memory naming neither
-   "Ada" nor "tool"). The query's entities are detected, typed relations are
-   followed up to two hops, and the reached memories are fused in. When a
-   namespace has no typed relations yet, this falls back to localized PageRank
-   over entity co-occurrence (no LLM). A **rescue threshold** means relational
-   candidates only recover memories hybrid *buried or missed*; they never demote
-   a strong direct hit.
+   "Ada" nor "tool"). The query's entities are detected, their relations and
+   version and part links are followed (directed and weighted, one link deep by
+   default), and every candidate, the text ranking's and the linked entities'
+   best, is ordered by how well it states the property asked times how strongly
+   it is about the entity named.
 
 3. **Filters** — an optional `categories` (tag) filter and a `since`/`until` date
    window. An empty query with just a tag or date *browses* instead of ranking.
@@ -212,7 +211,7 @@ people.
 | Extraction + reconciliation (ADD/UPDATE/SUPERSEDE/NONE) | real |
 | Hybrid retrieval (vector + BM25 + recency/importance) | real |
 | Entity extraction + conservative disambiguation + merge proposals | real |
-| Typed relations + relational retrieval (+ PPR fallback) | real |
+| Typed relations + the linked search | real |
 | Normalized topics, hierarchy expansion, canonicalization | real (abstraction opt-in) |
 | Entity types (person/project/place/…) + typing backfill | real |
 | Memory-type-driven decay (episodic fades, procedural persists) | real |

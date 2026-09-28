@@ -58,14 +58,6 @@ def test_a_saved_memory_gets_its_property_vector_once_its_mentions_are_attached(
         memory_id: (_text_hash("it stores its data in SQLite"), store._property_label())}
 
 
-def test_nothing_is_computed_while_the_linked_search_is_off(store):
-    store.config.retrieval.relational_fusion = "rescue"
-    actions = store._apply_candidates(
-        [CandidateFact(content="bildy stores its data in SQLite", entities=["bildy"])],
-        Scope(user_id="ada"), [])
-    assert store.backend.property_vector_hashes([actions[0].memory_id]) == {}
-
-
 def test_a_memory_whose_text_names_no_entity_keeps_its_ordinary_vector(store):
     note = _memory(store, "The sprint review moved to Friday", [])
     assert store.refresh_property_vectors(user_id="ada") == 0

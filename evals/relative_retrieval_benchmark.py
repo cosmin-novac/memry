@@ -36,11 +36,13 @@ Links between the entities, as Memry keeps them on compared pairs:
             random (evals/datasets/belongs_answers.json): graded, noisy, with a
             "same" answer on every pair
 
-Search modes (``RetrievalConfig``): hybrid alone; "typed" (today: extracted
-relations both ways, 2 hops, rescue fusion); "undirected" (also version and
-part links at the belongs bar, unweighted); "directed" (every link weighted by
-kind, direction and probability, a step down after a step up held down), each
-at depth 1, 2 and 3, with "rescue" or "weighted" fusion.
+Search modes (``MODES``): hybrid alone, without links, and the linked search
+(``RetrievalConfig``: every link followed directed and weighted by kind,
+direction and probability, a step down after a step up held down, depth 1,
+"linked" fusion) with the property similarity sharpened 1, 2 or 3 times or
+judged by the decision provider. The "typed", "undirected", "rescue",
+"weighted", "inherit" and "gated" modes were removed from Memry
+(``REMOVED_MODES``).
 
 Run:
     OPENAI_API_KEY=... python evals/relative_retrieval_benchmark.py      # real embeddings
@@ -1288,23 +1290,8 @@ def store_says(store: MemoryStore, memory_ids: list[str], texts: list[str],
 
 
 MODES = [
-    # (label, relational, mode, depth, fusion)
-    ("hybrid", False, "typed", 2, "rescue"),
-    ("typed d1", True, "typed", 1, "rescue"),
-    ("typed d2 (today)", True, "typed", 2, "rescue"),
-    ("undirected d1", True, "undirected", 1, "rescue"),
-    ("undirected d2", True, "undirected", 2, "rescue"),
-    ("undirected d3", True, "undirected", 3, "rescue"),
-    ("directed d1", True, "directed", 1, "rescue"),
-    ("directed d2", True, "directed", 2, "rescue"),
-    ("directed d3", True, "directed", 3, "rescue"),
-    ("undirected d2 weighted", True, "undirected", 2, "weighted"),
-    ("directed d1 weighted", True, "directed", 1, "weighted"),
-    ("directed d2 weighted", True, "directed", 2, "weighted"),
-    ("directed d3 weighted", True, "directed", 3, "weighted"),
-    ("directed d1 inherit", True, "directed", 1, "inherit"),
-    ("directed d1 gated", True, "directed", 1, "gated"),
-    ("directed d2 gated", True, "directed", 2, "gated"),
+    # (label, relational, mode, depth, fusion[, sharpness[, relevance]])
+    ("hybrid", False, "directed", 1, "linked"),  # no links: the baseline
     ("linked k1", True, "directed", 1, "linked", 1.0),
     ("linked k2", True, "directed", 1, "linked", 2.0),
     ("linked k3", True, "directed", 1, "linked", 3.0),
@@ -1312,6 +1299,31 @@ MODES = [
     # --jev on): its answer is a probability, so no sharpening
     ("linked jev", True, "directed", 1, "linked", 1.0, "jev"),
 ]
+#: Modes this benchmark measured before Memry removed them: the linked search
+#: beat the typed search on every family.
+REMOVED_MODES = (
+    "typed d1", "typed d2 (today)", "undirected d1", "undirected d2", "undirected d3",
+    "directed d1", "directed d2", "directed d3", "undirected d2 weighted",
+    "directed d1 weighted", "directed d2 weighted", "directed d3 weighted",
+    "directed d1 inherit", "directed d1 gated", "directed d2 gated",
+)
+
+
+def select_modes(labels: list[str] | None) -> list[tuple]:
+    """The ``MODES`` named (all of them for none); a removed or unknown label
+    is refused with a message saying which modes there are."""
+    if not labels:
+        return list(MODES)
+    known = [m[0] for m in MODES]
+    removed = [label for label in labels if label in REMOVED_MODES]
+    if removed:
+        raise ValueError(f"mode {', '.join(map(repr, removed))} was removed from Memry "
+                         f"(the linked search replaced it); the modes are {', '.join(known)}")
+    unknown = [label for label in labels if label not in known]
+    if unknown:
+        raise ValueError(f"unknown mode {', '.join(map(repr, unknown))}; "
+                         f"the modes are {', '.join(known)}")
+    return [m for m in MODES if m[0] in labels]
 
 
 def _asks_decider(store: MemoryStore, relational: bool) -> bool:
@@ -1321,8 +1333,7 @@ def _asks_decider(store: MemoryStore, relational: bool) -> bool:
     if not getattr(decider, "available", False):
         return False
     rerank = cfg.decision.rerank if cfg.decision.rerank is not None else decider.reranks_by_default
-    judged = (relational and cfg.retrieval.relational_fusion == "linked"
-              and cfg.retrieval.relational_relevance == "jev")
+    judged = relational and cfg.retrieval.relational_relevance == "jev"
     return judged or bool(rerank and getattr(decider, "may_rerank", True))
 
 
@@ -1456,14 +1467,17 @@ def main() -> None:
                         help="JSON object memory index -> says (the statement with its "
                              "subject taken out): property vectors from it, not the masked text")
     parser.add_argument("--rerank", action="store_true",
-                        help="Jev re-ranks each search (TYPESAFE_API_KEY), on the families "
-                             "where the text ranking and the links disagree, fewer modes")
+                        help="Jev re-ranks each search the linked search did not order "
+                             "(TYPESAFE_API_KEY), hybrid and linked k1 only")
     parser.add_argument("--tags", action="store_true",
                         help="tag every memory as an agent does when it saves (tag_world); "
                              "the store keeps the tags as the memories' categories")
     args = parser.parse_args()
     decider = None
-    modes = [m for m in MODES if not args.modes or m[0] in args.modes]
+    try:
+        modes = select_modes(args.modes)
+    except ValueError as exc:
+        parser.error(str(exc))
     def jev_judge():
         """A fresh Jev decider per store (closing a store closes its decider)
         that counts its calls and stops the run after three failed ones, so a
@@ -1494,8 +1508,7 @@ def main() -> None:
 
         decider = JevDecider(DecisionConfig(provider="jev", rerank=True,
                                             api_key=os.environ["TYPESAFE_API_KEY"]))
-        modes = [m for m in MODES if m[0] in (
-            "hybrid", "typed d2 (today)", "directed d1 weighted", "directed d1 inherit")]
+        modes = select_modes(["hybrid", "linked k1"])
     key = os.environ.get("OPENAI_API_KEY", "").strip()
     if key:
         base: Embedder = OpenAIEmbedder(EmbeddingConfig(provider="openai", api_key=key))
@@ -1532,12 +1545,8 @@ def main() -> None:
             store, memory_ids = build_store(world, embedder, links, answers, decider=decider,
                                             says=says)
             for mode in modes:
-                if links == "none" and mode[2] != "typed":
-                    continue  # without compared pairs the link modes see only relations
-                if links != "none" and mode[2] == "typed" and mode[0] != "hybrid":
-                    continue  # "typed" reads no compared pairs: same as without links
-                if links != "none" and mode[0] == "hybrid":
-                    continue
+                if (links == "none") != (mode[0] == "hybrid"):
+                    continue  # hybrid reads no links; the linked modes need compared pairs
                 calls_before = getattr(decider, "calls", 0)
                 res = score(store, memory_ids, world["queries"], mode)
                 asked = sum(v["n"] for v in res.values())

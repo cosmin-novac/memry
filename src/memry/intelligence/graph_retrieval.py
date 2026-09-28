@@ -2,19 +2,16 @@
 
 Experiments (see evals) showed pure hybrid retrieval scores a flat zero on
 multi-hop questions - "what tool does Ada use?" is answered by a memory that
-names neither "Ada" nor "tool", so no embedder can find it. Following typed
-relations from the query's entities does find it, reliably, at any store size.
-
-The move is deliberately ranked by graph distance, not by text similarity: the
-multi-hop answer is relevant *because* it is two typed hops from the query, even
-though it shares no words with it. Those candidates are then fused (RRF) with the
-hybrid results, so direct lookups keep their strong lexical/semantic ranking and
-relational questions gain the hop-reachable memories on top.
+names neither "Ada" nor "tool", so no embedder can find it. Following the links
+from the query's entities does find it: the "linked" search
+(``store._search_linked``) walks them directed and weighted (``activation``),
+takes the memories of the entities they reach as candidates, and scores each by
+how well it states the property asked times how strongly it is about the entity
+the query names (``aboutness``).
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 import re
 from typing import Iterable
@@ -93,114 +90,6 @@ def detect_query_entities(
     return [entity.id for entity in found]
 
 
-def expand_entities(
-    backend: MemoryBackend, seeds: list[str], *, hops: int = 2
-) -> list[str]:
-    """Entities reachable from the seeds over typed relations, nearest first.
-
-    Falls back to co-occurrence (entities sharing a memory) only if no typed
-    relation touches the seeds, mirroring the PPR-as-fallback result: typed
-    edges when present, structural proximity otherwise."""
-    reached: set[str] = set(seeds)
-    order: list[str] = []
-    frontier = set(seeds)
-    for _ in range(hops):
-        rels = backend.relations_of(list(frontier))
-        nxt: set[str] = set()
-        for r in rels:
-            for endpoint in (r.subject, r.object):
-                if endpoint not in reached:
-                    nxt.add(endpoint)
-        for e in nxt:
-            reached.add(e)
-            order.append(e)
-        frontier = nxt
-        if not frontier:
-            break
-    if not order:
-        # No typed edges (e.g. memories predating relation extraction): fall back
-        # to co-occurrence proximity. The benchmark showed localized PageRank over
-        # co-occurrence is the reliable relation-free option (~0.90, scale-stable),
-        # so weight neighbours by how strongly they co-occur with the seeds rather
-        # than dumping a flat pool.
-        order = _cooccurrence_expand(backend, seeds, hops=hops)
-    return order
-
-
-def _cooccurrence_expand(
-    backend: MemoryBackend, seeds: list[str], *, hops: int, per_entity: int = 25
-) -> list[str]:
-    """Entities near the seeds by shared-memory co-occurrence, ranked by a
-    localized PageRank so the strongest structural neighbours come first."""
-    adj: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    reached: set[str] = set(seeds)
-    frontier = set(seeds)
-    for _ in range(hops):
-        nxt: set[str] = set()
-        for e in frontier:
-            for mem in backend.entity_memories(e, limit=per_entity):
-                others = [x.id for x in backend.entities_of_memory(mem.id)]
-                for a in others:
-                    for b in others:
-                        if a != b:
-                            adj[a][b] += 1.0
-                    if a not in reached:
-                        nxt.add(a)
-        reached |= nxt
-        frontier = nxt
-        if not frontier:
-            break
-    nodes = list(reached | set(adj))
-    if not nodes:
-        return []
-    # weighted personalized PageRank, localized to this neighbourhood
-    idx = {n: i for i, n in enumerate(nodes)}
-    seed_mass = 1.0 / max(len(seeds), 1)
-    rank = {n: (seed_mass if n in seeds else 0.0) for n in nodes}
-    alpha = 0.85
-    for _ in range(20):
-        nxt_rank = {n: (1 - alpha) * (seed_mass if n in seeds else 0.0) for n in nodes}
-        for n in nodes:
-            out = adj.get(n)
-            if not out:
-                continue
-            total = sum(out.values())
-            share = alpha * rank[n] / total
-            for m, w in out.items():
-                if m in idx:
-                    nxt_rank[m] += share * w
-        rank = nxt_rank
-    ranked = sorted((n for n in nodes if n not in seeds), key=lambda n: -rank[n])
-    return ranked
-
-
-def relational_memory_ids(
-    backend: MemoryBackend,
-    scope: Scope,
-    query: str,
-    *,
-    hops: int = 2,
-    per_entity: int = 25,
-) -> list[str]:
-    """Ordered memory ids reached by traversing relations from the query's
-    entities. Empty when the query names no known entity."""
-    seeds = detect_query_entities(backend, scope, query)
-    if not seeds:
-        return []
-    expanded = expand_entities(backend, seeds, hops=hops)
-    ids: list[str] = []
-    seen: set[str] = set()
-    # expanded (hop-reachable) entities first - those carry the non-obvious,
-    # multi-hop answers; the seed's own memories come after (hybrid already has
-    # them covered).
-    for entity_id in expanded + seeds:
-        for mem in backend.entity_memories(entity_id, limit=per_entity):
-            if mem.id not in seen:
-                seen.add(mem.id)
-                ids.append(mem.id)
-    return ids
-
-
 # -- links of every kind, weighted --------------------------------------------
 # A store can hold a graded answer for every pair it compared: how likely two
 # entities are one thing, and how likely one is a version or a part of the
@@ -231,42 +120,10 @@ RELATION = 0.9
 TURN = 0.25
 #: Activation under this is not followed further.
 FLOOR = 0.05
-#: "weighted" fusion: a memory whose entities the query's links reach at this
-#: activation or more keeps its text score, so the text decides between a
-#: version's own facts and its thing's. A memory about entities the links do
-#: not reach (another product, a sibling version, another person) drops
-#: towards ``LOW``: its text may match, but it is about something else. A
-#: memory that names no entity keeps its score. Lifting the linked memories
-#: instead measured worse: text scores are close together, so any lift put
-#: every memory of the named entity above the one that answered.
-STRONG = 0.5
+#: How much a memory that names only entities the links do not reach is about
+#: what the query names (``aboutness``): a sibling version, another product or
+#: another person may match the text, but it is about something else.
 LOW = 0.3
-
-
-def specificity(activations: list[float]) -> float:
-    """How specific a memory is to what the query names: 1.0 for the entity
-    it names, the activation for a thing it belongs to, ``LOW`` and up for
-    entities the links do not reach. "gated" fusion puts the most specific of
-    the memories that answer the question first: a version's own fact
-    overrides its thing's, as a default does in an inheritance hierarchy, and
-    only where the version has a fact on what was asked."""
-    if not activations:
-        return LOW
-    strongest = max(activations)
-    return strongest if strongest >= STRONG else LOW + (1.0 - LOW) * strongest / STRONG
-
-
-def link_factor(activations: list[float]) -> float:
-    """What a memory's text score is multiplied by in "weighted" fusion, from
-    the activations of the entities it names (empty: it names none)."""
-    if not activations:
-        return 1.0
-    strongest = max(activations)
-    if strongest >= STRONG:
-        return 1.0
-    return LOW + (1.0 - LOW) * strongest / STRONG
-#: The modes ``relational_mode`` takes besides "typed".
-LINK_MODES = ("undirected", "directed")
 
 
 @dataclass(frozen=True)
@@ -280,12 +137,9 @@ class Link:
     p: float
 
 
-def links_of(backend: MemoryBackend, entity_ids: list[str], *, graded: bool) -> list[Link]:
-    """Extracted relations and compared pairs touching these entities. Graded:
-    every answer with its probability. Otherwise only a version or a part at
-    ``identity.BELONGS_BAR``, as the structure pass reads it."""
-    from .identity import BELONGS_BAR, belonging
-
+def links_of(backend: MemoryBackend, entity_ids: list[str]) -> list[Link]:
+    """Extracted relations and compared pairs touching these entities, every
+    answer with its probability."""
     links = [Link(r.subject, r.object, "relation", 1.0)
              for r in backend.relations_of(entity_ids)]
     for proposal in backend.proposals_of(entity_ids):
@@ -294,39 +148,27 @@ def links_of(backend: MemoryBackend, entity_ids: list[str], *, graded: bool) -> 
         if a is None or b is None or a == b:
             continue
         belongs = proposal.belongs or {}
-        if graded:
-            # A version scores P(same) of about 0.75: the names and facts are
-            # close because one belongs to the other, which the belongs answer
-            # already says. Only the share of "neither" is left for "same".
-            same = proposal.confidence * belongs.get("neither", 1.0)
-            if proposal.status == "proposed" and same >= FLOOR:
-                links.append(Link(a, b, "same", same))
-            for child, parent, side in ((a, b, "a"), (b, a, "b")):
-                other = "b" if side == "a" else "a"
-                for kind in ("kind", "part"):
-                    p = belongs.get(f"{side}_{kind}_of_{other}", 0.0)
-                    if p >= FLOOR:
-                        links.append(Link(child, parent, kind, p))
-            continue
-        side, p = belonging(belongs)
-        if side is None or p < BELONGS_BAR:
-            continue
-        child, parent = (a, b) if side == "a" else (b, a)
-        other = "b" if side == "a" else "a"
-        kind = ("kind" if belongs.get(f"{side}_kind_of_{other}", 0.0)
-                >= belongs.get(f"{side}_part_of_{other}", 0.0) else "part")
-        links.append(Link(child, parent, kind, 1.0))
+        # A version scores P(same) of about 0.75: the names and facts are
+        # close because one belongs to the other, which the belongs answer
+        # already says. Only the share of "neither" is left for "same".
+        same = proposal.confidence * belongs.get("neither", 1.0)
+        if proposal.status == "proposed" and same >= FLOOR:
+            links.append(Link(a, b, "same", same))
+        for child, parent, side in ((a, b, "a"), (b, a, "b")):
+            other = "b" if side == "a" else "a"
+            for kind in ("kind", "part"):
+                p = belongs.get(f"{side}_{kind}_of_{other}", 0.0)
+                if p >= FLOOR:
+                    links.append(Link(child, parent, kind, p))
     return links
 
 
-def _steps(link: Link, node: str, directed: bool, relation: float = RELATION):
+def _steps(link: Link, node: str, relation: float = RELATION):
     """(other end, factor, step up, step down) for following ``link`` from ``node``."""
     if node not in (link.child, link.parent):
         return
     other = link.parent if node == link.child else link.child
-    if not directed:
-        yield other, RELATION, False, False
-    elif link.kind in ("relation", "same"):
+    if link.kind in ("relation", "same"):
         yield other, (relation if link.kind == "relation" else 1.0) * link.p, False, False
     elif node == link.child:
         yield other, (UP_KIND if link.kind == "kind" else UP_PART) * link.p, True, False
@@ -335,24 +177,20 @@ def _steps(link: Link, node: str, directed: bool, relation: float = RELATION):
 
 
 def activation(
-    backend: MemoryBackend, seeds: list[str], *, depth: int = 2, mode: str = "directed",
-    relation: float = RELATION,
+    backend: MemoryBackend, seeds: list[str], *, depth: int = 2, relation: float = RELATION,
 ) -> dict[str, float]:
     """How strongly each entity near the seeds bears on a query about the
     seeds: 1.0 for a seed, the product of the factors along the best path for
-    the rest. "undirected" follows relations and version and part links at the
-    belongs bar alike, 0.9 a step, as relations were always followed."""
-    return activation_paths(backend, seeds, depth=depth, mode=mode, relation=relation)[0]
+    the rest."""
+    return activation_paths(backend, seeds, depth=depth, relation=relation)[0]
 
 
 def activation_paths(
-    backend: MemoryBackend, seeds: list[str], *, depth: int = 2, mode: str = "directed",
-    relation: float = RELATION,
+    backend: MemoryBackend, seeds: list[str], *, depth: int = 2, relation: float = RELATION,
 ) -> tuple[dict[str, float], set[str]]:
     """``activation``, and the entities whose best path took a step up (the
     thing or the whole a seed belongs to, and siblings through them): what is
     true of those holds for a seed only where the seed says nothing else."""
-    directed = mode == "directed"
     best: dict[str, float] = {seed: 1.0 for seed in seeds}
     up: set[str] = set()
     # A path is a state as well as a place: whether it has gone up to a thing
@@ -362,11 +200,11 @@ def activation_paths(
     for _ in range(max(depth, 0)):
         if not frontier:
             break
-        links = links_of(backend, sorted({node for node, _ in frontier}), graded=directed)
+        links = links_of(backend, sorted({node for node, _ in frontier}))
         reached: dict[tuple[str, bool], float] = {}
         for (node, went_up), act in frontier.items():
             for link in links:
-                for other, factor, step_up, step_down in _steps(link, node, directed, relation):
+                for other, factor, step_up, step_down in _steps(link, node, relation):
                     if step_down and went_up:
                         factor *= TURN
                     value = act * factor
@@ -385,51 +223,6 @@ def activation_paths(
                     else:
                         up.discard(state[0])
     return best, up - set(seeds)
-
-
-def linked_memories(
-    backend: MemoryBackend, scope: Scope, query: str, *, depth: int = 2,
-    mode: str = "directed", per_entity: int = 25,
-) -> tuple[list[str], dict[str, float]]:
-    """Memory ids reached from the query's entities, strongest link first and
-    the query's own entities last (the text ranking has those), and the
-    activation of every entity reached. Empty when the query names none."""
-    seeds = detect_query_entities(backend, scope, query, longest=True)
-    if not seeds:
-        return [], {}
-    act = activation(backend, seeds, depth=depth, mode=mode)
-    order = sorted((e for e in act if e not in seeds), key=lambda e: -act[e]) + seeds
-    ids: list[str] = []
-    seen: set[str] = set()
-    for entity_id in order:
-        for memory in backend.entity_memories(entity_id, limit=per_entity):
-            if memory.id not in seen:
-                seen.add(memory.id)
-                ids.append(memory.id)
-    return ids, act
-
-
-def inherited_questions(
-    backend: MemoryBackend, scope: Scope, query: str
-) -> list[tuple[str, str]]:
-    """(the query asked of a thing, that thing's id) for every thing an entity
-    the query names is a version, occurrence or item of: "Which platforms does
-    bildy v4 run on?" is also "Which platforms does bildy run on?", since what
-    is true of bildy holds for v4 unless a memory says otherwise. People
-    answer "can a canary fly?" by way of "bird" (Collins and Quillian 1969).
-    A part inherits nothing, so a part's whole is not asked."""
-    seeds = detect_query_entities(backend, scope, query, longest=True)
-    asked: list[tuple[str, str]] = []
-    for link in links_of(backend, seeds, graded=True):
-        if link.kind != "kind" or link.child not in seeds or UP_KIND * link.p < STRONG:
-            continue
-        child, parent = backend.get_entity(link.child), backend.get_entity(link.parent)
-        if child is None or parent is None:
-            continue
-        found = re.search(re.escape(child.name), query, re.IGNORECASE)
-        if found:
-            asked.append((query[:found.start()] + parent.name + query[found.end():], parent.id))
-    return asked
 
 
 # -- "linked" search: which entity from the links, which property from the text --
@@ -462,17 +255,22 @@ NO_ENTITY = LOW
 _POSSESSIVE = "(?:'s|\u2019s)?"
 
 
-#: Judging in rounds (``store._judge_in_rounds``). A question whose answer is
-#: one memory reads on while nothing reaches ANSWER_BAR (Jev: answers 0.54 to
-#: 0.86, non-answers 0.02 to 0.13); one that needs several (SET_BAR on its
-#: "needs several memories" answer: sets 0.73 to 0.90, one-answer 0.09 to
-#: 0.47) reads on while a round adds a member (``set_members``).
-ANSWER_BAR = 0.5
+#: Judging (``store._judge_in_rounds``). A question whose answer is one memory
+#: is answered from the first call: reading on while nothing scored 0.5 (Jev:
+#: answers 0.54 to 0.86, non-answers 0.02 to 0.13) found nothing 5 of 5 times
+#: it ran. One that needs several (SET_BAR on its "needs several memories"
+#: answer: sets 0.73 to 0.90, one-answer 0.09 to 0.47) has one more call, on
+#: the memories filed under the topics the first ones share
+#: (``store._set_pool``); its members are the top tier of both calls' scores
+#: (``set_members``), returned past the limit up to SET_RESULT_CAP.
 SET_BAR = 0.5
 MEMBER_FLOOR = 0.07  # non-members of the traced sets scored 0.06 or less
-ONE_ROUNDS = 3
-SET_ROUNDS = 3  # measured: rounds 4 and 5 added no right member, only wrong ones
 SET_RESULT_CAP = 100
+#: A topic (a tag) is shared by the first judged memories when at least this
+#: many of them carry it; each shared topic's newest ``SET_SCAN`` memories are
+#: candidates for the second call.
+SET_SHARED = 2
+SET_SCAN = 500
 
 
 def set_members(judged: dict[str, float]) -> set[str]:
@@ -514,7 +312,7 @@ def homes_of(backend: MemoryBackend, entity_ids: list[str]) -> dict[str, set[str
     homes: dict[str, set[str]] = {entity_id: set() for entity_id in entity_ids}
     ids = sorted(homes)
     for start in range(0, len(ids), 400):
-        for link in links_of(backend, ids[start:start + 400], graded=True):
+        for link in links_of(backend, ids[start:start + 400]):
             if link.kind in ("kind", "part") and link.p >= HOME_P and link.child in homes:
                 homes[link.child].add(link.parent)
     return homes
