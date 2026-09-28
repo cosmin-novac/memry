@@ -830,6 +830,95 @@ def add_owner(add, relations, queries, types, projects, products, people, rnd: r
             add(text, o)
 
 
+CAR_MODELS = [("Skoda", "Octavia"), ("Renault", "Zoe"), ("Toyota", "Yaris"), ("VW", "ID.3"),
+              ("Fiat", "Panda"), ("Kia", "Niro"), ("Hyundai", "Kona"), ("Peugeot", "208"),
+              ("Seat", "Leon"), ("Dacia", "Spring"), ("Mazda", "CX-30"), ("Volvo", "EX30"),
+              ("Opel", "Corsa"), ("Citroen", "e-C4"), ("Honda", "Jazz"), ("Nissan", "Leaf"),
+              ("Ford", "Puma"), ("BMW", "i3"), ("Audi", "A3"), ("Cupra", "Born")]
+SHOPS = ["Lidl", "Aldi", "Rewe", "Edeka", "the farmers' market"]
+OTHER_SPENDING = ["fuel", "books", "a haircut", "cinema tickets", "train tickets", "a gym day pass"]
+RESTAURANT_WORDS = ["Olive", "Harbour", "Linden", "Copper", "Saffron", "Juniper", "Maple",
+                    "Fig", "Cedar", "Pepper", "Clover", "Amber", "Sage", "Quince", "Ember",
+                    "Birch", "Hazel", "Plum", "Rowan", "Thyme", "Willow", "Fennel", "Basil",
+                    "Nutmeg", "Laurel"]
+RESTAURANT_KINDS = ["Kitchen", "Bistro", "Trattoria"]
+
+
+def add_owner_sets(add, queries, types, rnd: random.Random) -> None:
+    """Questions whose answer is a set, in the owner's store: every car price
+    for "Which car is the cheapest?", every grocery purchase for "How much did
+    I spend on groceries?", every liked restaurant. Each set sits among near
+    misses (a car's insurance cost, fuel spending, restaurants disliked or
+    only visited). Beside them, one-answer questions in the same places, to
+    see how often such a question reads on for nothing."""
+    o = OWNER
+    cars = [f"{brand} {model}" for brand, model in CAR_MODELS]
+    cars += [f"{car} {trim}" for car, trim in zip(cars, rnd.sample(
+        ["Sport", "Comfort", "Long Range", "Plus", "Edition", "Base"] * 4, len(cars)))]
+    prices = {car: rnd.randrange(14_000, 62_000, 100) for car in cars}
+    price_mems, range_mems, drive_mems = [], [], []
+    for car in cars:
+        types[car] = "product"
+        price = f"{prices[car]:,}"
+        price_mems.append(add(rnd.choice([f"The {car} costs {price} euros.",
+                                          f"{o} was quoted {price} euros for the {car}."]),
+                              *([car, o] if rnd.random() < 0.5 else [car])))
+        near = rnd.sample([
+            f"The {car} has a range of {rnd.randint(250, 600)} km.",
+            f"Insurance for the {car} would be {rnd.randint(300, 1400)} euros a year.",
+            f"{o} test drove the {car} in {rnd.choice(MONTHS)}.",
+            f"The nearest {car} dealer is in {rnd.choice(CITIES)}.",
+            f"The {car} has room for {rnd.choice([4, 5, 7])} people.",
+        ], 2)
+        for text in near:
+            k = add(text, car, *([o] if o in text else []))
+            if "range of" in text:
+                range_mems.append(k)
+            if "test drove" in text:
+                drive_mems.append(k)
+    grocery, others = [], []
+    for _ in range(40):
+        amount, date = rnd.randint(8, 160), f"{rnd.randint(1, 28)} {rnd.choice(MONTHS)}"
+        shop = rnd.choice(SHOPS)
+        grocery.append(add(rnd.choice([
+            f"{o} spent {amount} euros on groceries at {shop} on {date}.",
+            f"Groceries at {shop} cost {o} {amount} euros on {date}."]), o))
+    for _ in range(40):
+        amount, date = rnd.randint(5, 300), f"{rnd.randint(1, 28)} {rnd.choice(MONTHS)}"
+        others.append(add(rnd.choice([
+            f"{o} spent {amount} euros on {rnd.choice(OTHER_SPENDING)} on {date}.",
+            f"{o} got a {amount} euro refund from {rnd.choice(SHOPS)} on {date}."]), o))
+    add(f"{o} wants to spend less on groceries.", o)
+    names = [f"{w} {rnd.choice(RESTAURANT_KINDS)}" for w in RESTAURANT_WORDS]
+    liked, disliked, visited = names[:12], names[12:20], names[20:]
+    liked_mems = []
+    for r in names:
+        types[r] = "organization"
+    for r in liked:
+        liked_mems.append(add(rnd.choice([f"{o} liked the food at {r}.", f"{o} loved dinner at {r}."]),
+                              o, r))
+    for r in disliked:
+        add(rnd.choice([f"{o} did not like the food at {r}.", f"{o} found {r} disappointing."]), o, r)
+    for r in visited + liked[:4]:
+        add(f"{o} had lunch at {r} with {person(rnd)}.", o, r)
+    queries["set"] += [
+        ("Which car is the cheapest?", price_mems, []),
+        ("Which of the cars I looked at is the cheapest?", price_mems, []),
+        ("Which cars cost less than 30,000 euros?", price_mems, []),
+        ("Which cars have the longest range?", range_mems, []),
+        ("Which cars did I test drive?", drive_mems, []),
+        (f"How much did {o} spend on groceries?", grocery, []),
+        ("How much did I spend on groceries?", grocery, []),
+        (f"Which restaurants did {o} like?", liked_mems, []),
+        ("Which restaurants did I like?", liked_mems, []),
+    ]
+    for car in rnd.sample(cars, 6):
+        k = price_mems[cars.index(car)]
+        queries["set_single"].append((f"How much does the {car} cost?", [k], []))
+    for r, k in list(zip(liked, liked_mems))[:3]:
+        queries["set_single"].append((f"Did {o} like {r}?", [k], []))
+
+
 def build_world_dense(size: int, seed: int = 11, owner: bool = False) -> dict:
     """Like ``build_world``, with entities of realistic size: a product has
     35 to 50 memories, each version 10 to 15, its sync service 11 to 15, an event
@@ -1005,6 +1094,7 @@ def build_world_dense(size: int, seed: int = 11, owner: bool = False) -> dict:
     if owner:  # its own random draws: the rest of the world stays as it was
         add_owner(add, relations, queries, types, projects, things, people,
                   random.Random(seed + 5))
+        add_owner_sets(add, queries, types, random.Random(seed + 6))
     for pr in projects:
         gold = [k for k, m in enumerate(memories) if pr in m["entities"]]
         queries["by_entity"].append((f"Show everything about {pr}.", gold, []))
@@ -1124,7 +1214,7 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
 
 #: Families scored by recall@10 (many memories answer them); the rest by MRR.
 RECALL = {"rollup": "recall", "version_rollup": "recall", "multi_hop": "recall",
-          "by_entity": "recall"}
+          "by_entity": "recall", "set": "recall"}
 
 
 def main() -> None:
