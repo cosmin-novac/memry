@@ -505,7 +505,7 @@ def test_it_stands_for_one_entity_in_what_the_decision_provider_reads(store, fam
 
         def decide(self, state, questions):
             asked.extend(q.instructions.split("Memory: ", 1)[1] for key, q in questions.items()
-                         if key != "property")
+                         if key.startswith("m"))
             return Answers({key: Answer(0.5, {}, 0.9, True) for key in questions})
 
     kai = _entity(store, "Kai Lund")
@@ -577,3 +577,91 @@ def test_a_question_in_the_first_person_is_about_the_owner(store, family):
     assert about[lives.id] == 1.0
     results = store.search("What do I know about bildy?", user_id="ada", limit=10)
     assert lives.id not in {r.memory.id for r in results if r.signals.get("about") == 1.0}
+
+
+class _RoundJudge:
+    """A decision provider for the rounds: counts its calls, answers the
+    meta questions as told and scores a memory by the words it contains."""
+
+    available = True
+    may_rerank = reranks_by_default = False
+
+    def close(self):
+        pass
+
+    def __init__(self, *, specific, several, scores):
+        self.specific, self.several, self.scores, self.calls = specific, several, scores, 0
+
+    def decide(self, state, questions):
+        from memry.providers.decisions import Answer, Answers
+
+        self.calls += 1
+
+        def value(key, text):
+            if key == "property":
+                return self.specific
+            if key == "several":
+                return self.several
+            return next((v for word, v in self.scores.items() if word in text), 0.02)
+        return Answers({key: Answer(value(key, q.instructions), {}, 0.9, True)
+                        for key, q in questions.items()})
+
+
+class _KindEmbedder(Embedder):
+    """Vectors by kind of fact (a price, an insurance cost, a test drive), as a
+    real embedder places them; the car's name does not move them."""
+
+    name, _model, dimensions = "kind", "v1", 4
+    KINDS = ["costs", "insurance", "drove"]
+
+    def embed(self, texts):
+        return [[float(k in t.lower()) for k in self.KINDS] + [0.1] for t in texts]
+
+
+def _shopping(store):
+    store.embedder = _KindEmbedder()
+    store.config.retrieval.relational_fusion = "linked"
+    store.config.retrieval.relational_relevance = "jev"
+    store.config.decision.rerank_pool = 4
+
+    def add(text):
+        return store.backend.insert_memory(
+            Memory(content=text, user_id="ada", embedding_model=store.embedder.model_id),
+            embedding=store.embedder.embed([text])[0])
+
+    prices = [add(f"The Carmodel{i} costs {14000 + 900 * i} euros.") for i in range(12)]
+    for i in range(12):
+        add(f"Insurance for the Carmodel{i} would be {300 + 20 * i} euros a year.")
+        add(f"Ada test drove the Carmodel{i} on a rainy day.")
+    return prices
+
+
+def test_a_question_needing_several_memories_collects_the_set_in_rounds(store):
+    """"Which car is the cheapest?" needs every price. After the first round
+    the next come from the memories nearest the prices found, until a round
+    adds none; all of them are returned, more than the limit."""
+    prices = _shopping(store)
+    judge = _RoundJudge(specific=0.9, several=0.9, scores={"costs": 0.12})
+    store.decider = judge
+    results = store.search("Which car is the cheapest?", user_id="ada", limit=5)
+    members = [r for r in results if r.signals.get("member")]
+    assert {r.memory.id for r in members} == {m.id for m in prices}
+    assert len(results) >= len(prices) > 5
+    assert results[0].signals["rounds"] == judge.calls >= 3  # the last round found nothing
+
+
+def test_a_one_answer_question_reads_on_only_while_nothing_answers(store):
+    _shopping(store)
+    store.decider = _RoundJudge(specific=0.9, several=0.1, scores={"Carmodel3 costs": 0.9})
+    store.search("How much does the Carmodel3 cost?", user_id="ada", limit=5)
+    assert store.decider.calls == 1  # the answer was in the first round
+    store.decider = _RoundJudge(specific=0.9, several=0.1, scores={})
+    store.search("How much does the Carmodel99 cost?", user_id="ada", limit=5)
+    assert store.decider.calls == 3  # nothing answers: two more rounds, then stop
+
+
+def test_a_question_about_everything_does_not_read_on(store):
+    _shopping(store)
+    store.decider = _RoundJudge(specific=0.1, several=0.9, scores={})
+    store.search("Tell me about the cars", user_id="ada", limit=5)
+    assert store.decider.calls == 1

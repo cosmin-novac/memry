@@ -461,6 +461,24 @@ NO_ENTITY = LOW
 _POSSESSIVE = "(?:'s|\u2019s)?"
 
 
+#: Judging in rounds (``store._judge_in_rounds``). A question whose answer is
+#: one memory reads on while nothing reaches ANSWER_BAR (Jev: answers 0.54 to
+#: 0.86, non-answers 0.02 to 0.13); one that needs several (SET_BAR on its
+#: "needs several memories" answer: sets 0.73 to 0.90, one-answer 0.09 to
+#: 0.47) reads on while a round adds a member. A member scores at least
+#: MEMBER_SHARE of the best judged memory and at least MEMBER_FLOOR: Jev scores
+#: a car's price 0.08 to 0.15 for "Which car is the cheapest?" and grocery
+#: purchases 0.62 to 0.67 for "How much did I spend on groceries?", with
+#: non-members at 0.05 or less in both.
+ANSWER_BAR = 0.5
+SET_BAR = 0.5
+MEMBER_SHARE = 0.5
+MEMBER_FLOOR = 0.06
+ONE_ROUNDS = 3
+SET_ROUNDS = 5
+SET_RESULT_CAP = 100
+
+
 #: A thing an entity more likely than not belongs to reads "it" in that
 #: entity's memories too ("The first release of bildy" in bildy v1's).
 HOME_P = 0.5
