@@ -683,3 +683,6 @@ def test_set_members_split_where_the_scores_separate():
     assert set_members({**liked, **lunch}) == set(liked)
     assert set_members(dict(zip("abcd", [0.12] * 4))) == set("abcd")   # a round of members only
     assert set_members(noise) == set()                                 # a round of noise only
+    # three tiers: the liked, the merely visited, noise; the top tier is the set
+    assert set_members({**liked, **lunch, **dict(zip("pqrst", [0.05, 0.04, 0.03, 0.02, 0.02]))}) \
+        == set(liked)

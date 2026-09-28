@@ -904,7 +904,8 @@ def add_owner_sets(add, queries, types, rnd: random.Random) -> None:
     queries["set"] += [
         ("Which car is the cheapest?", price_mems, []),
         ("Which of the cars I looked at is the cheapest?", price_mems, []),
-        ("Which cars cost less than 30,000 euros?", price_mems, []),
+        ("Which cars cost less than 30,000 euros?",
+         [k for car, k in zip(cars, price_mems) if prices[car] < 30_000], []),
         ("Which cars have the longest range?", range_mems, []),
         ("Which cars did I test drive?", drive_mems, []),
         (f"How much did {o} spend on groceries?", grocery, []),

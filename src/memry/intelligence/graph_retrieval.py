@@ -480,25 +480,28 @@ def set_members(judged: dict[str, float]) -> set[str]:
     alone. Its scale differs by question: a car's price scores 0.08 to 0.16
     for "Which car is the cheapest?" beside insurance costs at 0.02 to 0.06; a
     liked restaurant 0.42 to 0.64 for "Which restaurants did I like?" beside
-    "had lunch at" at 0.15 to 0.25. So the scores split in two where they
-    separate best on a log scale (Otsu's threshold), and the upper group are
-    the members when its mean is at least twice the lower's. Scores without
-    two such groups are all members or all noise, by ``MEMBER_FLOOR`` (a first
-    round can hold nothing but the set: 20 of 21 test drives)."""
+    "had lunch at" at 0.15 to 0.25 and noise at 0.02 to 0.05. The members are
+    the top tier: the scores split in two where they separate best on a log
+    scale (Otsu's threshold), the upper group is kept while it stands at
+    least twice above the lower, and split again. Scores with no such split
+    are all members or all noise, by ``MEMBER_FLOOR`` (a first round can hold
+    nothing but the set: 20 of 21 test drives)."""
     import math
 
-    values = sorted((max(v, 0.01), mid) for mid, v in judged.items())
-    logs = [math.log(v) for v, _ in values]
-    best, cut = -1.0, None
-    for i in range(1, len(logs)):
-        low, high = logs[:i], logs[i:]
-        mean_low, mean_high = sum(low) / len(low), sum(high) / len(high)
-        spread = len(low) * len(high) * (mean_high - mean_low) ** 2
-        if spread > best:
-            best, cut = spread, (i, mean_high - mean_low)
-    if cut is None or cut[1] < math.log(2):
-        return {mid for v, mid in values if v >= MEMBER_FLOOR}
-    return {mid for v, mid in values[cut[0]:] if v >= MEMBER_FLOOR}
+    tier = sorted((max(v, 0.01), mid) for mid, v in judged.items())
+    while len(tier) > 1:
+        logs = [math.log(v) for v, _ in tier]
+        best, cut = -1.0, None
+        for i in range(1, len(logs)):
+            low, high = logs[:i], logs[i:]
+            gap = sum(high) / len(high) - sum(low) / len(low)
+            spread = len(low) * len(high) * gap ** 2
+            if spread > best:
+                best, cut = spread, (i, gap)
+        if cut[1] < math.log(2):
+            break
+        tier = tier[cut[0]:]
+    return {mid for v, mid in tier if v >= MEMBER_FLOOR}
 
 
 #: A thing an entity more likely than not belongs to reads "it" in that
