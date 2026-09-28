@@ -561,6 +561,9 @@ def test_a_possessive_still_names_the_entity(store):
     assert detect_query_entities(store.backend, scope, "What is Ilva Marsh's cat called?") == [ilva.id]
     assert detect_query_entities(store.backend, scope, "Is McDonald's open late?") == [shop.id]
     assert detect_query_entities(store.backend, scope, "When does Ilva Marsh’s gym open?") == [ilva.id]
+    car = _entity(store, "VW ID.3")
+    assert detect_query_entities(store.backend, scope, "How much does the VW ID.3 cost?") == [car.id]
+    assert detect_query_entities(store.backend, scope, "Ilva Marsh. Where is she?") == [ilva.id]
 
 
 def test_a_question_in_the_first_person_is_about_the_owner(store, family):

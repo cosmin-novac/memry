@@ -63,7 +63,8 @@ def detect_query_entities(
     "bildy", which it contains. A search that starts at "bildy" reaches every
     version below it, so a question about v4 would take v3's memories too.
     """
-    tokens = re.findall(r"[^\W_]+(?:[-'’][^\W_]+)*", query.lower(), re.UNICODE)
+    # a dot inside a word stays: "VW ID.3", "Node.js"; a full stop does not
+    tokens = re.findall(r"[^\W_]+(?:[-'’.][^\W_]+)*", query.lower(), re.UNICODE)
     # "Ilva Marsh's cat" names Ilva Marsh; "McDonald's" names itself. Each
     # phrase is tried as written and without a trailing possessive.
     bare = [_POSSESSIVE_END.sub("", token) for token in tokens]
