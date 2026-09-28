@@ -69,7 +69,7 @@ from memry.config import Config, EmbeddingConfig  # noqa: E402
 from memry.models import Entity, EntityMention, Memory, MergeProposal, Relation  # noqa: E402
 from memry.providers.embeddings import Embedder, HashEmbedder, OpenAIEmbedder  # noqa: E402
 from memry.providers.llm import NoneLLM  # noqa: E402
-from memry.store import MemoryStore  # noqa: E402
+from memry.store import MemoryStore, _cut, _text_hash  # noqa: E402
 
 USER = "bench"
 NOUNS = ["planner", "editor", "tracker", "ledger", "studio", "console", "reader", "scanner"]
@@ -1210,9 +1210,13 @@ def tag_world(world: dict, seed: int = 21) -> None:
 
 
 def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed: int = 3,
-                decider=None, property_dimensions: int | None = None):
+                decider=None, property_dimensions: int | None = None,
+                says: dict[str, str] | None = None):
     """The world in a fresh store, with compared pairs as ``links`` says.
-    ``decider`` re-ranks every search when given (Jev in production)."""
+    ``decider`` re-ranks every search when given (Jev in production).
+    ``says`` (memory index as a string: the statement with its subject taken
+    out, as an LLM writes it) gives the property vectors in place of the
+    masked texts (``store_says``)."""
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=embedder,
                         decider=decider)
     store.config.retrieval.property_dimensions = property_dimensions
@@ -1252,10 +1256,35 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
         store.backend.add_proposal(MergeProposal(
             entity_a=ids[child], entity_b=ids[parent], user_id=USER, confidence=same,
             different=different, belongs=belongs, compared_step=1))
-    # as Memry computes them: each memory's entities and what those belong to
-    # (at the links just stored) read "it"
-    store.refresh_property_vectors(user_id=USER)
+    if says is None:
+        # as Memry computes them: each memory's entities and what those belong
+        # to (at the links just stored) read "it"
+        store.refresh_property_vectors(user_id=USER)
+    else:
+        store_says(store, memory_ids, [m["text"] for m in world["memories"]], says)
     return store, memory_ids
+
+
+def store_says(store: MemoryStore, memory_ids: list[str], texts: list[str],
+               says: dict[str, str]) -> int:
+    """Each memory's ``says`` as its property vector, stored as
+    ``MemoryStore.refresh_property_vectors`` stores a masked text's: under the
+    store's property label, cut to ``property_dimensions``, with the text's
+    hash, in batches of 64. A memory whose says is its text (or that has no
+    says) gets no row: search reads its ordinary vector. Returns how many it
+    embedded."""
+    model, keep = store._property_label(), store.config.retrieval.property_dimensions
+    due = [(memory_ids[int(k)], text) for k, text in sorted(says.items(), key=lambda kv: int(kv[0]))
+           if text != texts[int(k)]]
+    embedded = 0
+    for start in range(0, len(due), 64):
+        batch = due[start:start + 64]
+        vectors = store.embedder.embed([text for _, text in batch])
+        rows = {mid: _cut(vector, keep) for (mid, _), vector in zip(batch, vectors) if vector}
+        store.backend.set_property_vectors(
+            rows, model, {mid: _text_hash(text) for mid, text in batch if mid in rows})
+        embedded += len(rows)
+    return embedded
 
 
 MODES = [
@@ -1337,6 +1366,9 @@ def main() -> None:
                         help="questions a family with --jev or --rerank (a Jev call each)")
     parser.add_argument("--links", nargs="*", default=["none", "oracle", "measured"],
                         help="which compared pairs to build stores with")
+    parser.add_argument("--says", default=None,
+                        help="JSON object memory index -> says (the statement with its "
+                             "subject taken out): property vectors from it, not the masked text")
     parser.add_argument("--rerank", action="store_true",
                         help="Jev re-ranks each search (TYPESAFE_API_KEY), on the families "
                              "where the text ranking and the links disagree, fewer modes")
@@ -1385,11 +1417,18 @@ def main() -> None:
     cache = pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / f"memry_relative_{base.name}.json"
     embedder = CachedEmbedder(base, cache)
     answers = json.loads((HERE / "datasets" / "belongs_answers.json").read_text())["answers"]
+    says = json.loads(pathlib.Path(args.says).read_text()) if args.says else None
     results = {}
     for size in sizes:
         world = (build_world_dense(size, owner=args.owner) if args.world == "dense"
                  else build_world(size))
         texts = [m["text"] for m in world["memories"]]
+        if says is not None:
+            missing = sum(str(k) not in says for k in range(len(texts)))
+            if missing:
+                print(f"  {missing} memories have no says: their ordinary vector is read",
+                      flush=True)
+            texts += [text for k, text in says.items() if text != texts[int(k)]]
         texts += [q for items in world["queries"].values() for q, _, _ in items]
         embedder.warm(texts)
         if args.rerank or args.jev:  # a Jev call a question
@@ -1399,7 +1438,8 @@ def main() -> None:
         for links in args.links:
             if args.jev:
                 decider = jev_judge()
-            store, memory_ids = build_store(world, embedder, links, answers, decider=decider)
+            store, memory_ids = build_store(world, embedder, links, answers, decider=decider,
+                                            says=says)
             for mode in modes:
                 if links == "none" and mode[2] != "typed":
                     continue  # without compared pairs the link modes see only relations
