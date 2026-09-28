@@ -363,7 +363,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <dt>Episode</dt><dd>The raw message you originally sent, stored word for word and never edited. Memories are worked out from episodes; if extraction ever needs redoing, this is what it is redone from. One message can produce several memories, which is why the two numbers differ.</dd>
     <dt>Tag</dt><dd>A subject a memory is filed under, like <i>2026 taxes</i>. A memory can have a few. Clicking one filters to everything under it.</dd>
     <dt>Entity (a "person or thing")</dt><dd>Someone or something that keeps coming up, with its own page collecting what is known about it.</dd>
-    <dt>Entity type</dt><dd>What kind of thing it is: person, organization, project, product, place, event, document, code, or concept. Used to keep unrelated things with the same name apart, and to group the list - it does not change search ranking.</dd>
+    <dt>Entity type</dt><dd>What kind of thing it is: person, organization, project, product, place, event, document, code, concept, or topic. Used to keep unrelated things with the same name apart, and to group the list - it does not change search ranking. A topic is a tag: every tag is an entity of its own, which the memories filed under it mention.</dd>
     <dt>Relation</dt><dd>A link between two entities, like "Ada works on Helios". Search follows these to reach answers that share no words with your question.</dd>
     <dt>Invalidated</dt><dd>A memory that is no longer treated as true, but is still on file. Happens when you delete it, or when something you said later contradicted it. It stops appearing in search; it does not stop existing.</dd>
     <dt>Superseded</dt><dd>An invalidated memory that was replaced by a specific newer one - the old version of a fact you updated. It stays attached to its replacement as history. When the replacement came from a contradiction it is listed under Archive, where you can undo it. Memry never replaces an important memory without asking you first.</dd>
@@ -1813,7 +1813,7 @@ async function applyMerge(group,index){
 }
 async function loadEntities(){
   const [entities,relations,proposals]=await Promise.all([
-    api('/api/v1/entities?limit=100000&include_merged=true'),
+    api('/api/v1/entities?limit=100000&include_merged=true&kind=any'),
     api('/api/v1/relations?limit=2000'),
     api('/api/v1/entities/proposals?asked=true')]);
   knowledgeNames={};entities.forEach(entity=>knowledgeNames[entity.id]=entity.name);
@@ -1841,7 +1841,8 @@ function placeBlock(detail){
   if(detail.parts&&detail.parts.length)lines.push(`${detail.parts.length} part${detail.parts.length===1?'':'s'}: `
     +detail.parts.slice(0,40).map(part=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(part.id)})'>${esc(part.name)}</button>`).join(', ')
     +(detail.parts.length>40?` <span class="cnt">and ${detail.parts.length-40} more</span>`:''));
-  if(!detail.hub)lines.push('<span class="cnt">Not on the map: so far this is a phrase on its memories. That changes when the evidence does.</span>');
+  if(detail.entity&&detail.entity.entity_type==='topic')lines.push('<span class="cnt">A tag: the memories below are filed under it. Rename it here or on the Tags page; delete it there.</span>');
+  else if(!detail.hub)lines.push('<span class="cnt">Not on the map: so far this is a phrase on its memories. That changes when the evidence does.</span>');
   return lines.length?`<div class="hint">${lines.join('<br>')}</div>`:'';
 }
 function entityIdentityBlock(entity,aliases){
@@ -1862,7 +1863,7 @@ async function openEntity(id){
       <button class="act" onclick='renameEntity(${JSON.stringify(id)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button>
       <button class="act" onclick='addAlias(${JSON.stringify(id)})' title="Add another name for this entity.">add alias</button>
       <button class="act" onclick='toggleKnowledgeDuplicatePicker(this,${JSON.stringify(id)})' title="Say this is the same thing as another entity, and combine the two.">is duplicate of...</button>
-      <button class="act danger" onclick='removeEntity(${JSON.stringify(id)},${detail.memories.length})' title="Remove this name; if more than one memory mentions it, it is kept as a tag on them.">not an entity</button>
+      ${entity.entity_type==='topic'?'':`<button class="act danger" onclick='removeEntity(${JSON.stringify(id)},${detail.memories.length})' title="Remove this name; if more than one memory mentions it, it is kept as a tag on them.">not an entity</button>`}
     </div>
     <div class="entity-duplicate" id="knowledgeduplicatepicker" data-memories="${detail.memories.length}" hidden>
       <select id="knowledgeduplicatetarget" onchange="document.getElementById('knowledgeduplicatebtn').disabled=!this.value" title="Choose the entity this is a duplicate of.">
@@ -1914,7 +1915,7 @@ async function toggleKnowledgeDuplicatePicker(button,entityId){
   if(!select.dataset.loaded){
     select.dataset.loaded='1';
     try{
-      const entities=await api('/api/v1/entities?limit=100000');
+      const entities=await api('/api/v1/entities?limit=100000&kind=any');
       select.insertAdjacentHTML('beforeend',knowledgeEntityTargetOptions(entities,entityId));
     }catch(error){delete select.dataset.loaded;alert('Could not load the list of entities.');return}
   }
@@ -1936,7 +1937,7 @@ async function mergeKnowledgeEntity(entityId){
   const result=await api('/api/v1/entities/merge',{method:'POST',body:JSON.stringify({keep_id:targetId,merge_id:entityId})});
   if(result.error){alert(result.error);return}
   await Promise.all([loadEntities(),loadStats(),loadMapData()]);
-  await openEntity(targetId);
+  await openEntity(result.kept_id||targetId);
 }
 // A type like "concept" can hold hundreds of entities. Listing them all turns
 // the tab into one long scroll, so each type is capped until asked to expand.
@@ -3348,10 +3349,17 @@ def create_app(
     async def list_entities(request: Request) -> Response:
         q = request.query_params
         user_id = _p(request).namespace(q.get("user_id"))
+        # ``kind=any`` lists tags too, as entities of type "topic" (the
+        # dashboard's name list groups them under that type; they are never
+        # hubs); ``kind=topic`` only tags. Named things alone by default.
+        kind = q.get("kind") or "named"
+        if kind not in ("named", "topic", "any"):
+            return JSONResponse({"error": "kind is named, topic or any"}, status_code=400)
         entities = store.entities(
             user_id=user_id,
             include_merged=q.get("include_merged") == "true",
             limit=int(q.get("limit", "100")),
+            kind=kind,
         )
         # hub status and home are computed, so they ride along on the payload
         structure = await run_in_threadpool(partial(store.entity_structure, user_id=user_id))
@@ -3367,7 +3375,8 @@ def create_app(
         rules: computed, so it is never out of step with the evidence."""
         structure = store.entity_structure(user_id=entity.user_id)
         info = structure.get(entity.id) or {}
-        names = {e.id: e.name for e in store.entities(user_id=entity.user_id, limit=1_000_000)}
+        names = {e.id: e.name for e in store.entities(
+            user_id=entity.user_id, limit=1_000_000, kind="any")}
         parts = sorted(
             ({"id": other_id, "name": names.get(other_id, ""), "hub": other["hub"]}
              for other_id, other in structure.items()
@@ -3456,9 +3465,13 @@ def create_app(
         ))
         if not merged:
             return JSONResponse({"error": "not found"}, status_code=404)
-        return JSONResponse(
-            {"merged": True, "keep_id": keep_id, "merge_id": merge_id}
-        )
+        payload = {"merged": True, "keep_id": keep_id, "merge_id": merge_id}
+        # A tag folded together with a named thing goes into the thing, even
+        # when the tag was the one to keep: say which one is left.
+        kept = store.backend.resolve_entity_id(keep_id)
+        if kept and kept != keep_id:
+            payload["kept_id"] = kept
+        return JSONResponse(payload)
 
     async def list_proposals(request: Request) -> Response:
         """Open merge proposals. ``asked=true`` lists only the pairs Upkeep asks a

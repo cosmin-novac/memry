@@ -149,8 +149,8 @@ def test_abstract_tags_records_run_and_is_idempotent_on_reruns(seeded):
 def test_synthetic_parents_are_not_offered_back_to_abstraction(seeded):
     """A parent must never become a member of a broader parent.
 
-    ``topic_counts`` rolls descendants up, so a synthetic parent carries a
-    memory count and looks exactly like an ordinary tag. Feeding that histogram
+    ``topic_counts`` rolled descendants up, so a synthetic parent carried a
+    memory count and looked exactly like an ordinary tag. Feeding that histogram
     back in lets run two cluster 'liver health' and 'weekly gym' into 'health',
     losing the useful level one run at a time.
     """
@@ -165,12 +165,15 @@ def test_synthetic_parents_are_not_offered_back_to_abstraction(seeded):
     assert {t.tag for t in store.synthetic_tags(user_id="ada")} == {
         "liver health", "weekly gym",
     }
-    rolled = {row["category"] for row in store.categories(user_id="ada")}
-    assert {"liver health", "weekly gym"} <= rolled
+    assert {m.content for m in store.get_all(
+        user_id="ada", categories=["liver health"], limit=50)} == {"ran 10k", "ate salad"}
 
-    # ... but abstraction's own input never lists them
+    # ... but abstraction's own input never lists them, and since tags are
+    # topic entities counted directly, neither does the histogram: no rollup
     direct = {row["category"] for row in store.direct_categories(user_id="ada")}
     assert not ({"liver health", "weekly gym"} & direct)
+    listed = {row["category"] for row in store.categories(user_id="ada")}
+    assert not ({"liver health", "weekly gym"} & listed)
 
     # and even if a model names one anyway, it is rejected as a member
     store.llm.queue(json.dumps({"clusters": [

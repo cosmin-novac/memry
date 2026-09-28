@@ -229,12 +229,15 @@ class AnnConfig(BaseModel):
 
 
 class TagAbstractionConfig(BaseModel):
-    """Optional topic abstraction.
+    """Optional topic abstraction (synthetic parent tags).
 
     An LLM proposes higher-level topic parents and the store records hierarchy
     edges to their existing members. Parent labels are not copied onto memories.
     It is off by default because generic abstraction can hurt retrieval; run it
-    only when the resulting navigation is useful.
+    only when the resulting navigation is useful. ``enabled`` is the only way
+    to put it in the upkeep cycle. Tags are topic entities now, which carry no
+    hierarchy: tag counts are direct and do not roll up into parents, whether
+    or not this is on; a filter on a recorded parent still reaches its members.
     """
     enabled: bool = False
     interval_days: float = 7.0

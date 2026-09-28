@@ -119,11 +119,17 @@ preserve old claims instead of pretending that the latest claim erased history.
 ### Tags (backend names: categories and topics)
 
 The product and dashboard call deterministic classification labels such as `liver health`
-or `2026 taxes` **tags**. The existing Python/REST field remains `categories`. Internally, the
-normalized `topics` table plus the indexed `memory_topics` join provides canonicalization,
-hierarchy, counts, and filtering. The memory's JSON `categories` list is the public projection
-returned with each memory. Both are updated together deliberately; they are not competing
-knowledge concepts and no rename or data migration is planned.
+or `2026 taxes` **tags**. The existing Python/REST field remains `categories`, and the memory's
+JSON `categories` list stays the record every filter, backup and export reads. Each tag is also
+an entity of type `topic` (one per user and normalized tag, created on first use) and each
+tagged memory mentions it, so tags, people, products and projects are one kind of thing with
+one merge machinery: a tag merge is an entity merge plus a rewrite of the `categories` column,
+and whatever writes the column brings the mentions in line. Tag counts and the vocabulary
+offered to extraction are read from the topic entities. The normalized `topics` table plus
+the indexed `memory_topics` join remain the filter index derived from the column (and the
+record `memry tags-to-things` migrates from). A topic entity is never a hub, is never masked
+in a property vector, and is never found by a name lookup; a tag and a named thing of the same
+name are compared by the entity identity funnel, two tags by the tag question.
 
 Mechanical separator and singular/plural duplicates are merged deterministically once two
 real stored labels map to the same form. Semantic synonym merges remain reviewable.

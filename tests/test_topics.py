@@ -88,7 +88,13 @@ def test_parent_topic_expands_at_query_time_without_copying(verbatim_store):
     matches = store.get_all(user_id="ada", categories=["health"], limit=20)
     assert {memory.content for memory in matches} == {"Ada runs", "Ada sleeps"}
     assert all("health" not in memory.categories for memory in matches)
-    assert {row["category"]: row["count"] for row in store.categories(user_id="ada")}["health"] == 2
+    # Tags are topic entities now, counted directly: a parent no longer rolls
+    # up the memories of its children in the histogram (synthetic parents are
+    # off), while the filter above still reaches them.
+    assert store.categories(user_id="ada") == [
+        {"category": "running", "count": 1},
+        {"category": "sleep", "count": 1},
+    ]
 
 
 def test_legacy_copied_synthetic_tags_migrate_to_edges(tmp_path):

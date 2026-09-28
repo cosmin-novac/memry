@@ -347,7 +347,7 @@ class MemoryBackend(ABC):
         return None
 
     def retag_topics(
-        self, scope: Scope, remove: set[str], add: str | None
+        self, scope: Scope, remove: set[str], add: str | None, *, exact_user: bool = False
     ) -> int | None:
         """Set-based topic edit, or ``None`` when an adapter has no topic store."""
         return None
@@ -357,6 +357,47 @@ class MemoryBackend(ABC):
 
     def list_topic_relations(self, scope: Scope) -> list[TopicRelation]:
         return []
+
+    # -- tags as topic entities --------------------------------------------
+    # A tag is an entity of type ``models.TOPIC_TYPE``, one per user and
+    # normalized tag. A backend that stores entities creates it the first time
+    # a memory carries the tag and keeps each memory's mentions of tags in line
+    # with its ``categories`` column; one that does not returns None from the
+    # counts, and the store counts the column instead.
+    def topic_entity(
+        self, name: str, scope: Scope, *, create: bool = True
+    ) -> Entity | None:
+        """The topic entity of tag ``name`` for ``scope.user_id``, created when
+        missing and ``create``; for a tag merged into a named thing, that thing."""
+        return None
+
+    def rename_topic(self, entity_id: str, name: str) -> Entity | None:
+        """Rename a topic entity to another tag, keeping its id; None when it
+        is not an active topic entity."""
+        return None
+
+    def topic_mention_counts(
+        self, scope: Scope, *, exact_user: bool = False
+    ) -> list[dict[str, Any]] | None:
+        """Active memories per tag (``{"category", "count"}``), counted from
+        the topic entities' mentions, largest first. ``exact_user`` reads
+        ``scope.user_id`` None as the memories without a user, not as all."""
+        return None
+
+    def topic_mention_links(
+        self, scope: Scope, *, exact_user: bool = False
+    ) -> list[tuple[str, str]] | None:
+        """``(tag, memory_id)`` for every active memory mentioning a tag."""
+        return None
+
+    def tags_to_topics(
+        self, *, user_id: str | None = None, all_users: bool = True, dry_run: bool = False
+    ) -> list[dict[str, Any]]:
+        """Migrate the legacy ``topics``/``memory_topics`` rows to topic
+        entities and mentions, per user. A backend without either has nothing
+        to migrate."""
+        return []
+
     # -- entities ---------------------------------------------------------
     # Default implementations are no-ops so adapters without entity support
     # (e.g. Mem0) stay valid; LocalBackend implements the production behavior.
@@ -430,13 +471,21 @@ class MemoryBackend(ABC):
         it never touches ``updated_at``, so recomputing them changes no order."""
         return None
 
-    def entity_memory_links(self, scope: Scope) -> list[tuple[str, str]]:
-        """(entity_id, memory_id) for every active entity and active memory."""
+    def entity_memory_links(
+        self, scope: Scope, *, kind: str = "named"
+    ) -> list[tuple[str, str]]:
+        """(entity_id, memory_id) for every active entity and active memory.
+        ``kind`` as for ``list_entities``."""
         return []
 
     def list_entities(
-        self, scope: Scope, *, include_merged: bool = False, limit: int = 100
+        self, scope: Scope, *, include_merged: bool = False, limit: int = 100,
+        kind: str = "named",
     ) -> list[Entity]:
+        """Entities in scope. ``kind`` "named" (the default) is every type but
+        ``models.TOPIC_TYPE``, "topic" only tags, "any" both. Name lookups
+        (``find_entities``, ``find_entity_candidates``) only ever find named
+        entities."""
         return []
 
     def add_mention(self, mention: EntityMention) -> None:
@@ -455,8 +504,9 @@ class MemoryBackend(ABC):
         """How many active memories mention this entity."""
         return len(self.entity_memories(entity_id, limit=100_000))
 
-    def entities_of_memory(self, memory_id: str) -> list[Entity]:
-        """The entities a single memory mentions (for relation backfill)."""
+    def entities_of_memory(self, memory_id: str, *, kind: str = "named") -> list[Entity]:
+        """The entities a single memory mentions (for relation backfill).
+        ``kind`` as for ``list_entities``: its tags only when asked for."""
         return []
 
     def touch_entity(self, entity_id: str) -> None:
@@ -464,7 +514,8 @@ class MemoryBackend(ABC):
         return None
 
     def merge_entities(self, keep_id: str, merge_id: str) -> bool:
-        """Fold ``merge_id`` into ``keep_id`` (repoint mentions, mark merged)."""
+        """Fold ``merge_id`` into ``keep_id`` (repoint mentions, mark merged).
+        A tag and a named thing are folded into the thing either way round."""
         return False
 
     # -- typed relations (anchor -> anchor edges) -------------------------

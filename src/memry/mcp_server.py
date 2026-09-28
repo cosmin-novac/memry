@@ -167,6 +167,7 @@ class MemoryStatsData(BaseModel):
     memories_by_type: dict[str, int] | None = None
     users: list[str] | None = None
     entities: int | None = None
+    topics: int | None = None
     open_merge_proposals: int | None = None
     ann: dict[str, Any] | None = None
     llm: str | None = None
@@ -515,8 +516,8 @@ def create_server(
     ) -> Annotated[CallToolResult, ListCategoriesOutput]:
         """List all memory categories (tags) with their memory counts, sorted
         by count descending. Use this to see how knowledge is organized before
-        drilling into a category with search_memories. Some tags are synthetic:
-        higher-level themes Memry adds to cluster related tags."""
+        drilling into a category with search_memories. Each count is the
+        memories filed directly under that tag."""
         cats = await _threaded(store.categories, user_id=_uid(user_id))
         synthetic = {
             t.tag for t in await _threaded(store.synthetic_tags, user_id=_uid(user_id))

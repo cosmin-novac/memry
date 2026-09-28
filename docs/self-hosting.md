@@ -347,7 +347,14 @@ memry sweep --threshold 0.1   # soft-forget stale, low-importance memories
 memry stats                   # counts, providers, db path
 memry export > backup.json    # knowledge only: IDs, provenance, entities, relations, history
 memry abstract-tags           # LLM clusters tags into higher-level ones now
+memry tags-to-things --dry-run   # once after upgrading: count, then run without --dry-run
 ```
+
+Tags are entities of type `topic`. A database or backup from before that change keeps its
+tags in the `categories` column and the legacy `topics`/`memory_topics` tables, which every
+filter still reads; `memry tags-to-things [--user USER]` gives each tag its topic entity and
+each tagged memory its mention, so the Tags page and the tag counts see them. It only reads
+the legacy tables, and a second run changes nothing.
 
 When accounts or OAuth are enabled, also back up `auth.db` with `memry.db`. The JSON export
 does not contain login data.
@@ -367,10 +374,11 @@ An optional, off-by-default LLM pass proposes higher-level parents for browsing,
 `health` over `liver health` and `weekly gym`. Leave it off unless you want that navigation
 view: retrieval measures best when a filter names the specific level, and a broad parent
 adds candidates without adding coverage (`MEMRY_TAG_ABSTRACTION=on`,
-`MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7`, or `memry abstract-tags`). Memry stores hierarchy
-edges and expands a parent filter at query time; it does not copy the parent label onto each
-memory. Synthetic parents remain visible through `/api/v1/categories` and
-`GET /api/v1/tags/synthetic`.
+`MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7`, or `memry abstract-tags`; the config switch is the
+only way into the upkeep cycle). Memry stores hierarchy edges and expands a parent filter at
+query time; it does not copy the parent label onto each memory. Tag counts
+(`/api/v1/categories`, the Tags page) are direct and do not roll a parent up; recorded
+parents are listed at `GET /api/v1/tags/synthetic`.
 
 Entities open as hubs with aliases, a bounded description, and active
 supporting memories. Relations are listed under the entity they describe and can open their

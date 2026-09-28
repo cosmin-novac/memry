@@ -23,6 +23,20 @@ EventType = Literal["ADD", "UPDATE", "DELETE", "SUPERSEDE", "NONE"]
 
 MEMORY_TYPES: tuple[str, ...] = ("semantic", "episodic", "procedural", "working")
 
+#: The type of an entity that is a tag: a "category" or "topic" a memory is
+#: filed under ("groceries", "2026 taxes"). A tag is an entity like a person or
+#: a product, with one merge machinery and one set of links, but extraction
+#: never names one: the store creates it from a memory's ``categories``.
+TOPIC_TYPE = "topic"
+
+#: Every type an entity may be stored with: the kinds of named thing
+#: extraction assigns (``intelligence.extraction.ENTITY_TYPES``, which does not
+#: offer ``TOPIC_TYPE``) and ``TOPIC_TYPE``.
+ENTITY_TYPES: tuple[str, ...] = (
+    "person", "organization", "project", "product", "place", "event",
+    "document", "code", "concept", "other", TOPIC_TYPE,
+)
+
 
 #: A tag is a short retrieval subject. Anything longer is a sentence or a list
 #: that was glued together, and is dropped rather than stored.

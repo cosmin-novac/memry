@@ -43,6 +43,7 @@ from .identity import (
     belongs_blocks,
     closest_people,
     compare,
+    is_owner,
     judges_pairs,
     merge_pair,
     name_vectors,
@@ -781,6 +782,12 @@ def propose_same_name_duplicates(
     only identical names are paired, and a pair whose members live under
     different homes ("privacy policy" in two projects) is left alone, since no
     judge could answer it and no person should be asked.
+
+    A tag (a topic entity) is paired with each named thing of its very name
+    ("bildy" the tag, "Bildy" the product), with or without a judge, and the
+    pair goes through the same comparison as any: the tag's memories are its
+    side. Two tags are never paired here; the tag question decides those
+    (``MemoryStore.merge_obvious_topics``).
     """
     entities = [e for e in backend.list_entities(scope, limit=10_000) if e.merged_into is None]
     pairs: list[tuple[Entity, Entity]] = []
@@ -836,6 +843,13 @@ def propose_same_name_duplicates(
                 home_a, home_b = home_of(members[0]), home_of(other)
                 if not (home_a and home_b and home_a != home_b):
                     pairs.append((members[0], other))
+    named: dict[str, list[Entity]] = {}
+    for entity in entities:
+        if not is_owner(entity):
+            named.setdefault(entity.normalized or entity.name.strip().lower(), []).append(entity)
+    for topic in backend.list_entities(scope, limit=100_000, kind="topic"):
+        for thing in named.get(topic.normalized, []):
+            pairs.append((thing, topic))
     created = 0
     for a, b in pairs:
         if created >= limit:

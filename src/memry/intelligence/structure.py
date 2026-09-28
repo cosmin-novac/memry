@@ -42,6 +42,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from ..models import TOPIC_TYPE
+
 #: Types that are hubs on their own: the things a store is about.
 ANCHOR_TYPES = frozenset({"person", "organization", "project", "product", "place"})
 #: Types a part can belong to. A person or a place is never a home.
@@ -89,7 +91,11 @@ def hub_reason(
     entity_type: str | None, memories: int, relations: int,
     screen: dict[str, Any] | None = None,
 ) -> str:
-    """Why a name is a hub, in words; empty when it is not one."""
+    """Why a name is a hub, in words; empty when it is not one. A tag (an
+    entity of ``TOPIC_TYPE``) never is: it files memories, and a question
+    that uses its word ("What food does Ada like?") is not about it."""
+    if entity_type == TOPIC_TYPE:
+        return ""
     if memories < 1 and relations < 1:
         return ""
     verdict = (screen or {}).get("verdict")

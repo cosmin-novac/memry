@@ -84,7 +84,14 @@ def test_backup_restores_exact_knowledge_and_is_idempotent():
         assert len(backup["tables"]["episodes"]) == 2
         assert len(backup["tables"]["memories"]) == 2
         assert len(backup["tables"]["memory_events"]) >= 4
-        assert len(backup["tables"]["entity_mentions"]) == 2
+        # two names, and each tag a memory is filed under (research twice,
+        # projects once) as a mention of its topic entity
+        topics = {row["id"] for row in backup["tables"]["entities"]
+                  if row["entity_type"] == "topic"}
+        mentions = backup["tables"]["entity_mentions"]
+        assert len([m for m in mentions if m["entity_id"] not in topics]) == 2
+        assert sorted(m["surface"] for m in mentions if m["entity_id"] in topics) == [
+            "projects", "research", "research"]
         assert len(backup["tables"]["relations"]) == 1
 
         result = target.import_backup(backup, owner_prefix="ada")

@@ -128,6 +128,7 @@ from .models import (
     Scope,
     SearchResult,
     SyntheticTag,
+    TOPIC_TYPE,
     clean_tags,
     Topic,
     TopicRelation,
@@ -571,6 +572,9 @@ class MemoryStore:
     def _canonicalize_obvious_topics(
         self, candidates: list[CandidateFact], scope: Scope
     ) -> None:
+        """Write each incoming tag as the obvious canonical form (singular,
+        plural, spacing) it shares with the user's topic entities, and fold a
+        stored variant into it (``_merge_topics``)."""
         incoming = {
             str(category).strip().casefold()
             for candidate in candidates
@@ -581,7 +585,9 @@ class MemoryStore:
             return
         existing = {
             topic.normalized
-            for topic in self.backend.list_topics(scope, limit=100_000)
+            for topic in self.backend.list_entities(
+                Scope(user_id=scope.user_id), limit=1_000_000, kind="topic")
+            if topic.user_id == scope.user_id
         }
         groups = obvious_canonical_merges(
             [{"category": topic} for topic in existing | incoming]
@@ -593,7 +599,7 @@ class MemoryStore:
             replacements.update({variant: canonical for variant in variants})
             stored_variants = (variants - {canonical}) & existing
             if stored_variants:
-                self.backend.retag_topics(scope, stored_variants, canonical)
+                self._merge_topics(scope.user_id, stored_variants, canonical, exact_user=True)
         for candidate in candidates:
             rewritten: list[str] = []
             seen: set[str] = set()
@@ -1707,7 +1713,19 @@ class MemoryStore:
         self, contents: dict[str, str], entities: dict[str, list[str]]
     ) -> dict[str, str]:
         """Each memory's text with every alias of its entities, and of the
-        things those belong to (``graph_retrieval.HOME_P``), read as "it"."""
+        things those belong to (``graph_retrieval.HOME_P``), read as "it".
+
+        A tag is not masked: "Spent 34 euros on groceries at Lidl" filed under
+        "groceries" says "Spent 34 euros on groceries at it", since the tag is
+        what the memory states, not what it is about."""
+        kinds: dict[str, str | None] = {}
+        for entity_id in {e for ids in entities.values() for e in ids}:
+            entity = self.backend.get_entity(entity_id)
+            kinds[entity_id] = entity.entity_type if entity is not None else None
+        entities = {
+            memory_id: [e for e in ids if kinds.get(e) != TOPIC_TYPE]
+            for memory_id, ids in entities.items()
+        }
         homes = homes_of(self.backend, sorted({e for ids in entities.values() for e in ids}))
         aliases: dict[str, list[str]] = {}
         masked = {}
@@ -1772,8 +1790,8 @@ class MemoryStore:
         structure rules, so a stray phrase stored as an entity ("go",
         "upkeep") does not decide what a search is about."""
         entity = self.backend.get_entity(entity_id)
-        if entity is None:
-            return False
+        if entity is None or entity.entity_type == TOPIC_TYPE:
+            return False  # a tag's word in a question never makes it the subject
         return is_hub(entity.entity_type, self.backend.count_entity_memories(entity_id),
                       len(self.backend.relations_of([entity_id])),
                       (entity.metadata or {}).get("screen"))
@@ -2039,9 +2057,13 @@ class MemoryStore:
         agent_id: str | None = None,
         run_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Category histogram over active memories, largest count first."""
+        """Category histogram over active memories, largest count first.
+
+        Each tag is a topic entity, counted by the active memories that
+        mention it. Counts are direct: synthetic parent tags are off, and a
+        parent no longer rolls up the memories of the tags under it."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        indexed = self.backend.topic_counts(scope)
+        indexed = self.backend.topic_mention_counts(scope)
         if indexed is not None:
             return indexed
         counter: dict[str, int] = {}
@@ -2091,7 +2113,7 @@ class MemoryStore:
         when it is the 300th most common tag.
         """
         try:
-            counts = self.backend.direct_topic_counts(scope)
+            counts = self.backend.topic_mention_counts(scope)
         except Exception:
             return []
         if not counts:
@@ -2126,13 +2148,13 @@ class MemoryStore:
     ) -> list[dict[str, Any]]:
         """Histogram over tags attached straight to memories, no parent rollup.
 
-        ``categories()`` rolls descendants up into their parents, which is what
-        the Knowledge UI and parent filtering want. Abstraction wants the
-        opposite: if a system-generated parent appears in its own input, the
-        next run happily clusters ``liver health`` and ``weekly gym`` into
-        ``health`` and the useful level decays one run at a time.
+        Abstraction must read this: if a system-generated parent appeared in
+        its own input, the next run would cluster ``liver health`` and
+        ``weekly gym`` into ``health`` and the useful level would decay one run
+        at a time. ``categories()`` counts the same way now, since topic
+        entities carry no hierarchy; this stays the name abstraction reads.
         """
-        direct = self.backend.direct_topic_counts(Scope(user_id=user_id))
+        direct = self.backend.topic_mention_counts(Scope(user_id=user_id))
         return direct if direct is not None else self.categories(user_id=user_id)
 
     def get_all(
@@ -2556,9 +2578,13 @@ class MemoryStore:
         run_id: str | None = None,
         include_merged: bool = False,
         limit: int = 100,
+        kind: str = "named",
     ) -> list[Entity]:
+        """Entities in scope: named things by default, tags (topic entities)
+        with ``kind="topic"``, both with ``kind="any"``."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        return self.backend.list_entities(scope, include_merged=include_merged, limit=limit)
+        return self.backend.list_entities(
+            scope, include_merged=include_merged, limit=limit, kind=kind)
 
     def relations(self, *, user_id: str | None = None, limit: int = 1000) -> list[Relation]:
         return self.backend.list_relations(Scope(user_id=user_id), limit=limit)
@@ -2863,10 +2889,20 @@ class MemoryStore:
     def rename_entity(
         self, entity_id: str, name: str, *, owner_prefix: str | None = None
     ) -> Entity | None:
-        """Rename the canonical entity while retaining its old name as an alias."""
+        """Rename the canonical entity while retaining its old name as an alias.
+
+        A tag (topic entity) is renamed as a tag: on every memory carrying it
+        (``rename_tag``), so its memories' ``categories`` say the new name."""
         entity = self.backend.get_entity(entity_id)
         if not _owned(entity, owner_prefix) or not name.strip():
             return None
+        if entity.entity_type == TOPIC_TYPE:
+            tag = next(iter(clean_tags(name)), None)
+            if entity.merged_into is not None or tag is None:
+                return None
+            self._retag(entity.user_id, {entity.normalized}, tag, exact_user=True)
+            return self.backend.topic_entity(
+                tag.lower(), Scope(user_id=entity.user_id), create=False)
         return self.backend.rename_entity(entity_id, name)
 
     def merge_proposals(
@@ -2976,7 +3012,12 @@ class MemoryStore:
         """
         removed = 0
         for entity_id in entity_ids:
-            if _owned(self.backend.get_entity(entity_id), owner_prefix):
+            entity = self.backend.get_entity(entity_id)
+            # A tag is removed from its memories on the tag page (delete_tag);
+            # retiring its entity alone would leave the memories filed under it.
+            if entity is not None and entity.entity_type == TOPIC_TYPE:
+                continue
+            if _owned(entity, owner_prefix):
                 removed += int(self.backend.retire_entity(entity_id, reason))
         return removed
 
@@ -3010,6 +3051,9 @@ class MemoryStore:
         entity = self.backend.get_entity(entity_id)
         if not _owned(entity, owner_prefix):
             return {"removed": 0, "tagged": 0, "tag": None}
+        if entity.entity_type == TOPIC_TYPE:
+            # already a tag, and nothing but one: there is nothing to remove
+            return {"removed": 0, "tagged": 0, "tag": entity.name}
 
         memories = [
             memory
@@ -3044,7 +3088,11 @@ class MemoryStore:
     def merge_entities(
         self, keep_id: str, merge_id: str, *, owner_prefix: str | None = None
     ) -> bool:
-        """Idempotent direct merge outside of a proposal."""
+        """Idempotent direct merge outside of a proposal.
+
+        Two tags merge as tags (``merge_tags``), so the memories of the one
+        folded in are filed under the one kept. A tag and a named thing fold
+        into the thing (``MemoryBackend.merge_entities``)."""
         keep_root = self.backend.resolve_entity_id(keep_id)
         merge_root = self.backend.resolve_entity_id(merge_id)
         if keep_root is None or merge_root is None:
@@ -3054,6 +3102,15 @@ class MemoryStore:
             for entity_id in (keep_root, merge_root)
         ):
             return False
+        keep, other = self.backend.get_entity(keep_root), self.backend.get_entity(merge_root)
+        if (
+            keep is not None and other is not None and keep_root != merge_root
+            and keep.entity_type == TOPIC_TYPE and other.entity_type == TOPIC_TYPE
+        ):
+            if keep.user_id != other.user_id:
+                return False
+            self._retag(keep.user_id, {other.normalized}, keep.normalized, exact_user=True)
+            return self.backend.resolve_entity_id(merge_root) == keep_root
         return self.backend.merge_entities(keep_root, merge_root)
 
     # -- the store owner ----------------------------------------------------
@@ -3150,6 +3207,15 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # tag abstraction
     # ------------------------------------------------------------------
+    def tags_to_topics(
+        self, *, user_id: str | None = None, all_users: bool = True, dry_run: bool = False
+    ) -> list[dict[str, Any]]:
+        """Give every tag of the legacy ``topics`` table its topic entity and
+        every ``memory_topics`` link its mention, user by user; see
+        ``LocalBackend.tags_to_topics``. Idempotent; ``dry_run`` only counts."""
+        return self.backend.tags_to_topics(
+            user_id=user_id, all_users=all_users, dry_run=dry_run)
+
     def synthetic_tags(self, *, user_id: str | None = None) -> list[SyntheticTag]:
         """The higher-level tags the system invented for this namespace."""
         return self.backend.list_synthetic_tags(Scope(user_id=user_id))
@@ -3238,20 +3304,29 @@ class MemoryStore:
         judge and ``judge`` set, the tags it puts at its tag merge threshold
         (identity.py). Each tag pair's funnel step is stored, so a pair is
         compared when found and once more at 10 memories a tag, not on every
-        pass."""
+        pass.
+
+        Tags are topic entities of one user, so a merge is theirs whole:
+        ``agent_id`` and ``run_id`` narrow which memories are counted, not
+        which are rewritten. Each merge folds the variant's topic entity into
+        the canonical one and rewrites the ``categories`` column
+        (``_merge_topics``)."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        categories = self.categories(
-            user_id=user_id, agent_id=agent_id, run_id=run_id
-        )
-        groups = obvious_canonical_merges(categories)
+
+        def counted() -> list[dict[str, Any]]:
+            rows = self.backend.topic_mention_counts(scope, exact_user=True)
+            return rows if rows is not None else self.categories(
+                user_id=user_id, agent_id=agent_id, run_id=run_id)
+
+        groups = obvious_canonical_merges(counted())
         changed = 0
         for group in groups:
             remove = set(group["variants"]) - {group["canonical"]}
-            result = self.backend.retag_topics(scope, remove, group["canonical"])
-            changed += result or 0
+            changed += self._merge_topics(
+                user_id, remove, group["canonical"], exact_user=True) or 0
         judged: list[dict[str, Any]] = []
         if judge and judges_pairs(self.decider):
-            tags = self.categories(user_id=user_id, agent_id=agent_id, run_id=run_id)
+            tags = counted()
             compared = self._upkeep_get("tag_pairs", user_id, {})
             judged = judged_tag_merges(
                 self.decider, tags, self._entities_named(scope, tags),
@@ -3264,8 +3339,41 @@ class MemoryStore:
             self._upkeep_set("tag_pairs", user_id, compared)
             for group in judged:
                 remove = set(group["variants"]) - {group["canonical"]}
-                changed += self.backend.retag_topics(scope, remove, group["canonical"]) or 0
+                changed += self._merge_topics(
+                    user_id, remove, group["canonical"], exact_user=True) or 0
         return {"groups_merged": len(groups) + len(judged), "memories_changed": changed}
+
+    def _merge_topics(
+        self, user_id: str | None, remove: set[str], into: str | None, *,
+        exact_user: bool = False,
+    ) -> int:
+        """Merge tags the way entities merge: each tag in ``remove`` that is a
+        topic entity of ``user_id`` is folded into the topic entity of
+        ``into`` (``MemoryBackend.merge_entities``: its mentions move, its id
+        redirects), then the ``categories`` column is rewritten
+        (``retag_topics``), which brings every rewritten memory's mentions in
+        line with its column. A rename to a tag that has no entity yet renames
+        the entity instead, so it keeps its id. ``into`` None drops the tags.
+        Returns how many memories changed, or None when the backend keeps no
+        tag index."""
+        scope = Scope(user_id=user_id)
+        wanted = {str(tag).strip().lower() for tag in remove if str(tag).strip()}
+        target = str(into).strip().lower() if into and str(into).strip() else None
+        if target is not None:
+            variants = [
+                other for other in (
+                    self.backend.topic_entity(tag, scope, create=False)
+                    for tag in sorted(wanted - {target})
+                )
+                if other is not None and other.entity_type == TOPIC_TYPE
+            ]
+            keep = self.backend.topic_entity(target, scope, create=False)
+            if keep is None and variants:
+                keep = self.backend.rename_topic(variants.pop(0).id, target)
+            for other in variants:
+                if keep is not None and other.id != keep.id:
+                    self.backend.merge_entities(keep.id, other.id)
+        return self.backend.retag_topics(scope, wanted, target, exact_user=exact_user)
 
     def _entities_named(
         self, scope: Scope, tags: list[dict[str, Any]]
@@ -3460,7 +3568,7 @@ class MemoryStore:
         excludes memories the question needed.
         """
         scope = Scope(user_id=user_id)
-        links = self.backend.topic_memory_ids(scope)
+        links = self.backend.topic_mention_links(scope)
         if not links:
             return []
         vectors = dict(self.backend.memory_vectors(scope, limit=1_000_000))
@@ -3518,9 +3626,9 @@ class MemoryStore:
         vectors already stored.
         """
         scope = Scope(user_id=user_id)
-        counts = self.backend.direct_topic_counts(scope) or []
+        counts = self.backend.topic_mention_counts(scope) or []
         total = len(self.get_all(user_id=user_id, limit=1_000_000))
-        tagged = len({mid for _, mid in (self.backend.topic_memory_ids(scope) or [])})
+        tagged = len({mid for _, mid in (self.backend.topic_mention_links(scope) or [])})
         singles = sum(1 for row in counts if row.get("count") == 1)
         splits = self.semantic_tag_duplicates(user_id=user_id)
         return {
@@ -3580,10 +3688,12 @@ class MemoryStore:
         return self._retag(user_id, {tag.strip().lower()}, None)
 
     def _retag(
-        self, user_id: str | None, remove: set[str], add: str | None
+        self, user_id: str | None, remove: set[str], add: str | None, *,
+        exact_user: bool = False,
     ) -> int:
         """Strip ``remove`` tags from matching memories and optionally add
-        ``add``, preserving the other tags and their original casing.
+        ``add``, preserving the other tags and their original casing. The
+        tags' topic entities merge with it (``_merge_topics``).
 
         Once a tag is curated by hand its synthetic marker is dropped: the tag
         is now the user's, not the system's guess.
@@ -3596,7 +3706,7 @@ class MemoryStore:
             # shape; one that cleans away to nothing is a plain removal.
             add = next(iter(clean_tags(add)), None)
         scope = Scope(user_id=user_id)
-        indexed = self.backend.retag_topics(scope, remove, add)
+        indexed = self._merge_topics(user_id, remove, add, exact_user=exact_user)
         if indexed is not None:
             for tag in remove:
                 self.backend.delete_synthetic_tag(scope, tag)
@@ -3672,6 +3782,10 @@ class MemoryStore:
         return outcome
 
     def maintenance_enabled(self, key: str) -> bool:
+        if key == "tag_abstraction" and not self.config.tags.enabled:
+            # Synthetic parent tags are off unless the config switches them on
+            # (MEMRY_TAG_ABSTRACTION); a stored toggle alone cannot.
+            return False
         override = self.backend.get_meta(f"maintenance:{key}:enabled")
         if override is not None:
             return override == "true"
@@ -3779,6 +3893,14 @@ class MemoryStore:
                           "share": home["share"], "source": home["source"]}
                          if home else None),
             }
+        # Tags are listed with their memories, and are never a hub nor a home:
+        # the structure rules above only ever see named things.
+        tagged = Counter(
+            entity_id for entity_id, _ in self.backend.entity_memory_links(
+                Scope(user_id=user_id), kind="topic"))
+        for entity_id, memories in tagged.items():
+            out[entity_id] = {"hub": False, "why": "", "screened_out": False,
+                              "memories": memories, "relations": 0, "home": None}
         return out
 
     def run_structure_pass(

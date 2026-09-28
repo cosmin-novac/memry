@@ -905,8 +905,9 @@ def _in_context(
         found: dict[str, Memory] = {}
         for memory in pool:
             for other in backend.session_memories(memory, hours=SESSION_HOURS):
+                # a memory filed under a side that is a tag names it as well
                 if other.id not in named and other.id not in found and not sides & {
-                        e.id for e in backend.entities_of_memory(other.id)}:
+                        e.id for e in backend.entities_of_memory(other.id, kind="any")}:
                     found[other.id] = other
         around = list(found.values())
         if len(around) > CONTEXT_MEMORIES:

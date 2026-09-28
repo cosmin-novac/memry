@@ -12,6 +12,7 @@
     memry reindex                 re-embed all memories
     memry backfill-property-vectors  property vectors for the linked search
     memry export / import         lossless backup/restore; legacy JSON imports
+    memry tags-to-things          give existing tags their topic entities (once)
     memry config                  print resolved configuration
     memry eval --dataset <path>   run the retrieval eval harness
 """
@@ -264,6 +265,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
     p = sub.add_parser(
+        "tags-to-things",
+        help="make every existing tag a topic entity and each tagged memory a "
+             "mention of it (token-free, idempotent; the legacy tag tables are "
+             "only read)",
+    )
+    p.add_argument("-u", "--user", default=None,
+                   help="namespace to migrate (default: every namespace)")
+    p.add_argument("--dry-run", action="store_true", help="count without writing")
+
+    p = sub.add_parser(
         "backfill-property-vectors",
         help="embed each memory with its entity names masked, for the linked search "
              "(only what is missing or changed)",
@@ -457,6 +468,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             _print([{"user": uid, "embedded": store.refresh_property_vectors(user_id=uid)}
                     for uid in namespaces])
+        elif args.command == "tags-to-things":
+            scopes = store.tags_to_topics(
+                user_id=args.user, all_users=args.user is None, dry_run=args.dry_run)
+            totals = {
+                key: sum(row[key] for row in scopes)
+                for key in ("topics", "skipped_parents", "entities_created",
+                            "entities_existing", "mentions_created", "mentions_existing")
+            }
+            _print({"dry_run": args.dry_run, "scopes": scopes, "total": totals})
         elif args.command == "reindex":
             count = store.reindex()
             _print({"reindexed": count, "embedder": store.embedder.model_id})
