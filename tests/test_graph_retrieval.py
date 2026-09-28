@@ -548,3 +548,32 @@ def test_a_question_about_everything_is_ordered_by_aboutness(store, family):
                                                    "bildy v4 added a timeline view"}
     thing = next(r for r in top if r.memory.content == "bildy stores its data in SQLite")
     assert thing.signals["judged"] == pytest.approx((0.9 * 0.8) ** 0.05, abs=1e-3)
+
+
+def test_a_possessive_still_names_the_entity(store):
+    """"Ilva Marsh's cat" names Ilva Marsh; a name that ends in 's itself
+    ("McDonald's") still matches as written."""
+    from memry.intelligence.graph_retrieval import detect_query_entities
+
+    ilva = _entity(store, "Ilva Marsh")
+    shop = _entity(store, "McDonald's")
+    scope = Scope(user_id="ada")
+    assert detect_query_entities(store.backend, scope, "What is Ilva Marsh's cat called?") == [ilva.id]
+    assert detect_query_entities(store.backend, scope, "Is McDonald's open late?") == [shop.id]
+    assert detect_query_entities(store.backend, scope, "When does Ilva Marsh’s gym open?") == [ilva.id]
+
+
+def test_a_question_in_the_first_person_is_about_the_owner(store, family):
+    """"Where do I live?" names nobody: the linked search starts at the store's
+    owner. A first-person question that names someone else keeps them."""
+    _linked(store)
+    owner = _entity(store, "Ilva Marsh")
+    lives = _memory(store, "Ilva Marsh lives in Lisbon", [owner.id])
+    _memory(store, "Ilva Marsh's sister lives in Porto", [owner.id])
+    _with_property_vectors(store)
+    store._upkeep_set("owner_entity", "ada", owner.id)
+    results = store.search("Where do I live?", user_id="ada", limit=10)
+    about = {r.memory.id: r.signals.get("about") for r in results}
+    assert about[lives.id] == 1.0
+    results = store.search("What do I know about bildy?", user_id="ada", limit=10)
+    assert lives.id not in {r.memory.id for r in results if r.signals.get("about") == 1.0}

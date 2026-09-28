@@ -23,6 +23,32 @@ from ..backends.base import MemoryBackend
 from ..models import Scope
 
 _MIN_SURFACE = 3  # ignore 1-2 char "entities" that would match everything
+_POSSESSIVE_END = re.compile("['’]s$")
+#: A question in the first person, which is about the store's owner when it
+#: names nobody else: "Where do I live?", "the user's shoe size".
+_FIRST_PERSON = re.compile(
+    r"\b(?:i|me|my|mine|myself)\b|\bthe user\b|\buser['’]s\b", re.IGNORECASE)
+_FIRST_PERSON_AS_IT = [
+    (re.compile(r"\bmyself\b", re.IGNORECASE), "itself"),
+    (re.compile(r"\b(?:my|mine)\b", re.IGNORECASE), "its"),
+    (re.compile(r"\b(?:i|me)\b", re.IGNORECASE), "it"),
+    (re.compile(r"\bthe user['’]s\b|\buser['’]s\b", re.IGNORECASE), "its"),
+    (re.compile(r"\bthe user\b", re.IGNORECASE), "it"),
+]
+
+
+def speaks_in_first_person(query: str) -> bool:
+    """Whether a question speaks of the store's owner as "I", "my" or "the
+    user"."""
+    return bool(_FIRST_PERSON.search(query))
+
+
+def mask_first_person(query: str) -> str:
+    """The question with the owner spoken of as "it", as a memory reads once
+    the owner's name is masked: "Where do I live?" -> "Where do it live?"."""
+    for pattern, word in _FIRST_PERSON_AS_IT:
+        query = pattern.sub(word, query)
+    return query
 
 
 def detect_query_entities(
@@ -37,16 +63,20 @@ def detect_query_entities(
     "bildy", which it contains. A search that starts at "bildy" reaches every
     version below it, so a question about v4 would take v3's memories too.
     """
-    tokens = re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", query.lower(), re.UNICODE)
+    tokens = re.findall(r"[^\W_]+(?:[-'’][^\W_]+)*", query.lower(), re.UNICODE)
+    # "Ilva Marsh's cat" names Ilva Marsh; "McDonald's" names itself. Each
+    # phrase is tried as written and without a trailing possessive.
+    bare = [_POSSESSIVE_END.sub("", token) for token in tokens]
     phrases: list[str] = []
     seen: set[str] = set()
     for width in range(min(6, len(tokens)), 0, -1):
         for start in range(0, len(tokens) - width + 1):
-            phrase = " ".join(tokens[start : start + width]).strip()
-            if len(phrase) < _MIN_SURFACE or phrase in seen:
-                continue
-            seen.add(phrase)
-            phrases.append(phrase)
+            for words in (tokens, bare):
+                phrase = " ".join(words[start : start + width]).strip()
+                if len(phrase) < _MIN_SURFACE or phrase in seen:
+                    continue
+                seen.add(phrase)
+                phrases.append(phrase)
             if len(phrases) >= cap:
                 break
         if len(phrases) >= cap:

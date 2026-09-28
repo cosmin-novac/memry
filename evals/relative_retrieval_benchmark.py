@@ -651,11 +651,191 @@ def _some(fillers: list[str], lo: int, hi: int, rnd: random.Random) -> list[str]
     return rnd.sample(fillers, min(len(fillers), rnd.randint(lo, hi)))
 
 
-def build_world_dense(size: int, seed: int = 11) -> dict:
+OWNER = "Ilva Marsh"
+#: (named question, first-person question, fact, near misses); {o} is the
+#: owner's name, the other fields are drawn per world.
+OWNER_FACTS = [
+    ("Where does {o} live?", "Where do I live?", "{o} lives in {c1}.",
+     ["{o}'s sister lives in {c2}.", "{o} grew up in {c3}.", "{o} would like to move to {c4} one day.",
+      "{o}'s office is in {c5}."]),
+    ("What is {o}'s shoe size?", "What is my shoe size?", "{o}'s shoe size is {n1}.",
+     ["{o}'s jacket size is M.", "{o}'s bike frame is {n2} cm."]),
+    ("Which bank does {o} use?", "Which bank do I use?", "{o} banks with {bank}.",
+     ["{o}'s salary arrives on the {n3}th.", "{o} is saving for a new {item}."]),
+    ("What does {o} drink in the morning?", "What do I drink in the morning?",
+     "{o} drinks {coffee} every morning.",
+     ["{o}'s partner drinks green tea.", "{o} gave up energy drinks in {y1}."]),
+    ("When is {o}'s dentist appointment?", "When is my dentist appointment?",
+     "{o}'s next dentist appointment is on {d1}.",
+     ["{o}'s car inspection is due on {d2}.", "{o}'s haircut is booked for {d3}."]),
+    ("What phone does {o} have?", "What phone do I have?", "{o}'s phone is the {phone}.",
+     ["{o}'s old phone was the {phone2}.", "{o}'s laptop is the {laptop}."]),
+    ("What car does {o} drive?", "What car do I drive?", "{o} drives a {car}.",
+     ["{o}'s partner drives a {car2}.", "{o} rented a {car3} on holiday."]),
+    ("What is {o} allergic to?", "What am I allergic to?", "{o} is allergic to {allergen}.",
+     ["{o} dislikes {dislike}.", "{o}'s dog is allergic to chicken."]),
+    ("When is {o}'s birthday?", "When is my birthday?", "{o}'s birthday is on {d4}.",
+     ["{o}'s partner's birthday is on {d5}.", "{o}'s mother's birthday is in {m1}."]),
+    ("Where does {o} work?", "Where do I work?", "{o} works at {company}.",
+     ["{o} used to work at {company2}.", "{o}'s best friend works at {company3}."]),
+    ("What is {o}'s favourite book?", "What is my favourite book?", "{o}'s favourite book is {book}.",
+     ["{o} is reading {book2} at the moment.", "{o} gave {book3} to a friend."]),
+    ("Which day does {o} go to the gym?", "Which day do I go to the gym?",
+     "{o} goes to the gym on {day1}s.",
+     ["{o}'s yoga class is on {day2}s.", "{o} plays football on {day3}s."]),
+    ("Which language is {o} learning?", "Which language am I learning?", "{o} is learning {lang1}.",
+     ["{o} speaks {lang2} fluently.", "{o} studied {lang3} at school."]),
+    ("Who is {o}'s internet provider?", "Who is my internet provider?",
+     "{o}'s internet provider is {isp}.",
+     ["{o}'s mobile plan is with {isp2}.", "{o}'s electricity comes from {energy}."]),
+    ("Which health insurance does {o} have?", "Which health insurance do I have?",
+     "{o}'s health insurance is with {ins}.",
+     ["{o}'s car insurance is with {ins2}.", "{o}'s liability insurance renews in {m2}."]),
+    ("What is {o}'s cat called?", "What is my cat called?", "{o} has a cat called {pet1}.",
+     ["{o}'s neighbour's dog is called {pet2}.", "{o} used to have a hamster called {pet3}."]),
+    ("What is {o}'s favourite restaurant?", "What is my favourite restaurant?",
+     "{o}'s favourite restaurant is {rest1}.",
+     ["{o} booked a table at {rest2} for Friday.", "{o} did not like the food at {rest3}."]),
+    ("What heats {o}'s house?", "What heats my house?", "{o}'s house is heated by a {brand1} heat pump.",
+     ["{o} asked for a quote for a {brand2} air conditioner.", "{o}'s old boiler was removed in {y2}."]),
+    ("What is {o}'s blood type?", "What is my blood type?", "{o}'s blood type is {blood}.",
+     ["{o} donated blood in {m3}."]),
+    ("How does {o} get to work?", "How do I get to work?", "{o} commutes by {mode}.",
+     ["{o}'s partner commutes by {mode2}.", "{o} bought a new bike lock in {m4}."]),
+    ("Who is {o}'s family doctor?", "Who is my family doctor?", "{o}'s family doctor is Dr. {last1}.",
+     ["{o} saw a physiotherapist, {person1}, in {m5}.", "{o}'s dentist is Dr. {last2}."]),
+    ("Where is {o} going on holiday?", "Where am I going on holiday?",
+     "{o} is going to {country1} in {m6}.",
+     ["{o} went to {country2} last year.", "{o}'s sister is travelling to {country3}."]),
+    ("What is {o}'s favourite band?", "What is my favourite band?", "{o}'s favourite band is {band1}.",
+     ["{o} saw {band2} live in {y3}.", "{o}'s partner listens to {band3}."]),
+    ("What does {o} grow on the balcony?", "What do I grow on the balcony?",
+     "{o} grows {plant1} on the balcony.",
+     ["{o}'s mother grows {plant2}.", "{o}'s {plant3} died last winter."]),
+    ("Which team does {o} support?", "Which team do I support?", "{o} supports {team1}.",
+     ["{o}'s brother supports {team2}."]),
+    ("Which editor does {o} use?", "Which editor do I use?", "{o} writes code in {editor1}.",
+     ["{o} tried {editor2} for a week.", "{o}'s colleague uses {editor3}."]),
+    ("Which password manager does {o} use?", "Which password manager do I use?",
+     "{o} keeps passwords in {pm1}.", ["{o}'s partner uses {pm2}."]),
+    ("How many rooms does {o}'s flat have?", "How many rooms does my flat have?",
+     "{o}'s flat has {n4} rooms.", ["{o}'s office has {n5} desks.", "{o}'s parents' house has a garden."]),
+    ("When does {o} wake up?", "When do I wake up?", "{o} wakes up at {t1}.",
+     ["{o}'s partner wakes up at {t2}.", "{o}'s standing meeting starts at {t3}."]),
+]
+OWNER_EVERYDAY = [
+    "{o} bought a {item} for {n} euros.", "{o} had a call with {person} about {topic}.",
+    "{o} wants to {goal} this year.", "{o} finished {book} in {month}.",
+    "{o} felt tired after the {topic} meeting.", "{o} needs to {task}.",
+    "{o} met {person} for lunch in {city}.", "{o} paid the {bill} bill on {date}.",
+    "{o} thinks {opinion}.", "{o} fixed the {thing} at home.",
+    "{o} watched {film} with friends.", "{o} signed up for a {course} course.",
+    "{o} ran {n} km on {day}.", "{o} cooked {dish} for dinner.",
+    "{o} asked {person} to review the {topic} document.", "{o}'s {device} needs a new battery.",
+    "{o} is annoyed by the {thing}.", "{o}'s goal for {month} is to {goal}.",
+    "{o} visited {person} in {city}.", "{o} sent {person} the {topic} notes.",
+    "{o} postponed the {topic} review to {day}.", "{o} is looking forward to {event}.",
+    "{o} lent {person} a {item}.", "{o} forgot to {task}.",
+]
+OWNER_VALUES = {
+    "c": CITIES, "bank": ["Monzo", "N26", "ING", "Revolut", "Triodos"],
+    "coffee": ["a flat white", "black coffee", "a cortado", "an oat latte"],
+    "phone": ["Pixel 8", "iPhone 15", "Fairphone 5", "Galaxy S23"], "laptop": ["ThinkPad X1", "MacBook Air", "Framework 13"],
+    "car": ["Skoda Octavia", "Renault Zoe", "Toyota Yaris", "VW ID.3", "Fiat Panda"],
+    "allergen": ["penicillin", "pollen", "cats' hair", "walnuts"], "dislike": ["olives", "coriander", "loud offices"],
+    "company": ["Nordlicht GmbH", "Brightline", "Kestrel Labs", "Oakfield", "Vantage Health"],
+    "book": ["The Left Hand of Darkness", "Middlemarch", "Stoner", "The Dispossessed", "Piranesi"],
+    "day": DAYS, "lang": ["Italian", "Japanese", "Dutch", "Portuguese", "Greek"],
+    "isp": ["Telekom", "Vodafone", "O2", "1&1"], "energy": ["a green energy co-op", "the city utility"],
+    "ins": ["TK", "AOK", "Barmer", "DAK"], "pet": ["Pixel", "Olive", "Mochi", "Tofu", "Basil"],
+    "rest": ["Trattoria Sole", "Kanpai", "Blue Lotus", "Casa Verde", "The Copper Pot"],
+    "brand": ["Bosch", "Vaillant", "Daikin", "Viessmann"], "blood": ["A+", "O-", "B+", "AB+"],
+    "mode": ["bike", "tram", "train", "car"], "last": LAST,
+    "country": ["Portugal", "Norway", "Japan", "Greece", "Morocco", "Chile"],
+    "band": ["Radiohead", "Khruangbin", "Bonobo", "Beach House", "The National"],
+    "plant": ["tomatoes", "basil", "chillies", "strawberries", "mint"],
+    "team": ["St. Pauli", "Ajax", "Celtic", "Union Berlin"],
+    "editor": ["Neovim", "VS Code", "Helix", "Zed", "IntelliJ"], "pm": ["Bitwarden", "1Password", "KeePassXC"],
+    "t": ["6:30", "7:00", "7:15", "8:00", "8:30"],
+}
+
+
+def _owner_values(rnd: random.Random) -> dict:
+    """Distinct values for each numbered field ("car1", "car2"), so a near miss
+    never names the answer's value; the unnumbered field is the first."""
+    counts = {"c": 5, "bank": 1, "coffee": 1, "phone": 2, "laptop": 1, "car": 3, "allergen": 1,
+              "dislike": 1, "company": 3, "book": 3, "day": 3, "lang": 3, "isp": 2, "ins": 2,
+              "pet": 3, "rest": 3, "brand": 2, "blood": 1, "mode": 2, "last": 2, "country": 3,
+              "band": 3, "plant": 3, "team": 2, "editor": 3, "pm": 2, "t": 3}
+    values: dict = {}
+    for field, count in counts.items():
+        for k, value in enumerate(rnd.sample(OWNER_VALUES[field], count), start=1):
+            values[f"{field}{k}"] = value
+        values[field] = values[f"{field}1"]
+    values["energy"] = rnd.choice(OWNER_VALUES["energy"])
+    values.update(
+        n1=rnd.choice([38, 39, 40, 41, 42, 43, 44]), n2=rnd.choice([52, 54, 56, 58]),
+        n3=rnd.choice([1, 15, 25, 28]), n4=rnd.choice([2, 3, 4]), n5=rnd.choice([6, 8, 12]),
+        item=rnd.choice(["sofa", "camera", "bike"]), y1=rnd.randint(2018, 2024),
+        y2=rnd.randint(2015, 2023), y3=rnd.randint(2010, 2024), person1=person(rnd),
+        **{f"m{k}": rnd.choice(MONTHS) for k in range(1, 7)},
+        **{f"d{k}": f"{rnd.randint(1, 28)} {rnd.choice(MONTHS)}" for k in range(1, 6)},
+    )
+    return values
+
+
+def add_owner(add, relations, queries, types, projects, products, people, rnd: random.Random,
+              everyday: int = 200) -> None:
+    """The owner: 29 facts a question asks about, each with near misses, and
+    about 200 everyday memories; linked to their projects, the products they
+    use and their friends. Questions come named ("Where does Ilva Marsh
+    live?") and in the first person ("Where do I live?")."""
+    o = OWNER
+    types[o] = "person"
+    values = _owner_values(rnd)
+    for named, first, fact, near in OWNER_FACTS:
+        gold = add(fact.format(o=o, **values), o)
+        wrong = [add(text.format(o=o, **values), o) for text in near]
+        queries["owner_fact"].append((named.format(o=o), [gold], wrong))
+        queries["owner_fact_first"].append((first, [gold], wrong))
+    for pr in rnd.sample(projects, min(3, len(projects))):
+        add(f"{o} works on {pr}.", o, pr)
+        relations.append((o, "works_on", pr))
+    for p in rnd.sample(products, min(3, len(products))):
+        add(f"{o} uses {p} every day.", o, p)
+        relations.append((o, "uses", p))
+    for friend in rnd.sample(people, min(5, len(people))):
+        add(f"{o} and {friend} are friends.", o, friend)
+        relations.append((o, "knows", friend))
+    fill = dict(
+        item=["charger", "desk lamp", "rain jacket", "keyboard", "kettle", "backpack"],
+        topic=TOPICWORDS, goal=["read more", "sleep earlier", "learn to sail", "run a half marathon"],
+        book=["Dune", "Educated", "Klara and the Sun", "Project Hail Mary"], month=MONTHS,
+        task=["renew the parking permit", "call the landlord", "book the vet", "file the tax return"],
+        city=CITIES, bill=["water", "phone", "electricity", "gym"],
+        opinion=["remote work suits the team", "the new office is too loud", "the quarterly plan is too tight"],
+        thing=["dripping tap", "squeaky door", "broken shelf", "slow router"],
+        film=["Past Lives", "Perfect Days", "Aftersun"], course=["pottery", "first aid", "bread baking"],
+        day=DAYS, dish=["risotto", "dal", "shakshuka", "ramen"], device=["watch", "headphones", "e-reader"],
+        event=["the summer party", "the long weekend", "the concert"],
+    )
+    seen: set[str] = set()
+    while len(seen) < everyday:
+        template = rnd.choice(OWNER_EVERYDAY)
+        text = template.format(o=o, person=person(rnd), n=rnd.randint(2, 400),
+                               date=f"{rnd.randint(1, 28)} {rnd.choice(MONTHS)}",
+                               **{k: rnd.choice(v) for k, v in fill.items()})
+        if text not in seen:
+            seen.add(text)
+            add(text, o)
+
+
+def build_world_dense(size: int, seed: int = 11, owner: bool = False) -> dict:
     """Like ``build_world``, with entities of realistic size: a product has
     35 to 50 memories, each version 10 to 15, its sync service 11 to 15, an event
     series 19 to 23, each occurrence 10 to 14, a person 14 to 20, a project 15
-    to 22 plus its members' "works on"."""
+    to 22 plus its members' "works on". ``owner`` adds the store's owner, an
+    entity of about 300 memories (``add_owner``), in place of as many notes."""
     rnd = random.Random(seed)
     n_products, n_events = max(6, size // 250), max(4, size // 400)
     n_people, n_projects = max(12, size // 100), max(6, size // 250)
@@ -670,10 +850,12 @@ def build_world_dense(size: int, seed: int = 11) -> dict:
         memories.append({"text": text, "entities": list(names)})
         return len(memories) - 1
 
+    things: list[str] = []
     for i in range(n_products):
         w = base_words[i]
         p = f"{w} {NOUNS[i % len(NOUNS)]}"
         types[p] = "product"
+        things.append(p)
         platform, lang, license_ = rnd.choice(PLATFORMS), rnd.choice(LANGS), rnd.choice(LICENSES)
         db, db3 = rnd.sample(DBS, 2)
         m_platform = add(_pick(rnd, ["{p} runs on {v}.", "{p} is available on {v}."],
@@ -820,6 +1002,9 @@ def build_world_dense(size: int, seed: int = 11) -> dict:
         queries["single_fact_para"].append((f"What does {who} like?", [pref], []))
         gold = [m for pr in mine for m in project_tool_mems[pr]]
         queries["multi_hop"].append((f"What tools does {who} use for their work?", gold, []))
+    if owner:  # its own random draws: the rest of the world stays as it was
+        add_owner(add, relations, queries, types, projects, things, people,
+                  random.Random(seed + 5))
     for pr in projects:
         gold = [k for k, m in enumerate(memories) if pr in m["entities"]]
         queries["by_entity"].append((f"Show everything about {pr}.", gold, []))
@@ -842,6 +1027,8 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
     for name, entity_type in world["types"].items():
         ids[name] = store.backend.insert_entity(Entity(
             name=name, normalized=name.lower(), entity_type=entity_type, user_id=USER)).id
+    if OWNER in ids:  # as Memry records it from the account settings
+        store._upkeep_set("owner_entity", USER, ids[OWNER])
     vectors = embedder.embed([m["text"] for m in world["memories"]])
     memory_ids = []
     stamp = "2026-06-01T09:00:00+00:00"
@@ -943,6 +1130,8 @@ RECALL = {"rollup": "recall", "version_rollup": "recall", "multi_hop": "recall",
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sizes", type=int, nargs="*", default=None)
+    parser.add_argument("--owner", action="store_true",
+                        help="dense world with the store's owner (about 300 memories)")
     parser.add_argument("--world", choices=["simple", "dense"], default="simple",
                         help="dense: entities of 15 to 50 memories with near misses")
     parser.add_argument("--out", default=None)
@@ -1005,7 +1194,8 @@ def main() -> None:
     answers = json.loads((HERE / "datasets" / "belongs_answers.json").read_text())["answers"]
     results = {}
     for size in sizes:
-        world = build_world_dense(size) if args.world == "dense" else build_world(size)
+        world = (build_world_dense(size, owner=args.owner) if args.world == "dense"
+                 else build_world(size))
         texts = [m["text"] for m in world["memories"]]
         texts += [q for items in world["queries"].values() for q, _, _ in items]
         embedder.warm(texts)

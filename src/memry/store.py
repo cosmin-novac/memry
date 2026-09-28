@@ -73,9 +73,11 @@ from .intelligence.graph_retrieval import (
     homes_of,
     link_factor,
     linked_memories,
+    mask_first_person,
     mask_names,
     relational_memory_ids,
     specificity,
+    speaks_in_first_person,
 )
 from .intelligence.identity import (
     BELONGS_BAR,
@@ -1415,12 +1417,21 @@ class MemoryStore:
         cfg = self.config.retrieval
         seeds = [e for e in detect_query_entities(self.backend, scope, query, longest=True)
                  if self._is_hub(e)]
+        first_person = False
+        if not seeds and speaks_in_first_person(query):
+            # "Where do I live?" names nobody: it is about the store's owner
+            owner = self.owner_entity(scope.user_id)
+            if owner is not None and self._is_hub(owner.id):
+                seeds, first_person = [owner.id], True
         if not seeds:
             return results
         act, above = activation_paths(self.backend, seeds, depth=cfg.relational_depth,
                                       mode="directed", relation=LINKED_RELATION)
         names = [n for seed in seeds for n in self.backend.entity_aliases(seed)]
-        asked = np.asarray(self.embedder.embed([mask_names(query, names)])[0], dtype=np.float32)
+        question = mask_names(query, names)
+        if first_person:
+            question = mask_first_person(question)
+        asked = np.asarray(self.embedder.embed([question])[0], dtype=np.float32)
         asked = asked[: cfg.property_dimensions or len(asked)]
         asked /= float(np.linalg.norm(asked)) or 1.0
 
@@ -1484,7 +1495,7 @@ class MemoryStore:
             texts.append((result.memory.id, mask_names(
                 result.memory.content, [n for entity_id in it for n in aliases[entity_id]],
                 keep=[e.name for e in entities[result.memory.id] if e.id not in it])))
-        judged, specific = self._judged_relevance(mask_names(query, names), texts)
+        judged, specific = self._judged_relevance(question, texts)
         if not judged:
             return ranked
         # What is true of the thing a seed belongs to holds for the seed only
