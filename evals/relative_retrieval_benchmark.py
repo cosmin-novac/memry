@@ -1095,6 +1095,11 @@ def build_world_dense(size: int, seed: int = 11, owner: bool = False) -> dict:
         add_owner(add, relations, queries, types, projects, things, people,
                   random.Random(seed + 5))
         add_owner_sets(add, queries, types, random.Random(seed + 6))
+        # the owner's favourite restaurant is one they like too
+        favourite = next(k for k, m in enumerate(memories)
+                         if m["text"].startswith(f"{OWNER}'s favourite restaurant is"))
+        queries["set"] = [(q, gold + [favourite] if "restaurants did" in q else gold, bad)
+                          for q, gold, bad in queries["set"]]
     for pr in projects:
         gold = [k for k, m in enumerate(memories) if pr in m["entities"]]
         queries["by_entity"].append((f"Show everything about {pr}.", gold, []))

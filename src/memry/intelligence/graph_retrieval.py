@@ -466,18 +466,39 @@ _POSSESSIVE = "(?:'s|\u2019s)?"
 #: one memory reads on while nothing reaches ANSWER_BAR (Jev: answers 0.54 to
 #: 0.86, non-answers 0.02 to 0.13); one that needs several (SET_BAR on its
 #: "needs several memories" answer: sets 0.73 to 0.90, one-answer 0.09 to
-#: 0.47) reads on while a round adds a member. A member scores at least
-#: MEMBER_SHARE of the best judged memory and at least MEMBER_FLOOR: Jev scores
-#: a car's price 0.08 to 0.15 for "Which car is the cheapest?" and grocery
-#: purchases 0.62 to 0.67 for "How much did I spend on groceries?", with
-#: non-members at 0.05 or less in both.
+#: 0.47) reads on while a round adds a member (``set_members``).
 ANSWER_BAR = 0.5
 SET_BAR = 0.5
-MEMBER_SHARE = 0.5
-MEMBER_FLOOR = 0.06
+MEMBER_FLOOR = 0.07  # non-members of the traced sets scored 0.06 or less
 ONE_ROUNDS = 3
 SET_ROUNDS = 5
 SET_RESULT_CAP = 100
+
+
+def set_members(judged: dict[str, float]) -> set[str]:
+    """The memories of a set question that belong to the set, from Jev's scores
+    alone. Its scale differs by question: a car's price scores 0.08 to 0.16
+    for "Which car is the cheapest?" beside insurance costs at 0.02 to 0.06; a
+    liked restaurant 0.42 to 0.64 for "Which restaurants did I like?" beside
+    "had lunch at" at 0.15 to 0.25. So the scores split in two where they
+    separate best on a log scale (Otsu's threshold), and the upper group are
+    the members when its mean is at least twice the lower's. Scores without
+    two such groups are all members or all noise, by ``MEMBER_FLOOR`` (a first
+    round can hold nothing but the set: 20 of 21 test drives)."""
+    import math
+
+    values = sorted((max(v, 0.01), mid) for mid, v in judged.items())
+    logs = [math.log(v) for v, _ in values]
+    best, cut = -1.0, None
+    for i in range(1, len(logs)):
+        low, high = logs[:i], logs[i:]
+        mean_low, mean_high = sum(low) / len(low), sum(high) / len(high)
+        spread = len(low) * len(high) * (mean_high - mean_low) ** 2
+        if spread > best:
+            best, cut = spread, (i, mean_high - mean_low)
+    if cut is None or cut[1] < math.log(2):
+        return {mid for v, mid in values if v >= MEMBER_FLOOR}
+    return {mid for v, mid in values[cut[0]:] if v >= MEMBER_FLOOR}
 
 
 #: A thing an entity more likely than not belongs to reads "it" in that

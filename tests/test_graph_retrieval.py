@@ -668,3 +668,18 @@ def test_a_question_about_everything_does_not_read_on(store):
     store.decider = _RoundJudge(specific=0.1, several=0.9, scores={})
     store.search("Tell me about the cars", user_id="ada", limit=5)
     assert store.decider.calls == 1
+
+
+def test_set_members_split_where_the_scores_separate():
+    """The scale differs by question; the members are the upper of two groups
+    that separate at least twofold, or all of a round above the noise."""
+    from memry.intelligence.graph_retrieval import set_members
+
+    cheap = dict(zip("abcdef", [0.16, 0.13, 0.11, 0.09, 0.09, 0.08]))
+    noise = dict(zip("uvwxyz", [0.06, 0.05, 0.04, 0.03, 0.02, 0.01]))
+    assert set_members({**cheap, **noise}) == set(cheap)
+    liked = dict(zip("abc", [0.64, 0.55, 0.42]))
+    lunch = dict(zip("uvw", [0.25, 0.22, 0.15]))
+    assert set_members({**liked, **lunch}) == set(liked)
+    assert set_members(dict(zip("abcd", [0.12] * 4))) == set("abcd")   # a round of members only
+    assert set_members(noise) == set()                                 # a round of noise only

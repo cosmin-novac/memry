@@ -66,8 +66,6 @@ from .intelligence.graph_retrieval import (
     FAMILY_TOP,
     LINKED_RELATION,
     LINK_MODES,
-    MEMBER_FLOOR,
-    MEMBER_SHARE,
     ONE_ROUNDS,
     SET_BAR,
     SET_RESULT_CAP,
@@ -83,6 +81,7 @@ from .intelligence.graph_retrieval import (
     mask_first_person,
     mask_names,
     relational_memory_ids,
+    set_members,
     specificity,
     speaks_in_first_person,
 )
@@ -1483,8 +1482,10 @@ class MemoryStore:
         ranked = [result for _, _, result in scored]
         if cfg.relational_relevance != "jev":
             return ranked
-        return self._judge_in_rounds(question, ranked, scope, include_invalid, link={
-            "act": act, "above": above, "seeds": set(seeds), "entities": entities})
+        return self._judge_in_rounds(question if len(seeds) == 1 else query, ranked, scope,
+                                     include_invalid, link={"act": act, "above": above,
+                                                            "seeds": set(seeds),
+                                                            "entities": entities})
 
     def _judge_in_rounds(
         self, question: str, ranked: list[SearchResult], scope: Scope, include_invalid: bool,
@@ -1520,6 +1521,11 @@ class MemoryStore:
             linked = [e.id for e in ents(mid) if e.id in act]
             return max(linked, key=act.get) if linked else None
 
+        # With one entity named, "it" stands for it in the question and the
+        # memories; with several ("Did Ilva like Olive Kitchen?") the names
+        # stay, or the question would read "Did it like it?".
+        masking = bool(link) and len(seeds) == 1
+
         def text_of(result: SearchResult) -> str:
             # "it" stands for the entity a memory's aboutness comes from and
             # the things that entity more likely than not belongs to ("The
@@ -1527,7 +1533,7 @@ class MemoryStore:
             # name stays: it can be the answer ("uses Redis"), someone else
             # ("Kai Lund works on it", not "it works on it") or another
             # entity ("Bildy Bakery").
-            who = subject(result.memory.id) if link else None
+            who = subject(result.memory.id) if masking else None
             if who is None:
                 return result.memory.content
             it = {who} | homes.get(who, set())
@@ -1551,12 +1557,9 @@ class MemoryStore:
         extra: list[SearchResult] = []
         rounds = 1
 
-        def bar() -> float:
-            return max(MEMBER_FLOOR, MEMBER_SHARE * max(judged.values()))
-
         members: set[str] = set()
         if specific >= 0.5 and several >= SET_BAR:
-            members = {mid for mid, value in judged.items() if value >= bar()}
+            members = set_members(judged)
             while members and rounds < SET_ROUNDS:
                 batch = [r for r in self._nearest_unjudged(members, judged, scope,
                                                            include_invalid, size)]
@@ -1569,11 +1572,11 @@ class MemoryStore:
                 got, _, _ = judge(batch, False)
                 rounds += 1
                 judged.update(got)
-                added = {mid for mid, value in got.items() if value >= bar()} - members
+                added = set_members(judged) - members
                 if not added:
                     break
                 members |= added
-            members = {mid for mid, value in judged.items() if value >= bar()}
+            members = set_members(judged)
         elif specific >= 0.5 and max(judged.values()) < ANSWER_BAR:
             start = size
             while rounds < ONE_ROUNDS and start < len(ranked):
