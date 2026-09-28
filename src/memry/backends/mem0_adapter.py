@@ -87,12 +87,14 @@ class Mem0ComparisonAdapter(MemoryBackend):
             self._m.update(memory_id, content)
         return self.get_memory(memory_id)
 
-    def invalidate_memory(self, memory_id: str, *, superseded_by: str | None = None) -> Memory | None:
+    def invalidate_memory(
+        self, memory_id: str, *, superseded_by: str | None = None, at: str | None = None
+    ) -> Memory | None:
         # mem0 has no temporal invalidation; fall back to hard delete.
         memory = self.get_memory(memory_id)
         self._m.delete(memory_id)
         if memory:
-            memory.invalid_at = utcnow()
+            memory.invalid_at = at or utcnow()
             memory.superseded_by = superseded_by
         return memory
 

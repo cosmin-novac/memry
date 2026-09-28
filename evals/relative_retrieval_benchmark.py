@@ -1326,15 +1326,24 @@ def select_modes(labels: list[str] | None) -> list[tuple]:
     return [m for m in MODES if m[0] in labels]
 
 
-def _asks_decider(store: MemoryStore, relational: bool) -> bool:
-    """Whether a search asks the decision provider (Jev), as ``MemoryStore``
-    decides it: to re-rank, or in the linked search to judge relevance."""
-    decider, cfg = store.decider, store.config
-    if not getattr(decider, "available", False):
+def _asks_decider(store: MemoryStore, relational: bool, results: list | None = None) -> bool:
+    """Whether a search asked the decision provider (Jev), as ``MemoryStore``
+    decides it. With links and ``relevance_mode()`` "jev" it judges every
+    search (in the linked search's order, or the text ranking's for a question
+    naming no hub). Otherwise only the re-rank asks (``_reranks``), and it
+    runs only after no linked route (``_rerank``): always without links, and
+    with them only where the search's ``results`` carry no "about" (the
+    question named no hub). Without ``results`` a linked search counts as not
+    asking."""
+    if not getattr(store.decider, "available", False):
         return False
-    rerank = cfg.decision.rerank if cfg.decision.rerank is not None else decider.reranks_by_default
-    judged = relational and store.relevance_mode() == "jev"
-    return judged or bool(rerank and getattr(decider, "may_rerank", True))
+    if relational and store.relevance_mode() == "jev":
+        return True
+    if not store._reranks():
+        return False
+    if not relational:
+        return True
+    return results is not None and not any("about" in r.signals for r in results)
 
 
 def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dict:
@@ -1363,7 +1372,6 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
         cfg.relational_sharpness = mode[5]
     cfg.relational_relevance = mode[6] if len(mode) > 6 else "vector"
     index = {mid: k for k, mid in enumerate(memory_ids)}
-    once = _asks_decider(store, relational)
     seen: dict[str, list] = {}
     inner = store._search_linked
 
@@ -1392,8 +1400,8 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
                     first_wrong = next((r for r, m in enumerate(got) if m in wrong_ids), None)
                     wrong_first.append(first_wrong is not None and (
                         first_gold is None or first_wrong < first_gold))
-                # the full ranking
-                if not once:
+                # the full ranking, unless this search asked the provider
+                if not _asks_decider(store, relational, results):
                     seen.clear()
                     results = store.search(query, user_id=USER, limit=100, relational=relational)
                 ranked = seen.get("ranked") or results

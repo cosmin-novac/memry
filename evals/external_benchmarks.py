@@ -15,6 +15,10 @@ goes into a fresh in-memory store through ``MemoryStore.add``:
             through the episodes it came from, so with whole sessions a
             memory counts for every turn of its session.
 
+In both modes a save reconciled as NONE (a restated turn) credits its turns to
+the memory it landed on, which counts as retrieved for them; every results
+file says so in its notes.
+
 Every save carries its session's date: ``add(created_at=...)`` makes it the
 episodes' and new memories' created_at, updated_at and valid_from (and the
 updated_at of a memory a save rewrites), and ``add(now=...)`` makes it the day
@@ -45,7 +49,8 @@ answer is scored against the gold one:
             open-domain one by its first ";"-separated alternative
   em        normalised exact match
   contains  the normalised gold answer occurs, as whole words, in the answer
-  judge     ``Judge(question, gold, prediction) -> bool``; the default
+  judge     ``Judge(question, gold, prediction) -> bool``, given the gold f1
+            reads (an open-domain one's first alternative); the default
             (``containment_judge``) is "contains", or both abstaining.
             LongMemEval's LLM judge plugs in here: --judge module:function
 
@@ -502,7 +507,11 @@ def ingest(store: MemoryStore, conversation: Conversation, *, mode: str = "verba
     module docstring). The turns of a session are a second apart; each save
     carries its time (``created_at``, ``now``) and its memories' bench
     metadata (``memory_metadata``). A memory is traced to the turns of every
-    save that landed on it."""
+    save that landed on it, a save reconciled as NONE included: a turn that
+    restates what a memory already says is credited to that memory, so it
+    counts as retrieved whenever the original memory is. That is kept on
+    purpose (the memory does hold the answer) and said in the results' notes
+    (``DEDUP_NOTE``)."""
     if mode not in INGEST_MODES or unit not in EXTRACT_UNITS or when not in WHEN_POLICIES:
         raise ValueError(f"mode {mode!r}, unit {unit!r}, when {when!r}")
     ingested = Ingested(store, conversation, session_of_turn={
@@ -540,12 +549,18 @@ def ingest(store: MemoryStore, conversation: Conversation, *, mode: str = "verba
             else:
                 ingested.turn_of_episode.update(zip(result.episode_ids, keys))
             for action in result.actions:
-                if action.memory_id:
+                if action.memory_id:  # a NONE too: the memory it landed on (DEDUP_NOTE)
                     ingested.turns_of_memory.setdefault(action.memory_id, set()).update(keys)
             ingested.warnings.extend(f"{conversation.conv_id} {keys[0]}: {w}"
                                      for w in result.warnings)
     ingested.seconds = time.perf_counter() - started
     return ingested
+
+
+#: Said in every results file: how a save that added nothing is traced.
+DEDUP_NOTE = ("a save reconciled as NONE (already known) credits its turns to the memory "
+              "it landed on, so a turn restating an earlier one counts as retrieved when "
+              "that memory is; the memory does hold the answer")
 
 
 # --------------------------------------------------------------------------
@@ -656,7 +671,9 @@ def load_judge(spec: str | None) -> Judge:
 
 def score_answer(prediction: str, question: Question,
                  judge: Judge = containment_judge) -> dict[str, Any]:
-    """f1, em, contains and the judge's verdict for one answer."""
+    """f1, em, contains and the judge's verdict for one answer. The judge is
+    handed the gold the other scores read (an open-domain question's first
+    ";" alternative)."""
     gold = question.answer
     if question.abstain:
         right = float(is_abstention(prediction))
@@ -667,7 +684,7 @@ def score_answer(prediction: str, question: Question,
         f1 = parts_f1(prediction, gold) if question.category_name == "multi-hop" \
             else token_f1(prediction, gold)
         em, contains = float(exact_match(prediction, gold)), float(answer_contained(prediction, gold))
-    verdict = bool(judge(question.question, question.answer, prediction))
+    verdict = bool(judge(question.question, gold, prediction))
     return {"f1": round(f1, 4), "em": em, "contains": contains, "judge": verdict}
 
 
@@ -907,6 +924,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
             store.close()
         log(f"  {conv.conv_id}: {len(conv.turns)} turns -> {memories} memories in "
             f"{ingested.seconds:.1f}s, {len(asked)} questions")
+    notes.append(DEDUP_NOTE)
     if mode == "extract" and unit == "session":
         notes.append("extract by session: a memory counts for every turn of the session it "
                      "came from, so turn-level recall is session-level recall")

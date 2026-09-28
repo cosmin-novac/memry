@@ -366,7 +366,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <dt>Entity type</dt><dd>What kind of thing it is: person, organization, project, product, place, event, document, code, concept, or topic. Used to keep unrelated things with the same name apart, and to group the list - it does not change search ranking. A topic is a tag: every tag is an entity of its own, which the memories filed under it mention.</dd>
     <dt>Relation</dt><dd>A link between two entities, like "Ada works on Helios". Search follows these to reach answers that share no words with your question.</dd>
     <dt>Invalidated</dt><dd>A memory that is no longer treated as true, but is still on file. Happens when you delete it, or when something you said later contradicted it. It stops appearing in search; it does not stop existing.</dd>
-    <dt>Superseded</dt><dd>An invalidated memory that was replaced by a specific newer one - the old version of a fact you updated. It stays attached to its replacement as history. When the replacement came from a contradiction it is listed under Archive, where you can undo it. Memry never replaces an important memory without asking you first.</dd>
+    <dt>Superseded</dt><dd>An invalidated memory that was replaced by a specific newer one - the old version of a fact you updated. It stays attached to its replacement as history. When the replacement came from a contradiction, or from an update no merged text was written for, it is listed under Archive, where you can undo it. Memry never replaces an important memory without asking you first.</dd>
     <dt>Forgotten</dt><dd>An invalidated memory that nothing replaced - you deleted it, or it faded out. These are listed on their own tab, where you can restore one or delete it permanently.</dd>
     <dt>Importance</dt><dd>How much weight a memory carries in results, from 0 to 1. Set when it is saved.</dd>
     <dt>Decay</dt><dd>The slow drop in a memory's pull on results as it ages. Dated events fade fastest, standing rules barely at all.</dd>
@@ -416,7 +416,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
   <p class="hint">Deleting a memory hides it from search but keeps the record, so nothing is lost by accident. This is where those land. Permanent deletion is only possible from here, and only for memories that are already forgotten.</p>
   <div id="forgottenlist"></div>
   <h2 style="font-size:.95rem;margin-top:1.2rem">Replaced by a newer memory</h2>
-  <p class="hint">When something new contradicts a memory, Memry takes the old one out of use and lists it here. That is a model's judgement, so it can be wrong. With undo you get the old memory back and the one that replaced it is forgotten. With keep both you get the old memory back and keep the new one too.</p>
+  <p class="hint">When something new contradicts a memory, Memry takes the old one out of use and lists it here. That is a model's judgement, so it can be wrong. With undo you get the old memory back and the one that replaced it is forgotten. With keep both you get the old memory back and keep the new one too. A memory an update replaced without a merged text is listed too; its undo brings it back beside the newer one.</p>
   <div id="replacedlist"></div>
   <h2 style="font-size:.95rem;margin-top:1.2rem">Removed names</h2>
   <p class="hint">Removing a person or thing leaves the memories alone and puts the name here. Restoring one brings back its aliases, and the mentions and relations whose memories are still around.</p>
@@ -1500,10 +1500,11 @@ async function loadReplaced(){
     ${esc(row.memory.content)}
     <div class="hint">replaced ${esc((row.replaced_at||'').slice(0,10))}${row.actor==='user'?' by you':''} with: ${esc(row.replacement?row.replacement.content:'a memory that no longer exists')}</div>
     ${row.reason?`<div class="hint">${esc(row.reason)}</div>`:''}</span>
-    <button class="act" title="bring this memory back and forget the one that replaced it"
+    ${row.contradiction===false?`<button class="act" title="bring this memory back beside the newer one, which added to it"
+      onclick='undoReplacement(${JSON.stringify(row.memory.id)},true)'>undo</button>`:`<button class="act" title="bring this memory back and forget the one that replaced it"
       onclick='undoReplacement(${JSON.stringify(row.memory.id)},false)'>undo</button>
     <button class="act" title="bring this memory back and keep the newer one too"
-      onclick='undoReplacement(${JSON.stringify(row.memory.id)},true)'>keep both</button></div>`).join('');
+      onclick='undoReplacement(${JSON.stringify(row.memory.id)},true)'>keep both</button>`}</div>`).join('');
 }
 async function undoReplacement(id,keepNew){
   const result=await api('/api/v1/memories/'+encodeURIComponent(id)+'/undo-replacement',
@@ -2792,6 +2793,7 @@ def create_app(
                 ),
                 "reason": row["reason"],
                 "actor": row["actor"],
+                "contradiction": row["contradiction"],
             }
             for row in rows
         ])

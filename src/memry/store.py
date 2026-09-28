@@ -92,7 +92,11 @@ from .intelligence.extraction import (
     verbatim_candidates,
     verify_coverage,
 )
-from .intelligence.reconcile import CONFLICT_KEY, reconcile_candidate
+from .intelligence.reconcile import (
+    CONFLICT_KEY,
+    UPDATE_SUPERSEDE_REASON,
+    reconcile_candidate,
+)
 from .intelligence.structure import (
     ANCHOR_TYPES,
     Node,
@@ -285,13 +289,21 @@ def _forgetting_trigger(event: Any) -> str:
     return reason or f"Removed by {event.actor or 'the system'}, with no reason recorded."
 
 
+def _is_update_supersede(event: MemoryEvent) -> bool:
+    """A SUPERSEDE of an UPDATE nobody could write a merged text for: the newer
+    memory adds to the old one, which is kept and was never contradicted."""
+    return (event.reason or "").startswith(UPDATE_SUPERSEDE_REASON)
+
+
 def _is_contradiction(event: MemoryEvent) -> bool:
-    """A SUPERSEDE that reconciliation made, as opposed to a merge of duplicates
-    or the distilling of a raw message, which record their own reasons."""
+    """A SUPERSEDE that reconciliation made because the new memory contradicts
+    the old one, as opposed to a merge of duplicates, the distilling of a raw
+    message or an update kept and superseded, which record their own reasons."""
     reason = event.reason or ""
     return not (
         reason.startswith("consolidated into")
         or reason.startswith("distilled with its context")
+        or _is_update_supersede(event)
     )
 
 
@@ -373,10 +385,12 @@ def _similarity(asked: np.ndarray, vector: np.ndarray | None) -> float:
 
 def _across_runs(scope: Scope) -> Scope:
     """A save's scope as the lookups across one person's saves read it: the
-    whole user (with the agent), not one run. Reconcile candidates and the tag
-    vocabulary use it; topic canonicalization and entity lookup
-    (``entities.resolve_mentions``) read the whole user too. A duplicate saved
-    in another session is still a duplicate."""
+    whole user (with the agent), not one run. The tag vocabulary offered to
+    extraction uses it; topic canonicalization and entity lookup
+    (``entities.resolve_mentions``) read the whole user too. Reconcile does
+    not: its candidates are the save's own scope, run included, so a fact
+    saved under a run is a memory of that run that a search of the run finds
+    (the consolidation pass merges duplicates across runs)."""
     if scope.user_id is None:
         return scope
     return Scope(user_id=scope.user_id, agent_id=scope.agent_id)
@@ -447,7 +461,8 @@ class MemoryStore:
         every memory the save produces (a key Memry sets itself, such as
         "when", is kept). ``created_at`` (ISO 8601) is the time of the save:
         the episodes' and new memories' ``created_at``, ``updated_at`` and
-        ``valid_from``, and the ``updated_at`` of a memory it rewrites.
+        ``valid_from``, the ``updated_at`` of a memory it rewrites, and the
+        ``invalid_at`` and ``updated_at`` of one it supersedes.
         ``now`` is the reference date extraction resolves "yesterday"
         against, and the when-confirmation reads as the day of writing,
         instead of the clock. All three are for replaying dated
@@ -708,11 +723,14 @@ class MemoryStore:
         excluded: set[str] = set(exclude_ids or ())
         actions: list[AddAction] = []
         for candidate in candidates:
+            # the save's own scope, run included: reconciled across runs, a
+            # fact of this run would land as NONE on another run's memory and
+            # a search of this run would not find it
             similar = hybrid_search(
                 backend=self.backend,
                 embedder=self.embedder,
                 query=candidate.content,
-                scope=_across_runs(scope),
+                scope=scope,
                 limit=self.config.retrieval.reconcile_similarity_limit,
                 cfg=self.config.retrieval,
             )
@@ -1337,7 +1355,7 @@ class MemoryStore:
                         ", ".join(m.id for m in active), "; ".join(missing))
         for memory in active:
             invalidated = self.backend.invalidate_memory(
-                memory.id, superseded_by=new_id
+                memory.id, superseded_by=new_id, at=created_at
             )
             if invalidated is not None:
                 self.backend.update_memory(
@@ -1500,7 +1518,8 @@ class MemoryStore:
         links are followed directed and weighted, ``relational_depth`` deep
         (``graph_retrieval.activation_paths``). The candidates are the text
         ranking's and, for every entity linked at ``FAMILY_MIN`` or more, the
-        ``FAMILY_TOP`` of its memories that best state the property. A query
+        ``FAMILY_TOP`` of its memories in the scope searched (its user, agent
+        and run, as the text ranking's) that best state the property. A query
         naming no hub keeps the text ranking.
 
         With ``relational_relevance = "jev"`` (or "auto" with a provider that
@@ -1538,8 +1557,9 @@ class MemoryStore:
         for entity_id, strength in act.items():
             if strength < FAMILY_MIN:
                 continue
+            # an entity's memories span runs: only those of the scope searched
             members = [m for m in self.backend.entity_memories(entity_id, limit=FAMILY_SCAN)
-                       if include_invalid or m.invalid_at is None]
+                       if (include_invalid or m.invalid_at is None) and _in_scope(m, scope)]
             vectors = self._property_vectors([m.id for m in members])
             for memory in sorted(members,
                                  key=lambda m: -_similarity(asked, vectors.get(m.id)))[:FAMILY_TOP]:
@@ -1758,19 +1778,22 @@ class MemoryStore:
                 walk[memory.id] += share
         if walk:
             best = sorted(walk, key=lambda mid: -walk[mid])
+            edge = round(walk[best[min(budget, len(best)) - 1]], 9)
+            # the candidates: all above the cut and all tied at it, each
+            # scored once for the tie-break and the batch's order alike
+            best = [mid for mid in best if round(walk[mid], 9) >= edge]
+            order = linked_order(best)
             if len(best) > budget:
-                edge = round(walk[best[budget - 1]], 9)
                 chosen = [mid for mid in best if round(walk[mid], 9) > edge]
-                tied = [mid for mid in best if round(walk[mid], 9) == edge]
-                by_property = linked_order(tied)
-                tied.sort(key=lambda mid: -by_property[mid])
+                tied = sorted((mid for mid in best if round(walk[mid], 9) == edge),
+                              key=lambda mid: -order[mid])
                 best = chosen + tied[: budget - len(chosen)]
             known = {r.memory.id: r for r in ranked}
             batch = [known.get(mid) or SearchResult(memory=memories[mid], score=0.0)
                      for mid in best]
         else:
             batch = [r for r in ranked[size:] if r.memory.id not in done][:budget]
-        order = linked_order([r.memory.id for r in batch])
+            order = linked_order([r.memory.id for r in batch])
         return sorted(batch, key=lambda r: -order[r.memory.id])
 
     def _judged_relevance(
@@ -1825,17 +1848,11 @@ class MemoryStore:
         """Each memory's text with every alias of its entities, and of the
         things those belong to (``graph_retrieval.HOME_P``), read as "it".
 
-        A tag is not masked: "Spent 34 euros on groceries at Lidl" filed under
-        "groceries" says "Spent 34 euros on groceries at it", since the tag is
-        what the memory states, not what it is about."""
-        kinds: dict[str, str | None] = {}
-        for entity_id in {e for ids in entities.values() for e in ids}:
-            entity = self.backend.get_entity(entity_id)
-            kinds[entity_id] = entity.entity_type if entity is not None else None
-        entities = {
-            memory_id: [e for e in ids if kinds.get(e) != TOPIC_TYPE]
-            for memory_id, ids in entities.items()
-        }
+        ``entities`` holds named things only: a tag is not masked, and the
+        callers' lookups (``kind="named"``) leave tags out in SQL. "Spent 34
+        euros on groceries at Lidl" filed under "groceries" says "Spent 34
+        euros on groceries at it", since the tag is what the memory states,
+        not what it is about."""
         homes = homes_of(self.backend, sorted({e for ids in entities.values() for e in ids}))
         aliases: dict[str, list[str]] = {}
         masked = {}
@@ -1864,7 +1881,7 @@ class MemoryStore:
         entities: dict[str, list[str]] = defaultdict(list)
         if memory_ids is None:
             scope = Scope(user_id=user_id)
-            for entity_id, memory_id in self.backend.entity_memory_links(scope):
+            for entity_id, memory_id in self.backend.entity_memory_links(scope, kind="named"):
                 entities[memory_id].append(entity_id)
             contents = {m.id: m.content
                         for m in self.backend.list_memories(scope, limit=10_000_000)
@@ -1875,7 +1892,8 @@ class MemoryStore:
                 memory = self.backend.get_memory(memory_id)
                 if memory is not None and memory.invalid_at is None:
                     contents[memory_id] = memory.content
-                    entities[memory_id] = [e.id for e in self.backend.entities_of_memory(memory_id)]
+                    entities[memory_id] = [
+                        e.id for e in self.backend.entities_of_memory(memory_id, kind="named")]
         masked = self._masked_texts(contents, entities)
         stored = self.backend.property_vector_hashes(list(masked))
         model = self._property_label()
@@ -2451,12 +2469,15 @@ class MemoryStore:
     def replaced(
         self, *, user_id: str | None = None, limit: int = 200
     ) -> list[dict[str, Any]]:
-        """Memories a contradiction took out of use, newest first.
+        """Memories a contradiction, or an update kept and superseded, took
+        out of use, newest first; ``contradiction`` says which.
 
-        Only contradictions: a memory that was consolidated or distilled lives
-        on inside what replaced it, so there is nothing to undo. One that was
-        contradicted is the opposite case - the store stopped believing it on
-        one model's say-so - and that is the judgement worth a second look.
+        A memory that was consolidated or distilled lives on inside what
+        replaced it, so there is nothing to undo. One that was contradicted is
+        the opposite case - the store stopped believing it on one model's
+        say-so - and that is the judgement worth a second look. One an update
+        superseded, with no merged text written, holds what the newer memory
+        does not say: its undo brings it back beside the newer one.
         """
         scope = Scope(user_id=user_id)
         out: list[dict[str, Any]] = []
@@ -2472,7 +2493,10 @@ class MemoryStore:
                 ),
                 None,
             )
-            if event is None or not _is_contradiction(event):
+            if event is None:
+                continue
+            contradiction = _is_contradiction(event)
+            if not (contradiction or _is_update_supersede(event)):
                 continue
             out.append({
                 "memory": memory,
@@ -2480,6 +2504,7 @@ class MemoryStore:
                 "replacement": self.backend.get_memory(memory.superseded_by),
                 "reason": event.reason,
                 "actor": event.actor,
+                "contradiction": contradiction,
             })
         out.sort(key=lambda row: row["replaced_at"] or "", reverse=True)
         return out[:limit]
@@ -2488,11 +2513,14 @@ class MemoryStore:
         self, memory_id: str, *, keep_new: bool = False,
         owner_prefix: str | None = None,
     ) -> bool:
-        """Bring back a memory that a contradiction replaced.
+        """Bring back a memory that a contradiction, or an update kept and
+        superseded, replaced.
 
         ``keep_new`` leaves the replacement in use as well, for when both turn
         out to be true. Otherwise the replacement is forgotten - it goes to the
-        Archive like any deleted memory, so this is itself undoable.
+        Archive like any deleted memory, so this is itself undoable. The
+        replacement of an update never contradicted the memory and is always
+        kept.
         """
         memory = self.backend.get_memory(memory_id)
         if not _owned(memory, owner_prefix):
@@ -2504,7 +2532,9 @@ class MemoryStore:
              if e.event == "SUPERSEDE"),
             None,
         )
-        if event is None or not _is_contradiction(event):
+        if event is not None and _is_update_supersede(event):
+            keep_new = True  # the newer memory adds to it; both stay
+        elif event is None or not _is_contradiction(event):
             raise ValueError(
                 "this memory was merged into its replacement, not contradicted "
                 "by it; there is nothing to undo"
@@ -3362,6 +3392,14 @@ class MemoryStore:
                 if other is not None and other.entity_type == TOPIC_TYPE
             ]
             keep = self.backend.topic_entity(target, scope, create=False)
+            if (keep is not None and keep.entity_type == TOPIC_TYPE
+                    and keep.normalized != target):
+                # ``target`` was merged into this topic before. Merged back
+                # the other way ("tax" into "taxes", then "taxes" into "tax")
+                # the topic takes the name back; asked for by other tags, the
+                # name gets a topic of its own again
+                keep = (self.backend.rename_topic(keep.id, target)
+                        if keep.normalized in wanted else None)
             if keep is None and variants:
                 keep = self.backend.rename_topic(variants.pop(0).id, target)
             for other in variants:

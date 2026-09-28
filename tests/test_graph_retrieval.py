@@ -832,3 +832,30 @@ def test_a_relation_counts_half_in_the_linked_search(store):
     signals = {r.memory.id: r.signals["about"] for r in results}
     assert signals[rust.id] == pytest.approx(0.5)
     assert signals[own.id] == 1.0
+
+
+def test_the_linked_search_keeps_to_the_run_searched(store):
+    """The memories an entity's family brings into the linked search come from
+    the scope searched, as the text ranking's do: a search of run "s2" does
+    not return Ada's memory saved under run "s1"; a search of the user does."""
+    ada = store.backend.insert_entity(
+        Entity(name="Ada", normalized="ada", user_id="ada", run_id="s2"))
+
+    def remember(content, run_id):
+        memory = store.backend.insert_memory(
+            Memory(content=content, user_id="ada", run_id=run_id),
+            embedding=store.embedder.embed([content])[0])
+        store.backend.add_mention(EntityMention(entity_id=ada.id, memory_id=memory.id,
+                                                surface="Ada"))
+        return memory
+
+    tea = remember("Ada likes green tea", "s1")
+    remember("Ada lives in Lisbon", "s2")
+    remember("Ada works at Acme", "s2")
+    _linked(store)
+    in_run = store.search("What does Ada like?", user_id="ada", run_id="s2", limit=10)
+    assert in_run and all("about" in r.signals for r in in_run)  # the linked search ran
+    assert {r.memory.run_id for r in in_run} == {"s2"}
+    assert tea.id not in {r.memory.id for r in in_run}
+    everywhere = store.search("What does Ada like?", user_id="ada", limit=10)
+    assert tea.id in {r.memory.id for r in everywhere}

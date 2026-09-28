@@ -81,9 +81,12 @@ class MemoryBackend(ABC):
 
     @abstractmethod
     def invalidate_memory(
-        self, memory_id: str, *, superseded_by: str | None = None
+        self, memory_id: str, *, superseded_by: str | None = None, at: str | None = None
     ) -> Memory | None:
-        """Temporal soft-delete: mark the memory as no longer valid."""
+        """Temporal soft-delete: mark the memory as no longer valid. ``at``
+        (ISO 8601) is when, the memory's ``invalid_at`` and ``updated_at``: a
+        replayed save's time (``MemoryStore.add(created_at=...)``); the clock
+        when None."""
 
     def revalidate_memory(self, memory_id: str) -> "Memory | None":
         """Undo an invalidation: the memory is believed true again."""
@@ -368,7 +371,8 @@ class MemoryBackend(ABC):
         self, name: str, scope: Scope, *, create: bool = True
     ) -> Entity | None:
         """The topic entity of tag ``name`` for ``scope.user_id``, created when
-        missing and ``create``; for a tag merged into a named thing, that thing."""
+        missing and ``create``; for a tag merged away, the entity it went into
+        (another topic, or a named thing)."""
         return None
 
     def rename_topic(self, entity_id: str, name: str) -> Entity | None:

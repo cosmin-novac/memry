@@ -505,6 +505,49 @@ def test_an_update_nobody_could_write_keeps_the_target_and_supersedes_it(llm):
     store.close()
 
 
+def test_an_update_kept_and_superseded_is_no_contradiction_and_undo_keeps_both():
+    """The newer memory of an update nobody could write adds to the old one,
+    it does not contradict it: the Archive lists the old one as replaced, not
+    contradicted, and its plain undo brings it back without forgetting the
+    newer one."""
+    from memry.store import _is_contradiction
+
+    store, target = _updating(NoneLLM())
+    newer = store.add("Ada is a data engineer there", user_id="u", infer=False).actions[0]
+    assert newer.event == "SUPERSEDE"
+    [event] = [e for e in store.history(target) if e.event == "SUPERSEDE"]
+    assert not _is_contradiction(event)
+    [row] = store.replaced(user_id="u")
+    assert (row["memory"].id, row["contradiction"]) == (target, False)
+    assert store.undo_replacement(target)  # keep_new=False, as the plain undo sends
+    assert store.get(target).invalid_at is None
+    assert store.get(newer.memory_id).invalid_at is None
+    assert sorted(m.content for m in store.get_all(user_id="u")) == [
+        "Ada is a data engineer there", "Ada works at Northwind"]
+    assert store.replaced(user_id="u") == []
+    store.close()
+
+
+def test_a_contradiction_is_listed_as_one_and_its_undo_forgets_the_newer():
+    from conftest import decision, facts_response
+
+    llm = FakeLLM()
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64))
+    llm.queue(facts_response({"content": "Ada lives in Munich", "type": "semantic",
+                              "importance": 0.5, "categories": [], "entities": []}))
+    old = store.add("I live in Munich", user_id="u").actions[0].memory_id
+    llm.queue(facts_response({"content": "Ada lives in Amsterdam", "type": "semantic",
+                              "importance": 0.5, "categories": [], "entities": []}),
+              decision("DELETE", target=0, reason="moved cities"))
+    new = store.add("I moved to Amsterdam", user_id="u").actions[0]
+    assert new.event == "DELETE"
+    [row] = store.replaced(user_id="u")
+    assert (row["memory"].id, row["contradiction"]) == (old, True)
+    assert store.undo_replacement(old)
+    assert store.get(new.memory_id).invalid_at is not None
+    store.close()
+
+
 # ---------------------------------------------------------------- re-ranking
 def _store_with(decider, **decision):
     from memry.config import Config

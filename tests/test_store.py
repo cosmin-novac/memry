@@ -349,17 +349,21 @@ def test_stats_counts_forgotten_memories_without_listing_them(verbatim_store):
 
 
 # ------------------------------------------------ one person's saves, any run
-def test_a_duplicate_saved_in_another_run_is_found_by_reconcile(verbatim_store):
-    """Reconcile looks across the user's runs, as entity lookup does: the same
-    fact saved in a second session is a duplicate, not a second memory. The
-    agent still separates."""
+def test_a_duplicate_saved_in_another_run_is_added_to_that_run(verbatim_store):
+    """Reconcile stays within the save's run: the same fact saved in a second
+    session is a memory of that session, so a search of the session finds it
+    (the consolidation pass merges duplicates across runs). Within one run it
+    is a duplicate."""
     first = verbatim_store.add("Ada likes green tea", user_id="ada", run_id="r1", infer=False)
     again = verbatim_store.add("Ada likes green tea", user_id="ada", run_id="r2", infer=False)
-    assert again.actions[0].event == "NONE"
-    assert again.actions[0].memory_id == first.actions[0].memory_id
-    other = verbatim_store.add("Ada likes green tea", user_id="ada", agent_id="bot",
-                               run_id="r3", infer=False)
-    assert other.actions[0].event == "ADD"
+    assert again.actions[0].event == "ADD"
+    assert again.actions[0].memory_id != first.actions[0].memory_id
+    found = verbatim_store.search("green tea", user_id="ada", run_id="r2", limit=5)
+    assert [r.memory.id for r in found] == [again.actions[0].memory_id]
+    same_run = verbatim_store.add("Ada likes green tea", user_id="ada", run_id="r2",
+                                  infer=False)
+    assert same_run.actions[0].event == "NONE"
+    assert same_run.actions[0].memory_id == again.actions[0].memory_id
     assert len(verbatim_store.get_all(user_id="ada")) == 2
 
 
@@ -448,6 +452,22 @@ def test_a_rewrite_is_stamped_with_the_time_of_the_save(store, fake_llm):
     assert (updated.created_at, updated.updated_at) == (STAMP, later)
 
 
+def test_a_memory_a_dated_save_supersedes_goes_out_of_use_at_the_save_time(store, fake_llm):
+    """A replay's contradiction retires the old memory when the replayed save
+    happened, not when the replay ran: its ``invalid_at`` and ``updated_at``
+    are the save's ``created_at``."""
+    fake_llm.queue(facts_response(fact("User lives in Munich")), coverage())
+    old = store.add("I live in Munich", user_id="ada", created_at=STAMP).actions[0]
+    later = "2023-05-25T19:30:00+00:00"
+    fake_llm.queue(facts_response(fact("User lives in Amsterdam")),
+                   decision("DELETE", target=0, reason="moved cities"), coverage())
+    result = store.add("I moved to Amsterdam", user_id="ada", created_at=later)
+    assert result.actions[0].event == "DELETE"
+    retired = store.get(old.memory_id)
+    assert retired.superseded_by == result.actions[0].memory_id
+    assert (retired.created_at, retired.invalid_at, retired.updated_at) == (STAMP, later, later)
+
+
 def test_a_deferred_save_keeps_its_time_metadata_and_date_for_distillation(store, fake_llm):
     from datetime import datetime, timezone
 
@@ -470,3 +490,6 @@ def test_a_deferred_save_keeps_its_time_metadata_and_date_for_distillation(store
     assert distilled.created_at == distilled.updated_at == distilled.valid_from == STAMP
     assert distilled.metadata["bench"] == {"session": "s1"}
     assert "_enrichment" not in store.get(pending.id).metadata
+    # the raw memory went out of use at the save's time too
+    raw_after = store.get(pending.id)
+    assert raw_after.invalid_at == raw_after.updated_at == STAMP

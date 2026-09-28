@@ -389,6 +389,7 @@ class LocalBackend(MemoryBackend):
         self._ensure_entity_description_columns()
         self._backfill_topics()
         self._migrate_synthetic_topic_relations()
+        self._migrate_tags_to_topic_entities()
         self._db.commit()
         self._has_metadata_aliases = self._db.execute(
             "SELECT 1 FROM entities WHERE metadata LIKE '%\"aliases\"%' LIMIT 1"
@@ -583,6 +584,28 @@ class LocalBackend(MemoryBackend):
         self._db.execute(
             "INSERT OR REPLACE INTO meta (key, value) "
             "VALUES ('schema:topic-relations:v1', ?)",
+            (utcnow(),),
+        )
+
+    def _migrate_tags_to_topic_entities(self) -> None:
+        """Give the legacy tags their topic entities and mentions exactly once
+        (``tags_to_topics``, which needs no model), so an upgraded database
+        shows its tags without ``memry tags-to-things``. Committed with the
+        rest of the open; a second open finds the marker and does nothing."""
+        marker = self._db.execute(
+            "SELECT value FROM meta WHERE key = 'schema:tag-entities:v1'"
+        ).fetchone()
+        if marker:
+            return
+        users = [
+            row["user_id"] for row in self._db.execute(
+                "SELECT DISTINCT user_id FROM topics ORDER BY IFNULL(user_id, '')"
+            ).fetchall()
+        ]
+        for user in users:
+            self._tags_to_topics_locked(user)
+        self._db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema:tag-entities:v1', ?)",
             (utcnow(),),
         )
 
@@ -926,8 +949,8 @@ class LocalBackend(MemoryBackend):
                 "updated_at = ? WHERE id = ?",
                 (changed_at, memory_id),
             )
-            # Tags merged while it was gone were rewritten on active memories
-            # only: its mentions are brought back in line with its column.
+            # Its mentions are brought back in line with its column, which a
+            # tag merge while it was gone rewrote too (``retag_topics``).
             self._sync_topic_mentions_locked(
                 memory_id, json.loads(row["categories"]), row["user_id"])
             if row["embedding"] is not None and row["embedding_model"]:
@@ -946,15 +969,18 @@ class LocalBackend(MemoryBackend):
         return self.get_memory(memory_id)
 
     def invalidate_memory(
-        self, memory_id: str, *, superseded_by: str | None = None
+        self, memory_id: str, *, superseded_by: str | None = None, at: str | None = None
     ) -> Memory | None:
         from ..models import utcnow
 
+        # ``at``: a replayed save's time, for the memory and its relations;
+        # the entities' ``updated_at`` marks a change to refresh, so the clock
+        stamp = at or utcnow()
         with self._lock:
             cur = self._db.execute(
                 "UPDATE memories SET invalid_at = ?, superseded_by = ?, updated_at = ? "
                 "WHERE id = ? AND invalid_at IS NULL",
-                (utcnow(), superseded_by, utcnow(), memory_id),
+                (stamp, superseded_by, stamp, memory_id),
             )
             if cur.rowcount:
                 self._ann_remove(memory_id)
@@ -967,7 +993,7 @@ class LocalBackend(MemoryBackend):
                 self._db.execute(
                     "UPDATE relations SET invalid_at = ? "
                     "WHERE memory_id = ? AND invalid_at IS NULL",
-                    (changed_at, memory_id),
+                    (stamp, memory_id),
                 )
             self._db.commit()
         if cur.rowcount == 0:
@@ -1431,11 +1457,13 @@ class LocalBackend(MemoryBackend):
     def retag_topics(
         self, scope: Scope, remove: set[str], add: str | None, *, exact_user: bool = False
     ) -> int:
-        """Rewrite the ``categories`` column of the active memories carrying a
-        tag in ``remove``: those tags go, ``add`` (if any) comes in. The
-        column's index and the memories' tag mentions follow the column.
-        ``exact_user`` confines it to ``scope.user_id`` even when that is None
-        (the memories without a user), as a topic entity is confined."""
+        """Rewrite the ``categories`` column of the memories carrying a tag in
+        ``remove``: those tags go, ``add`` (if any) comes in. The column's
+        index and the memories' tag mentions follow the column. Invalid
+        memories are rewritten too, so one restored later does not bring back
+        a tag merged or deleted meanwhile; the count returned is of the active
+        ones. ``exact_user`` confines it to ``scope.user_id`` even when that
+        is None (the memories without a user), as a topic entity is confined."""
         normalized = {item.strip().lower() for item in remove if item.strip()}
         if not normalized:
             return 0
@@ -1465,11 +1493,10 @@ class LocalBackend(MemoryBackend):
                     target_ids[row["id"]] = target.id
 
             rows = self._db.execute(
-                "SELECT DISTINCT m.id, m.categories, m.user_id, m.agent_id, m.run_id "
-                "FROM memories m JOIN memory_topics mt ON mt.memory_id = m.id "
+                "SELECT DISTINCT m.id, m.categories, m.user_id, m.agent_id, m.run_id, "
+                "m.invalid_at FROM memories m JOIN memory_topics mt ON mt.memory_id = m.id "
                 "JOIN topics t ON t.id = mt.topic_id "
-                f"WHERE m.invalid_at IS NULL AND {memory_clause} "
-                f"AND t.normalized IN ({placeholders})",
+                f"WHERE {memory_clause} AND t.normalized IN ({placeholders})",
                 (*memory_params, *sorted(normalized)),
             ).fetchall()
             changed = 0
@@ -1496,7 +1523,8 @@ class LocalBackend(MemoryBackend):
                     provenance="user",
                 )
                 self._sync_topic_mentions_locked(row["id"], kept, row["user_id"])
-                changed += 1
+                if row["invalid_at"] is None:
+                    changed += 1
 
             if old_ids:
                 edge_placeholders = ",".join("?" * len(old_ids))
@@ -1631,11 +1659,12 @@ class LocalBackend(MemoryBackend):
         """(entity id, created) for the tag ``name`` of ``user_id``.
 
         The active topic entity of that name, else, when a topic of that name
-        was judged to be a named thing and merged into it ("bildy" the tag
-        into "Bildy" the product), that thing: the tag is that thing now.
-        Else a new topic entity, when ``create``. A topic merged into another
-        topic is not followed: its tag was rewritten to the other one, and a
-        memory carrying the old tag again carries a tag of its own again.
+        was merged away, the entity it went into: another topic ("taxes" into
+        "tax"), or a named thing it was judged to be ("bildy" the tag into
+        "Bildy" the product). A merge rewrites every column carrying the old
+        tag, but a column it did not reach (a restored backup, a memory
+        invalidated before merges rewrote invalid memories) must not bring
+        the merged tag back. Else a new topic entity, when ``create``.
         """
         normalized = str(name).strip().lower()
         if not normalized:
@@ -1653,7 +1682,7 @@ class LocalBackend(MemoryBackend):
             (TOPIC_TYPE, user_id, normalized),
         ).fetchall():
             root = self._root_locked(tombstone["id"])
-            if root is not None and root["entity_type"] != TOPIC_TYPE:
+            if root is not None:
                 return root["id"], False
         if not create:
             return None, False

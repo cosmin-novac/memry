@@ -753,9 +753,8 @@ def test_a_contradicted_memory_is_listed_and_its_replacement_undone():
         ))
 
         rows = client.get("/api/v1/memories/replaced?user_id=u").json()
-        assert [(r["memory"]["id"], r["replacement"]["id"], r["reason"]) for r in rows] == [
-            (old_id, new_id, "moved cities")
-        ]
+        assert [(r["memory"]["id"], r["replacement"]["id"], r["reason"], r["contradiction"])
+                for r in rows] == [(old_id, new_id, "moved cities", True)]
 
         response = client.post(f"/api/v1/memories/{old_id}/undo-replacement", json={})
         assert response.json() == {"restored": True}

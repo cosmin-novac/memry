@@ -124,12 +124,15 @@ JSON `categories` list stays the record every filter, backup and export reads. E
 an entity of type `topic` (one per user and normalized tag, created on first use) and each
 tagged memory mentions it, so tags, people, products and projects are one kind of thing with
 one merge machinery: a tag merge is an entity merge plus a rewrite of the `categories` column,
-and whatever writes the column brings the mentions in line. Tag counts and the vocabulary
+and whatever writes the column brings the mentions in line. A merge rewrites the column of
+invalid memories too, and a column still naming a merged tag is mentioned under the topic it
+went into, so restoring a memory never brings a merged tag back. Tag counts and the vocabulary
 offered to extraction are read from the topic entities. The normalized `topics` table plus
 the indexed `memory_topics` join remain the filter index derived from the column (and the
-record `memry tags-to-things` migrates from). A topic entity is never a hub, is never masked
-in a property vector, and is never found by a name lookup; a tag and a named thing of the same
-name are compared by the entity identity funnel, two tags by the tag question.
+record the first open of an upgraded database, or `memry tags-to-things`, migrates from).
+A topic entity is never a hub, is never masked in a property vector, and is never found by
+a name lookup; a tag and a named thing of the same name are compared by the entity identity
+funnel, two tags by the tag question.
 
 Mechanical separator and singular/plural duplicates are merged deterministically once two
 real stored labels map to the same form. Semantic synonym merges remain reviewable.
@@ -316,12 +319,15 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
 2. With an LLM, extract small candidate memories, types, importance, topics, entities, and
    possible relations, offered the user's tags from every run. Without an LLM, store the
    input verbatim.
-3. Retrieve similar active memories of the same user and agent, across runs (a fact saved
-   again in another session is a duplicate, as entity lookup already read it), and
-   reconcile each candidate as add, update, supersede, or no-op. An UPDATE's merged
-   sentence is written by the text model, also when a decision provider chose the action;
-   when none is written, the old memory is kept and superseded by the new one instead of
-   being overwritten with the new fact alone.
+3. Retrieve similar active memories in the save's scope (user, agent and run), and
+   reconcile each candidate as add, update, supersede, or no-op. A fact saved again under
+   another run is added to that run, so a search of the run finds it; the consolidation
+   pass merges duplicates across runs. (Tags, topic canonicalization and entity lookup
+   read the whole user.) An UPDATE's merged sentence is written by the text model, also
+   when a decision provider chose the action; when none is written, the old memory is kept
+   and superseded by the new one instead of being overwritten with the new fact alone.
+   The Archive lists that old memory as replaced (not contradicted), and its undo brings
+   it back beside the newer one.
 4. Store or update the memory, normalized topic links, embedding, and FTS row.
 5. Resolve entity mentions conservatively. Alias matches only narrow the candidates. A new
    name's screen verdict is kept on the entity it creates, so the weekly screen skips it.
@@ -331,7 +337,8 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    warning on the result.
 
 `add` (and `add_deferred`) take `created_at` (the episodes' and new memories' time and
-`valid_from`, and the `updated_at` of a memory the save rewrites), `memory_metadata`
+`valid_from`, the `updated_at` of a memory the save rewrites, and the `invalid_at` and
+`updated_at` of one it supersedes, a distilled raw memory included), `memory_metadata`
 (merged into every memory the save produces; a key Memry sets, such as "when", is kept)
 and `now` (the day extraction and the when-check read as today). They exist for replaying
 dated conversations (`evals/external_benchmarks.py`).

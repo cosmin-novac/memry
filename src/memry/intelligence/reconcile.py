@@ -155,6 +155,12 @@ def write_merged(llm: LLM, existing: str, new: str) -> str | None:
 #: Metadata key on a memory that was kept beside the one it contradicts.
 CONFLICT_KEY = "conflict"
 
+#: How the SUPERSEDE event of an UPDATE nobody could write a merged text for
+#: begins. The newer memory adds to the old one; it does not contradict it, so
+#: the Archive's undo brings the old one back beside it (``MemoryStore.
+#: undo_replacement``) instead of forgetting it.
+UPDATE_SUPERSEDE_REASON = "updated by new information, with no merged text written"
+
 
 def held_back(
     target: Memory, decision: dict[str, Any], cfg: SupersedeConfig
@@ -198,8 +204,9 @@ def reconcile_candidate(
     """Apply one candidate fact against the store and return what happened.
 
     ``created_at`` is the time of the save (``MemoryStore.add``): a new
-    memory's ``created_at``, ``updated_at`` and ``valid_from``, and the
-    ``updated_at`` of a memory an UPDATE rewrites. The clock when None."""
+    memory's ``created_at``, ``updated_at`` and ``valid_from``, the
+    ``updated_at`` of a memory an UPDATE rewrites, and the ``invalid_at`` and
+    ``updated_at`` of one it supersedes. The clock when None."""
 
     # Fast path: exact duplicate needs no LLM round-trip.
     norm = _normalize(candidate.content)
@@ -354,7 +361,8 @@ def reconcile_candidate(
         )
 
     if (action == "DELETE" or superseding) and target is not None:
-        backend.invalidate_memory(target.id, superseded_by=stored.id)
+        # out of use when the save happened: a replay's time, not the clock
+        backend.invalidate_memory(target.id, superseded_by=stored.id, at=created_at)
         backend.add_event(
             MemoryEvent(
                 memory_id=target.id,
@@ -362,8 +370,7 @@ def reconcile_candidate(
                 old_content=target.content,
                 new_content=stored.content,
                 reason=(
-                    "updated by new information, with no merged text written: "
-                    f"kept and superseded. {reason}".strip()
+                    f"{UPDATE_SUPERSEDE_REASON}: kept and superseded. {reason}".strip()
                     if superseding else reason or "contradicted by new information"
                 ),
             )

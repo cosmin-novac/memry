@@ -13,20 +13,13 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from ..models import MEMORY_TYPES, CandidateFact, clean_tags
+from ..models import MEMORY_TYPES, NAMED_ENTITY_TYPES, CandidateFact, clean_tags
 from ..providers.llm import LLM
 from .when import WHEN_FACT_SCHEMA, parse_when
 
-# `document` and `code` were added after reviewing what a real store dumped into
-# "other": contracts, invoices and registration numbers on one side, files,
-# symbols and tables on the other. Both are common enough to be worth naming,
-# and a named type keeps a document from being merged with a person who happens
-# to share its name. Types are deliberately few - each extra one is another way
-# for the model to mis-sort, and the type does not affect search ranking.
-ENTITY_TYPES: tuple[str, ...] = (
-    "person", "organization", "project", "product", "place", "event",
-    "document", "code", "concept", "other",
-)
+#: The types extraction assigns: the named kinds, defined once in ``models``
+#: (``models.ENTITY_TYPES`` adds the tag type, which extraction never offers).
+ENTITY_TYPES: tuple[str, ...] = NAMED_ENTITY_TYPES
 
 EXTRACTION_SCHEMA: dict[str, Any] = {
     "type": "object",

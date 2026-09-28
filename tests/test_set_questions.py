@@ -125,6 +125,25 @@ def test_the_second_call_respects_the_budget_and_counts_small_topics_first(store
     assert len(judge.batches[1]) == 70  # every memory under a shared topic, within 80
 
 
+def test_the_second_call_orders_each_candidate_once(store, monkeypatch):
+    """Ten dealer quotes tie for four places: the property ranking that breaks
+    the tie also orders the batch, so no memory is scored twice."""
+    _prices(store, broad=True)
+    store.config.retrieval.set_pool = 4
+    store.decider = judge = _set_judge()
+    scored: list[str] = []
+    linked_scores = store._linked_scores
+
+    def counted(asked, memory_ids, act, entities):
+        scored.extend(memory_ids)
+        return linked_scores(asked, memory_ids, act, entities)
+
+    monkeypatch.setattr(store, "_linked_scores", counted)
+    store.search(QUESTION, user_id="ada", limit=5)
+    assert judge.calls == 2 and len(judge.batches[1]) == 4
+    assert len(scored) == len(set(scored)) == 10
+
+
 def test_a_set_whose_first_share_no_topic_reads_the_ranking_past_them(store):
     """Nothing is tagged: the second call judges the ranking past the first 20
     instead, and the set question still makes two calls."""
@@ -216,6 +235,55 @@ def test_rerank_does_not_run_after_the_linked_search(store):
     assert reranker.states == ["QUESTION: Which notes mention Linux?"]
     store.search("What does Harlow run on?", user_id="ada", limit=5, relational=False)
     assert len(reranker.states) == 2
+
+
+def test_the_benchmark_searches_deep_where_the_first_search_asked_no_decider(monkeypatch):
+    """``relative_retrieval_benchmark.score`` reads a question's full ranking
+    from a second search at limit 100, except where the first search asked
+    the decision provider (it would be asked again). Under --rerank a linked
+    search that ran is not re-ranked, so it is searched again; a question
+    naming no hub is re-ranked, as is a search without links, and the linked
+    search judging relevance asks on every search."""
+    sys.path.insert(0, str(ROOT))
+    from evals import relative_retrieval_benchmark as bench
+    from memry.models import Entity
+
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=_KindEmbedder())
+    harlow = store.backend.insert_entity(
+        Entity(name="Harlow", normalized="harlow", user_id=bench.USER))
+    ids = []
+    for text in ("Harlow runs on Linux", "Harlow stores its data in SQLite",
+                 "Harlow costs nothing", *(f"Unrelated note {i} about Linux" for i in range(5))):
+        memory = store.backend.insert_memory(
+            Memory(content=text, user_id=bench.USER, embedding_model=store.embedder.model_id),
+            embedding=store.embedder.embed([text])[0])
+        if text.startswith("Harlow"):
+            store.backend.add_mention(EntityMention(entity_id=harlow.id, memory_id=memory.id,
+                                                    surface="Harlow"))
+        ids.append(memory.id)
+    store.decider = reranker = _Reranker()
+    limits: list[int] = []
+    search = store.search
+
+    def counted(query, **kwargs):
+        limits.append(kwargs["limit"])
+        return search(query, **kwargs)
+
+    monkeypatch.setattr(store, "search", counted)
+    hub = {"direct": [("What does Harlow run on?", [0], [])]}
+    linked = next(mode for mode in bench.MODES if mode[0] == "linked k1")
+    bench.score(store, ids, hub, linked)
+    assert (reranker.states, limits) == ([], [10, 100])
+    limits.clear()
+    bench.score(store, ids, {"direct": [("Which notes mention Linux?", [3], [])]}, linked)
+    assert (len(reranker.states), limits) == (1, [10])
+    limits.clear()
+    bench.score(store, ids, hub, next(mode for mode in bench.MODES if mode[0] == "hybrid"))
+    assert (len(reranker.states), limits) == (2, [10])
+    limits.clear()
+    bench.score(store, ids, hub, next(mode for mode in bench.MODES if mode[0] == "linked jev"))
+    assert (len(reranker.states), limits) == (3, [10])
+    store.close()
 
 
 # ----------------------------------------------------------- the one search

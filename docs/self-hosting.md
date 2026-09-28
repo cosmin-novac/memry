@@ -353,14 +353,15 @@ memry sweep --threshold 0.1   # soft-forget stale, low-importance memories
 memry stats                   # counts, providers, db path
 memry export > backup.json    # knowledge only: IDs, provenance, entities, relations, history
 memry abstract-tags           # LLM clusters tags into higher-level ones now
-memry tags-to-things --dry-run   # once after upgrading: count, then run without --dry-run
+memry tags-to-things --dry-run   # tags to topic entities (done at first open): count only
 ```
 
 Tags are entities of type `topic`. A database or backup from before that change keeps its
 tags in the `categories` column and the legacy `topics`/`memory_topics` tables, which every
-filter still reads; `memry tags-to-things [--user USER]` gives each tag its topic entity and
-each tagged memory its mention, so the Tags page and the tag counts see them. It only reads
-the legacy tables, and a second run changes nothing.
+filter still reads. The first open of such a database gives each tag its topic entity and
+each tagged memory its mention, so the Tags page and the tag counts see them, and records
+that it did so; `memry tags-to-things [--user USER]` runs the same migration by hand. It
+only reads the legacy tables, and a second run changes nothing.
 
 When accounts or OAuth are enabled, also back up `auth.db` with `memry.db`. The JSON export
 does not contain login data.

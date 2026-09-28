@@ -29,13 +29,24 @@ MEMORY_TYPES: tuple[str, ...] = ("semantic", "episodic", "procedural", "working"
 #: never names one: the store creates it from a memory's ``categories``.
 TOPIC_TYPE = "topic"
 
-#: Every type an entity may be stored with: the kinds of named thing
-#: extraction assigns (``intelligence.extraction.ENTITY_TYPES``, which does not
-#: offer ``TOPIC_TYPE``) and ``TOPIC_TYPE``.
-ENTITY_TYPES: tuple[str, ...] = (
+#: The kinds of named thing, the types extraction assigns
+#: (``intelligence.extraction.ENTITY_TYPES`` is this tuple). Defined once, so a
+#: type added here is one extraction offers and ``set_entity_type`` accepts.
+#: `document` and `code` were added after reviewing what a real store dumped
+#: into "other": contracts, invoices and registration numbers on one side,
+#: files, symbols and tables on the other. Both are common enough to be worth
+#: naming, and a named type keeps a document from being merged with a person
+#: who happens to share its name. Types are deliberately few - each extra one
+#: is another way for the model to mis-sort, and the type does not affect
+#: search ranking.
+NAMED_ENTITY_TYPES: tuple[str, ...] = (
     "person", "organization", "project", "product", "place", "event",
-    "document", "code", "concept", "other", TOPIC_TYPE,
+    "document", "code", "concept", "other",
 )
+
+#: Every type an entity may be stored with: the named kinds and
+#: ``TOPIC_TYPE``, which extraction never offers.
+ENTITY_TYPES: tuple[str, ...] = (*NAMED_ENTITY_TYPES, TOPIC_TYPE)
 
 
 #: A tag is a short retrieval subject. Anything longer is a sentence or a list

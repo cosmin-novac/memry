@@ -335,6 +335,23 @@ def test_judge_hook_default_and_plugged_in():
     assert calls == [("What breed is my dog?", "golden retriever", "golden retriever")]
 
 
+def test_the_judge_reads_the_gold_the_scores_read():
+    """An open-domain gold answer is scored by its first ";" alternative, and
+    the judge is handed that same gold, not the whole string."""
+    question = {x.qid: x for c in xb.load_locomo(LOCOMO) for x in c.questions}["conv-mini-2/q2"]
+    assert question.answer == "Likely yes; he works in solar energy"
+    golds = []
+
+    def judge(q, gold, prediction):
+        golds.append(gold)
+        return True
+
+    xb.score_answer("likely yes", question, judge)
+    assert golds == ["Likely yes"]
+    assert xb.score_answer("likely yes", question) == {
+        "f1": 1.0, "em": 1.0, "contains": 1.0, "judge": True}
+
+
 class ScriptedLLM(LLM):
     """Answers each question from a script; keeps the prompts it was sent."""
 

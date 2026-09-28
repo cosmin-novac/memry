@@ -12,7 +12,7 @@
     memry reindex                 re-embed all memories
     memry backfill-property-vectors  property vectors for the linked search
     memry export / import         lossless backup/restore; legacy JSON imports
-    memry tags-to-things          give existing tags their topic entities (once)
+    memry tags-to-things          give existing tags their topic entities (first open does it)
     memry config                  print resolved configuration
     memry eval --dataset <path>   run the retrieval eval harness
 """
