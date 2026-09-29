@@ -1177,24 +1177,43 @@ async function showMapEntityDetail(entityId){
     if(request===mapEntityDetailRequest){panel.innerHTML='<div class="hint">Could not load this entity.</div>'}
   }
 }
+// A rename can answer with another entity than the one renamed (a tag renamed
+// to a name merged away lands in that name's survivor): the panels, the map
+// selection and the entity filter then follow it to its id, and a panel is
+// drawn again, since its buttons carry the id. Returns whether it moved.
 function syncEntityIdentity(entityId,result){
   const entity=result.entity,aliases=result.aliases||[];
+  const id=result.entity_id||entity.id||entityId,moved=id!==entityId;
   const mapPanel=document.getElementById('mapentitydetail');
   if(mapPanel.dataset.entityId===entityId){
+    mapPanel.dataset.entityId=id;
+    if(activeMapKey==='entity:'+entityId)activeMapKey='entity:'+id;
     const name=document.getElementById('mapentityname'),identity=document.getElementById('mapentityidentity');
-    if(name)name.textContent=entity.name;if(identity)identity.innerHTML=entityIdentityBlock(entity,aliases);
+    if(moved)showMapEntityDetail(id);
+    else{if(name)name.textContent=entity.name;if(identity)identity.innerHTML=entityIdentityBlock(entity,aliases)}
   }
   const knowledgePanel=document.getElementById('entitydetail');
   if(knowledgePanel.dataset.entityId===entityId){
+    knowledgePanel.dataset.entityId=id;
     const name=document.getElementById('knowledgeentityname'),identity=document.getElementById('knowledgeentityidentity');
-    if(name)name.textContent=entity.name;if(identity)identity.innerHTML=entityIdentityBlock(entity,aliases);
+    if(moved)openEntity(id);
+    else{if(name)name.textContent=entity.name;if(identity)identity.innerHTML=entityIdentityBlock(entity,aliases)}
   }
   const mapNode=(mapData?.entities||[]).find(node=>node.entity_id===entityId);
   if(mapNode)mapNode.label=entity.name;
   const graphNode=G&&G.byKey['entity:'+entityId];if(graphNode)graphNode.label=entity.name;
-  const filterOption=[...document.getElementById('filter-entity').options].find(option=>option.value===entityId);
-  if(filterOption)filterOption.textContent=entity.name;
-  knowledgeNames[entityId]=entity.name;galaxyRead();
+  const options=[...document.getElementById('filter-entity').options];
+  const filterOption=options.find(option=>option.value===entityId);
+  if(filterOption){
+    filterOption.textContent=entity.name;
+    if(moved){
+      const kept=options.find(option=>option.value===id);
+      if(kept){kept.selected=kept.selected||filterOption.selected;filterOption.remove()}
+      else filterOption.value=id;
+    }
+  }
+  knowledgeNames[id]=entity.name;galaxyRead();
+  return moved;
 }
 async function renameEntity(entityId){
   const current=(mapData?.entities||[]).find(node=>node.entity_id===entityId)?.label||knowledgeNames[entityId]||'';
@@ -1202,8 +1221,8 @@ async function renameEntity(entityId){
   const name=(entered||'').trim();if(!name||name===current)return;
   const result=await api('/api/v1/entities/'+encodeURIComponent(entityId),{method:'PATCH',body:JSON.stringify({name})});
   if(result.error){alert(result.error);return}
-  syncEntityIdentity(entityId,result);
-  await loadEntities();
+  const moved=syncEntityIdentity(entityId,result);
+  await (moved?Promise.all([loadEntities(),loadMapData()]):loadEntities());
 }
 async function addMapAlias(entityId){
   const current=(mapData?.entities||[]).find(node=>node.entity_id===entityId)?.label
@@ -2990,7 +3009,8 @@ def create_app(
             return {
                 "key": key, "label": label, "detail": detail,
                 "automatic": store.maintenance_enabled(key),
-                "toggleable": True,
+                # a pass its config switch holds off has no toggle to offer
+                "toggleable": store.pass_allowed(key),
                 "run_url": f"/api/v1/maintenance/run/{key}",
                 "last": store.last_pass_run(key, user_id),
                 **extra,
@@ -3029,7 +3049,7 @@ def create_app(
                     "years, and forgetting uses that instead of one rate per "
                     "memory type. Needs a decision provider, and is off unless "
                     "MEMRY_DURABILITY is set.",
-                    needs_decider=True, toggleable=store.config.decay.durability,
+                    needs_decider=True,
                 ),
                 entry(
                     "consolidation", "Memory consolidation",
@@ -3435,8 +3455,11 @@ def create_app(
         )
         if entity is None:
             return JSONResponse({"error": "not found"}, status_code=404)
+        # A tag renamed to a name merged away lands in that name's survivor,
+        # another entity: the id says which one the panel shows now.
         return JSONResponse(
             {
+                "entity_id": entity.id,
                 "entity": entity.model_dump(),
                 "aliases": store.backend.entity_aliases(entity.id),
             }

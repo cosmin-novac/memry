@@ -142,18 +142,26 @@ away keeps its tombstone. A rename is such a merge, and the new topic takes over
 one's description, its time and metadata, with `renamed_from` naming the old id. A merge
 rewrites the column of invalid memories too, so restoring a memory never brings a merged
 tag back and the counts and the filters agree; a filter on the name merged away finds
-nothing. A save writes each tag in the obvious canonical form it shares with the user's
-tags, names merged away resolved before variants are grouped (after "tax" went into
-"levies", "taxes" is written "levies"), and folds stored variants into it; an update does
-the same for its own tags alone, reading just their obvious variants and merging nothing,
-so no other memory is retagged. Tag counts and the vocabulary offered to extraction are
+nothing. Two tags merged from the entity page merge by id into the topic kept, under its
+name as stored, even one a new tag could not have (over 64 characters, brackets, commas).
+A save writes each name merged away as its own survivor (after "tax" went into "levies"
+and "taxes" into "duties", "taxes" is written "duties") and each other tag in the obvious
+canonical form it shares with the user's active tags, grouping names still active only,
+and folds stored variants into it; an update does the same for its own tags alone,
+reading just their obvious variants and merging nothing, so no other memory is retagged.
+A deleted tag's topic entity is retired with its last mention, and the orphan purge
+retires a topic nothing mentions and no tombstone points at. A named thing retired after
+a tag was folded into it gives the tag back as a topic, the mentions the tag made going
+with it, and the two are recorded as kept apart, so a restore brings back the thing's
+named mentions only and the pair is not raised again. Tag counts and the vocabulary offered to extraction are
 read from the topic entities. The legacy index is the record the first open of an upgraded
 database, or `memry tags-to-things`, migrates from, committing user by user and marking the
 migration done after the last, so an open stopped midway resumes where it stopped; a later
 one-off pass at open files again any column a merge left naming a tag merged away.
-A topic entity is never a hub, is never masked in a property vector, and is never found by
-a name lookup; a tag and a named thing of the same name are compared by the entity identity
-funnel, two tags by the tag question.
+A topic entity is never a hub, is never masked in a property vector, is never found by
+a name lookup, and no link of the linked search reaches it (an open pair of a thing and
+the tag of its name included); a tag and a named thing of the same name are compared by
+the entity identity funnel, two tags by the tag question.
 
 Mechanical separator and singular/plural duplicates are merged deterministically once two
 real stored labels map to the same form. Semantic synonym merges remain reviewable.
@@ -409,13 +417,20 @@ For a normal text query:
    from that call. A question needing several (a list, a total, a comparison) gets one more
    call on up to `set_pool` (80) memories not judged yet: those filed under the topics
    (tags) the first 20 share, a small topic most of them carry counting most (its size
-   counted in the scope searched), and, where those are fewer (an untagged store, or
+   counted in the scope searched; of a tie at the cut, the newest are scored, as many as
+   places are left and 20 more), and, where those are fewer (an untagged store, or
    they share none), the memories nearest by vector to the members the first call found.
    Only with no member to start from is it the order past the first 20. The set's
    members from both calls come first and are returned past the limit, up to 100. In
-   this mode a question naming no hub is judged the same way, in the text ranking's order. The 0.35 re-rank blend runs only
-   on a search that was neither ordered by the linked search nor judged (a tag or entity
-   filter, or `relational=False`).
+   this mode a question naming no hub is judged the same way, the text ranking's first
+   20 in one call whose two meta questions decide the set path: a set question is
+   answered as above, and a question with one answer or about everything is ordered by
+   the 0.35 blend of the judged score with the text ranking's position (a judged score
+   under 0.15 pushed back), not by the judged score alone, which measured worse there
+   (R-117: recall@3 0.844 against 0.933 on distractors_v1). A question naming a hub is
+   ordered by the judged score times aboutness. The same blend, with a call of its own,
+   re-ranks a search that was neither ordered by the linked search nor judged (a tag or
+   entity filter, or `relational=False`).
 7. Context reconstruction may prepend a bounded, lazily refreshed entity description and
    then packs exact memories into the remaining token budget.
 

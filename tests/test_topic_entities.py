@@ -1085,35 +1085,37 @@ def test_a_column_left_naming_a_merged_tag_is_filed_again_at_open(tmp_path):
         store.close()
 
 
-def test_saves_file_a_retired_name_and_its_obvious_variants_under_its_survivor(tagged):
-    """After "tax" went into "levies", "tax" means "levies", and so do its
-    obvious variants: names merged away are resolved before obvious variants
-    are grouped. A save tagged "taxes" and one tagged "tax" both land under
-    "levies"; a stored "taxes" (written straight to the backend) is folded
-    into "levies" by the save's pass; and no "tax" or "taxes" topic is
-    active afterwards."""
+def test_saves_file_a_retired_name_under_its_survivor_and_group_active_names_only(tagged):
+    """After "tax" went into "levies", a save tagged "Tax" is filed under
+    "levies", through the name's own tombstone. Obvious variants are grouped
+    among names still active only: "taxes", never a topic, is not sent to
+    the survivor of the retired "tax" beside it but is a tag of its own, and
+    a later save of "tax" leaves that topic alone. No "tax" topic is active
+    at any point."""
     insert = tagged.backend.insert_memory
     insert(Memory(content="paid the tax", user_id="ada", categories=["tax"]))
     insert(Memory(content="levy notice", user_id="ada", categories=["levies"]))
     assert tagged.merge_tags(["tax"], "levies", user_id="ada") == 1
     [levies] = _active_topics(tagged, "levies")
-    plural = tagged.add("paid the taxes", user_id="ada", infer=False,
-                        categories=["taxes"]).actions[0].memory_id
     single = tagged.add("tax office letter", user_id="ada", infer=False,
                         categories=["Tax"]).actions[0].memory_id
-    assert tagged.get(plural).categories == ["levies"]
+    plural = tagged.add("paid the taxes", user_id="ada", infer=False,
+                        categories=["taxes"]).actions[0].memory_id
     assert tagged.get(single).categories == ["levies"]
-    assert _active_topics(tagged, "tax") == [] and _active_topics(tagged, "taxes") == []
-    assert tagged.categories(user_id="ada") == [{"category": "levies", "count": 4}]
+    assert tagged.get(plural).categories == ["taxes"]
+    [taxes] = _active_topics(tagged, "taxes")
+    assert _active_topics(tagged, "tax") == []
+    assert tagged.categories(user_id="ada") == [
+        {"category": "levies", "count": 3}, {"category": "taxes", "count": 1}]
     _agree(tagged, "ada")
 
-    stored = insert(Memory(content="old taxes", user_id="ada", categories=["taxes"])).id
-    assert _active_topics(tagged, "taxes")  # written straight to the backend
     tagged.add("tax refund", user_id="ada", infer=False, categories=["tax"])
-    assert _active_topics(tagged, "tax") == [] and _active_topics(tagged, "taxes") == []
+    assert _active_topics(tagged, "tax") == []
     assert _active_topics(tagged, "levies") == [levies]
-    assert tagged.get(stored).categories == ["levies"]
-    assert tagged.categories(user_id="ada") == [{"category": "levies", "count": 6}]
+    assert _active_topics(tagged, "taxes") == [taxes]
+    assert tagged.get(plural).categories == ["taxes"]
+    assert tagged.categories(user_id="ada") == [
+        {"category": "levies", "count": 4}, {"category": "taxes", "count": 1}]
     _agree(tagged, "ada")
 
 
@@ -1486,3 +1488,235 @@ def test_an_edit_with_no_user_is_made_in_every_namespace_that_carries_the_tag(ta
     assert [tagged.categories(user_id=user) for user in ("ada", "bob")] == [[], []]
     for user in ("ada", "bob"):
         _agree(tagged, user)
+
+
+# ------------------------------------------------------- fifth review round
+@pytest.mark.parametrize("name", ["x" * 70, "steuernummer (tin, koeln vingst)"])
+def test_a_tag_merges_into_the_chosen_topic_by_id_whatever_its_stored_name(tagged, name):
+    """A stored tag name that ``clean_tags`` refuses (longer than a tag may be,
+    or holding brackets and commas, as older imports and the migration left
+    them) stays the topic's name, and merging another tag into that topic
+    merges it into that topic by id. Before, the name was cleaned first: the
+    long one cleaned to nothing and the merge deleted the other tag; the
+    bracketed one cleaned to "steuernummer" and the other tag went into a
+    fresh topic of that name; either way the merge then reported failure,
+    after the data had changed."""
+    insert = tagged.backend.insert_memory
+    scope = Scope(user_id="ada")
+    kept = insert(Memory(content="a", user_id="ada", categories=[name])).id
+    moved = insert(Memory(content="b", user_id="ada", categories=["tax id"])).id
+    keep = tagged.backend.topic_entity(name, scope, create=False)
+    other = tagged.backend.topic_entity("tax id", scope, create=False)
+    assert keep is not None and keep.name == name
+    assert tagged.merge_entities(keep.id, other.id)
+    assert tagged.backend.get_entity(other.id).merged_into == keep.id
+    assert tagged.backend.get_entity(keep.id).name == name  # kept as it was
+    assert [tagged.get(m).categories for m in (kept, moved)] == [[name], [name]]
+    assert tagged.categories(user_id="ada") == [{"category": name, "count": 2}]
+    assert _active_topics(tagged, "steuernummer") == []
+    _agree(tagged, "ada")
+    # merged by name, the tag that exists is taken as stored too
+    third = insert(Memory(content="c", user_id="ada", categories=["tin"])).id
+    assert tagged.merge_tags(["tin"], name, user_id="ada") == 1
+    assert tagged.get(third).categories == [name]
+    assert _active_topics(tagged, name) == [keep.id]
+    _agree(tagged, "ada")
+
+
+def test_a_refused_tag_merge_changes_nothing(tagged, monkeypatch):
+    """The fold is validated and written before any column is: when the
+    backend refuses it (the other side was folded meanwhile), no memory is
+    retagged and the merge says it failed."""
+    insert = tagged.backend.insert_memory
+    scope = Scope(user_id="ada")
+    ids = [insert(Memory(content=c, user_id="ada", categories=[t])).id
+           for c, t in (("a", "tech"), ("b", "technical"))]
+    tech = tagged.backend.topic_entity("tech", scope, create=False)
+    technical = tagged.backend.topic_entity("technical", scope, create=False)
+    monkeypatch.setattr(tagged.backend, "merge_entities", lambda keep, merge: False)
+    assert not tagged.merge_entities(tech.id, technical.id)
+    assert [tagged.get(m).categories for m in ids] == [["tech"], ["technical"]]
+    assert tagged.backend.get_entity(technical.id).merged_into is None
+    _agree(tagged, "ada")
+
+
+def test_a_merge_that_finds_its_side_folded_meanwhile_leaves_no_transaction_open(
+        tmp_path, monkeypatch):
+    """The fold's UPDATE matched no row (another process folded the side
+    after it was resolved): the merge fails and rolls back, so the database
+    is not left locked for every other connection."""
+    import sqlite3
+
+    from memry.backends.local import LocalBackend
+
+    path = tmp_path / "memry.db"
+    backend = LocalBackend(str(path))
+    try:
+        a, b, c = (backend.insert_entity(Entity(name=n, normalized=n.lower(), user_id="ada"))
+                   for n in ("Ada", "Ada L", "Ada Lovelace"))
+        assert backend.merge_entities(a.id, b.id)
+        # the resolution read before the other process's fold
+        monkeypatch.setattr(backend, "resolve_entity_id", lambda entity_id: entity_id)
+        assert backend.merge_entities(c.id, b.id) is False
+        assert not backend._db.in_transaction
+        other = sqlite3.connect(str(path), timeout=0)
+        try:
+            other.execute("INSERT INTO meta (key, value) VALUES ('probe', '1')")
+            other.commit()
+        finally:
+            other.close()
+    finally:
+        backend.close()
+
+
+def test_each_name_merged_away_is_filed_under_its_own_survivor(tagged):
+    """ "tax" went into "levies" and "taxes" into "duties": a save tagged
+    "taxes" is filed under "duties", one tagged "Tax" under "levies". Before,
+    the two retired names were grouped as obvious variants and both went to
+    the survivor of the first ("levies")."""
+    insert = tagged.backend.insert_memory
+    for content, tag in (("a", "tax"), ("b", "taxes"), ("c", "levies"), ("d", "duties")):
+        insert(Memory(content=content, user_id="ada", categories=[tag]))
+    assert tagged.merge_tags(["tax"], "levies", user_id="ada") == 1
+    assert tagged.merge_tags(["taxes"], "duties", user_id="ada") == 1
+    plural = tagged.add("paid the taxes", user_id="ada", infer=False,
+                        categories=["taxes"]).actions[0].memory_id
+    single = tagged.add("tax office letter", user_id="ada", infer=False,
+                        categories=["Tax"]).actions[0].memory_id
+    assert tagged.get(plural).categories == ["duties"]
+    assert tagged.get(single).categories == ["levies"]
+    assert tagged.categories(user_id="ada") == [
+        {"category": "duties", "count": 3}, {"category": "levies", "count": 3}]
+    assert _active_topics(tagged, "tax") == [] and _active_topics(tagged, "taxes") == []
+    patched = tagged.update(single, categories=["taxes", "tax"])
+    assert patched.categories == ["duties", "levies"]
+    _agree(tagged, "ada")
+
+
+def test_a_restored_thing_brings_back_its_named_mentions_only(tagged):
+    """"bildy" the tag was found to be "Bildy" the product (a pair raised and
+    confirmed), then the product was retired and restored. Retiring unfolds
+    the tag and takes the product's mentions that came from the tag with it,
+    so the restore brings back the named mention only: each memory mentions
+    one of the two, the counts agree with the column and the filter, and the
+    pair is not raised again. Before, the restore put the tag's mentions back
+    on the product beside the topic's own (the product counted 3 memories
+    where one names it) and the pair was raised again."""
+    from memry.intelligence.entities import propose_same_name_duplicates
+
+    scope = Scope(user_id="ada")
+    product = tagged.backend.insert_entity(Entity(
+        name="Bildy", normalized="bildy", entity_type="product", user_id="ada"))
+    named = tagged.backend.insert_memory(Memory(content="Bildy runs on AWS", user_id="ada"))
+    tagged.backend.add_mention(EntityMention(entity_id=product.id, memory_id=named.id,
+                                             surface="Bildy"))
+    notes = [tagged.add(f"note {i}", user_id="ada", infer=False,
+                        categories=["bildy"]).actions[0].memory_id for i in range(2)]
+    tag = tagged.backend.topic_entity("bildy", scope, create=False)
+    assert propose_same_name_duplicates(backend=tagged.backend, scope=scope) == 1
+    [pair] = tagged.merge_proposals(user_id="ada")
+    assert {pair.entity_a, pair.entity_b} == {product.id, tag.id}
+    assert tagged.confirm_merge(pair.id)
+    assert tagged.backend.count_entity_memories(product.id) == 3
+
+    assert tagged.remove_entities([product.id], reason="not an entity") == 1
+    assert tagged.restore_entities([product.id]) == 1
+    assert [e.id for e in tagged.backend.entities_of_memory(named.id, kind="any")] == [
+        product.id]
+    for note in notes:
+        assert [e.id for e in tagged.backend.entities_of_memory(note, kind="any")] == [tag.id]
+    assert tagged.backend.count_entity_memories(product.id) == 1
+    assert tagged.backend.count_entity_memories(tag.id) == 2
+    assert tagged.categories(user_id="ada") == [{"category": "bildy", "count": 2}]
+    assert {m.id for m in tagged.get_all(user_id="ada", categories=["bildy"])} == set(notes)
+    assert propose_same_name_duplicates(backend=tagged.backend, scope=scope) == 0
+    assert tagged.merge_proposals(user_id="ada") == []
+    _agree(tagged, "ada")
+
+
+def test_a_deleted_tag_leaves_no_topic_behind(tagged):
+    """delete_tag("groceries") takes the tag off every memory and retires its
+    topic entity with its last mention, so no "groceries" topic stays active
+    with nothing filed under it and no pair with "Groceries" the thing is
+    raised for it. Before, the topic stayed forever: the orphan purge skipped
+    tags. The purge now retires a topic nothing mentions and no tombstone
+    points at; a later save of the tag makes a fresh topic, and the retired
+    one is not restored over it."""
+    from memry.intelligence.entities import propose_same_name_duplicates
+
+    scope = Scope(user_id="ada")
+    thing = tagged.backend.insert_entity(Entity(
+        name="Groceries", normalized="groceries", entity_type="concept", user_id="ada"))
+    named = tagged.add("Groceries are bought on Saturdays", user_id="ada",
+                       infer=False).actions[0].memory_id
+    tagged.backend.add_mention(EntityMention(entity_id=thing.id, memory_id=named,
+                                             surface="Groceries"))
+    for i in range(2):
+        tagged.add(f"bought milk {i}", user_id="ada", infer=False, categories=["groceries"])
+    old = tagged.backend.topic_entity("groceries", scope, create=False)
+    assert tagged.delete_tag("groceries", user_id="ada") == 2
+    assert _active_topics(tagged, "groceries") == []
+    assert tagged.backend.get_entity(old.id) is None
+    assert propose_same_name_duplicates(backend=tagged.backend, scope=scope) == 0
+    assert tagged.backend.list_proposals(scope, status=None) == []
+    assert tagged.backend.get_entity(thing.id).merged_into is None
+
+    # the purge: a stray topic goes, one a tombstone points at stays
+    stray = tagged.backend.topic_entity("stray", scope)
+    tax = tagged.backend.topic_entity("tax", scope)
+    taxes = tagged.backend.topic_entity("taxes", scope)
+    assert tagged.backend.merge_entities(tax.id, taxes.id)
+    assert tagged.backend.purge_orphan_entities(scope) == 1
+    assert tagged.backend.get_entity(stray.id) is None
+    assert tagged.backend.get_entity(tax.id).merged_into is None
+    assert tagged.backend.resolve_entity_id(taxes.id) == tax.id
+
+    later = tagged.add("bought bread", user_id="ada", infer=False,
+                       categories=["groceries"]).actions[0].memory_id
+    [fresh] = _active_topics(tagged, "groceries")
+    assert fresh != old.id
+    assert tagged.restore_entities([old.id]) == 0  # the name lives on in a fresh topic
+    assert _active_topics(tagged, "groceries") == [fresh]
+    assert _topics_of(tagged, later) == ["groceries"]
+    _agree(tagged, "ada")
+
+
+def test_an_open_pair_of_a_thing_and_its_tag_never_draws_the_tags_memories(
+        tagged, monkeypatch):
+    """ "Groceries" the thing and "groceries" the tag, raised as a pair and
+    not decided yet: the pair is a "same" link at 0.5, which reached the tag,
+    and every question naming the thing read up to FAMILY_SCAN of the tag's
+    memories. A tag is never what the linked search is about, so no link
+    reaches it, as none makes it a seed."""
+    from memry.intelligence.graph_retrieval import LINKED_RELATION, activation_paths
+    from memry.models import MergeProposal
+
+    tagged.config.retrieval.relational_fusion = "linked"
+    scope = Scope(user_id="ada")
+    thing = tagged.backend.insert_entity(Entity(
+        name="Groceries", normalized="groceries", entity_type="concept", user_id="ada"))
+    for text in ("Groceries are bought on Saturdays", "Groceries come from Lidl",
+                 "Groceries cost 80 euros a week"):
+        memory_id = tagged.add(text, user_id="ada", infer=False).actions[0].memory_id
+        tagged.backend.add_mention(EntityMention(entity_id=thing.id, memory_id=memory_id,
+                                                 surface="Groceries"))
+    for i in range(5):
+        tagged.add(f"bought milk {i}", user_id="ada", infer=False, categories=["groceries"])
+    tag = tagged.backend.topic_entity("groceries", scope, create=False)
+    tagged.backend.add_proposal(MergeProposal(
+        entity_a=thing.id, entity_b=tag.id, user_id="ada", confidence=0.5,
+        reason="not yet compared"))
+    assert tagged._is_hub(thing.id)
+    act, _ = activation_paths(tagged.backend, [thing.id], depth=1, relation=LINKED_RELATION)
+    assert act == {thing.id: 1.0}
+
+    read: list[str] = []
+    entity_memories = tagged.backend.entity_memories
+
+    def spy(entity_id, **kwargs):
+        read.append(entity_id)
+        return entity_memories(entity_id, **kwargs)
+
+    monkeypatch.setattr(tagged.backend, "entity_memories", spy)
+    tagged.search("When are Groceries bought?", user_id="ada", limit=10)
+    assert thing.id in read and tag.id not in read

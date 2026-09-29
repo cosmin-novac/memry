@@ -149,6 +149,30 @@ def test_the_second_call_orders_each_candidate_once(store, monkeypatch):
     assert len(scored) == len(set(scored)) == 10
 
 
+def test_a_large_tie_is_cut_before_it_is_scored(store, monkeypatch):
+    """500 dealer quotes under the one topic the first 20 share tie for 80
+    places. The tie is cut by a key that costs nothing (the share, then the
+    newest first) to the places left plus a margin of 20 before the property
+    ranking scores it, so about 100 are scored, not 500."""
+    for i in range(20):
+        _add(store, PRICED.format(i=i, n=14000 + 900 * i), ["car prices"])
+    for i in range(20, 520):
+        _add(store, QUOTED.format(i=i, n=14000 + 900 * i), ["car prices"])
+    store.config.retrieval.set_pool = 80
+    store.decider = judge = _set_judge()
+    scored: list[str] = []
+    linked_scores = store._linked_scores
+
+    def counted(asked, memory_ids, act, entities):
+        scored.extend(memory_ids)
+        return linked_scores(asked, memory_ids, act, entities)
+
+    monkeypatch.setattr(store, "_linked_scores", counted)
+    store.search(QUESTION, user_id="ada", limit=5)
+    assert judge.calls == 2 and len(judge.batches[1]) == 80
+    assert len(scored) == len(set(scored)) <= 100
+
+
 class _Counting:
     """A backend's stand-in that counts the calls made to it."""
 
@@ -310,6 +334,64 @@ def test_a_question_about_everything_makes_one_call(store):
     assert judge.calls == 1
     assert not any(r.signals.get("member") for r in results)
     assert len(results) == 5
+
+
+def _parking(store, entities=()):
+    """30 memories the question's words find, each with a word of its own."""
+    return [_add(store, f"Ada parked the car at garage marker{i:02d} today.",
+                 entities=entities) for i in range(30)]
+
+
+def test_a_question_naming_no_hub_blends_the_judgement_with_the_text_ranking(store):
+    """R-117. With the judging call on by default, a question naming no hub
+    was ordered by the judged score alone, which measured worse than the
+    0.35 blend of ``_rerank`` (recall@3 0.933 against 0.844 on
+    distractors_v1). A one-answer question naming no hub is now ordered by
+    that blend of the judged score and the text ranking's position: the
+    memory judged 0.6 at the bottom of the first 20, against 0.5 for the
+    rest, stays below the top hits and is not moved to first. One call is
+    made; its meta questions still decide the set path."""
+    _parking(store)
+    question = "Where did Ada park the car?"
+    ranking = [r.memory.id for r in store.search(question, user_id="ada", limit=40,
+                                                 relational=False)]
+    assert len(ranking) >= 20
+    bottom = store.get(ranking[19])
+    marker = bottom.content.split("garage ", 1)[1].split(" ", 1)[0]
+    store.decider = judge = _Batches(specific=0.9, several=0.1,
+                                     scores={marker: 0.6, "marker": 0.5})
+    results = store.search(question, user_id="ada", limit=20)
+    assert judge.calls == 1
+    order = [r.memory.id for r in results]
+    assert order[0] == ranking[0] and order[:5] == ranking[:5]
+    assert order.index(bottom.id) > 5
+    assert results[order.index(bottom.id)].signals["judged"] > results[0].signals["judged"]
+
+    # a set question naming no hub still gets its second call
+    store.decider = judge = _Batches(specific=0.9, several=0.9,
+                                     scores={marker: 0.6, "marker": 0.5})
+    store.search("Which garages did Ada park at?", user_id="ada", limit=5)
+    assert judge.calls == 2
+
+
+def test_a_question_naming_a_hub_is_ordered_by_the_judgement_as_before(store):
+    """The blend is for questions naming no hub: after the linked search the
+    judged score times aboutness orders, so the memory judged 0.6 comes
+    first wherever the ranking had it."""
+    harlow = _entity(store, "Harlow")
+    memories = [_add(store, f"Harlow parked the car at garage marker{i:02d} today.",
+                     entities=[harlow]) for i in range(30)]
+    question = "Where did Harlow park the car?"
+    store.decider = _Batches(specific=0.9, several=0.1, scores={"marker": 0.5})
+    ranking = [r.memory.id for r in store.search(question, user_id="ada", limit=20)]
+    assert len(ranking) == 20
+    bottom = next(m for m in memories if m.id == ranking[19])
+    marker = bottom.content.split("garage ", 1)[1].split(" ", 1)[0]
+    store.decider = judge = _Batches(specific=0.9, several=0.1,
+                                     scores={marker: 0.6, "marker": 0.5})
+    results = store.search(question, user_id="ada", limit=5)
+    assert judge.calls == 1
+    assert results[0].memory.id == bottom.id and "about" in results[0].signals
 
 
 # --------------------------------------------------------------- re-ranking

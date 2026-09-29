@@ -23,6 +23,7 @@ from ..models import (
     MergeProposal,
     Relation,
     Scope,
+    TOPIC_TYPE,
     SyntheticTag,
     Topic,
     TopicRelation,
@@ -324,6 +325,8 @@ class MemoryBackend(ABC):
 
         An entity with no mentions, no relations and no merge history is not
         evidence of anything; it is a record of an extraction that went nowhere.
+        A tag (a topic entity) nothing mentions and no tombstone points at
+        files nothing and is retired the same way.
         """
         return 0
 
@@ -541,6 +544,16 @@ class MemoryBackend(ABC):
         any) when given; read at once where the backend can."""
         return {entity_id: len(self.entity_memories(entity_id, limit=100_000, scope=scope))
                 for entity_id in entity_ids}
+
+    def topic_ids(self, entity_ids: Iterable[str]) -> set[str]:
+        """Which of these entities are tags (topic entities); read at once
+        where the backend can."""
+        out: set[str] = set()
+        for entity_id in set(entity_ids):
+            entity = self.get_entity(entity_id)
+            if entity is not None and entity.entity_type == TOPIC_TYPE:
+                out.add(entity_id)
+        return out
 
     def touch_entity(self, entity_id: str) -> None:
         """Mark an entity hub stale after its evidence changes."""

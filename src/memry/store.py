@@ -22,7 +22,7 @@ import logging
 import re
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -68,6 +68,7 @@ from .intelligence.graph_retrieval import (
     SET_RESULT_CAP,
     SET_SCAN,
     SET_SHARED,
+    SET_TIE_MARGIN,
     aboutness,
     activation_paths,
     detect_query_entities,
@@ -690,20 +691,23 @@ class MemoryStore:
         self, tag_lists: list[list[str]], scope: Scope, *, merge_stored: bool = True
     ) -> list[list[str]]:
         """Each list of tags as the store writes it, on a save and on an
-        update alike: each tag in the obvious canonical form (singular,
-        plural, spacing) it shares with the user's tags, and a name merged
-        away written as its survivor (``MemoryBackend.tag_filing``), so the
-        column names the tag its memory is counted and filtered under.
+        update alike: a name merged away written as its own survivor
+        (``MemoryBackend.tag_filing``), and each tag in the obvious canonical
+        form (singular, plural, spacing) it shares with the user's tags, so
+        the column names the tag its memory is counted and filtered under.
 
-        Names merged away are resolved before obvious variants are grouped: a
-        group holding one ("tax", merged into "levies", beside "taxes") is
-        written as that name's survivor ("levies"), so a group never brings a
-        retired name back. A save (``merge_stored``) runs the pass over the
-        whole vocabulary and folds each stored variant into the form its
-        group is written as (``_merge_topics``). An update rewrites its own
-        tags only (``merge_stored`` False): it reads just the incoming tags'
-        obvious variants and merges nothing, so no other memory is retagged;
-        the vocabulary-wide pass is the next save's, or upkeep's."""
+        Each incoming name merged away is resolved through its own tombstone
+        first ("tax" went into "levies", "taxes" into "duties": "taxes" is
+        written "duties"), and obvious variants are grouped only among names
+        still active (the user's active topics and the incoming names as
+        resolved): a retired name is never grouped, so a group never sends a
+        variant to another name's survivor or brings a retired name back. A
+        save (``merge_stored``) runs the pass over the whole vocabulary and
+        folds each stored variant into the form its group is written as
+        (``_merge_topics``). An update rewrites its own tags only
+        (``merge_stored`` False): it reads just the incoming tags' obvious
+        variants and merges nothing, so no other memory is retagged; the
+        vocabulary-wide pass is the next save's, or upkeep's."""
         incoming = {
             str(tag).strip().casefold()
             for tags in tag_lists
@@ -713,29 +717,33 @@ class MemoryStore:
         if not incoming:
             return [list(tags) for tags in tag_lists]
         user = Scope(user_id=scope.user_id)
-        vocabulary = self.backend.topic_names(
-            user,
-            prefixes=None if merge_stored else {obvious_variant_prefix(tag) for tag in incoming},
-        )
-        retired = {name for name, active in vocabulary.items() if not active}
-        groups = [
-            group for group in obvious_canonical_merges(
-                [{"category": name} for name in set(vocabulary) | incoming])
-            if merge_stored or incoming.intersection(group["variants"])
-        ]
+        prefixes = None if merge_stored else {obvious_variant_prefix(tag) for tag in incoming}
+        vocabulary = self.backend.topic_names(user, prefixes=prefixes)
         # only names merged away need resolving here; every other tag is
         # resolved once, where the backend files the column
-        survivor = self.backend.tag_filing(sorted((incoming & retired) | {
-            name for group in groups for name in group["variants"] if name in retired
-        }), user)
+        survivor = self.backend.tag_filing(
+            sorted(name for name in incoming if vocabulary.get(name) is False), user)
+        resolved = {name: survivor.get(name, name) for name in incoming}
+        if prefixes is not None:
+            # a survivor's own obvious variants, read as the incoming ones' are
+            more = {obvious_variant_prefix(name) for name in resolved.values()} - prefixes
+            if more:
+                vocabulary.update(self.backend.topic_names(user, prefixes=more))
+        active = {name for name, alive in vocabulary.items() if alive}
+        # a survivor that is a named thing's tag (merged away) stays as it is
+        candidates = active | {name for name in resolved.values() if name not in vocabulary
+                               or vocabulary[name]}
+        wanted = set(resolved.values())
+        groups = [
+            group for group in obvious_canonical_merges(
+                [{"category": name} for name in candidates])
+            if merge_stored or wanted.intersection(group["variants"])
+        ]
         replacements: dict[str, str] = {}
         for group in groups:
-            variants = list(group["variants"])
-            gone = sorted((name for name in variants if name in retired),
-                          key=lambda name: (name != group["canonical"], name))
-            target = survivor.get(gone[0], gone[0]) if gone else group["canonical"]
-            replacements.update({variant: target for variant in variants})
-            stored = {name for name in variants if vocabulary.get(name) and name != target}
+            target = group["canonical"]
+            replacements.update({variant: target for variant in group["variants"]})
+            stored = {name for name in group["variants"] if name in active and name != target}
             if merge_stored and stored:
                 self._merge_topics(scope.user_id, stored, target, exact_user=True)
         rewritten_lists: list[list[str]] = []
@@ -744,8 +752,8 @@ class MemoryStore:
             seen: set[str] = set()
             for raw in tags:
                 normalized = str(raw).strip().casefold()
-                canonical = replacements.get(normalized, normalized)
-                canonical = survivor.get(canonical, canonical)  # merged away: its survivor
+                canonical = resolved.get(normalized, normalized)  # merged away: its survivor
+                canonical = replacements.get(canonical, canonical)
                 if canonical and canonical not in seen:
                     seen.add(canonical)
                     rewritten.append(canonical)
@@ -1548,19 +1556,11 @@ class MemoryStore:
                                         f"Memory: {r.memory.content}")
              for i, r in enumerate(pool)},
         )
-        if not any(answers[f"m{i}"].available for i in range(len(pool))):
+        judged = [answers[f"m{i}"].value if answers[f"m{i}"].available else None
+                  for i in range(len(pool))]
+        if all(value is None for value in judged):
             return results
-        span = max(len(pool) - 1, 1)
-        ordered = []
-        for i, result in enumerate(pool):
-            hybrid = 1.0 - (i / span)
-            answer = answers[f"m{i}"]
-            relevance = answer.value if answer.available else hybrid
-            demoted = 1 if (answer.available and relevance < cfg.rerank_floor) else 0
-            blended = cfg.rerank_weight * relevance + (1 - cfg.rerank_weight) * hybrid
-            ordered.append((demoted, -blended, i, result))
-        ordered.sort()
-        return [r for _d, _s, _i, r in ordered] + results[len(pool):]
+        return self._blended(results, judged)
 
     def _search_linked(
         self, query: str, scope: Scope, results: list[SearchResult], include_invalid: bool,
@@ -1573,8 +1573,12 @@ class MemoryStore:
         (``graph_retrieval.activation_paths``). The candidates are the text
         ranking's and, for every entity linked at ``FAMILY_MIN`` or more, the
         ``FAMILY_TOP`` of its memories in the scope searched (its user, agent
-        and run, as the text ranking's) that best state the property. A query
-        naming no hub keeps the text ranking.
+        and run, as the text ranking's) that best state the property. No link
+        reaches a tag (``links_of``), so a tag's memories are never such
+        candidates, as a tag is never a seed. A query naming no hub keeps the
+        text ranking; with "jev" it is judged, and one with one answer or
+        about everything is ordered by the re-rank blend of the judgement and
+        that ranking (``_judge_in_rounds``).
 
         With ``relational_relevance = "jev"`` (or "auto" with a provider that
         re-ranks, ``relevance_mode``) the decision provider then judges
@@ -1683,8 +1687,14 @@ class MemoryStore:
         many memories the second judged.
         ``link`` carries the linked search's activation: then "it" stands for
         each memory's own entity, aboutness weighs the order and a thing's
-        answer yields to its version's own. Without it (a question naming
-        nobody) memories are read as written and the judgement alone orders."""
+        answer yields to its version's own, and the judgement orders. Without
+        it (a question naming no hub) memories are read as written, and a
+        question with one answer or about everything is ordered by the blend
+        of ``_rerank`` (``decision.rerank_weight`` of the judged score, the
+        rest the text ranking's position, a score under ``decision.
+        rerank_floor`` pushed back): the judgement alone measured worse there
+        (R-117: recall@3 0.844 against 0.933 on distractors_v1). A set
+        question keeps its members first either way."""
         size = max(self.config.decision.rerank_pool, 2)
         act = link["act"] if link else {}
         above = link["above"] if link else set()
@@ -1742,7 +1752,8 @@ class MemoryStore:
         rounds, pooled = 1, 0
 
         members: set[str] = set()
-        if specific >= 0.5 and several >= SET_BAR:
+        several_asked = specific >= 0.5 and several >= SET_BAR
+        if several_asked:
             try:
                 asked = link["asked"] if link else self._asked_vector(question)
             except Exception:  # embedding service down: the batch keeps its order
@@ -1781,9 +1792,38 @@ class MemoryStore:
                               "rounds": rounds, "pool": pooled,
                               **({"member": True} if mid in members else {})}
             order.append((mid not in members, -(value ** specific) * about, result))
+        if not link and not several_asked:
+            return self._blended(ranked, [
+                judged[r.memory.id] ** specific if r.memory.id in judged else None
+                for r in ranked[:size]])
         order.sort(key=lambda item: (item[0], item[1]))
         return [result for *_, result in order] + [
             r for r in ranked + extra if r.memory.id not in judged]
+
+    def _blended(
+        self, ranked: list[SearchResult], judged: list[float | None]
+    ) -> list[SearchResult]:
+        """The first of the ranking, one per judged score (None where the
+        provider did not answer), in the re-rank blend (``_rerank``):
+        ``decision.rerank_weight`` of the judged score and the rest of the
+        position in the ranking (1 first, 0 last), a judged score under
+        ``decision.rerank_floor`` pushed back past the others and a memory
+        not answered for kept at its position. The rest of the ranking
+        follows as it was."""
+        cfg = self.config.decision
+        pool = ranked[:len(judged)]
+        span = max(len(pool) - 1, 1)
+        ordered = []
+        for i, result in enumerate(pool):
+            position = 1.0 - i / span
+            relevance = judged[i]
+            demoted = relevance is not None and relevance < cfg.rerank_floor
+            if relevance is None:
+                relevance = position
+            blended = cfg.rerank_weight * relevance + (1 - cfg.rerank_weight) * position
+            ordered.append((demoted, -blended, i, result))
+        ordered.sort(key=lambda item: item[:3])
+        return [result for *_, result in ordered] + ranked[len(pool):]
 
     def _set_pool(
         self, ranked: list[SearchResult], size: int, judged: dict[str, float], scope: Scope,
@@ -1799,7 +1839,10 @@ class MemoryStore:
         under one of them (its newest ``SET_SCAN``) scores, over those topics,
         how many of the first carry the topic over how many memories the topic
         has in the scope searched: a small topic most of them share counts
-        most. The best are taken, a tie by the property ranking. Measured on
+        most. The best are taken, a tie at the cut by the property ranking,
+        over the tied candidates the newest first as many as places are left
+        and ``SET_TIE_MARGIN`` more (a tie of hundreds, one topic's share, is
+        not scored whole). Measured on
         the dense world's set questions, those held 85 to 100% of each set
         within 100 candidates.
 
@@ -1847,17 +1890,20 @@ class MemoryStore:
         order: dict[str, float] = {}
         batch: list[SearchResult] = []
         if walk:
-            best = sorted(walk, key=lambda mid: -walk[mid])
+            # by the share, then the newest first: a key that costs nothing
+            best = sorted(walk, key=lambda mid: memories[mid].updated_at or "", reverse=True)
+            best.sort(key=lambda mid: -round(walk[mid], 9))
             edge = round(walk[best[min(budget, len(best)) - 1]], 9)
-            # the candidates: all above the cut and all tied at it, each
-            # scored once for the tie-break and the batch's order alike
-            best = [mid for mid in best if round(walk[mid], 9) >= edge]
-            order = linked_order(best)
-            if len(best) > budget:
-                chosen = [mid for mid in best if round(walk[mid], 9) > edge]
-                tied = sorted((mid for mid in best if round(walk[mid], 9) == edge),
-                              key=lambda mid: -order[mid])
-                best = chosen + tied[: budget - len(chosen)]
+            # the candidates: all above the cut, and of those tied at it the
+            # first by that key, as many as places are left and a margin
+            # (SET_TIE_MARGIN), each scored once for the tie-break and the
+            # batch's order alike; a tie of hundreds is not scored whole
+            chosen = [mid for mid in best if round(walk[mid], 9) > edge]
+            tied = [mid for mid in best if round(walk[mid], 9) == edge]
+            tied = tied[: max(budget - len(chosen), 0) + SET_TIE_MARGIN]
+            order = linked_order(chosen + tied)
+            tied = sorted(tied, key=lambda mid: -order[mid])
+            best = chosen + tied[: max(budget - len(chosen), 0)]
             batch = [known.get(mid) or SearchResult(memory=memories[mid], score=0.0)
                      for mid in best]
         if len(batch) < budget:
@@ -3233,9 +3279,10 @@ class MemoryStore:
     ) -> bool:
         """Idempotent direct merge outside of a proposal.
 
-        Two tags merge as tags (``merge_tags``), so the memories of the one
-        folded in are filed under the one kept. A tag and a named thing fold
-        into the thing (``MemoryBackend.merge_entities``)."""
+        Two tags merge as tags, so the memories of the one folded in are
+        filed under the one kept (``_fold_topic``: by id, whatever the kept
+        topic's stored name). A tag and a named thing fold into the thing
+        (``MemoryBackend.merge_entities``)."""
         keep_root = self.backend.resolve_entity_id(keep_id)
         merge_root = self.backend.resolve_entity_id(merge_id)
         if keep_root is None or merge_root is None:
@@ -3250,11 +3297,32 @@ class MemoryStore:
             keep is not None and other is not None and keep_root != merge_root
             and keep.entity_type == TOPIC_TYPE and other.entity_type == TOPIC_TYPE
         ):
-            if keep.user_id != other.user_id:
-                return False
-            self._retag(keep.user_id, {other.normalized}, keep.normalized, exact_user=True)
-            return self.backend.resolve_entity_id(merge_root) == keep_root
+            return self._fold_topic(keep, other)
         return self.backend.merge_entities(keep_root, merge_root)
+
+    def _fold_topic(self, keep: Entity, other: Entity) -> bool:
+        """Merge the tag ``other`` into the tag ``keep``, both active topic
+        entities: ``other`` folds into ``keep`` by id, then every column
+        naming ``other`` names ``keep`` (``retag_topics``), under ``keep``'s
+        name as stored. That name is not cleaned again (``clean_tags``): one
+        it would refuse (over ``TAG_MAX_LENGTH``, brackets, commas, as older
+        imports and the migration left them) stays the topic's name, where a
+        cleaned name made the merge a delete of ``other`` or a refile under
+        a fresh topic. Everything is checked before the fold, the first
+        write, and the columns are rewritten only after it, so a merge
+        refused changes nothing."""
+        if (
+            keep.user_id != other.user_id
+            or keep.merged_into is not None or other.merged_into is not None
+            or not keep.normalized.strip() or not other.normalized.strip()
+        ):
+            return False
+        if not self.backend.merge_entities(keep.id, other.id):
+            return False
+        scope = Scope(user_id=keep.user_id)
+        self.backend.retag_topics(scope, {other.normalized}, keep.normalized, exact_user=True)
+        self.backend.delete_synthetic_tag(scope, other.normalized)
+        return True
 
     # -- the store owner ----------------------------------------------------
     def set_owner_name(self, user_id: str | None, name: str) -> None:
@@ -3858,7 +3926,9 @@ class MemoryStore:
         return self._retag(user_id, remove, to.strip().lower())
 
     def delete_tag(self, tag: str, *, user_id: str | None = None) -> int:
-        """Remove a tag from every memory (the memories stay)."""
+        """Remove a tag from every memory (the memories stay). Its topic
+        entity is retired with its last mention (``retag_topics``), so no
+        active tag is left with nothing filed under it."""
         return self._retag(user_id, {tag.strip().lower()}, None)
 
     def _retag(
@@ -3886,9 +3956,12 @@ class MemoryStore:
             if namespaces is not None:
                 return sum(self._retag(namespace, remove, add, exact_user=True)
                            for namespace in namespaces)
-        if add is not None:
-            # The new name is a tag like any other, so it is held to the same
-            # shape; one that cleans away to nothing is a plain removal.
+        if add is not None and self.backend.topic_entity(
+                add, Scope(user_id=user_id), create=False) is None:
+            # A new name is a tag like any other, so it is held to the same
+            # shape; one that cleans away to nothing is a plain removal. The
+            # name of a tag that exists is taken as stored, even one a new
+            # tag could not have (``_fold_topic``).
             add = next(iter(clean_tags(add)), None)
         scope = Scope(user_id=user_id)
         indexed = self._merge_topics(user_id, remove, add, exact_user=exact_user)
@@ -3920,6 +3993,18 @@ class MemoryStore:
     _MAINTENANCE_KEYS = (
         "dedup_entities", "tag_abstraction", "durability", "consolidation", "structure",
     )
+    #: The passes a config switch gates, with why one is off while its
+    #: switch is: a stored toggle cannot turn such a pass on
+    #: (``maintenance_enabled``), "run now" says why it did not run
+    #: (``_pass_off_reason``) and the dashboard offers no toggle for it
+    #: (``pass_allowed``).
+    _CONFIG_GATES: dict[str, tuple[Callable[[Config], bool], str]] = {
+        # synthetic parent tags (MEMRY_TAG_ABSTRACTION)
+        "tag_abstraction": (lambda config: config.tags.enabled,
+                            "tag abstraction is off (MEMRY_TAG_ABSTRACTION)"),
+        "durability": (lambda config: config.decay.durability,
+                       "decay.durability is off (MEMRY_DURABILITY)"),
+    }
 
     #: How many memories one durability pass scores. Jev answers 128 questions
     #: in a single call, so the batch is bounded by prudence, not by cost.
@@ -3941,7 +4026,7 @@ class MemoryStore:
         decay age.
         """
         outcome: dict[str, Any] = {"scored": 0, "skipped": 0, "provider": self.decider.name}
-        if not self.config.decay.durability:
+        if not self.pass_allowed("durability"):
             outcome["skipped"] = -1
             outcome["reason"] = self._pass_off_reason("durability")
             return outcome
@@ -3975,29 +4060,28 @@ class MemoryStore:
         )
         return outcome
 
+    def pass_allowed(self, key: str) -> bool:
+        """Whether the config lets the pass run at all (``_CONFIG_GATES``): a
+        pass no switch gates always may."""
+        gate = self._CONFIG_GATES.get(key)
+        return gate is None or bool(gate[0](self.config))
+
     def _pass_off_reason(self, key: str) -> str:
         """Why a pass that is off (``maintenance_enabled``) is off."""
-        if key == "durability" and not self.config.decay.durability:
-            return "decay.durability is off (MEMRY_DURABILITY)"
-        if key == "tag_abstraction" and not self.config.tags.enabled:
-            return "tag abstraction is off (MEMRY_TAG_ABSTRACTION)"
+        if not self.pass_allowed(key):
+            return self._CONFIG_GATES[key][1]
         return "this pass is off; turn it on under Upkeep to run it"
 
     def maintenance_enabled(self, key: str) -> bool:
-        if key == "tag_abstraction" and not self.config.tags.enabled:
-            # Synthetic parent tags are off unless the config switches them on
-            # (MEMRY_TAG_ABSTRACTION); a stored toggle alone cannot.
-            return False
-        if key == "durability" and not self.config.decay.durability:
-            # Likewise the durability pass (MEMRY_DURABILITY).
-            return False
+        if not self.pass_allowed(key):
+            return False  # off by its config switch, whatever a toggle says
         override = self.backend.get_meta(f"maintenance:{key}:enabled")
         if override is not None:
             return override == "true"
         if key == "dedup_entities":
             return self.config.dedup_entities
         if key == "tag_abstraction":
-            return self.config.tags.enabled and self.llm.available
+            return self.llm.available
         if key == "durability":
             return self.decider.available
         if key == "consolidation":

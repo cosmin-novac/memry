@@ -139,13 +139,26 @@ class Link:
 
 def links_of(backend: MemoryBackend, entity_ids: list[str]) -> list[Link]:
     """Extracted relations and compared pairs touching these entities, every
-    answer with its probability."""
-    links = [Link(r.subject, r.object, "relation", 1.0)
-             for r in backend.relations_of(entity_ids)]
+    answer with its probability.
+
+    None reaches a tag (a topic entity): a tag is never what the linked
+    search is about, as it is never a seed (``MemoryStore._is_hub``), so an
+    open pair of a thing and the tag of its name ("Groceries" and
+    "groceries", a "same" link at 0.5 until judged) does not draw the tag's
+    memories into every question naming the thing."""
+    relations = backend.relations_of(entity_ids)
+    pairs = []
     for proposal in backend.proposals_of(entity_ids):
         a = backend.resolve_entity_id(proposal.entity_a)
         b = backend.resolve_entity_id(proposal.entity_b)
-        if a is None or b is None or a == b:
+        if a is not None and b is not None and a != b:
+            pairs.append((proposal, a, b))
+    tags = backend.topic_ids({end for r in relations for end in (r.subject, r.object)}
+                             | {end for _, a, b in pairs for end in (a, b)})
+    links = [Link(r.subject, r.object, "relation", 1.0)
+             for r in relations if r.subject not in tags and r.object not in tags]
+    for proposal, a, b in pairs:
+        if a in tags or b in tags:
             continue
         belongs = proposal.belongs or {}
         # A version scores P(same) of about 0.75: the names and facts are
@@ -271,6 +284,10 @@ SET_RESULT_CAP = 100
 #: candidates for the second call.
 SET_SHARED = 2
 SET_SCAN = 500
+#: Of the candidates tied at the cut of the second call's budget, as many as
+#: places are left and this many more are scored to break the tie; the rest
+#: are cut first by the share and the newest (``store._set_pool``).
+SET_TIE_MARGIN = 20
 
 
 def set_members(judged: dict[str, float]) -> set[str]:

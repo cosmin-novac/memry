@@ -1478,10 +1478,10 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             rows = self._db.execute(
                 "SELECT e.id FROM entities e "
+                # a name or a tag (a topic entity): a tag no memory carries
+                # any more files nothing, and a memory tagged so later makes
+                # a fresh topic
                 f"WHERE e.merged_into IS NULL AND {clause} "
-                # a tag no memory carries any more is not a name to retire: it
-                # counts nothing and comes back to life when a memory uses it
-                f"AND {_kind_clause('named', 'e.')} "
                 # nothing mentions it ...
                 "AND NOT EXISTS (SELECT 1 FROM entity_mentions m WHERE m.entity_id = e.id) "
                 # ... it is on no typed edge ...
@@ -1512,7 +1512,10 @@ class LocalBackend(MemoryBackend):
         rewritten too, so one restored later does not bring back a tag merged
         or deleted meanwhile; the count returned is of the active ones.
         ``exact_user`` confines it to ``scope.user_id`` even when that is None
-        (the memories without a user), as a topic entity is confined."""
+        (the memories without a user), as a topic entity is confined. With no
+        ``add`` (``delete_tag``) the topic entity of each tag removed is
+        retired once nothing mentions it, so no tag deleted stays active
+        with nothing filed under it."""
         normalized = {item.strip().lower() for item in remove if item.strip()}
         if not normalized:
             return 0
@@ -1641,6 +1644,18 @@ class LocalBackend(MemoryBackend):
                     "WHERE broader_topic_id = ? OR narrower_topic_id = ?)",
                     (old_id, old_id, old_id, old_id),
                 )
+            if not add:
+                # a deleted tag's topic goes with its last mention, retired as
+                # any entity is (snapshot kept), tags merged into it with it
+                entity_clause, entity_params = clause(Scope(user_id=scope.user_id), prefix="e.")
+                for row in self._db.execute(
+                    "SELECT e.id FROM entities e WHERE e.entity_type = ? "
+                    f"AND e.merged_into IS NULL AND {entity_clause} "
+                    f"AND e.normalized IN ({placeholders}) "
+                    "AND NOT EXISTS (SELECT 1 FROM entity_mentions m WHERE m.entity_id = e.id)",
+                    (TOPIC_TYPE, *entity_params, *sorted(normalized)),
+                ).fetchall():
+                    self._retire_locked(row["id"], "tag deleted")
             self._db.commit()
         return changed
 
@@ -2855,6 +2870,20 @@ class LocalBackend(MemoryBackend):
             out.update((r["entity_id"], int(r["n"])) for r in rows)
         return out
 
+    def topic_ids(self, entity_ids: Iterable[str]) -> set[str]:
+        ids = sorted(set(entity_ids))
+        out: set[str] = set()
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT id FROM entities WHERE entity_type = ? "
+                    f"AND id IN ({','.join('?' * len(chunk))})",
+                    (TOPIC_TYPE, *chunk),
+                ).fetchall()
+            out.update(row["id"] for row in rows)
+        return out
+
     def touch_entity(self, entity_id: str) -> None:
         with self._lock:
             self._db.execute(
@@ -2934,14 +2963,18 @@ class LocalBackend(MemoryBackend):
         self._db.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
 
     def _retire_locked(self, entity_id: str, reason: str) -> bool:
-        if self._db.execute(
-            "SELECT 1 FROM entities WHERE id = ?", (entity_id,)
-        ).fetchone() is None:
+        row = self._db.execute(
+            "SELECT entity_type FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()
+        if row is None:
             return False
-        # A tag folded into it is a tag again: its tombstone would otherwise
-        # point at nothing, filing would make a fresh topic beside it, and a
-        # restore would bring the fold back, two entities claiming one tag.
-        self._unfold_tags_locked(entity_id)
+        if row["entity_type"] != TOPIC_TYPE:
+            # A tag folded into it is a tag again: its tombstone would
+            # otherwise point at nothing, filing would make a fresh topic
+            # beside it, and a restore would bring the fold back, two
+            # entities claiming one tag. A retired tag's own tombstones (tags
+            # merged into it) go with it.
+            self._unfold_tags_locked(entity_id)
         snapshot = self._entity_snapshot_locked(entity_id)
         if snapshot is None:
             return False
@@ -2964,9 +2997,18 @@ class LocalBackend(MemoryBackend):
         topic again, before the entity is retired: its tombstone becomes the
         active topic of its name (or, where one is active already, points at
         that one), and the memories filed under the name are filed again, so
-        their mentions go to the topic instead of the entity going away."""
+        their mentions go to the topic instead of the entity going away.
+
+        The entity's mentions that came from the tag go first
+        (``_unmention_tags_locked``), so its snapshot holds its named
+        mentions only and a restore brings back no second mention of a
+        memory beside the topic's. The pair of the entity and each unfolded
+        topic is recorded as kept apart (``_record_unfolded_pair_locked``):
+        a restore does not fold the tag back, and the pair is not raised
+        again for the judge to fold it back either."""
         now = utcnow()
         names: dict[str | None, set[str]] = {}
+        topics: dict[str, str | None] = {}
         for tombstone in self._db.execute(
             "SELECT id, user_id, normalized FROM entities "
             "WHERE merged_into = ? AND entity_type = ? ORDER BY created_at, id",
@@ -2979,20 +3021,77 @@ class LocalBackend(MemoryBackend):
                 (active, now, tombstone["id"]),
             )
             names.setdefault(tombstone["user_id"], set()).add(tombstone["normalized"])
+            topics.setdefault(active or tombstone["id"], tombstone["user_id"])
         for user_id, unfolded in names.items():
+            self._unmention_tags_locked(entity_id, user_id, unfolded)
             self._refile_named_locked(user_id, unfolded)
+        for topic_id, user_id in topics.items():
+            self._record_unfolded_pair_locked(entity_id, topic_id, user_id, now)
 
-    def _refile_named_locked(self, user_id: str | None, names: set[str]) -> None:
-        """File again the memories of ``user_id`` (exactly) whose column names
-        one of ``names`` (``_refile_locked``)."""
+    def _unmention_tags_locked(
+        self, entity_id: str, user_id: str | None, names: set[str]
+    ) -> None:
+        """Remove the mentions of ``entity_id`` that a tag in ``names`` folded
+        into it made: on each memory of ``user_id`` whose column names such a
+        tag, the mention whose surface is the tag as the column writes it
+        (``_mention_tags_locked`` writes a tag's mention under that name, and
+        a merge moved the topic's mentions, written so, onto the entity). A
+        mention under another surface ("Bildy" in "Bildy runs on AWS", beside
+        the tag "bildy") names the entity, and stays."""
+        for row in self._memories_naming_locked(user_id, names):
+            surfaces = sorted({
+                str(tag).strip() for tag in json.loads(row["categories"])
+                if str(tag).strip().lower() in names
+            })
+            if not surfaces:
+                continue
+            self._db.execute(
+                "DELETE FROM entity_mentions WHERE entity_id = ? AND memory_id = ? "
+                f"AND trim(surface) IN ({','.join('?' * len(surfaces))})",
+                (entity_id, row["id"], *surfaces),
+            )
+
+    def _record_unfolded_pair_locked(
+        self, entity_id: str, topic_id: str, user_id: str | None, now: str
+    ) -> None:
+        """Record the entity and a topic unfolded from it as a pair kept
+        apart, unless the two are a pair already. It lands in the entity's
+        snapshot with its other pairs and comes back on a restore, so the
+        pair of a thing and the tag of its name
+        (``entities.propose_same_name_duplicates``) is not raised again."""
+        if self._db.execute(
+            "SELECT 1 FROM entity_proposals WHERE (entity_a = ? AND entity_b = ?) "
+            "OR (entity_a = ? AND entity_b = ?)",
+            (entity_id, topic_id, topic_id, entity_id),
+        ).fetchone() is not None:
+            return
+        self._db.execute(
+            "INSERT INTO entity_proposals (id, entity_a, entity_b, user_id, status, "
+            "confidence, reason, created_at, decided_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (new_id(), entity_id, topic_id, user_id, "rejected", 0.0,
+             "kept apart: the tag was unfolded when this was removed", now, now),
+        )
+
+    def _memories_naming_locked(
+        self, user_id: str | None, names: set[str]
+    ) -> list[sqlite3.Row]:
+        """(id, categories) of the memories of ``user_id`` (exactly) whose
+        column names one of ``names``, read through the legacy index."""
         wanted = sorted(names)
-        ids = [row["id"] for row in self._db.execute(
-            "SELECT DISTINCT m.id FROM memories m "
+        if not wanted:
+            return []
+        return self._db.execute(
+            "SELECT DISTINCT m.id, m.categories FROM memories m "
             "JOIN memory_topics mt ON mt.memory_id = m.id "
             "JOIN topics t ON t.id = mt.topic_id "
             f"WHERE m.user_id IS ? AND t.normalized IN ({','.join('?' * len(wanted))})",
             (user_id, *wanted),
-        ).fetchall()]
+        ).fetchall()
+
+    def _refile_named_locked(self, user_id: str | None, names: set[str]) -> None:
+        """File again the memories of ``user_id`` (exactly) whose column names
+        one of ``names`` (``_refile_locked``)."""
+        ids = [row["id"] for row in self._memories_naming_locked(user_id, names)]
         cache: dict[Any, Any] = {}
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
@@ -3026,7 +3125,9 @@ class LocalBackend(MemoryBackend):
 
         Mentions come back only for memories that are still there, and edges
         only where the entity at the other end is still active: a restore must
-        not resurrect rows that dangle.
+        not resurrect rows that dangle. A retired tag whose name a fresh
+        topic has taken since (a memory tagged so after ``delete_tag``) is not
+        restored: one active topic per name.
         """
         with self._lock:
             row = self._db.execute(
@@ -3040,10 +3141,17 @@ class LocalBackend(MemoryBackend):
             ).fetchone() is not None:
                 return False  # something already lives under this id
             snapshot = json.loads(row["snapshot"])
-            self._insert_row_locked("entities", snapshot["entity"])
+            entity = snapshot["entity"]
+            if entity.get("entity_type") == TOPIC_TYPE and self._active_topic_locked(
+                    entity["normalized"], entity["user_id"]) is not None:
+                return False  # the name lives on in a fresh topic
+            self._insert_row_locked("entities", entity)
             refile: dict[str | None, set[str]] = {}
+            # a retired tag's own tombstones (tags merged into it) come back
+            # pointing at it; only a thing's are unfolded
+            unfold = entity.get("entity_type") != TOPIC_TYPE
             for tombstone in snapshot.get("tombstones", []):
-                if tombstone.get("entity_type") == TOPIC_TYPE:
+                if unfold and tombstone.get("entity_type") == TOPIC_TYPE:
                     # a tag folded into it before retiring unfolded tags (a
                     # snapshot of before) comes back a topic, not folded again:
                     # the active topic of its name, or pointing at that one
@@ -3078,7 +3186,14 @@ class LocalBackend(MemoryBackend):
                 ).fetchone() is not None:
                     self._insert_row_locked("entity_proposals", proposal)
             for user_id, names in refile.items():
+                # a snapshot of before holds the mentions the tags made too
+                self._unmention_tags_locked(entity_id, user_id, names)
                 self._refile_named_locked(user_id, names)
+            for tombstone in snapshot.get("tombstones", []):
+                if unfold and tombstone.get("entity_type") == TOPIC_TYPE:
+                    self._record_unfolded_pair_locked(
+                        entity_id, self.resolve_entity_id(tombstone["id"]) or tombstone["id"],
+                        tombstone["user_id"], utcnow())
             self._restore_aliases_locked(entity_id, snapshot.get("aliases", []))
             self._db.execute(
                 "DELETE FROM retired_entities WHERE entity_id = ?", (entity_id,)
@@ -3142,11 +3257,15 @@ class LocalBackend(MemoryBackend):
         A tag folded together with a named thing ("bildy" the tag and "Bildy"
         the product) always goes into the thing, whichever side the caller
         kept: the thing keeps its type, relations and name, and the tag's
-        memories become its mentions."""
+        memories become its mentions. A side found folded meanwhile (the
+        fold's UPDATE matched no row) rolls back: the UPDATE opened the
+        transaction, which would otherwise hold the write lock."""
         with self._lock:
             folded = self._merge_entities_locked(keep_id, merge_id)
             if folded:
                 self._db.commit()
+            elif folded is None and self._db.in_transaction:
+                self._db.rollback()
             return folded is not None
 
     def _merge_entities_locked(self, keep_id: str, merge_id: str) -> bool | None:

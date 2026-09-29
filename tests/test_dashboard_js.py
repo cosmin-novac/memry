@@ -555,3 +555,88 @@ const reply=name=>({entity:{name,description:name+' facts'},aliases:[],memories:
 """
     result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_a_rename_that_lands_in_another_entity_moves_the_panel_to_it():
+    """Renaming a tag to a name merged away folds it into that name's
+    survivor, and the rename answers with the survivor. The panels, the map
+    selection and the entity filter follow it to its id, and each panel is
+    drawn again for it (its buttons carry the id); a plain rename keeps the
+    id and only updates the name."""
+    source = "\n".join(_scripts(_dashboard_html()))
+    rename = source[
+        source.index("function syncEntityIdentity(") : source.index("async function addMapAlias(")
+    ]
+    contract = r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+function option(value,selected){
+  const o={value,textContent:value,selected,remove(){options.splice(options.indexOf(o),1)}};
+  return o;
+}
+const options=[option('tag-old',true)];
+const nodes={
+  mapentitydetail:{dataset:{entityId:'tag-old'}},
+  entitydetail:{dataset:{entityId:'tag-old'}},
+  mapentityname:{textContent:'tax'},mapentityidentity:{innerHTML:''},
+  knowledgeentityname:{textContent:'tax'},knowledgeentityidentity:{innerHTML:''},
+  'filter-entity':{get options(){return options}},
+};
+const document={getElementById:id=>nodes[id]};
+let activeMapKey='entity:tag-old',mapData={entities:[{entity_id:'tag-old',label:'tax'}]},G=null;
+const knowledgeNames={};
+const galaxyRead=()=>{},entityIdentityBlock=(entity,aliases)=>'identity of '+entity.name;
+const shown=[],opened=[];let reloaded=[];
+const showMapEntityDetail=id=>shown.push(id),openEntity=id=>opened.push(id);
+const loadEntities=async()=>reloaded.push('entities'),loadMapData=async()=>reloaded.push('map');
+const alert=message=>{throw new Error(message)};
+let answer='levies',reply=null,patched=null;
+const prompt=()=>answer;
+const api=async(path,opts)=>{patched=path;return reply};
+""" + rename + r"""
+(async()=>{
+  reply={entity_id:'survivor',entity:{id:'survivor',name:'levies'},aliases:[]};
+  await renameEntity('tag-old');
+  check(patched==='/api/v1/entities/tag-old','the rename is sent for the entity shown');
+  check(nodes.mapentitydetail.dataset.entityId==='survivor','the map panel shows the survivor');
+  check(nodes.entitydetail.dataset.entityId==='survivor','the entities panel shows the survivor');
+  check(activeMapKey==='entity:survivor','the map selection follows it');
+  check(shown.join()==='survivor'&&opened.join()==='survivor','both panels are drawn for it');
+  check(options.length===1&&options[0].value==='survivor'&&options[0].selected,'the filter follows it');
+  check(knowledgeNames.survivor==='levies','its name is known under its id');
+  check(reloaded.includes('map')&&reloaded.includes('entities'),'the map and the list reload');
+
+  // a plain rename keeps the id and draws nothing again
+  shown.length=0;opened.length=0;reloaded=[];answer='duties';
+  reply={entity_id:'survivor',entity:{id:'survivor',name:'duties'},aliases:[]};
+  mapData.entities[0].entity_id='survivor';mapData.entities[0].label='levies';
+  await renameEntity('survivor');
+  check(nodes.mapentitydetail.dataset.entityId==='survivor'&&activeMapKey==='entity:survivor','same id');
+  check(nodes.mapentityname.textContent==='duties'&&nodes.knowledgeentityname.textContent==='duties',
+        'the name is updated in place');
+  check(shown.length===0&&opened.length===0&&reloaded.join()==='entities','nothing is drawn again');
+})().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+    result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_rename_route_answers_with_the_entity_the_tag_went_into(tmp_path):
+    """Renaming a tag to a name merged away answers with that name's
+    survivor, and says its id."""
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    try:
+        for content, tag in (("a", "tax"), ("b", "levies"), ("c", "duties")):
+            store.add(content, user_id="default", infer=False, categories=[tag])
+        store.merge_tags(["tax"], "levies", user_id="default")
+        from memry.models import Scope
+
+        scope = Scope(user_id="default")
+        duties = store.backend.topic_entity("duties", scope, create=False)
+        levies = store.backend.topic_entity("levies", scope, create=False)
+        with TestClient(create_app(store)) as client:
+            response = client.patch(f"/api/v1/entities/{duties.id}", json={"name": "tax"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["entity_id"] == levies.id == body["entity"]["id"]
+    finally:
+        store.close()
