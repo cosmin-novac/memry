@@ -42,11 +42,8 @@ def test_env_overrides(monkeypatch, tmp_path):
     assert cfg.default_user_id == "marcus"
 
 
-def test_extraction_asks_the_model_the_comparison_kept():
-    """Extraction sends each save to the OpenAI default, gpt-6-luna. Compared
-    with gpt-5.6-luna on generated saves and owner texts it was as good on
-    every measure, within run noise, at half the price, so the default
-    stayed."""
+def test_extraction_asks_the_default_model():
+    """Extraction sends each save to the OpenAI default, gpt-6-luna."""
     import httpx
 
     from memry.config import DEFAULT_LLM_MODELS, LLMConfig

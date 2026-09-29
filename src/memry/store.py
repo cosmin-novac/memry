@@ -1921,9 +1921,9 @@ class MemoryStore:
         untagged store, memories saved with ``infer=False`` or imported
         verbatim), the rest are the unjudged memories nearest the ``members``
         found in the first call (``_nearest_unjudged``, half by memory vector
-        and half by property vector). Measured on four sets, the 40 nearest
-        the members held 41 to 100% of the rest of a set by memory vector and
-        76 to 100% by property vector, the next 40 of the ranking 29 to 36%.
+        and half by property vector): members of a set are the same kind of
+        fact, so their neighbours hold more of the rest of the set than the
+        ranking past the first does.
         Only with no member to start from is the ranking past the first taken.
         Either way the batch is ordered as the linked search orders (the
         property similarity to ``asked``, to the power

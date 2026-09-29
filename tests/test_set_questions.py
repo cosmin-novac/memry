@@ -447,8 +447,7 @@ def test_a_set_question_gets_its_second_call_only_as_a_property_question(
     """The second call also needs P(the question asks for one property) at
     0.5 or more, or a question about everything ("Tell me about the cars")
     would read on. A set question read under 0.5 keeps what the first call
-    found and no member is marked; "What does Ada Reid like?", the lowest of
-    the property questions measured, scored 0.54."""
+    found and no member is marked."""
     _prices(store)
     store.config.retrieval.set_pool = 10
     store.decider = judge = _Batches(specific=specific, several=0.9,

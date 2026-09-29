@@ -958,8 +958,7 @@ def test_a_false_yes_on_the_versions_own_memory_leaves_the_inherited_answer_firs
 def test_how_far_a_property_question_read_as_about_everything_keeps_its_answer(
         store, family, specific, first):
     """Relevance and the override count to the power of P(the question asks
-    for one property). "What does Ada Reid like?", the lowest of the property
-    questions measured, scored 0.54: there the answer v4 inherits still ranks
+    for one property). At 0.54 the answer v4 inherits still ranks
     above v4's own non-answers, (0.8 x 0.95) ** 0.54 x 0.72 = 0.62 against
     0.05 ** 0.54 = 0.20. Read as a question about everything (0.1), a
     property question would lose it to them: 0.70 against 0.74, the limit the
