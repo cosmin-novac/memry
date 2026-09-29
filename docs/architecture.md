@@ -91,7 +91,7 @@ those limits are visible and intentional.
 | Public surfaces | Python API, CLI, REST, dashboard, MCP | They call `MemoryStore`; they do not implement memory behavior independently. |
 | `MemoryStore` | Ownership checks, write/read workflows, knowledge operations | It is the product facade and the main invariant boundary. |
 | Intelligence | Extraction, reconciliation, entity resolution, relation extraction, topic abstraction, descriptions, decay, consolidation | Derived outputs remain rebuildable from evidence. |
-| Retrieval | FTS5/BM25, vectors, reciprocal-rank fusion, recency/importance, entity graph expansion | Invalidated evidence is excluded by default and work is bounded. |
+| Retrieval | FTS5/BM25, vectors, reciprocal-rank fusion, recency/importance, the linked search over entity links | Invalidated evidence is excluded by default and work is bounded. |
 | Providers | LLM and embedding integrations | External providers are optional; zero-key fallbacks remain functional. |
 | Production persistence | `LocalBackend` | SQLite is the sole production source of truth. |
 
@@ -284,7 +284,9 @@ names are compared and nothing merges on the model's own confidence.
 Tags follow the same pattern (`judged_tag_merges`): candidate pairs from the name index
 (no shared-word signal for tags), judged in both orders with the 10 most recent memories
 per tag, merged from P(same subject) 0.55, compared when found and once more when both
-tags are on 10 memories; the dashboard's suggest button asks the judge nothing.
+tags are on 10 memories. The dashboard's suggest button does not run this: its last pass
+asks the judge about the tag names alone, only when at most 20 tags are left that nothing
+else flagged, and only suggests (`clustering.judge_tag_pairs`, from P(yes) 0.5).
 
 The measurements behind these numbers are in the PhD repository,
 `papers/memry-field-studies/findings/identity-obvious-merges.md` and
@@ -364,7 +366,8 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    undo brings it back beside the newer one. Each SUPERSEDE event records its `kind`
    (contradiction, update, consolidation or distillation), which the Archive reads; an
    event from before the column is classified by its reason.
-4. Store or update the memory, normalized topic links, embedding, and FTS row.
+4. Store or update the memory, its tags (the column, the filter index and the topic
+   mentions, `_file_tags_locked`), embedding, and FTS row.
 5. Resolve entity mentions conservatively. Alias matches only narrow the candidates. A new
    name's screen verdict is kept on the entity it creates, so the weekly screen skips it.
 6. Store evidence-grounded relations whose endpoints resolved in that memory.
@@ -433,6 +436,9 @@ For a normal text query:
    entity filter, or `relational=False`).
 7. Context reconstruction may prepend a bounded, lazily refreshed entity description and
    then packs exact memories into the remaining token budget.
+
+Every ranked read breaks a tie by memory id (`ORDER BY updated_at DESC, id` and the like),
+so memories of one time (a bulk import, a restore) rank alike in every build of a store.
 
 The ANN file is a cache. SQLite remains authoritative, ANN candidates are exact-rescored,
 and the index can be rebuilt. Invalidated memories are excluded unless a caller explicitly
@@ -584,7 +590,7 @@ up as a red run within a week instead of in a user's terminal.
 | Knowledge and login data remain in `memry.db` and `auth.db` | Knowledge restore/reset cannot overwrite credentials; a complete server backup must capture both files together. | Yes |
 | Local MCP uses `memry mcp`; remote MCP uses `/mcp` from `memry serve` | This preserves local zero-port use and one network server where configured authentication is applied. The separate unauthenticated HTTP launcher added risk without a used product case. | Yes |
 | Edited memory text is re-analyzed for entity links | Entity chips and entity filters must describe the current text, not names left behind by an older version. | Yes |
-| The UI says tags; the public backend field remains `categories`; normalized storage remains `topics`/`memory_topics` | Users get one familiar word without a breaking API/schema rename. | Yes |
+| The UI says tags; the public backend field remains `categories`; a tag is a topic entity, and `topics`/`memory_topics` remain the filter index | Users get one familiar word without a breaking API/schema rename, and tags merge by the same machinery as names. | Yes |
 | MCP saves persist raw text before acknowledgement and enrich it in one managed worker | Agent calls return after a cheap SQLite commit instead of waiting on several provider calls, while the active pending row prevents data loss and enables restart recovery without another queue system. | Yes |
 | Background work uses bounded database batches but separate prompts per memory | Bounded draining improves throughput; separate prompts preserve each user scope, provenance, retry, and failure boundary. | Yes |
 | Anthropic defaults to claude-haiku-4-5 | Memory extraction is frequent background work, so the lower-cost, lower-latency model is the useful default; operators can explicitly select a larger model when quality justifies the extra cost. | Yes |

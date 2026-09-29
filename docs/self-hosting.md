@@ -275,8 +275,8 @@ undone there. The three thresholds are `MEMRY_SUPERSEDE_PROTECT_IMPORTANCE`,
 **Re-ranking** blends the relevance judgement with the hybrid rank at 0.35 rather than
 replacing it, and pushes anything under 0.15 to the back. Replacing the hybrid rank
 outright measured worse than not re-ranking at all, because that rank already carries
-recency, decayed importance and entity anchors. A question naming something Memry knows
-is ordered by the linked search instead (see `docs/architecture.md`, read path), which
+recency and decayed importance. A question naming something Memry knows is ordered by
+the linked search instead (see `docs/architecture.md`, read path), which
 follows the links from it directed and weighted, one link deep; that is the only link
 mode (`retrieval.relational_mode` "directed", `relational_fusion` "linked"), and a config
 naming a removed one ("typed", "undirected", "rescue", "weighted", "inherit", "gated") is

@@ -7,6 +7,7 @@ back out through the store, REST and MCP filters.
 
 from __future__ import annotations
 
+import itertools
 import json
 from datetime import date
 
@@ -368,12 +369,17 @@ def test_an_update_that_carries_a_when_replaces_it(store, fake_llm):
 # ----------------------------------------------------------------- backfilling
 
 
+_SEEDED = itertools.count()
+
+
 def _seed(store, *contents, memory_type="episodic") -> list[str]:
     """Put memories in without going through reconciliation, which would want
-    scripted answers of its own and has nothing to do with the backfill."""
+    scripted answers of its own and has nothing to do with the backfill. Saved
+    within one second, they are read by id, so the ids follow the order given."""
     ids = []
     for content in contents:
-        memory = Memory(content=content, memory_type=memory_type, user_id="u")
+        memory = Memory(id=f"m{next(_SEEDED):04d}", content=content,
+                        memory_type=memory_type, user_id="u")
         store.backend.insert_memory(memory)
         ids.append(memory.id)
     return ids

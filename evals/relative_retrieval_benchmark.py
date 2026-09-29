@@ -37,12 +37,11 @@ Links between the entities, as Memry keeps them on compared pairs:
             "same" answer on every pair
 
 Search modes (``MODES``): hybrid alone, without links, and the linked search
-(``RetrievalConfig``: every link followed directed and weighted by kind,
-direction and probability, a step down after a step up held down, depth 1,
-"linked" fusion) with the property similarity sharpened 1, 2 or 3 times or
-judged by the decision provider. The "typed", "undirected", "rescue",
-"weighted", "inherit" and "gated" modes were removed from Memry
-(``REMOVED_MODES``).
+(every link followed directed and weighted by kind, direction and probability,
+a step down after a step up held down, depth 1) with the property similarity
+sharpened 1, 2 or 3 times or judged by the decision provider. The "typed",
+"undirected", "rescue", "weighted", "inherit" and "gated" modes were removed
+from Memry (``REMOVED_MODES``).
 
 Run:
     OPENAI_API_KEY=... python evals/relative_retrieval_benchmark.py      # real embeddings
@@ -853,7 +852,7 @@ def add_owner_sets(add, queries, types, rnd: random.Random) -> None:
     I spend on groceries?", every liked restaurant. Each set sits among near
     misses (a car's insurance cost, fuel spending, restaurants disliked or
     only visited). Beside them, one-answer questions in the same places, to
-    see how often such a question reads on for nothing."""
+    see how often such a question is taken for a set and judged twice."""
     o = OWNER
     cars = [f"{brand} {model}" for brand, model in CAR_MODELS]
     cars += [f"{car} {trim}" for car, trim in zip(cars, rnd.sample(
@@ -1215,36 +1214,44 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
                 decider=None, property_dimensions: int | None = None,
                 says: dict[str, str] | None = None):
     """The world in a fresh store, with compared pairs as ``links`` says.
-    ``decider`` re-ranks every search when given (Jev in production).
+    ``decider`` is the decision provider searches ask when given (Jev in
+    production).
     ``says`` (memory index as a string: the statement with its subject taken
     out, as an LLM writes it) gives the property vectors in place of the
     masked texts (``store_says``)."""
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=embedder,
                         decider=decider)
     store.config.retrieval.property_dimensions = property_dimensions
+    # Each record under an id from its place in the world, all at one time:
+    # two builds of one world are one store, and a tie (memories of one time
+    # read by id) falls in the order the world lists them.
+    stamp = "2026-06-01T09:00:00+00:00"
     ids: dict[str, str] = {}
-    for name, entity_type in world["types"].items():
+    for n, (name, entity_type) in enumerate(world["types"].items()):
         ids[name] = store.backend.insert_entity(Entity(
-            name=name, normalized=name.lower(), entity_type=entity_type, user_id=USER)).id
+            id=f"e{n:05d}", name=name, normalized=name.lower(), entity_type=entity_type,
+            user_id=USER, created_at=stamp, updated_at=stamp)).id
     if OWNER in ids:  # as Memry records it from the account settings
         store._upkeep_set("owner_entity", USER, ids[OWNER])
     vectors = embedder.embed([m["text"] for m in world["memories"]])
     memory_ids = []
-    stamp = "2026-06-01T09:00:00+00:00"
-    for m, vector in zip(world["memories"], vectors):
+    for n, (m, vector) in enumerate(zip(world["memories"], vectors)):
         memory = store.backend.insert_memory(
-            Memory(content=m["text"], user_id=USER, created_at=stamp, updated_at=stamp,
-                   embedding_model=embedder.model_id, categories=m.get("tags", [])),
+            Memory(id=f"m{n:05d}", content=m["text"], user_id=USER, created_at=stamp,
+                   updated_at=stamp, embedding_model=embedder.model_id,
+                   categories=m.get("tags", [])),
             embedding=vector)
         memory_ids.append(memory.id)
-        for name in m["entities"]:
-            store.backend.add_mention(EntityMention(entity_id=ids[name], memory_id=memory.id,
-                                                    surface=name))
-    for subject, predicate, obj in world["relations"]:
-        store.backend.add_relation(Relation(subject=ids[subject], predicate=predicate,
-                                            object=ids[obj], user_id=USER))
+        for k, name in enumerate(m["entities"]):
+            store.backend.add_mention(EntityMention(
+                id=f"{memory.id}.{k}", entity_id=ids[name], memory_id=memory.id,
+                surface=name, created_at=stamp))
+    for n, (subject, predicate, obj) in enumerate(world["relations"]):
+        store.backend.add_relation(Relation(
+            id=f"r{n:05d}", subject=ids[subject], predicate=predicate, object=ids[obj],
+            user_id=USER, created_at=stamp))
     rnd = random.Random(seed)
-    for child, parent, kind in world["pairs"] if links != "none" else []:
+    for n, (child, parent, kind) in enumerate(world["pairs"] if links != "none" else []):
         if links == "oracle":
             related = kind in ("version", "occurrence", "component")
             belongs = {"a_kind_of_b": 0.0, "a_part_of_b": 0.0, "b_kind_of_a": 0.0,
@@ -1256,8 +1263,9 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
             row = rnd.choice(answers[kind])
             belongs, same, different = row["belongs"], row["same"], row["different"]
         store.backend.add_proposal(MergeProposal(
-            entity_a=ids[child], entity_b=ids[parent], user_id=USER, confidence=same,
-            different=different, belongs=belongs, compared_step=1))
+            id=f"p{n:05d}", entity_a=ids[child], entity_b=ids[parent], user_id=USER,
+            confidence=same, different=different, belongs=belongs, compared_step=1,
+            created_at=stamp))
     if says is None:
         # as Memry computes them: each memory's entities and what those belong
         # to (at the links just stored) read "it"
@@ -1290,14 +1298,14 @@ def store_says(store: MemoryStore, memory_ids: list[str], texts: list[str],
 
 
 MODES = [
-    # (label, relational, mode, depth, fusion[, sharpness[, relevance]])
-    ("hybrid", False, "directed", 1, "linked"),  # no links: the baseline
-    ("linked k1", True, "directed", 1, "linked", 1.0),
-    ("linked k2", True, "directed", 1, "linked", 2.0),
-    ("linked k3", True, "directed", 1, "linked", 3.0),
+    # (label, relational, depth[, sharpness[, relevance]])
+    ("hybrid", False, 1),  # no links: the baseline
+    ("linked k1", True, 1, 1.0),
+    ("linked k2", True, 1, 2.0),
+    ("linked k3", True, 1, 3.0),
     # the same, with the decision provider judging relevance (--rerank off,
     # --jev on): its answer is a probability, so no sharpening
-    ("linked jev", True, "directed", 1, "linked", 1.0, "jev"),
+    ("linked jev", True, 1, 1.0, "jev"),
 ]
 #: Modes this benchmark measured before Memry removed them: the linked search
 #: beat the typed search on every family.
@@ -1365,12 +1373,12 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
     linked search did not run that search's own results. A search that asks
     the decision provider is not run a second time (it would be judged again):
     its ranking is the limit-10 search's own."""
-    label, relational, rmode, depth, fusion = mode[:5]
+    _, relational, depth = mode[:3]
     cfg = store.config.retrieval
-    cfg.relational_mode, cfg.relational_depth, cfg.relational_fusion = rmode, depth, fusion
-    if len(mode) > 5:
-        cfg.relational_sharpness = mode[5]
-    cfg.relational_relevance = mode[6] if len(mode) > 6 else "vector"
+    cfg.relational_depth = depth
+    if len(mode) > 3:
+        cfg.relational_sharpness = mode[3]
+    cfg.relational_relevance = mode[4] if len(mode) > 4 else "vector"
     index = {mid: k for k, mid in enumerate(memory_ids)}
     seen: dict[str, list] = {}
     inner = store._search_linked

@@ -295,7 +295,9 @@ flowchart LR
    old memory and link it to its successor. The pending raw memory is superseded only
    after enrichment succeeds.
 4. **Retrieval.** BM25 and cosine similarity are fused with reciprocal-rank fusion, then
-   boosted by recency and importance. Pending raw memories are searchable immediately.
+   boosted by recency and importance. A question naming a known entity also takes the
+   memories of the entities linked to it (the linked search). Pending raw memories are
+   searchable immediately.
 5. **Forgetting.** Effective importance decays over time; `memry sweep` invalidates
    memories that fall below threshold. Tag filters (`memry search -c diet`) narrow any
    query.
@@ -335,11 +337,12 @@ export MEMRY_DECISION_API_KEY=...   # TypeSafe API key
 ```
 
 With Jev, Memry merges duplicate entities on its own above 0.70 confidence, a threshold
-measured on the labelled identity set in `evals/`. The upkeep pass scores how long each
-memory stays relevant, so each memory decays at its own pace, and search re-ranking is on.
-You still need a text model for extraction. If you set `MEMRY_DECISION_PROVIDER=llm`,
-Memry sends these questions to the text model, merges entities only by fixed rules, and
-you confirm the other merges yourself. The
+measured on the labelled identity set in `evals/`. Jev also judges the first 20 results
+of a search, and for a question whose answer is a set (a list, a total, a comparison) one
+more batch of memories. Scoring how long each memory stays relevant is off unless
+`MEMRY_DURABILITY=1`. You still need a text model for extraction. If you set
+`MEMRY_DECISION_PROVIDER=llm`, Memry sends these questions to the text model, merges
+entities only by fixed rules, and you confirm the other merges yourself. The
 measurements and the remaining settings are in [docs/self-hosting.md](docs/self-hosting.md#where-memry-sends-its-decision-questions).
 
 ## Evaluation
@@ -350,10 +353,9 @@ memry eval --dataset evals/datasets/synthetic_v1.jsonl -k 5
 
 The harness ingests each case through the full write path, then scores retrieval
 (recall@k, MRR, latency p50/p95). It is deterministic and offline, so it runs in CI.
-LoCoMo and LongMemEval can be formatted into the same JSONL schema to compare providers,
-configs, plus the optional Mem0 comparison adapter, under identical conditions. The
-landscape survey behind the design is in
-[docs/research/competitive-analysis.md](docs/research/competitive-analysis.md).
+Datasets in its JSONL schema compare providers, configs and the optional Mem0 comparison
+adapter under identical conditions. `evals/external_benchmarks.py` runs LoCoMo and
+LongMemEval as published (evidence recall at 5, 10 and 20 and MRR, without a model).
 
 ## Project layout
 

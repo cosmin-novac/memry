@@ -804,7 +804,7 @@ class LocalBackend(MemoryBackend):
         clause, params = _scope_clause(scope)
         with self._lock:
             rows = self._db.execute(
-                f"SELECT * FROM episodes WHERE {clause} ORDER BY created_at DESC LIMIT ?",
+                f"SELECT * FROM episodes WHERE {clause} ORDER BY created_at DESC, id LIMIT ?",
                 (*params, limit),
             ).fetchall()
         return [
@@ -1004,7 +1004,7 @@ class LocalBackend(MemoryBackend):
                 f"SELECT {_MEMORY_COLS} FROM memories "
                 "WHERE invalid_at IS NULL "
                 "AND json_extract(metadata, '$.pending_distillation') = 1 "
-                f"{due_clause}ORDER BY created_at LIMIT ?",
+                f"{due_clause}ORDER BY created_at, id LIMIT ?",
                 (*params, limit),
             ).fetchall()
         return [_row_to_memory(row) for row in rows]
@@ -1150,7 +1150,7 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             rows = self._db.execute(
                 f"SELECT {_MEMORY_COLS} FROM memories WHERE {clause} AND {cat_clause} "
-                f"AND {entity_clause} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                f"AND {entity_clause} ORDER BY updated_at DESC, id LIMIT ? OFFSET ?",
                 (*params, *cat_params, *entity_params, limit, offset),
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
@@ -1323,7 +1323,7 @@ class LocalBackend(MemoryBackend):
     def _score_rows(
         self, rows: list[sqlite3.Row], embedding: list[float], limit: int
     ) -> list[tuple[Memory, float]]:
-        if not rows:
+        if not rows or limit <= 0:
             return []
         query = np.asarray(embedding, dtype=np.float32)
         qnorm = np.linalg.norm(query)
@@ -1333,7 +1333,14 @@ class LocalBackend(MemoryBackend):
         norms = np.linalg.norm(mats, axis=1)
         norms[norms == 0] = 1e-9
         sims = (mats @ query) / (norms * qnorm)
-        order = np.argsort(-sims)[:limit]
+        # the best ``limit``, a tie broken by memory id: rows come in storage
+        # order, which two builds of one store (a restore, a bulk import) need
+        # not share
+        best = np.arange(len(rows))
+        if len(rows) > limit:
+            cut = np.partition(-sims, limit - 1)[limit - 1]
+            best = np.flatnonzero(-sims <= cut)
+        order = sorted(best, key=lambda i: (-sims[i], rows[i]["id"]))[:limit]
         return [(_row_to_memory(rows[i]), float(sims[i])) for i in order]
 
     def vector_search(
@@ -1404,7 +1411,7 @@ class LocalBackend(MemoryBackend):
             "bm25(memories_fts) AS rank_score "
             "FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid "
             f"WHERE memories_fts MATCH ? AND {clause} AND {cat_clause} "
-            f"AND {entity_clause} ORDER BY rank_score LIMIT ?"
+            f"AND {entity_clause} ORDER BY rank_score, m.id LIMIT ?"
         )
         with self._lock:
             rows = self._db.execute(
@@ -1466,7 +1473,7 @@ class LocalBackend(MemoryBackend):
         clause, params = _scope_clause(scope)
         with self._lock:
             rows = self._db.execute(
-                f"SELECT * FROM topics WHERE {clause} ORDER BY normalized LIMIT ?",
+                f"SELECT * FROM topics WHERE {clause} ORDER BY normalized, id LIMIT ?",
                 (*params, limit),
             ).fetchall()
         return [self._row_to_topic(row) for row in rows]
@@ -1691,22 +1698,6 @@ class LocalBackend(MemoryBackend):
             )
             self._db.commit()
         return relation
-
-    def list_topic_relations(self, scope: Scope) -> list[TopicRelation]:
-        clause, params = _scope_clause(Scope(user_id=scope.user_id))
-        with self._lock:
-            rows = self._db.execute(
-                f"SELECT * FROM topic_relations WHERE {clause} ORDER BY created_at",
-                params,
-            ).fetchall()
-        return [
-            TopicRelation(
-                id=row["id"], broader_topic_id=row["broader_topic_id"],
-                narrower_topic_id=row["narrower_topic_id"], user_id=row["user_id"],
-                provenance=row["provenance"], created_at=row["created_at"],
-            )
-            for row in rows
-        ]
 
     # -- tags as topic entities ----------------------------------------------
     # A tag is an entity of type ``TOPIC_TYPE``, one per namespace (``user_id``
@@ -2289,7 +2280,7 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             rows = self._db.execute(
                 f"SELECT * FROM relations WHERE {clause} AND invalid_at IS NULL "
-                "ORDER BY created_at DESC LIMIT ?",
+                "ORDER BY created_at DESC, id LIMIT ?",
                 (*params, limit),
             ).fetchall()
         return [self._row_to_relation(r) for r in rows]
@@ -2301,7 +2292,7 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             rows = self._db.execute(
                 f"SELECT * FROM relations WHERE invalid_at IS NULL AND "
-                f"(subject IN ({placeholders}) OR object IN ({placeholders}))",
+                f"(subject IN ({placeholders}) OR object IN ({placeholders})) ORDER BY id",
                 (*entity_ids, *entity_ids),
             ).fetchall()
         return [self._row_to_relation(r) for r in rows]
@@ -2313,7 +2304,7 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             rows = self._db.execute(
                 f"SELECT * FROM entity_proposals WHERE status != 'confirmed' AND "
-                f"(entity_a IN ({placeholders}) OR entity_b IN ({placeholders}))",
+                f"(entity_a IN ({placeholders}) OR entity_b IN ({placeholders})) ORDER BY id",
                 (*entity_ids, *entity_ids),
             ).fetchall()
         return [self._row_to_proposal(r) for r in rows]
@@ -2325,7 +2316,7 @@ class LocalBackend(MemoryBackend):
             rows = self._db.execute(
                 f"SELECT id, embedding FROM memories WHERE {clause} "
                 "AND embedding IS NOT NULL AND invalid_at IS NULL "
-                "ORDER BY updated_at DESC LIMIT ?",
+                "ORDER BY updated_at DESC, id LIMIT ?",
                 (*params, limit),
             ).fetchall()
         return [
@@ -2451,7 +2442,7 @@ class LocalBackend(MemoryBackend):
             rows = self._db.execute(
                 f"SELECT {_MEMORY_COLS} FROM memories WHERE {owner} AND id != ? "
                 f"AND invalid_at IS NULL AND {same} AND created_at BETWEEN ? AND ? "
-                "ORDER BY created_at DESC LIMIT ?",
+                "ORDER BY created_at DESC, id LIMIT ?",
                 (*([] if memory.user_id is None else [memory.user_id]), memory.id, *params,
                  (at - window).isoformat(timespec="seconds"),
                  (at + window).isoformat(timespec="seconds"), limit),
@@ -2528,7 +2519,7 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             rows = self._db.execute(
                 f"SELECT * FROM entities WHERE normalized = ? AND merged_into IS NULL "
-                f"AND {_kind_clause('named')} AND {clause} ORDER BY updated_at DESC",
+                f"AND {_kind_clause('named')} AND {clause} ORDER BY updated_at DESC, id",
                 (normalized.strip().lower(), *params),
             ).fetchall()
         return [self._row_to_entity(r) for r in rows]
@@ -2555,7 +2546,7 @@ class LocalBackend(MemoryBackend):
             # a name finds named things: a tag is never what a save or a
             # question names (``topic_entity`` finds tags)
             f"AND {_kind_clause('named', 'e.')} "
-            f"AND {scope_clause} ORDER BY e.updated_at DESC LIMIT ?"
+            f"AND {scope_clause} ORDER BY e.updated_at DESC, e.id LIMIT ?"
         )
         with self._lock:
             rows = self._db.execute(
@@ -2572,7 +2563,7 @@ class LocalBackend(MemoryBackend):
                     f"AND {scope_clause} AND EXISTS ("
                     "SELECT 1 FROM json_each(e.metadata, '$.aliases') alias "
                     f"WHERE lower(trim(CAST(alias.value AS TEXT))) IN ({placeholders})"
-                    ") ORDER BY e.updated_at DESC LIMIT ?",
+                    ") ORDER BY e.updated_at DESC, e.id LIMIT ?",
                     (*scope_params, *names, limit),
                 ).fetchall()
         return [self._row_to_entity(row) for row in rows]
@@ -2720,7 +2711,7 @@ class LocalBackend(MemoryBackend):
             clause += " AND merged_into IS NULL"
         with self._lock:
             rows = self._db.execute(
-                f"SELECT * FROM entities WHERE {clause} ORDER BY updated_at DESC LIMIT ?",
+                f"SELECT * FROM entities WHERE {clause} ORDER BY updated_at DESC, id LIMIT ?",
                 (*params, limit),
             ).fetchall()
         return [self._row_to_entity(r) for r in rows]
@@ -2765,7 +2756,7 @@ class LocalBackend(MemoryBackend):
                 f"SELECT DISTINCT {', '.join('m.' + c.strip() for c in _MEMORY_COLS.split(','))} "
                 "FROM entity_mentions em JOIN memories m ON m.id = em.memory_id "
                 f"WHERE em.entity_id = ?{active_clause} AND {scope_clause} "
-                "ORDER BY m.updated_at DESC LIMIT ?",
+                "ORDER BY m.updated_at DESC, m.id LIMIT ?",
                 (entity_id, *scope_params, limit),
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
@@ -2818,7 +2809,8 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             rows = self._db.execute(
                 "SELECT e.* FROM entity_mentions em JOIN entities e ON e.id = em.entity_id "
-                f"WHERE em.memory_id = ? AND e.merged_into IS NULL AND {_kind_clause(kind, 'e.')}",
+                f"WHERE em.memory_id = ? AND e.merged_into IS NULL AND {_kind_clause(kind, 'e.')} "
+                "ORDER BY em.created_at, em.id",
                 (memory_id,),
             ).fetchall()
         # distinct by id (a memory can mention an entity under several surfaces)
@@ -2842,7 +2834,8 @@ class LocalBackend(MemoryBackend):
                     "SELECT em.memory_id AS mentioned_in, e.* FROM entity_mentions em "
                     "JOIN entities e ON e.id = em.entity_id "
                     f"WHERE em.memory_id IN ({','.join('?' * len(chunk))}) "
-                    f"AND e.merged_into IS NULL AND {_kind_clause(kind, 'e.')}",
+                    f"AND e.merged_into IS NULL AND {_kind_clause(kind, 'e.')} "
+                    "ORDER BY em.created_at, em.id",
                     chunk,
                 ).fetchall()
             for r in rows:  # distinct by memory and entity, as entities_of_memory
@@ -2883,15 +2876,6 @@ class LocalBackend(MemoryBackend):
                 ).fetchall()
             out.update(row["id"] for row in rows)
         return out
-
-    def touch_entity(self, entity_id: str) -> None:
-        with self._lock:
-            self._db.execute(
-                "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
-                "WHERE id = ?",
-                (utcnow(), entity_id),
-            )
-            self._db.commit()
 
     def delete_entity(self, entity_id: str) -> bool:
         """Remove an entity and everything that points at it, for good.
@@ -3246,7 +3230,7 @@ class LocalBackend(MemoryBackend):
             rows = self._db.execute(
                 "SELECT entity_id, user_id, name, entity_type, reason, retired_at "
                 f"FROM retired_entities WHERE {clause} "
-                "ORDER BY retired_at DESC, name LIMIT ?",
+                "ORDER BY retired_at DESC, name, entity_id LIMIT ?",
                 (*params, limit),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -3388,7 +3372,7 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             rows = self._db.execute(
                 f"SELECT * FROM entity_proposals WHERE {where} "
-                "ORDER BY created_at DESC LIMIT ?",
+                "ORDER BY created_at DESC, id LIMIT ?",
                 (*params, limit),
             ).fetchall()
         return [self._row_to_proposal(r) for r in rows]

@@ -118,7 +118,8 @@ class MemoryBackend(ABC):
         offset: int = 0,
         categories: list[str] | None = None,
         entity_id: str | None = None,
-    ) -> list[Memory]: ...
+    ) -> list[Memory]:
+        """Memories in scope, newest first (``updated_at``, a tie by memory id)."""
 
     def update_proposal_judgement(
         self, proposal_id: str, *, confidence: float, reason: str | None,
@@ -268,7 +269,8 @@ class MemoryBackend(ABC):
         categories: list[str] | None = None,
         entity_id: str | None = None,
     ) -> list[tuple[Memory, float]]:
-        """Cosine similarity over stored vectors (same embedding model only)."""
+        """Cosine similarity over stored vectors (same embedding model only),
+        best first, a tie by memory id."""
 
     @abstractmethod
     def keyword_search(
@@ -280,7 +282,7 @@ class MemoryBackend(ABC):
         categories: list[str] | None = None,
         entity_id: str | None = None,
     ) -> list[tuple[Memory, float]]:
-        """Full-text (BM25) search. Higher score = better."""
+        """Full-text (BM25) search. Higher score = better, a tie by memory id."""
 
     def native_search(
         self, query: str, scope: Scope, limit: int = 20
@@ -345,9 +347,6 @@ class MemoryBackend(ABC):
 
     def add_topic_relation(self, relation: TopicRelation) -> TopicRelation:
         return relation
-
-    def list_topic_relations(self, scope: Scope) -> list[TopicRelation]:
-        return []
 
     # -- tags as topic entities --------------------------------------------
     # A tag is an entity of type ``models.TOPIC_TYPE``, one per user and
@@ -513,10 +512,12 @@ class MemoryBackend(ABC):
         self, entity_id: str, limit: int = 10, *, include_invalid: bool = False,
         scope: Scope | None = None,
     ) -> list[Memory]:
-        """Memories that mention this entity, newest first. Active evidence is
-        the default. ``scope`` keeps to the memories of that user, agent and
-        run (a field None matches any) before ``limit`` counts, so a run's
-        memories of an entity other runs mention far more are still read."""
+        """Memories that mention this entity, newest first (``updated_at``, a
+        tie by memory id, so memories of one time read alike in every build of
+        a store). Active evidence is the default. ``scope`` keeps to the
+        memories of that user, agent and run (a field None matches any) before
+        ``limit`` counts, so a run's memories of an entity other runs mention
+        far more are still read."""
         return []
 
     def count_entity_memories(self, entity_id: str) -> int:
@@ -554,10 +555,6 @@ class MemoryBackend(ABC):
             if entity is not None and entity.entity_type == TOPIC_TYPE:
                 out.add(entity_id)
         return out
-
-    def touch_entity(self, entity_id: str) -> None:
-        """Mark an entity hub stale after its evidence changes."""
-        return None
 
     def merge_entities(self, keep_id: str, merge_id: str) -> bool:
         """Fold ``merge_id`` into ``keep_id`` (repoint mentions, mark merged).

@@ -29,7 +29,6 @@ class _Recording(HashEmbedder):
 @pytest.fixture
 def store():
     s = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=_Recording())
-    s.config.retrieval.relational_fusion = "linked"
     yield s
     s.close()
 

@@ -17,7 +17,7 @@ indexes and organization layered on top.
 | **Memory** | One distilled, self-contained fact/event/statement. Bi-temporal. | `memories` table | extraction + reconciliation |
 | **Entity** | A stable referent hub with aliases, a derived description, and linked evidence. | `entities` + `entity_mentions` | entity linking on save; description on first use |
 | **Relation** | A typed edge between two entities (`Ada -works_on-> Helios`). | `relations` table | relation extraction on save |
-| **Topic** | A scoped classification and filter, with optional parent/child hierarchy. | `topics` + `memory_topics` + `topic_relations` | extraction, user, or abstraction |
+| **Tag** | A classification and filter: an entity of type `topic`, one per user and name, mentioned by every memory filed under it. | `entities` + `entity_mentions`; the `categories` column and the `topics`/`memory_topics` filter index; `topic_relations` for optional parents | extraction, user, or abstraction |
 
 Two important properties of a **Memory**:
 
@@ -97,7 +97,9 @@ question:
    version and part links are followed (directed and weighted, one link deep by
    default), and every candidate, the text ranking's and the linked entities'
    best, is ordered by how well it states the property asked times how strongly
-   it is about the entity named.
+   it is about the entity named. With Jev, the decision model then judges the
+   first 20 in one call, and a question whose answer is a set gets one more call
+   (see architecture.md, read path).
 
 3. **Filters** — an optional `categories` (tag) filter and a `since`/`until` date
    window. An empty query with just a tag or date *browses* instead of ranking.
@@ -141,12 +143,15 @@ Entities are **extracted, disambiguated, and typed.**
   The same data is available through **`GET /api/v1/entities`** and
   `/api/v1/relations`.
 
-## Topics: indexed classification, not identity
+## Tags: topic entities
 
-Public APIs still call the topic list `categories` for compatibility. Internally, topics are
-canonical scoped rows linked to memories through an indexed many-to-many table. They never
-enter entity disambiguation: `health` is a classification, while `Jonas` may refer to several
-people.
+Public APIs still call a memory's tags `categories`. Each tag is an entity of type `topic`,
+one per user and normalized name, and every memory filed under it mentions it. The
+`categories` column and the legacy `topics`/`memory_topics` index, which the filters read,
+are written from the same tags. Two tags merge through the tag question (each shown with
+its 10 most recent memories); a tag and a named thing of the same name ("bildy" and the
+product Bildy) through the entity pair question. A tag is never a hub and never what a
+search is about.
 
 - The **Tags** tab in the dashboard's Upkeep area lists topics A-to-Z with counts and
   supports rename, combine, and delete operations.
@@ -157,10 +162,12 @@ people.
   `liver health`. The parent is not copied onto the child memories. Filtering by `health`
   expands through the hierarchy at query time. It is off by default and meant for
   browsing: a filter that names the specific tag retrieves better than its parent.
-- Entity structure decides which extracted names are hubs, files a part under the project
-  or product it keeps appearing with, and reads a shared name through that home. It is
-  computed from mentions and relations and deletes nothing; a removed name is retired and
-  can be restored under Upkeep > Archive.
+- Entity structure: whether a name is a hub is computed when asked, from its type, its
+  memories and relations and the name screen's verdict. The structure pass records each
+  part's home (a stated `part_of` relation, or the judge's answer that it is a version or
+  a part of another entity; appearing in the same memories gives none) and merges names
+  that are the same thing under the same home. It deletes nothing; a removed name is
+  retired and can be restored under Upkeep > Archive.
 - Consolidation merges memories that record the same fact more than once. Grouping is
   geometric over the stored vectors; the merge itself is judged by an LLM and written to
   preserve every detail. Originals are superseded, never deleted. Word-for-word duplicates
@@ -174,15 +181,15 @@ people.
             │
         episodes               ← immutable source of truth
             │
-     topic links              ← indexed cross-cutting filters and hierarchy
+     tags (topic entities)    ← cross-cutting filters, optional hierarchy
 ```
 
 - **Memories** are the atoms; **episodes** are what they came from.
 - **Entities + relations** are where retrieval intelligence lives: they turn a
   bag of facts into a graph you can traverse, which is the only thing that makes
   multi-hop questions answerable.
-- **Topics** cut across memories as indexed filters; hierarchy provides abstraction without copying labels.
-- Synthetic topic parents are an optional map on top, not places
+- **Tags** cut across memories as filters; hierarchy provides abstraction without copying labels.
+- Synthetic tag parents are an optional map on top, off by default, not places
   facts live.
 
 ## Keeping it manageable
@@ -199,7 +206,6 @@ people.
   are free).
 - Use **Upkeep > Tags** and conservative "Suggest merges" to keep the
   classification vocabulary clean; prefer specific topics.
-  runs on a schedule, so it spends no tokens unasked.
 - Nothing the system does destroys data: forgetting is invalidation, and every
   mutation is in `memory_events`.
 
@@ -212,7 +218,7 @@ people.
 | Hybrid retrieval (vector + BM25 + recency/importance) | real |
 | Entity extraction + conservative disambiguation + merge proposals | real |
 | Typed relations + the linked search | real |
-| Normalized topics, hierarchy expansion, canonicalization | real (abstraction opt-in) |
+| Tags as topic entities, hierarchy expansion, canonicalization | real (abstraction opt-in) |
 | Entity types (person/project/place/…) + typing backfill | real |
 | Memory-type-driven decay (episodic fades, procedural persists) | real |
 | Unified Upkeep area: what needs you, entity hubs with their relations, tags, and the archive of what was removed | real |

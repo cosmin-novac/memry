@@ -163,7 +163,7 @@ def test_categories_count_topic_entities_by_their_active_mentions(tagged):
     ]
     assert tagged.categories(user_id="ada", run_id="r1") == [
         {"category": "travel", "count": 1}, {"category": "work", "count": 1}]
-    assert tagged.direct_categories(user_id="bob") == [{"category": "work", "count": 1}]
+    assert tagged.categories(user_id="bob") == [{"category": "work", "count": 1}]
 
 
 def test_the_vocabulary_offered_to_extraction_is_the_same_as_before(tagged):
@@ -525,7 +525,6 @@ def test_a_topic_folded_the_wrong_way_round_still_leaves_the_named_thing(tagged)
 
 # ------------------------------------------------------------------- search
 def test_masking_reads_names_as_it_but_leaves_tags_as_written(tagged):
-    tagged.config.retrieval.relational_fusion = "linked"
     memory_id = tagged.add("spent 34 euros on groceries at Lidl", user_id="ada",
                            infer=False, categories=["groceries"]).actions[0].memory_id
     lidl = tagged.backend.insert_entity(Entity(
@@ -563,7 +562,6 @@ def test_a_topic_never_seeds_the_linked_search(tagged, monkeypatch):
     from memry import store as store_module
     from memry.intelligence.structure import is_hub
 
-    tagged.config.retrieval.relational_fusion = "linked"
     ada = tagged.backend.insert_entity(Entity(
         name="Ada", normalized="ada", entity_type="person", user_id="ada"))
     for text in ("Ada likes pasta", "Ada likes sushi", "Bob hates olives"):
@@ -1688,10 +1686,9 @@ def test_an_open_pair_of_a_thing_and_its_tag_never_draws_the_tags_memories(
     and every question naming the thing read up to FAMILY_SCAN of the tag's
     memories. A tag is never what the linked search is about, so no link
     reaches it, as none makes it a seed."""
-    from memry.intelligence.graph_retrieval import LINKED_RELATION, activation_paths
+    from memry.intelligence.graph_retrieval import activation_paths
     from memry.models import MergeProposal
 
-    tagged.config.retrieval.relational_fusion = "linked"
     scope = Scope(user_id="ada")
     thing = tagged.backend.insert_entity(Entity(
         name="Groceries", normalized="groceries", entity_type="concept", user_id="ada"))
@@ -1707,7 +1704,7 @@ def test_an_open_pair_of_a_thing_and_its_tag_never_draws_the_tags_memories(
         entity_a=thing.id, entity_b=tag.id, user_id="ada", confidence=0.5,
         reason="not yet compared"))
     assert tagged._is_hub(thing.id)
-    act, _ = activation_paths(tagged.backend, [thing.id], depth=1, relation=LINKED_RELATION)
+    act, _ = activation_paths(tagged.backend, [thing.id], depth=1)
     assert act == {thing.id: 1.0}
 
     read: list[str] = []

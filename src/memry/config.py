@@ -104,11 +104,12 @@ class DecisionConfig(BaseModel):
     #: model); gpt-5-mini scored below the baseline, so for it and for any
     #: unmeasured model the setting is refused.
     rerank: bool | None = None
-    #: How many of the hybrid candidates to judge.
+    #: How many of the first candidates to judge: the linked search's order,
+    #: or the text ranking's where it did not run.
     rerank_pool: int = 20
     #: How much the relevance judgement counts against the hybrid rank. The
-    #: hybrid rank carries recency, decay, anchors and relation hops, so
-    #: replacing it outright loses more than the judgement adds.
+    #: hybrid rank carries recency and decay, so replacing it outright loses
+    #: more than the judgement adds.
     rerank_weight: float = 0.35
     #: Below this, a candidate is treated as a clear non-answer and pushed to
     #: the back whatever its hybrid rank.

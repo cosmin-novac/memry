@@ -4,10 +4,10 @@ Experiments (see evals) showed pure hybrid retrieval scores a flat zero on
 multi-hop questions - "what tool does Ada use?" is answered by a memory that
 names neither "Ada" nor "tool", so no embedder can find it. Following the links
 from the query's entities does find it: the "linked" search
-(``store._search_linked``) walks them directed and weighted (``activation``),
-takes the memories of the entities they reach as candidates, and scores each by
-how well it states the property asked times how strongly it is about the entity
-the query names (``aboutness``).
+(``store._search_linked``) walks them directed and weighted
+(``activation_paths``), takes the memories of the entities they reach as
+candidates, and scores each by how well it states the property asked times how
+strongly it is about the entity the query names (``aboutness``).
 """
 
 from __future__ import annotations
@@ -115,7 +115,10 @@ UP_KIND = 0.8
 DOWN_KIND = 0.7
 UP_PART = 0.5
 DOWN_PART = 0.7
-RELATION = 0.9
+#: A relation carries little of what is true of an entity: Ada works on Project
+#: X, but "Project X is written in Rust" says nothing about Ada. Its memories are
+#: still candidates (the tools Ada uses are among Project X's), at this weight.
+LINKED_RELATION = 0.5
 #: Extra factor for a step down after a step up: a sibling.
 TURN = 0.25
 #: Activation under this is not followed further.
@@ -176,34 +179,29 @@ def links_of(backend: MemoryBackend, entity_ids: list[str]) -> list[Link]:
     return links
 
 
-def _steps(link: Link, node: str, relation: float = RELATION):
+def _steps(link: Link, node: str):
     """(other end, factor, step up, step down) for following ``link`` from ``node``."""
     if node not in (link.child, link.parent):
         return
     other = link.parent if node == link.child else link.child
     if link.kind in ("relation", "same"):
-        yield other, (relation if link.kind == "relation" else 1.0) * link.p, False, False
+        factor = LINKED_RELATION if link.kind == "relation" else 1.0
+        yield other, factor * link.p, False, False
     elif node == link.child:
         yield other, (UP_KIND if link.kind == "kind" else UP_PART) * link.p, True, False
     else:
         yield other, (DOWN_KIND if link.kind == "kind" else DOWN_PART) * link.p, False, True
 
 
-def activation(
-    backend: MemoryBackend, seeds: list[str], *, depth: int = 2, relation: float = RELATION,
-) -> dict[str, float]:
-    """How strongly each entity near the seeds bears on a query about the
-    seeds: 1.0 for a seed, the product of the factors along the best path for
-    the rest."""
-    return activation_paths(backend, seeds, depth=depth, relation=relation)[0]
-
-
 def activation_paths(
-    backend: MemoryBackend, seeds: list[str], *, depth: int = 2, relation: float = RELATION,
+    backend: MemoryBackend, seeds: list[str], *, depth: int = 1,
 ) -> tuple[dict[str, float], set[str]]:
-    """``activation``, and the entities whose best path took a step up (the
-    thing or the whole a seed belongs to, and siblings through them): what is
-    true of those holds for a seed only where the seed says nothing else."""
+    """How strongly each entity within ``depth`` links of the seeds bears on a
+    query about the seeds (1.0 for a seed, the product of the factors along
+    the best path for the rest), and the entities whose best path took a step
+    up (the thing or the whole a seed belongs to, and siblings through them):
+    what is true of those holds for a seed only where the seed says nothing
+    else."""
     best: dict[str, float] = {seed: 1.0 for seed in seeds}
     up: set[str] = set()
     # A path is a state as well as a place: whether it has gone up to a thing
@@ -217,7 +215,7 @@ def activation_paths(
         reached: dict[tuple[str, bool], float] = {}
         for (node, went_up), act in frontier.items():
             for link in links:
-                for other, factor, step_up, step_down in _steps(link, node, relation):
+                for other, factor, step_up, step_down in _steps(link, node):
                     if step_down and went_up:
                         factor *= TURN
                     value = act * factor
@@ -229,7 +227,10 @@ def activation_paths(
             if value > seen.get(state, 0.0):
                 seen[state] = value
                 frontier[state] = value
-                if value > best.get(state[0], 0.0):
+                strongest = best.get(state[0], 0.0)
+                # of two paths as strong, the one without a step up counts,
+                # whichever was found first
+                if value > strongest or (value == strongest and not state[1]):
                     best[state[0]] = value
                     if state[1]:
                         up.add(state[0])
@@ -248,10 +249,6 @@ def activation_paths(
 # it take place?" is closest to "It takes place in Lisbon", the forum's memory,
 # which the 2024 edition inherits. See the PhD notes, relative-retrieval.
 
-#: A relation carries little of what is true of an entity: Ada works on Project
-#: X, but "Project X is written in Rust" says nothing about Ada. Its memories are
-#: still candidates (the tools Ada uses are among Project X's), at this weight.
-LINKED_RELATION = 0.5
 #: Entities linked at least this strongly have their memories that best state
 #: the property asked searched as well: ``FAMILY_TOP`` of them each, chosen
 #: among their ``FAMILY_SCAN`` newest.
@@ -268,7 +265,7 @@ NO_ENTITY = LOW
 _POSSESSIVE = "(?:'s|\u2019s)?"
 
 
-#: Judging (``store._judge_in_rounds``). A question whose answer is one memory
+#: Judging (``store._judge_ranking``). A question whose answer is one memory
 #: is answered from the first call: reading on while nothing scored 0.5 (Jev:
 #: answers 0.54 to 0.86, non-answers 0.02 to 0.13) found nothing 5 of 5 times
 #: it ran. One that needs several (SET_BAR on its "needs several memories"
@@ -299,7 +296,7 @@ def set_members(judged: dict[str, float]) -> set[str]:
     the top tier: the scores split in two where they separate best on a log
     scale (Otsu's threshold), the upper group is kept while it stands at
     least twice above the lower, and split again. Scores with no such split
-    are all members or all noise, by ``MEMBER_FLOOR`` (a first round can hold
+    are all members or all noise, by ``MEMBER_FLOOR`` (a first call can hold
     nothing but the set: 20 of 21 test drives)."""
     import math
 

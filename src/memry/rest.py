@@ -1842,7 +1842,7 @@ async function loadEntities(){
   const active=showAllNames?names:names.filter(entity=>entity.hub);
   document.getElementById('entcount').innerHTML=esc(active.length+(showAllNames?' names':' hubs')
     +' of '+names.length+' names, '+relations.length+' relations')
-    +' <button class="act" onclick="toggleAllNames()" title="A name is a hub once it is a person, organization, project, product or place, or two memories mention it, or a relation involves it.">'
+    +' <button class="act" onclick="toggleAllNames()" title="A name is a hub when the name screen called it a named thing, or it is a person, organization, project, product or place, or, without a verdict from the screen, two memories mention it. A name the screen called a value or a role is not.">'
     +(showAllNames?'hubs only':'show every name')+'</button>';
   const byType={};
   active.forEach(entity=>(byType[entity.entity_type||'untyped']??=[]).push(entity));
@@ -3037,10 +3037,10 @@ def create_app(
                 # MEMRY_TAG_ABSTRACTION or the CLI, not a switch in the dashboard.
                 entry(
                     "structure", "Entity structure",
-                    "Works out which names are hubs, files parts under the "
-                    "project, product or organization they keep appearing with, "
-                    "and merges names that are the same thing under the same "
-                    "home. Nothing is deleted.",
+                    "Records where each part belongs (a stated part-of relation, "
+                    "or the judge's answer that it is a version or a part of "
+                    "another entity) and merges names that are the same thing "
+                    "under the same home. Nothing is deleted.",
                     interval_days=every, needs_llm=False,
                 ),
                 entry(
@@ -3660,11 +3660,11 @@ def create_app(
         await mcp_app(scope, receive, send)
 
     async def _maintenance_scheduler() -> None:
-        """Periodic per-namespace upkeep: entity self-healing, consolidation,
-        durability scoring and optional tag abstraction, each on its own
-        interval. Last-run times are persisted (backend meta) so restarts don't
-        re-run, and per-cycle work is capped so a many-account server spreads
-        LLM cost across cycles. The passes themselves live in
+        """Periodic per-namespace upkeep: entity self-healing, consolidation
+        and, where configured, durability scoring and tag abstraction, each on
+        its own interval. Last-run times are persisted (backend meta) so
+        restarts don't re-run, and per-cycle work is capped so a many-account
+        server spreads LLM cost across cycles. The passes themselves live in
         ``MemoryStore.run_upkeep_cycle`` so the dashboard's "run now" and the
         tests exercise the same code.
         """

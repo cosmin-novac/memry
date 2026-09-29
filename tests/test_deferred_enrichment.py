@@ -103,8 +103,9 @@ def test_worker_batch_limit_preserves_independent_pending_records(tmp_path):
         facts_response(fact("Fact two")), _audit(),
     ])
     store = _store(str(tmp_path / "memry.db"), llm)
-    for number in ("one", "two", "three"):
-        store.add_deferred(f"Fact {number}", user_id=number)
+    for second, number in enumerate(("one", "two", "three")):  # the oldest go first
+        store.add_deferred(f"Fact {number}", user_id=number,
+                           created_at=f"2026-09-01T09:00:0{second}+00:00")
 
     outcome = store.process_pending_enrichments(limit=2)
 
@@ -219,11 +220,13 @@ def test_lost_context_labels_are_restored_from_the_saves(tmp_path):
         _audit(),
     ])
     store = _store(str(tmp_path / "memry.db"), llm)
-    store.add_deferred("Kitchen: new sockets, tiles on Friday.", user_id="ada", run_id="r1",
-                       metadata={"context": "kitchen renovation"})
-    store.add_deferred("I like green tea.", user_id="ada", run_id="r2")
-    for pending in store.backend.list_pending_memories(limit=10):
-        store.distill(pending.id)
+    saves = [
+        store.add_deferred("Kitchen: new sockets, tiles on Friday.", user_id="ada",
+                           run_id="r1", metadata={"context": "kitchen renovation"}),
+        store.add_deferred("I like green tea.", user_id="ada", run_id="r2"),
+    ]
+    for save in saves:  # in the order the answers are scripted
+        store.distill(save.actions[0].memory_id)
     for memory in store.get_all(user_id="ada"):  # as distilled before the fix
         store.backend.update_memory(
             memory.id, metadata={k: v for k, v in memory.metadata.items() if k != "context"},

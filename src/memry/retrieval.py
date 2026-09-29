@@ -110,5 +110,7 @@ def hybrid_search(
         signals.update({"fused": norm_fused, "recency": rec, "importance": imp})
         results.append(SearchResult(memory=memory, score=final, signals=signals))
 
+    # A tie keeps the order the lists were fused in: the vector ranking's, then
+    # the keyword ranking's, each ordered by score and then memory id.
     results.sort(key=lambda r: r.score, reverse=True)
     return results[:limit]

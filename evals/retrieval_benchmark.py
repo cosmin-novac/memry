@@ -15,6 +15,9 @@ Findings that shaped the code:
   - typed-relation 2-hop is exact and scale-stable (1.00), PPR is a robust
     relation-free fallback (~0.90) but must never be used for direct lookups.
 
+Memry has since replaced the typed-relation walk with the linked search, which
+``relative_retrieval_benchmark.py`` measures on these families as well.
+
 Run:  python evals/retrieval_benchmark.py        # hash embeddings, offline
       OPENAI_API_KEY=sk-... python evals/retrieval_benchmark.py   # real embeddings
 """

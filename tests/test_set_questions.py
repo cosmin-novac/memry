@@ -21,7 +21,7 @@ from memry.models import EntityMention, Memory
 from memry.providers.llm import NoneLLM
 from memry.store import MemoryStore
 
-from test_graph_retrieval import _KindEmbedder, _RoundJudge, _entity
+from test_graph_retrieval import _CallJudge, _KindEmbedder, _entity
 
 ROOT = Path(__file__).resolve().parent.parent
 PRICED = "The Carmodel{i} is priced at {n} euros."
@@ -29,8 +29,8 @@ QUOTED = "Dealer quote: the Carmodel{i} costs {n} euros."
 QUESTION = "Which car is priced lowest?"
 
 
-class _Batches(_RoundJudge):
-    """``_RoundJudge`` that keeps the memories of each call, as it read them."""
+class _Batches(_CallJudge):
+    """``_CallJudge`` that keeps the memories of each call, as it read them."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -50,10 +50,11 @@ def store():
     s.close()
 
 
-def _add(store, text, tags=(), entities=(), run_id=None):
+def _add(store, text, tags=(), entities=(), run_id=None, memory_id=None):
     memory = store.backend.insert_memory(
-        Memory(content=text, user_id="ada", run_id=run_id,
-               embedding_model=store.embedder.model_id, categories=list(tags)),
+        Memory(**({"id": memory_id} if memory_id else {}), content=text, user_id="ada",
+               run_id=run_id, embedding_model=store.embedder.model_id,
+               categories=list(tags)),
         embedding=store.embedder.embed([text])[0])
     for entity in entities:
         store.backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
@@ -88,6 +89,47 @@ def _set_judge():
                     scores={"is priced at": 0.12, "Dealer quote": 0.12})
 
 
+class _Meta(_CallJudge):
+    """``_CallJudge`` that keeps what each call asked beside the memories."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.meta: list[dict[str, str]] = []
+
+    def decide(self, state, questions):
+        self.meta.append({key: q.instructions for key, q in questions.items()
+                          if not key.startswith("m")})
+        return super().decide(state, questions)
+
+
+@pytest.mark.parametrize("several, calls", [(0.5, 2), (0.4999, 1)])
+def test_a_set_question_is_told_by_the_calibrated_question_at_its_bar(store, several, calls):
+    """The first call asks, beside the memories, whether "The question needs
+    several memories to be answered, such as a comparison, a list or a
+    total", and a question at ``SET_BAR`` (0.5) or more on it gets the second
+    call. Calibrated on 30 questions, 14 whose answer is a set and 16 with one
+    answer: 13 of the 14 scored 0.73 to 0.90 and all 16 scored 0.09 to 0.47.
+    The measurement is in the PhD repo, papers/memry-field-studies:
+    findings/relative-retrieval-and-rounds.md (section 4) and
+    notes/scenario-registry.md (R-83)."""
+    from memry.intelligence.graph_retrieval import SET_BAR
+
+    assert SET_BAR == 0.5
+    _prices(store)
+    store.config.retrieval.set_pool = 10
+    store.decider = judge = _Meta(specific=0.9, several=several,
+                                  scores={"is priced at": 0.12, "Dealer quote": 0.12})
+    store.search(QUESTION, user_id="ada", limit=5)
+    assert judge.calls == calls
+    assert judge.meta[0] == {
+        "property": "The question asks for one particular property or fact of it, not "
+                    "for everything about it.",
+        "several": "The question needs several memories to be answered, such as a "
+                   "comparison, a list or a total.",
+    }
+    assert judge.meta[1:] == [{}] * (calls - 1)  # the second call judges memories only
+
+
 def test_a_set_whose_members_share_a_topic_takes_two_calls_and_every_member(store):
     """The first 20 judged are the prices the question's words find; they
     share the topic "car prices", so the second call judges the ten dealer
@@ -106,7 +148,7 @@ def test_a_set_whose_members_share_a_topic_takes_two_calls_and_every_member(stor
     members = [r for r in results if r.signals.get("member")]
     assert {r.memory.id for r in members} == {m.id for m in priced + quoted}
     assert {m.id for m in quoted} <= {r.memory.id for r in results}  # outside the first 20
-    assert results[0].signals["rounds"] == 2 and results[0].signals["pool"] == 10
+    assert results[0].signals["calls"] == 2 and results[0].signals["pool"] == 10
     assert all(r.signals["judged"] for r in members)
 
 
@@ -250,13 +292,19 @@ def test_a_set_whose_first_share_no_topic_reads_the_memories_nearest_its_members
     verbatim): the second call judges the unjudged memories nearest the
     members the first call found, by vector, not the ranking past the first
     20. Here those are the ten dealer quotes, which no word of the question
-    matches and which the ranking does not reach next."""
+    matches and which the ranking does not reach next: every memory is as
+    near the question as every other (``_PriceEmbedder``), so past the 20 its
+    words find the ranking goes by memory id, and the quotes' come last."""
     store.embedder = _PriceEmbedder()
-    priced = [_add(store, PRICED.format(i=i, n=14000 + 900 * i)) for i in range(20)]
+    ids = (f"m{n:03d}" for n in range(100))
+    priced = [_add(store, PRICED.format(i=i, n=14000 + 900 * i), memory_id=next(ids))
+              for i in range(20)]
     for i in range(30):
-        _add(store, f"Insurance for the Carmodel{i} would be {300 + 20 * i} a year.")
-        _add(store, f"Ada test drove the Carmodel{i} on a rainy day.")
-    quoted = [_add(store, QUOTED.format(i=i, n=14000 + 900 * i)) for i in range(20, 30)]
+        _add(store, f"Insurance for the Carmodel{i} would be {300 + 20 * i} a year.",
+             memory_id=next(ids))
+        _add(store, f"Ada test drove the Carmodel{i} on a rainy day.", memory_id=next(ids))
+    quoted = [_add(store, QUOTED.format(i=i, n=14000 + 900 * i), memory_id=next(ids))
+              for i in range(20, 30)]
     store.config.retrieval.set_pool = 10
     ranking = [r.memory.content for r in
                store.search(QUESTION, user_id="ada", limit=40, relational=False)]
@@ -271,7 +319,7 @@ def test_a_set_whose_first_share_no_topic_reads_the_memories_nearest_its_members
     assert set(judge.batches[1]) == quotes
     members = {r.memory.id for r in results if r.signals.get("member")}
     assert members == {m.id for m in priced + quoted}
-    assert results[0].signals["rounds"] == 2 and results[0].signals["pool"] == 10
+    assert results[0].signals["calls"] == 2 and results[0].signals["pool"] == 10
 
 
 def test_a_topic_smaller_than_the_budget_is_filled_from_the_nearest_to_the_members(store):
@@ -315,7 +363,7 @@ def test_a_set_question_about_a_named_thing_pools_by_topic_too(store):
     assert all(text.startswith("it sells") for text in judge.batches[0] + judge.batches[1])
     members = {r.memory.id for r in results if r.signals.get("member")}
     assert members == {m.id for m in sold}
-    assert results[0].signals["about"] == 1.0 and results[0].signals["rounds"] == 2
+    assert results[0].signals["about"] == 1.0 and results[0].signals["calls"] == 2
 
 
 def test_a_one_answer_question_makes_one_call_even_when_nothing_answers(store):
@@ -323,7 +371,7 @@ def test_a_one_answer_question_makes_one_call_even_when_nothing_answers(store):
     store.decider = judge = _Batches(specific=0.9, several=0.1, scores={})
     results = store.search("How much is the Carmodel99 priced at?", user_id="ada", limit=5)
     assert judge.calls == 1  # nothing scores 0.5, and no second call
-    assert results[0].signals["rounds"] == 1 and results[0].signals["pool"] == 0
+    assert results[0].signals["calls"] == 1 and results[0].signals["pool"] == 0
     assert not any(r.signals.get("member") for r in results)
 
 
@@ -395,7 +443,7 @@ def test_a_question_naming_a_hub_is_ordered_by_the_judgement_as_before(store):
 
 
 # --------------------------------------------------------------- re-ranking
-class _Reranker(_RoundJudge):
+class _Reranker(_CallJudge):
     """A provider that re-ranks by default and counts the questions it gets."""
 
     may_rerank = reranks_by_default = True

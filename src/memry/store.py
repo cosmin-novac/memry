@@ -63,7 +63,6 @@ from .intelligence.graph_retrieval import (
     FAMILY_MIN,
     FAMILY_SCAN,
     FAMILY_TOP,
-    LINKED_RELATION,
     SET_BAR,
     SET_RESULT_CAP,
     SET_SCAN,
@@ -1530,17 +1529,17 @@ class MemoryStore:
     def _rerank(self, query: str, results: list[SearchResult]) -> list[SearchResult]:
         """Let a relevance judgement adjust the hybrid order, not replace it.
 
-        Hybrid ranking matches wording and carries recency, decayed importance,
-        entity anchors and relation hops with it. Ordering purely by "does this
-        text answer the question" measured worse than doing nothing, because it
-        throws all of that away. Blending keeps it and adds what wording alone
-        cannot see, and a floor lets an obvious non-answer be pushed back
-        however well it matched.
+        Hybrid ranking matches wording and carries recency and decayed
+        importance with it. Ordering purely by "does this text answer the
+        question" measured worse than doing nothing, because it throws all of
+        that away. Blending keeps it and adds what wording alone cannot see,
+        and a floor lets an obvious non-answer be pushed back however well it
+        matched.
 
         One call covers the whole shortlist. A provider that abstains or fails
         leaves the order exactly as it found it. It runs only where the linked
-        search did not (no result carries its "about"): after the linked search
-        its own order stands, judged or not.
+        search neither ordered nor judged the results (none carries "about" or
+        "judged"): after the linked search its own order stands.
         """
         cfg = self.config.decision
         if not self._reranks():
@@ -1567,8 +1566,9 @@ class MemoryStore:
     ) -> list[SearchResult]:
         """Score each candidate by how well it states the property asked
         (similarity of the question and the memory with the names of the
-        entities the links reach replaced by "it") to the power ``relational_sharpness``, times how
-        strongly it is about the entity the query names (``aboutness``). The
+        entities the links reach replaced by "it") to the power
+        ``relational_sharpness``, times how strongly it is about the entity the
+        query names (``aboutness``), a tie by memory id. The
         links are followed directed and weighted, ``relational_depth`` deep
         (``graph_retrieval.activation_paths``). The candidates are the text
         ranking's and, for every entity linked at ``FAMILY_MIN`` or more, the
@@ -1578,13 +1578,13 @@ class MemoryStore:
         candidates, as a tag is never a seed. A query naming no hub keeps the
         text ranking; with "jev" it is judged, and one with one answer or
         about everything is ordered by the re-rank blend of the judgement and
-        that ranking (``_judge_in_rounds``).
+        that ranking (``_judge_ranking``).
 
         With ``relational_relevance = "jev"`` (or "auto" with a provider that
         re-ranks, ``relevance_mode``) the decision provider then judges
         whether each of the first ``decision.rerank_pool`` answers the
         question, and that replaces the similarity for them
-        (``_judge_in_rounds``). An answer from a thing the query's entity
+        (``_judge_ranking``). An answer from a thing the query's entity
         belongs to then counts only as far as none of the entity's own
         memories answers (a version's own change wins). Both count to the
         power of P(the question asks for one property): on "Show everything
@@ -1601,10 +1601,9 @@ class MemoryStore:
         judges = self.relevance_mode() == "jev"
         if not seeds:
             if judges:
-                return self._judge_in_rounds(query, results, scope, include_invalid)
+                return self._judge_ranking(query, results, scope, include_invalid)
             return results
-        act, above = activation_paths(self.backend, seeds, depth=cfg.relational_depth,
-                                      relation=LINKED_RELATION)
+        act, above = activation_paths(self.backend, seeds, depth=cfg.relational_depth)
         names = [n for seed in seeds for n in self.backend.entity_aliases(seed)]
         question = mask_names(query, names)
         if first_person:
@@ -1620,6 +1619,7 @@ class MemoryStore:
             members = self.backend.entity_memories(
                 entity_id, limit=FAMILY_SCAN, include_invalid=include_invalid, scope=scope)
             vectors = self._property_vectors([m.id for m in members])
+            # a tie keeps the order read: the newest first, then by memory id
             for memory in sorted(members,
                                  key=lambda m: -_similarity(asked, vectors.get(m.id)))[:FAMILY_TOP]:
                 pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
@@ -1631,15 +1631,16 @@ class MemoryStore:
             result.signals = {**result.signals, "property": round(relevance, 4),
                               "about": round(about, 3)}
             scored.append((relevance ** cfg.relational_sharpness * about, result.score, result))
-        scored.sort(key=lambda item: (-item[0], -item[1]))
+        # a tie in both scores by memory id, not by the order the pool was filled in
+        scored.sort(key=lambda item: (-item[0], -item[1], item[2].memory.id))
         ranked = [result for _, _, result in scored]
         if not judges:
             return ranked
-        return self._judge_in_rounds(question if len(seeds) == 1 else query, ranked, scope,
-                                     include_invalid, link={"act": act, "above": above,
-                                                            "seeds": set(seeds),
-                                                            "entities": entities,
-                                                            "asked": asked})
+        return self._judge_ranking(question if len(seeds) == 1 else query, ranked, scope,
+                                   include_invalid, link={"act": act, "above": above,
+                                                          "seeds": set(seeds),
+                                                          "entities": entities,
+                                                          "asked": asked})
 
     def _asked_vector(self, question: str) -> np.ndarray:
         """The question's vector as the property comparison reads it: cut to
@@ -1671,7 +1672,7 @@ class MemoryStore:
                       aboutness([act.get(e.id) for e in entities[mid]]))
                 for mid in memory_ids}
 
-    def _judge_in_rounds(
+    def _judge_ranking(
         self, question: str, ranked: list[SearchResult], scope: Scope, include_invalid: bool,
         link: dict | None = None,
     ) -> list[SearchResult]:
@@ -1683,7 +1684,7 @@ class MemoryStore:
           groceries?"): one more call judges up to ``retrieval.set_pool``
           memories more (``_set_pool``), and the members of the set
           (``set_members`` over both calls' scores) come first.
-        The "rounds" signal says how many calls were made (1 or 2), "pool" how
+        The "calls" signal says how many calls were made (1 or 2), "pool" how
         many memories the second judged.
         ``link`` carries the linked search's activation: then "it" stands for
         each memory's own entity, aboutness weighs the order and a thing's
@@ -1749,7 +1750,7 @@ class MemoryStore:
             return ranked
         found: dict[str, SearchResult] = {r.memory.id: r for r in ranked}
         extra: list[SearchResult] = []
-        rounds, pooled = 1, 0
+        calls, pooled = 1, 0
 
         members: set[str] = set()
         several_asked = specific >= 0.5 and several >= SET_BAR
@@ -1767,7 +1768,7 @@ class MemoryStore:
                         found[result.memory.id] = result
                         extra.append(result)
                 got, _, _ = judge(batch, False)
-                rounds, pooled = 2, len(batch)
+                calls, pooled = 2, len(batch)
                 judged.update(got)
             members = set_members(judged)
         # What is true of the thing a seed belongs to holds for the seed only
@@ -1789,7 +1790,7 @@ class MemoryStore:
                 result.signals = {**result.signals, "about": round(about, 3)}
             result.signals = {**result.signals, "judged": round(value ** specific, 4),
                               "specific": round(specific, 4), "several": round(several, 4),
-                              "rounds": rounds, "pool": pooled,
+                              "calls": calls, "pool": pooled,
                               **({"member": True} if mid in members else {})}
             order.append((mid not in members, -(value ** specific) * about, result))
         if not link and not several_asked:
@@ -1840,17 +1841,17 @@ class MemoryStore:
         how many of the first carry the topic over how many memories the topic
         has in the scope searched: a small topic most of them share counts
         most. The best are taken, a tie at the cut by the property ranking,
-        over the tied candidates the newest first as many as places are left
-        and ``SET_TIE_MARGIN`` more (a tie of hundreds, one topic's share, is
-        not scored whole). Measured on
-        the dense world's set questions, those held 85 to 100% of each set
-        within 100 candidates.
+        over the tied candidates the newest first (then by memory id) as many
+        as places are left and ``SET_TIE_MARGIN`` more (a tie of hundreds, one
+        topic's share, is not scored whole). Measured on the dense world's set
+        questions, those held 85 to 100% of each set within 100 candidates.
 
         Where the topics give fewer than the budget (the first share none: an
         untagged store, memories saved with ``infer=False`` or imported
         verbatim), the rest are the unjudged memories nearest the ``members``
-        found in the first call (``_nearest_unjudged``): measured, those held
-        76 to 100% of the rest of a set, the ranking past the first 29 to 36%.
+        found in the first call (``_nearest_unjudged``). Measured on four sets
+        (R-84), the 40 nearest the members by memory vector held 41 to 100% of
+        the rest of a set, the next 40 of the ranking 29 to 36%.
         Only with no member to start from is the ranking past the first taken.
         Either way the batch is ordered as the linked search orders (the
         property similarity to ``asked``, to the power
@@ -1890,8 +1891,10 @@ class MemoryStore:
         order: dict[str, float] = {}
         batch: list[SearchResult] = []
         if walk:
-            # by the share, then the newest first: a key that costs nothing
-            best = sorted(walk, key=lambda mid: memories[mid].updated_at or "", reverse=True)
+            # by the share, then the newest first, then by memory id: a key
+            # that costs nothing (each sort keeps the order of the one before)
+            best = sorted(walk)
+            best.sort(key=lambda mid: memories[mid].updated_at or "", reverse=True)
             best.sort(key=lambda mid: -round(walk[mid], 9))
             edge = round(walk[best[min(budget, len(best)) - 1]], 9)
             # the candidates: all above the cut, and of those tied at it the
@@ -2215,8 +2218,9 @@ class MemoryStore:
         """Category histogram over active memories, largest count first.
 
         Each tag is a topic entity, counted by the active memories that
-        mention it. Counts are direct: synthetic parent tags are off, and a
-        parent no longer rolls up the memories of the tags under it."""
+        mention it. Counts are direct: a synthetic parent does not roll up the
+        memories of the tags under it, so tag abstraction, which reads this,
+        never sees a parent of its own making as a tag."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         indexed = self.backend.topic_mention_counts(scope)
         if indexed is not None:
@@ -2297,20 +2301,6 @@ class MemoryStore:
             if name not in chosen:
                 chosen.append(name)
         return chosen
-
-    def direct_categories(
-        self, *, user_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Histogram over tags attached straight to memories, no parent rollup.
-
-        Abstraction must read this: if a system-generated parent appeared in
-        its own input, the next run would cluster ``liver health`` and
-        ``weekly gym`` into ``health`` and the useful level would decay one run
-        at a time. ``categories()`` counts the same way now, since topic
-        entities carry no hierarchy; this stays the name abstraction reads.
-        """
-        direct = self.backend.topic_mention_counts(Scope(user_id=user_id))
-        return direct if direct is not None else self.categories(user_id=user_id)
 
     def get_all(
         self,
@@ -3442,7 +3432,7 @@ class MemoryStore:
         if not self.llm.available:
             summary["skipped"] = "no LLM configured"
             return summary
-        histogram = self.direct_categories(user_id=user_id)
+        histogram = self.categories(user_id=user_id)
         if len(histogram) < cfg.min_tags:
             summary["skipped"] = f"only {len(histogram)} tags (< {cfg.min_tags})"
             self._stamp_tag_run(user_id)

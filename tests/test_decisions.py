@@ -659,7 +659,7 @@ def _store_with(decider, **decision):
 
 def test_rerank_blends_with_the_hybrid_order_rather_than_replacing_it():
     """Ordering purely by relevance measured worse than doing nothing: the
-    hybrid rank carries recency, decay, anchors and relation hops with it."""
+    hybrid rank carries recency and decayed importance with it."""
     results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
                for i in range(4)]
     # the model mildly prefers the last candidate; a 35% blend should not be
@@ -821,14 +821,86 @@ def test_consolidation_abstention_leaves_the_text_model_in_charge():
 # --------------------------------------------------- tag drift
 def test_tag_pairs_only_ever_add_suggestions():
     """On a labelled set this missed pairs a person would merge but never
-    proposed an unrelated one, so it belongs in front of review, not automation."""
+    proposed an unrelated one, so it belongs in front of review, not automation.
+    It is the suggest button's last pass (``MemoryStore.suggest_tag_merges``):
+    the tag names alone, every pair in one call, suggested from P(yes) 0.5.
+    It is not the question tags merge by (``identity.TAG_QUESTION``, below),
+    which reads each tag's memories."""
     from memry.intelligence.clustering import judge_tag_pairs
 
     pairs = [("work", "job"), ("food", "travel")]
-    stub = _stub(lambda k, q: Answer(0.8 if k == "t0" else 0.05, {}, 0.9, True))
+    stub = _stub(lambda k, q: Answer(0.5 if k == "t0" else 0.4999, {}, 0.9, True))
     assert judge_tag_pairs(stub, pairs) == [("work", "job")]
+    assert stub.last_state == "Tags used to file memories in a personal long-term memory store."
+    assert {key: q.instructions for key, q in stub.last_questions.items()} == {
+        "t0": 'Do the tags "work" and "job" mean the same thing and should be merged into one?',
+        "t1": 'Do the tags "food" and "travel" mean the same thing and should be merged '
+              "into one?",
+    }
     assert judge_tag_pairs(NoneDecider(), pairs) == []
     assert judge_tag_pairs(stub, []) == []
+
+
+def test_tags_merge_by_the_measured_question_at_its_measured_bar():
+    """Two tags merge when the judge, shown each with its 10 most recent
+    memories, in both orders, puts P(same subject) at Jev's
+    ``tag_merge_probability``, 0.55, or more. Measured on the 379 candidate
+    pairs of a real 417-tag store, labelled by hand (16 one subject, 41
+    borderline, 322 two subjects), two runs: no pair of two subjects scored
+    above 0.46, and from 0.55 the judge merged 7-9 of the 16 and nothing
+    wrong. The measurement is in the PhD repo, papers/memry-field-studies:
+    findings/identity-obvious-merges.md ("Tags on the same store") with
+    data/tag_pairs_jev.json, and for the wording
+    findings/identity-threshold-by-evidence.md ("Tag question") and
+    notes/scenario-registry.md, T-4 and T-8."""
+    from memry.intelligence.identity import TAG_EXAMPLES, TAG_QUESTION, judged_tag_merges
+    from memry.providers.decisions import Answers, JevDecider
+
+    assert JevDecider.tag_merge_probability == 0.55
+    assert TAG_EXAMPLES == 10
+    assert TAG_QUESTION.instructions == (
+        "Two tags that file memories in one person's memory store, each shown with "
+        "memories filed under it. Do tag A and tag B name the same subject, so that "
+        "every memory filed under one belongs under the other?")
+    assert TAG_QUESTION.criteria == {
+        "same": "One subject: the same tag written differently (spelling, typo, format, "
+                "singular or plural, abbreviation, acronym, translation, legal form or web "
+                "domain) or a synonym, and the memories under both are about that subject.",
+        "different": "Two subjects: unrelated subjects, related subjects, or one tag is a "
+                     "part, kind, aspect or detail of the other, as \"insurance\" and "
+                     "\"insurance contract\".",
+    }
+
+    class Recording(NoneDecider):
+        name, available, calibrated = "stub", True, True
+        tag_merge_probability = JevDecider.tag_merge_probability
+
+        def __init__(self, same):
+            self.same, self.asked = same, []
+
+        def decide(self, state, questions):
+            self.asked.append((state, questions))
+            return Answers({"tag": Answer("same", {"same": self.same,
+                                                   "different": 1 - self.same}, 0.9, True)})
+
+    tags = [{"category": "quality assurance", "count": 12}, {"category": "qa", "count": 11}]
+    recent = {tag: [f"{tag} memory {i}" for i in range(12)] for tag in ("qa", "quality assurance")}
+    for same, merged in ((0.55, True), (0.5499, False)):
+        judge = Recording(same)
+        groups = judged_tag_merges(judge, tags, {}, recent.get)
+        assert [group["variants"] for group in groups] == ([["qa", "quality assurance"]]
+                                                          if merged else [])
+        assert [questions for _, questions in judge.asked] == [{"tag": TAG_QUESTION}] * 2
+        first, second = sorted(state for state, _ in judge.asked)
+        assert first.index('TAG A: "qa" (on 11 memories)') < first.index(
+            'TAG B: "quality assurance" (on 12 memories)')
+        assert second.index('TAG A: "quality assurance" (on 12 memories)') < second.index(
+            'TAG B: "qa" (on 11 memories)')
+        for state in (first, second):  # the 10 most recent of each tag's 12
+            assert state.count("The 10 most recent memories filed under it:") == 2
+            assert "- qa memory 9" in state and "- qa memory 10" not in state
+            assert "- quality assurance memory 9" in state
+            assert "- quality assurance memory 10" not in state
 
 
 def test_rerank_cannot_be_forced_onto_a_provider_that_did_not_earn_it():

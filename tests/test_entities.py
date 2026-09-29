@@ -585,3 +585,60 @@ def test_judged_junk_is_proposed_not_removed(verbatim_store):
     )
     assert removed == 1
     assert {e.name for e in verbatim_store.entities(user_id="ada")} == {"RAG"}
+
+
+# ------------------------------------------- two things that share a name
+NOORD = "Invoice 2024-117 from Noord Legal B.V."
+LEXNOVA = "Invoice 2024-117 from LexNova GmbH"
+
+
+def test_the_extraction_prompt_names_two_things_that_share_a_name_apart():
+    """A save naming two invoices numbered 2024-117 listed one "Invoice
+    2024-117", so one entity stood for both and a Noord Legal memory later
+    joined it. With this instruction, on the 13 saves of world 3 that mention
+    the invoices, facts naming both kept them apart 6 of 6 times (1-2 of 6
+    before) and facts naming one carried the sender 23 of 23 times (0 of 14):
+    commit 973d0ca; the PhD repo's scenario registry, I-44
+    (papers/memry-field-studies/notes/scenario-registry.md, with
+    code/identity-replay/samename_test.py and
+    data/identity_context/samename_extraction.json)."""
+    from conftest import FakeLLM
+    from memry.intelligence.extraction import extract_facts
+
+    llm = FakeLLM([facts_response()])
+    extract_facts(llm, [{"role": "user", "content": "Paid both invoices 2024-117."}])
+    (system, _), = llm.calls
+    assert (
+        "When the conversation names two or more different things by the same name "
+        "(two invoices numbered 2024-117 from different senders, a \"PR #42\" in two "
+        "repositories), give each a name of its own: the shared name and what tells "
+        "them apart in the conversation (\"Invoice 2024-117 from LexNova GmbH\"). Use "
+        "that name for the thing in every fact, also in a fact that names only one."
+    ) in " ".join(system.split())
+
+
+def test_two_things_that_share_a_name_stay_two_entities_through_a_save(store, fake_llm):
+    """Named apart by extraction, the two invoices are two entities: the fact
+    naming both mentions each, and a fact naming one joins that one."""
+    fake_llm.queue(facts_response(
+        fact(f"{NOORD} and {LEXNOVA} were both paid in March.",
+             entities=[{"name": NOORD, "type": "document"},
+                       {"name": LEXNOVA, "type": "document"}]),
+        fact(f"{LEXNOVA} was 1,200 euros.", entities=[{"name": LEXNOVA, "type": "document"}]),
+    ))
+    # the second fact's name is one the store now has: it is judged the same
+    fake_llm.queue(identity("same", 0.97, "the same invoice"))
+    store.add("Paid both invoices numbered 2024-117 in March, Noord Legal's and "
+              "LexNova's; LexNova's was 1,200 euros.", user_id="ada")
+
+    entities = {e.name: e for e in store.entities(user_id="ada")}
+    assert set(entities) == {NOORD, LEXNOVA}
+    assert all(e.entity_type == "document" for e in entities.values())
+    memories = {name: {m.content for m in store.backend.entity_memories(e.id)}
+                for name, e in entities.items()}
+    assert memories == {
+        NOORD: {f"{NOORD} and {LEXNOVA} were both paid in March."},
+        LEXNOVA: {f"{NOORD} and {LEXNOVA} were both paid in March.",
+                  f"{LEXNOVA} was 1,200 euros."},
+    }
+    assert fake_llm.responses == []
