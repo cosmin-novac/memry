@@ -29,8 +29,9 @@ stored.
 
 A memory superseded as an update stays retrievable as history
 (``models.HISTORY_KINDS``): search returns it after the memory that replaced
-it, and the answer context shows until when it held ("[until 2026-04-13]",
-``context.until_note``); hiding such memories lost questions about the past.
+it, with the turns it rests on as its evidence, and the one rendering for a
+model shows until when it held ("(said 2 March 2026) [until 13 April 2026]",
+``context.memory_line``); hiding such memories lost questions about the past.
 One superseded as a contradiction leaves search, as before.
 
 SAME, MORE, CHANGED and WRONG act only at or above the decision provider's

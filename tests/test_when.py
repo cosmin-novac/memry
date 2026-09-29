@@ -505,7 +505,7 @@ def test_search_filters_on_occurrence_time(when_store):
 def test_context_line_says_when_the_fact_happens(when_store):
     store, _ids = when_store
     context = store.reconstruct_context("Lisbon offsite", user_id="u")
-    assert "(happened 2026-10-03)" in context.text or "(happens 2026-10-03)" in context.text
+    assert "[happened 2026-10-03] " in context.text or "[happens 2026-10-03] " in context.text
 
 
 # ----------------------------------------------------------- REST and the MCP

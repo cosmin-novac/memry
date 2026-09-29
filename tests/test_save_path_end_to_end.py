@@ -748,8 +748,10 @@ class WorldLLM(LLM):
         offered = _json_after(ENTITY_OFFER, user) or []
         owner = OWNER_OFFER.search(user)
         plans = []
-        # one line per message: a deferred save's group is read together
+        # one numbered line per message ("[1] user: ..."): a deferred save's
+        # group is read together
         for line in transcript.splitlines():
+            line = re.sub(r"^\[\d+\] ", "", line)
             message = line.split(": ", 1)[1] if line.startswith("user: ") else line
             planned = self.world.messages.get(message)
             # else a memory's own text, read again after an edit

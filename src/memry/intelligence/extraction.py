@@ -65,10 +65,11 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
                         },
                     },
                     "when": WHEN_FACT_SCHEMA,
+                    "sources": {"type": "array", "items": {"type": "integer"}},
                 },
                 "required": [
                     "content", "type", "importance", "categories", "entities",
-                    "relations", "when",
+                    "relations", "when", "sources",
                 ],
                 "additionalProperties": False,
             },
@@ -105,9 +106,14 @@ Extract:
   them apart in the conversation ("Invoice 2024-117 from LexNova GmbH"). Use
   that name for the thing in every fact, also in a fact that names only one.
 - procedural learnings (how the user wants things done)
+- what people did, went to, saw, made, bought or were given, with its specifics (who, where,
+  when, the name or title of the thing), and how they felt about it in their own words
+- what one person told, advised, praised or wished the other, when it says something about
+  either of them or their lives
 
 Do NOT extract:
-- small talk, transient context ("I'm tired today"), or assistant boilerplate
+- greetings, thanks and pleasantries that tell nothing ("Hi!", "Thanks!", "That's great!"),
+  or assistant boilerplate
 - secrets or credentials (passwords, API keys, tokens) - never store these
 - information the user asked to keep out of memory
 
@@ -124,8 +130,12 @@ Rules:
 - prefer several precise facts over one compressed summary
 - what a person shares (a photo, file or link, shown with its description) is
   part of what they said: extract a fact from it when it tells something about
-  them or their life, naming who shared it ("Ada knitted a scarf for her
-  sister; she shared a photo of it")
+  them or their life, naming who shared it and what it shows, including any
+  text on it ("Ada knitted a scarf for her sister; she shared a photo of it,
+  a red scarf with white stars")
+- keep the words that carry the specifics: names and titles of things (a book,
+  a song, a pet, a place, a brand), the exact feeling or reaction a person names
+  ("relieved", "overwhelmed"), and quoted text (a sign, a motto, a line someone said)
 - when several inputs describe one plan, decision, or design, preserve their
   shared subject and any stated why/how relationship in every affected fact;
   never turn related statements into context-free standalone instructions
@@ -170,12 +180,16 @@ Rules:
   when the fact actually states a link between two entities; return [] otherwise.
   These edges are what let later queries hop from one entity to another, so
   prefer the specific, durable relationship over a vague one.
+- sources: the numbers of the conversation lines the fact rests on, as the
+  conversation numbers them ("[2]" is line 2): every line whose words the fact
+  carries, and no other.
 
 Respond with JSON only: {{"facts": [{{"content": str, "type": str,
 "importance": number, "categories": [str],
 "entities": [{{"name": str, "type": str}}],
 "relations": [{{"subject": str, "predicate": str, "object": str}}],
-"when": {{"start": str|null, "end": str|null, "recurrence": str|null}}}}]}}.
+"when": {{"start": str|null, "end": str|null, "recurrence": str|null}},
+"sources": [int]}}]}}.
 Return {{"facts": []}} if nothing is worth remembering."""
 
 
@@ -191,9 +205,13 @@ CHAT_ROLES = frozenset({"user", "assistant", "system", "developer", "tool", "fun
 OWNER_PLACEHOLDER = "the user"
 
 
-def _transcript(messages: list[dict[str, str]]) -> str:
-    """One line per message: its speaker, then what it says. A message with a
-    ``name`` is spoken by "<name> (<role>)"; any other by its role."""
+def _transcript(messages: list[dict[str, str]], *, numbered: bool = False) -> str:
+    """One line per message that says something: its speaker, then what it
+    says. A message with a ``name`` is spoken by "<name> (<role>)"; any other
+    by its role. ``numbered`` starts each with its number, "[1] " for the
+    first: the numbers a fact's ``sources`` give, which are the store's
+    episodes of the save in order (``MemoryStore.add`` keeps one episode per
+    message that says something)."""
     lines = []
     for m in messages:
         content = (m.get("content") or "").strip()
@@ -202,7 +220,8 @@ def _transcript(messages: list[dict[str, str]]) -> str:
         role = m.get("role", "user")
         name = " ".join(str(m.get("name") or "").split())[:80]
         speaker = f"{name} ({role})" if name else role
-        lines.append(f"{speaker}: {content}")
+        number = f"[{len(lines) + 1}] " if numbered else ""
+        lines.append(f"{number}{speaker}: {content}")
     return "\n".join(lines)
 
 
@@ -261,7 +280,7 @@ def extract_facts(
     distinction it split.
     """
     now = now or datetime.now(timezone.utc)
-    transcript = _transcript(messages)
+    transcript = _transcript(messages, numbered=True)
     if not transcript:
         return []
     # Said only when the speakers have names, so the prompt for a plain
@@ -382,7 +401,8 @@ def verify_coverage(
 
 
 def verbatim_candidates(messages: list[dict[str, str]]) -> list[CandidateFact]:
-    """Zero-LLM fallback: store each message as an episodic memory."""
+    """Zero-LLM fallback: store each message as an episodic memory, resting on
+    its own line (``sources``)."""
     out: list[CandidateFact] = []
     for m in messages:
         content = (m.get("content") or "").strip()
@@ -394,6 +414,7 @@ def verbatim_candidates(messages: list[dict[str, str]]) -> list[CandidateFact]:
                 content=content if role == "user" else f"{role}: {content}",
                 memory_type="episodic",
                 importance=0.5,
+                sources=[len(out) + 1],
             )
         )
     return out
@@ -435,9 +456,32 @@ def _parse_facts(raw: str) -> list[CandidateFact]:
                 **_parse_entities(item.get("entities", [])),
                 relations=_parse_relations(item.get("relations", [])),
                 metadata={"when": when} if when else {},
+                sources=_parse_sources(item.get("sources")),
             )
         )
     return facts
+
+
+def _parse_sources(raw: Any) -> list[int]:
+    """The line numbers a fact rests on, each once and in the order given.
+    Anything but a list of whole numbers is read as none given: an output
+    written before facts had sources, or one that does not follow the schema,
+    keeps the save's rule for a fact without them (all its episodes)."""
+    if not isinstance(raw, list):
+        return []
+    out: list[int] = []
+    for value in raw:
+        if isinstance(value, bool):
+            return []
+        if isinstance(value, str) and value.strip().isdigit():
+            value = int(value.strip())
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        if not isinstance(value, int):
+            return []
+        if value not in out:
+            out.append(value)
+    return out
 
 
 def _parse_entities(raw: Any) -> dict[str, Any]:

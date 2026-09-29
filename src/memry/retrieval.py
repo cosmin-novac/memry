@@ -35,10 +35,14 @@ def hybrid_search(
     entity_id: str | None = None,
     now: datetime | None = None,
     history: bool = False,
+    query_vector: list[float] | None = None,
 ) -> list[SearchResult]:
     """The memories in use that best match ``query``; with ``history`` also
     those superseded as an update, which held until then (``MemoryBackend.
-    vector_search``); with ``include_invalid`` every memory."""
+    vector_search``); with ``include_invalid`` every memory.
+
+    ``query_vector`` is the query's vector when the caller has it already
+    ([] for none: the words alone rank); None embeds the query here."""
     cfg = cfg or RetrievalConfig()
     now = now or datetime.now(timezone.utc)
     n = max(limit * cfg.candidate_multiplier, limit)
@@ -71,12 +75,13 @@ def hybrid_search(
         vector: list[tuple[Memory, float]] = []
         if embedder.dimensions:
             try:
-                qvec = embedder.embed([query])[0]
-                vector = backend.vector_search(
-                    qvec, embedder.model_id, scope, n,
-                    include_invalid=include_invalid, categories=categories,
-                    entity_id=entity_id, history=history,
-                )
+                qvec = embedder.embed([query])[0] if query_vector is None else query_vector
+                if qvec:
+                    vector = backend.vector_search(
+                        qvec, embedder.model_id, scope, n,
+                        include_invalid=include_invalid, categories=categories,
+                        entity_id=entity_id, history=history,
+                    )
             except Exception:
                 vector = []  # embedding service down -> degrade to keyword-only
 

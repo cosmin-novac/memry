@@ -391,10 +391,11 @@ def test_answers_are_scored_and_grouped_by_category():
     assert rows["conv-mini-1/q1"]["contains"] == 1.0
     assert rows["conv-mini-1/q2"]["f1"] == pytest.approx(0.6667, abs=1e-4)
     assert rows["conv-mini-1/q3"]["f1"] == 1.0
-    # the model saw the top memories with their session dates
+    # the model saw the top memories as Memry renders them, dated by their session
     first = llm.prompts[0]
-    assert "[2023-05-08] Maya: Hey Theo! I finally adopted a rescue greyhound" in first
-    assert first.count("\n- [") == 5  # k=5 memories
+    assert ("- Maya: Hey Theo! I finally adopted a rescue greyhound last weekend, her name is "
+            "Pepper. (said 8 May 2023)") in first
+    assert first.count(" (said ") == 5  # k=5 memories; a verbatim turn is its own evidence
     by = {r["category"]: r for r in result["tables"]["by_category"]}
     assert set(by) == {1, 2, 4, 5}
     assert by[2]["f1"] == pytest.approx(0.8571, abs=1e-4)
@@ -447,8 +448,8 @@ def test_aggregate_groups_by_category():
 
 
 class RuleLLM(LLM):
-    """Extraction keeps each line of the transcript as a fact; every other
-    question gets the answer that changes nothing."""
+    """Extraction keeps each numbered line of the transcript as a fact resting
+    on that line; every other question gets the answer that changes nothing."""
 
     name = "rule"
     available = True
@@ -460,10 +461,12 @@ class RuleLLM(LLM):
         if system.startswith("You are the long-term memory extraction system"):
             self.todays.append(re.search(r"Today's date is (\S+?)\.", system).group(1))
             transcript = user.split("Conversation:\n", 1)[1].split("\n\n", 1)[0]
+            lines = [re.match(r"\[(\d+)\] (.*)", line) for line in transcript.splitlines()]
             return json.dumps({"facts": [
-                {"content": line, "type": "episodic", "importance": 0.5, "categories": [],
-                 "entities": [], "relations": [], "when": None}
-                for line in transcript.splitlines() if line.strip()]})
+                {"content": line.group(2), "type": "episodic", "importance": 0.5,
+                 "categories": [], "entities": [], "relations": [], "when": None,
+                 "sources": [int(line.group(1))]}
+                for line in lines if line]})
         if system.startswith("You audit"):
             return json.dumps({"missing": []})
         if "decide one action" in system:
@@ -845,21 +848,37 @@ def test_mem0_prompts_are_mem0s_own():
         "62395dd312a631dfd9355026a0b69cc936018274c3198b6365b5c2a5c9bca9e0")
 
 
-def test_mem0_answer_messages_hold_dated_memories_and_the_question():
-    from memry.models import Memory
+def test_mem0_answer_messages_hold_memrys_lines_and_the_question():
+    from memry.intelligence.context import memory_lines
+    from memry.models import EvidenceTurn, Memory
 
     assert mem0_judge.locomo_time("2023-05-08T13:56:00+00:00") == "1:56 pm on 8 May, 2023"
     assert mem0_judge.locomo_time("2023-05-08T00:05:00+00:00") == "12:05 am on 8 May, 2023"
     assert mem0_judge.locomo_time("2023-05-08T12:00:00+00:00") == "12:00 pm on 8 May, 2023"
-    memories = [Memory(content='Maya adopted "Pepper".', created_at="2023-05-08T13:56:00+00:00"),
-                Memory(content="Maya ran a 5k.", created_at="2023-05-25T19:30:02+00:00")]
-    (message,) = mem0_judge.answer_messages("Who is Pepper?", memories)
+    memories = [Memory(content='Maya adopted "Pepper".', updated_at="2023-05-08T13:56:00+00:00",
+                       metadata={"when": {"start": "2023-05-06"}}),
+                Memory(content="Maya ran a 5k.", updated_at="2023-05-25T19:30:02+00:00"),
+                # kept as history: an update replaced it, and moved its updated_at
+                Memory(content="Maya lives in Denver.", created_at="2023-05-08T13:56:00+00:00",
+                       valid_from="2023-05-08T13:56:00+00:00",
+                       updated_at="2023-07-15T10:00:00+00:00",
+                       invalid_at="2023-07-15T10:00:00+00:00", superseded_by="m9")]
+    turn = EvidenceTurn(episode_id="e1", content="Her name is Pepper!", speaker="Maya",
+                        said_at="2023-05-08T13:56:00+00:00", memory_ids=[memories[0].id])
+    lines = memory_lines(memories, [turn])
+    assert lines == ['[happened 2023-05-06] Maya adopted "Pepper". (said 8 May 2023)',
+                     "Maya ran a 5k. (said 25 May 2023)",
+                     "Maya lives in Denver. (said 8 May 2023) [until 15 July 2023]",
+                     "8 May 2023: Maya: Her name is Pepper!"]
+    (message,) = mem0_judge.answer_messages("Who is Pepper?", lines)
     assert message["role"] == "system"
     text = message["content"]
     assert "{{" not in text and "Question: Who is Pepper?\n    Answer:" in text
-    listed = json.dumps(['1:56 pm on 8 May, 2023: Maya adopted "Pepper".',
-                         "7:30 pm on 25 May, 2023: Maya ran a 5k."], indent=4)
+    listed = json.dumps(lines, indent=4)
     assert f"Memories:\n\n    {listed}\n\n    Question:" in text
+    # the prompt's own text is Mem0's
+    assert text == mem0_judge._render(mem0_judge.ANSWER_PROMPT,
+                                      {"memories": listed, "question": "Who is Pepper?"})
 
 
 def test_mem0_judge_reads_the_label(monkeypatch):
@@ -919,7 +938,7 @@ def test_answering_with_mem0s_prompt_through_the_runner():
     assert row["prediction"] == "Pepper" and row["judge"] and row["answer_k"] == 3
     ((messages, _),) = chat.sent
     assert messages[0]["role"] == "system" and "Question: What name did Maya" in messages[0]["content"]
-    assert messages[0]["content"].count("on 8 May, 2023: Maya: ") >= 1
+    assert messages[0]["content"].count("(said 8 May 2023)") >= 1
     assert result["config"]["answer_prompt"] == "evals.mem0_judge:answer_messages"
     assert result["config"]["answer_model"] == "scripted-chat"
 
@@ -929,6 +948,7 @@ def test_answering_with_mem0s_prompt_through_the_runner():
 
 
 from evals import api_usage  # noqa: E402
+from memry.intelligence.context import memory_lines  # noqa: E402
 
 
 def _mock_api(request: httpx.Request) -> httpx.Response:
@@ -1151,9 +1171,48 @@ def test_rows_keep_the_memories_shown_and_the_reference_date():
     assert first["memory"].startswith("Maya: Hey Theo!") and first["turns"] == ["D1:1"]
     assert first["created_at"] == "2023-05-08T13:56:00+00:00" and "score" in first
     assert len(row["memories"]) == len(conv.turns)  # all of them, up to the search depth
-    tokens = xb.count_tokens(mem0_judge.memories_json(
-        [Memory(content=m["memory"], created_at=m["created_at"]) for m in row["memories"][:3]]))
+    tokens = xb.count_tokens(mem0_judge.memories_json(memory_lines(
+        [Memory(content=m["memory"], updated_at=m["updated_at"]) for m in row["memories"][:3]])))
     assert row["context_tokens"] == tokens
+
+
+def test_the_runners_memory_list_is_memrys_rendering_with_the_evidence():
+    """The answer prompt's memory list is what Memry's context builder renders
+    for the top k: the memories with their dates, then their source turns that
+    best match the question, as ``MemoryStore.evidence`` chooses them."""
+    class SummaryLLM(RuleLLM):
+        """A fact keeps the first words of its line: the turn says more."""
+
+        def complete(self, system, user, *, json_schema=None):
+            raw = super().complete(system, user, json_schema=json_schema)
+            if not system.startswith("You are the long-term memory extraction system"):
+                return raw
+            facts = json.loads(raw)["facts"]
+            for fact in facts:
+                fact["content"] = " ".join(fact["content"].split()[:5])
+            return json.dumps({"facts": facts})
+
+    conv = xb.load_locomo(LOCOMO)[0]
+    chat = ScriptedChat("Pepper")
+    store = MemoryStore(Config(db_path=":memory:"), llm=SummaryLLM(),
+                        embedder=HashEmbedder(128))
+    try:
+        ingested = xb.ingest(store, conv, mode="extract", unit="session", dataset="locomo")
+        question = conv.questions[0]
+        row = xb.ask(ingested, question, k=3, answer_llm=chat,
+                     answer_prompt=mem0_judge.answer_messages)
+        results = store.search(question.question, user_id=xb.BENCH_USER, limit=xb.DEPTH,
+                               evidence=False)[:3]
+        turns = store.evidence(question.question, results, user_id=xb.BENCH_USER)
+        expected = memory_lines([r.memory for r in results], turns)
+    finally:
+        store.close()
+    ((messages, _),) = chat.sent
+    assert messages == mem0_judge.answer_messages(question.question, expected)
+    assert turns and len(expected) == 3 + len(turns)
+    # the row names the turns shown
+    assert row["answers"]["3"]["evidence"] == [
+        ingested.turn_of_episode[t.episode_id] for t in turns]
 
 
 def test_mem0_f1_and_bleu1_are_mem0s():

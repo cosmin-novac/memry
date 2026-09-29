@@ -184,6 +184,11 @@ class RetrievalConfig(BaseModel):
     #: Measured, the topics' held 85 to 100% of each set within 100
     #: candidates.
     set_pool: int = 80
+    #: The memories found are shown with the source turns they rest on that
+    #: best match the query, up to this many tokens in all
+    #: (``MemoryStore.evidence``); 0 shows none. A memory is a summary, and the
+    #: turn it came from keeps what the summary left out.
+    evidence_tokens: int = 600
 
     @field_validator("relational_mode", "relational_fusion", mode="before")
     @classmethod

@@ -39,7 +39,7 @@ from .intelligence.clustering import (
     suggest_canonical_merges,
 )
 from .intelligence.consolidate import judge_group, representative, similarity_groups
-from .intelligence.context import build_context, estimate_tokens
+from .intelligence.context import build_context, estimate_tokens, fitting, turn_line
 from .intelligence.decay import (
     DURABILITY_KEY,
     decay_sweep,
@@ -119,6 +119,7 @@ from .models import (
     Entity,
     EntityMention,
     Episode,
+    EvidenceTurn,
     Memory,
     MemoryEvent,
     MemoryType,
@@ -445,6 +446,20 @@ def _across_runs(scope: Scope) -> Scope:
     return Scope(user_id=scope.user_id, agent_id=scope.agent_id)
 
 
+def _rests_on(
+    candidate: CandidateFact, line_episodes: list[list[str]] | None, episode_ids: list[str]
+) -> list[str]:
+    """The episodes a candidate fact rests on: those of the transcript lines it
+    names (``CandidateFact.sources``). A fact that names no line, or a line the
+    transcript does not have, rests on every episode of the save, as a fact
+    did before facts named their lines: a number out of range says the model
+    lost count, so none of its numbers is trusted."""
+    lines = candidate.sources
+    if not lines or not line_episodes or any(not 1 <= n <= len(line_episodes) for n in lines):
+        return episode_ids
+    return list(dict.fromkeys(e for n in lines for e in line_episodes[n - 1])) or episode_ids
+
+
 def _text_hash(text: str) -> str:
     """Identifies a property vector's masked text, to tell when it changed."""
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
@@ -538,6 +553,7 @@ class MemoryStore:
             return AddResult()
         if episodes:
             self.backend.add_episodes(episodes)
+            self._embed_episodes(episodes)
         episode_ids = [e.id for e in episodes]
 
         candidates: list[CandidateFact]
@@ -589,7 +605,8 @@ class MemoryStore:
         _keep_context(candidates, _ingestion_context(metadata))
         _with_memory_metadata(candidates, memory_metadata)
         actions = self._apply_candidates(candidates, scope, episode_ids, created_at=created_at,
-                                         messages=messages)
+                                         messages=messages,
+                                         line_episodes=[[e] for e in episode_ids])
 
         missing = self._coverage_gaps(messages, actions) if infer else []
         if missing:
@@ -794,11 +811,17 @@ class MemoryStore:
         exclude_ids: set[str] | None = None,
         created_at: str | None = None,
         messages: list[dict[str, str]] | None = None,
+        line_episodes: list[list[str]] | None = None,
     ) -> list[AddAction]:
         """Reconcile candidates into the store (shared by add and distill).
 
         ``messages`` are what the candidates were extracted from: they say
         whether an owner without a name is "the user" (``owner_name``).
+
+        ``line_episodes`` are the episodes of each transcript line, in order:
+        a candidate rests on the episodes of the lines it names
+        (``CandidateFact.sources``), and on all ``episode_ids`` when it names
+        none or a line there is not (``_rests_on``).
 
         ``exclude_ids`` keeps memories out of the similarity set: distillation
         must not reconcile facts against the verbatim memory they came from,
@@ -832,7 +855,7 @@ class MemoryStore:
                 backend=self.backend,
                 embedder=self.embedder,
                 llm=self.llm,
-                episode_ids=episode_ids,
+                episode_ids=_rests_on(candidate, line_episodes, episode_ids),
                 decider=self.decider,
                 retrieval_cfg=self.config.retrieval,
                 supersede_cfg=self.config.supersede,
@@ -1177,6 +1200,10 @@ class MemoryStore:
         ]
         if episodes:
             self.backend.add_episodes(episodes)
+            # an imported row's episode says what its memory says: one vector
+            self.backend.set_episode_vectors(
+                {episode.id: vector for (_, vector), episode in zip(accepted, episodes) if vector},
+                self.embedder.model_id)
 
         memory_ids: list[str] = []
         for (row, vector), episode in zip(accepted, episodes):
@@ -1418,6 +1445,10 @@ class MemoryStore:
                 for episode_id in memory.source_episode_ids
             )
         )
+        # a deferred save made no provider call: its episodes are embedded now
+        embedded = self.backend.episode_vectors_of(episode_ids, self.embedder.model_id)
+        self._embed_episodes([episode for episode in self.backend.episodes_by_id(
+            [e for e in episode_ids if e not in embedded]).values()])
         # What the saves asked of their memories (add_deferred): the latest
         # time and reference date given, and every memory_metadata merged.
         jobs = [memory.metadata.get(_ENRICHMENT_KEY) or {} for memory in active]
@@ -1464,6 +1495,9 @@ class MemoryStore:
             episode_ids,
             exclude_ids={memory.id for memory in active},
             created_at=created_at,
+            # one transcript line per raw memory: the episodes it rests on
+            line_episodes=[memory.source_episode_ids for memory in active
+                           if memory.content.strip()],
         )
         landed = sum(1 for action in actions if action.event != "NONE")
         new_id = next(
@@ -1533,7 +1567,12 @@ class MemoryStore:
         when_since: str | None = None,
         when_until: str | None = None,
         relational: bool = True,
+        evidence: bool = True,
     ) -> list[SearchResult]:
+        """The memories that best answer ``query``, best first. With
+        ``evidence`` each result carries the source turns it is the best
+        ranked of the results to rest on, chosen within
+        ``retrieval.evidence_tokens`` (``evidence``)."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         if entity_id:
             entity_id = self._resolve_entity_filter(entity_id)
@@ -1553,6 +1592,8 @@ class MemoryStore:
             relational and not categories and not entity_id
         )
         fetch = limit if not wide else min(max(limit * 8, 40), 500)
+        # embedded once: the ranking and the choice of evidence read it
+        query_vector = self._query_vector(query)
         # what was true until an update replaced it is searchable too, for
         # questions about the past (``_current_first`` orders it)
         results = hybrid_search(
@@ -1566,6 +1607,7 @@ class MemoryStore:
             categories=categories,
             entity_id=entity_id,
             history=True,
+            query_vector=query_vector,
         )
         # The linked search: the memories of the entities linked to the query's
         # join the ranking (multi-hop answers hybrid alone scores at zero).
@@ -1580,7 +1622,13 @@ class MemoryStore:
         # a question needing several memories returns every member found
         members = sum(1 for r in results if r.signals.get("member"))
         ranked = self._current_first(self._rerank(query, results))
-        return ranked[:max(limit, min(members, SET_RESULT_CAP))]
+        found = ranked[:max(limit, min(members, SET_RESULT_CAP))]
+        if evidence:
+            by_id = {r.memory.id: r for r in found}
+            for turn in self.evidence(query, found, user_id=user_id, agent_id=agent_id,
+                                      run_id=run_id, query_vector=query_vector):
+                by_id[turn.memory_ids[0]].evidence.append(turn)
+        return found
 
     def _current_first(self, results: list[SearchResult]) -> list[SearchResult]:
         """A memory kept as history (``models.HISTORY_KINDS``) comes right
@@ -1617,6 +1665,109 @@ class MemoryStore:
             ordered.append(result)
             placed.add(result.memory.id)
         return ordered
+
+    def _query_vector(self, query: str) -> list[float]:
+        """The query's vector, or [] with no embedder or while it is down (the
+        ranking then reads the words alone)."""
+        if not self.embedder.dimensions:
+            return []
+        try:
+            return self.embedder.embed([query])[0] or []
+        except Exception:
+            return []
+
+    def _embed_episodes(self, episodes: list[Episode]) -> None:
+        """Store each episode's vector, as a memory's is stored. Best effort:
+        without one an episode is still chosen as evidence by its words."""
+        if not episodes or not self.embedder.dimensions:
+            return
+        try:
+            vectors = self.embedder.embed([e.content for e in episodes])
+        except Exception:
+            return
+        self.backend.set_episode_vectors(
+            {e.id: v for e, v in zip(episodes, vectors) if v}, self.embedder.model_id)
+
+    def evidence(
+        self,
+        query: str,
+        results: list[SearchResult],
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        token_budget: int | None = None,
+        query_vector: list[float] | None = None,
+    ) -> list[EvidenceTurn]:
+        """The source turns of the memories found that best match the query,
+        in the order they were said: provenance, shown with the facts.
+
+        Only the episodes the results in use or kept as history rest on are
+        candidates (``Memory.source_episode_ids``): a memory an update
+        replaced, which search returns after the one that replaced it, shows
+        what was said while it held, as any memory does; one out of use
+        otherwise (``include_invalid``) shows none. Each is taken once,
+        credited to the best ranked memory resting on it; only those of the
+        scope searched; none withheld or resting under a memory removed
+        (``MemoryBackend.evidence_episodes``); none whose words a memory
+        resting on it already says whole (a verbatim save). They are taken by
+        their similarity to the query (the full-text match breaks a tie), each
+        while it fits the budget (``token_budget``, default
+        ``retrieval.evidence_tokens``; ``build_context`` counts a turn as it
+        renders it)."""
+        budget = self.config.retrieval.evidence_tokens if token_budget is None else token_budget
+        if budget <= 0 or not (query or "").strip():
+            return []
+        history = self.backend.history_ids(
+            [r.memory.id for r in results if r.memory.invalid_at is not None])
+        resting: dict[str, list[str]] = {}
+        texts: dict[str, str] = {}
+        for result in results:
+            memory = result.memory
+            if memory.invalid_at is not None and memory.id not in history:
+                continue
+            texts[memory.id] = " ".join(memory.content.casefold().split())
+            for episode_id in memory.source_episode_ids or []:
+                resting.setdefault(episode_id, []).append(memory.id)
+        if not resting:
+            return []
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        episodes = [
+            e for e in self.backend.evidence_episodes(list(resting))
+            if all(getattr(scope, f) is None or getattr(scope, f) == getattr(e, f)
+                   for f in ("user_id", "agent_id", "run_id"))
+            and not any(" ".join(e.content.casefold().split()) in texts[mid]
+                        for mid in resting[e.id])
+        ]
+        if not episodes:
+            return []
+        if query_vector is None:
+            query_vector = self._query_vector(query)
+        asked = np.asarray(query_vector, dtype=np.float32) if query_vector else None
+        vectors = (self.backend.episode_vectors_of([e.id for e in episodes],
+                                                   self.embedder.model_id)
+                   if asked is not None else {})
+        if asked is not None:
+            asked /= float(np.linalg.norm(asked)) or 1.0
+        words = self.backend.episode_keyword_scores(query, [e.id for e in episodes])
+        turns = [
+            EvidenceTurn(episode_id=e.id, content=e.content, speaker=e.role,
+                         said_at=e.created_at, memory_ids=resting[e.id],
+                         score=round(_similarity(asked, vectors.get(e.id))
+                                     if asked is not None else 0.0, 6))
+            for e in episodes
+        ]
+        order = {turn.episode_id: i for i, turn in enumerate(turns)}  # as said
+        chosen: set[str] = set()
+        used = 0
+        for turn in sorted(turns, key=lambda t: (-t.score, -words.get(t.episode_id, 0.0),
+                                                 order[t.episode_id])):
+            cost = estimate_tokens(turn_line(turn)) + 1
+            if used + cost > budget:
+                continue
+            chosen.add(turn.episode_id)
+            used += cost
+        return [turn for turn in turns if turn.episode_id in chosen]
 
     def _reranks(self) -> bool:
         """Whether the decision provider re-ranks. The setting decides where it
@@ -1678,7 +1829,8 @@ class MemoryStore:
     ) -> list[SearchResult]:
         """Score each candidate by how well it states the property asked
         (similarity of the question and the memory with the names of the
-        entities the links reach replaced by "it") to the power
+        entities the links reach replaced by "it"; a question naming several
+        hubs is compared as written, with each memory's names kept) to the power
         ``relational_sharpness``, times how strongly it is about the entity the
         query names (``aboutness``), a tie by memory id. The
         links are followed directed and weighted, ``relational_depth`` deep
@@ -1720,7 +1872,15 @@ class MemoryStore:
             return results
         act, above = activation_paths(self.backend, seeds, depth=cfg.relational_depth)
         names = [n for seed in seeds for n in self.backend.entity_aliases(seed)]
-        question = mask_names(query, names)
+        # With several hubs named, "it" could stand for any of them: masked,
+        # "Why do Ada and Kai find Mira inspiring?" reads "Why do it and it
+        # find it inspiring?", which says nothing about which of their
+        # memories answers. So the names stay, as the judge reads them
+        # (``_judge_ranking``), and every memory is compared by its ordinary
+        # vector, names kept: those naming more of the things asked about
+        # come first.
+        several = len(seeds) > 1
+        question = query if several else mask_names(query, names)
         if first_person:
             question = mask_first_person(question)
         asked = self._asked_vector(question)
@@ -1733,13 +1893,14 @@ class MemoryStore:
             # searched, kept to in SQL before the newest FAMILY_SCAN are taken
             members = self.backend.entity_memories(
                 entity_id, limit=FAMILY_SCAN, include_invalid=include_invalid, scope=scope)
-            vectors = self._property_vectors([m.id for m in members])
+            vectors = (self.backend.vectors_of([m.id for m in members], self.embedder.model_id)
+                       if several else self._property_vectors([m.id for m in members]))
             # a tie keeps the order read: the newest first, then by memory id
             for memory in sorted(members,
                                  key=lambda m: -_similarity(asked, vectors.get(m.id)))[:FAMILY_TOP]:
                 pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
         entities: dict[str, list[Entity]] = {}
-        scores = self._linked_scores(asked, list(pool), act, entities)
+        scores = self._linked_scores(asked, list(pool), act, entities, names_kept=several)
         scored = []
         for mid, result in pool.items():
             relevance, about = scores[mid]
@@ -1782,19 +1943,22 @@ class MemoryStore:
 
     def _linked_scores(
         self, asked: np.ndarray, memory_ids: list[str], act: dict[str, float],
-        entities: dict[str, list[Entity]],
+        entities: dict[str, list[Entity]], names_kept: bool = False,
     ) -> dict[str, tuple[float, float]]:
         """(property similarity to ``asked``, aboutness) of each memory, as the
         linked search scores it. Only the names the links account for are
         masked: a memory naming an entity they reach is compared by its
         property vector, any other by its ordinary one, names kept ("Lena Blum
         works on Project Ekmibo" would otherwise read "It works on it", as
-        empty as "What do I know about it?"). ``entities`` caches each memory's
+        empty as "What do I know about it?"). With ``names_kept`` (a question
+        naming several hubs, asked as written) every memory is compared by its
+        ordinary vector. ``entities`` caches each memory's
         entities and is filled in, those not cached yet read at once."""
         missing = [mid for mid in dict.fromkeys(memory_ids) if mid not in entities]
         if missing:
             entities.update(self.backend.entities_of_memories(missing))
-        reached = [mid for mid in memory_ids if any(e.id in act for e in entities[mid])]
+        reached = [] if names_kept else [
+            mid for mid in memory_ids if any(e.id in act for e in entities[mid])]
         vectors = self._property_vectors(reached)
         vectors.update(self.backend.vectors_of([mid for mid in memory_ids if mid not in vectors],
                                                self.embedder.model_id))
@@ -1891,7 +2055,8 @@ class MemoryStore:
                 asked = None
             batch = self._set_pool(ranked, size, judged, scope, include_invalid,
                                    asked=asked, act=act, entities=entities,
-                                   members=set_members(judged))
+                                   members=set_members(judged),
+                                   names_kept=bool(link) and not masking)
             if batch:
                 for result in batch:
                     if result.memory.id not in found:
@@ -1976,7 +2141,7 @@ class MemoryStore:
     def _set_pool(
         self, ranked: list[SearchResult], size: int, judged: dict[str, float], scope: Scope,
         include_invalid: bool, *, asked: np.ndarray | None, act: dict[str, float],
-        entities: dict[str, list[Entity]], members: set[str],
+        entities: dict[str, list[Entity]], members: set[str], names_kept: bool = False,
     ) -> list[SearchResult]:
         """What the second call of a question needing several memories judges:
         at most ``retrieval.set_pool`` memories not judged yet.
@@ -2012,7 +2177,8 @@ class MemoryStore:
         def linked_order(memory_ids: list[str]) -> dict[str, float]:
             if asked is None or not memory_ids:
                 return dict.fromkeys(memory_ids, 0.0)
-            scores = self._linked_scores(asked, memory_ids, act, entities)
+            scores = self._linked_scores(asked, memory_ids, act, entities,
+                                         names_kept=names_kept)
             return {mid: relevance ** sharpness * about
                     for mid, (relevance, about) in scores.items()}
 
@@ -2244,15 +2410,26 @@ class MemoryStore:
         token_budget: int = 1200,
         limit: int = 20,
     ) -> ContextResult:
+        """The memories found for ``query`` that fit ``token_budget``, rendered
+        for a model (``intelligence.context``), after a description of the
+        entities the query names. The memories that fit take the budget
+        but a share for their evidence (``retrieval.evidence_tokens``, at most
+        half of what is left), and their source turns that best match the
+        query fill that share (``evidence``)."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         results = self.search(
-            query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit
+            query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit,
+            evidence=False,
         )
         entity_text, entity_memory_ids = self._entity_context(
             scope, query, token_budget=min(300, max(80, token_budget // 4))
         )
         remaining = max(0, token_budget - estimate_tokens(entity_text))
-        memory_context = build_context(results, token_budget=remaining)
+        share = min(max(self.config.retrieval.evidence_tokens, 0), remaining // 2)
+        shown = fitting(results, remaining - share)
+        turns = self.evidence(query, shown, user_id=user_id, agent_id=agent_id,
+                              run_id=run_id, token_budget=share)
+        memory_context = build_context(shown, token_budget=remaining, evidence=turns)
         parts = [part for part in (entity_text, memory_context.text) if part]
         combined = "\n\n".join(parts)
         memory_ids = list(dict.fromkeys([*entity_memory_ids, *memory_context.memory_ids]))
@@ -2260,6 +2437,7 @@ class MemoryStore:
             text=combined,
             memory_ids=memory_ids,
             token_estimate=estimate_tokens(combined) if combined else 0,
+            episode_ids=memory_context.episode_ids,
         )
 
     def _entity_context(
@@ -5059,6 +5237,14 @@ class MemoryStore:
             rebuild(self.embedder.model_id, self.embedder.dimensions)
         for user_id in self.backend.distinct_user_ids() or [None]:
             self.refresh_property_vectors(user_id=user_id)
+        # the episodes' vectors, which evidence is chosen by (older stores had none)
+        while episodes := self.backend.episodes_to_embed(self.embedder.model_id,
+                                                         limit=batch_size):
+            vectors = self.embedder.embed([e.content for e in episodes])
+            self.backend.set_episode_vectors(
+                {e.id: v for e, v in zip(episodes, vectors)}, self.embedder.model_id)
+            if not all(vectors):
+                break  # an episode the embedder gives no vector would come back forever
         return count
 
     def stats(self) -> dict[str, Any]:

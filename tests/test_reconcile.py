@@ -98,10 +98,13 @@ def test_a_changed_value_supersedes_the_old_one_which_stays_as_history(layout):
     for question in ("How much does Tom's gym membership cost?", "$40 a month"):
         found = store.search(question, user_id=USER, limit=5)
         assert [r.memory.id for r in found] == [new.memory_id, old.memory_id]
+    # the one rendering for a model (``context.memory_line``): the old value
+    # said the day it began to hold, and held until the day of the new one
     context = store.reconstruct_context("gym membership price", user_id=USER).text
-    assert f"[semantic · {FIRST[:10]}] Tom's gym membership costs $40 a month [until " \
-           f"{LATER[:10]}]" in context
-    assert "$55 a month [until" not in context
+    assert ("- Tom's gym membership costs $55 a month (said 13 April 2026)\n"
+            "- Tom's gym membership costs $40 a month (said 2 March 2026) "
+            "[until 13 April 2026]") in context
+    assert "$55 a month (said 13 April 2026) [until" not in context
     store.close()
 
 

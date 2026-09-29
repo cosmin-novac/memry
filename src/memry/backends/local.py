@@ -45,6 +45,10 @@ from .ann import HAS_USEARCH, HnswSidecar
 from .base import MemoryBackend
 
 _SCHEMA = """
+-- withheld_at: when a memory resting on the episode was deleted for good; from
+-- then on the episode is never shown as evidence (``evidence_episodes``). The
+-- embedding is what evidence is chosen by, stored as a memory's is. Each column
+-- defaults to NULL, so a backup from before it restores.
 CREATE TABLE IF NOT EXISTS episodes (
     id TEXT PRIMARY KEY,
     content TEXT NOT NULL,
@@ -53,9 +57,22 @@ CREATE TABLE IF NOT EXISTS episodes (
     agent_id TEXT,
     run_id TEXT,
     metadata TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    withheld_at TEXT DEFAULT NULL,
+    embedding BLOB DEFAULT NULL,
+    embedding_model TEXT DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_episodes_scope ON episodes(user_id, agent_id, run_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(
+    content, content='episodes', content_rowid='rowid'
+);
+CREATE TRIGGER IF NOT EXISTS episodes_ai AFTER INSERT ON episodes BEGIN
+    INSERT INTO episodes_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
+    INSERT INTO episodes_fts(episodes_fts, rowid, content)
+    VALUES ('delete', old.rowid, old.content);
+END;
 
 CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
@@ -439,6 +456,25 @@ def _row_scope(row: sqlite3.Row) -> Scope:
     return Scope(user_id=row["user_id"], agent_id=row["agent_id"], run_id=row["run_id"])
 
 
+_EPISODE_COLS = (
+    "id, content, role, user_id, agent_id, run_id, metadata, created_at, withheld_at"
+)
+
+
+def _row_to_episode(row: sqlite3.Row) -> Episode:
+    return Episode(
+        id=row["id"],
+        content=row["content"],
+        role=row["role"],
+        user_id=row["user_id"],
+        agent_id=row["agent_id"],
+        run_id=row["run_id"],
+        metadata=json.loads(row["metadata"]),
+        created_at=row["created_at"],
+        withheld_at=row["withheld_at"],
+    )
+
+
 def _row_to_memory(row: sqlite3.Row) -> Memory:
     return Memory(
         id=row["id"],
@@ -470,7 +506,20 @@ class LocalBackend(MemoryBackend):
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
+        # an episode table from before its columns and full-text index: the
+        # columns are added first, and the index is filled once it exists
+        episode_columns = {
+            row["name"] for row in self._db.execute("PRAGMA table_info(episodes)").fetchall()
+        }
+        for column, kind in (("withheld_at", "TEXT"), ("embedding", "BLOB"),
+                             ("embedding_model", "TEXT")):
+            if episode_columns and column not in episode_columns:
+                self._db.execute(f"ALTER TABLE episodes ADD COLUMN {column} {kind} DEFAULT NULL")
+        indexed = self._db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'episodes_fts'").fetchone() is not None
         self._db.executescript(_SCHEMA)
+        if not indexed:
+            self._db.execute("INSERT INTO episodes_fts(episodes_fts) VALUES ('rebuild')")
         self._ensure_entity_description_columns()
         self._ensure_exact_topic_scopes()
         self._ensure_one_active_topic_per_name()
@@ -873,22 +922,11 @@ class LocalBackend(MemoryBackend):
         clause, params = _scope_clause(scope)
         with self._lock:
             rows = self._db.execute(
-                f"SELECT * FROM episodes WHERE {clause} ORDER BY created_at DESC, id LIMIT ?",
+                f"SELECT {_EPISODE_COLS} FROM episodes WHERE {clause} "
+                "ORDER BY created_at DESC, id LIMIT ?",
                 (*params, limit),
             ).fetchall()
-        return [
-            Episode(
-                id=r["id"],
-                content=r["content"],
-                role=r["role"],
-                user_id=r["user_id"],
-                agent_id=r["agent_id"],
-                run_id=r["run_id"],
-                metadata=json.loads(r["metadata"]),
-                created_at=r["created_at"],
-            )
-            for r in rows
-        ]
+        return [_row_to_episode(r) for r in rows]
 
     def episodes_by_id(self, episode_ids: list[str]) -> dict[str, Episode]:
         out: dict[str, Episode] = {}
@@ -897,14 +935,125 @@ class LocalBackend(MemoryBackend):
             chunk = ids[start:start + 500]
             with self._lock:
                 rows = self._db.execute(
-                    f"SELECT * FROM episodes WHERE id IN ({','.join('?' * len(chunk))})", chunk,
+                    f"SELECT {_EPISODE_COLS} FROM episodes "
+                    f"WHERE id IN ({','.join('?' * len(chunk))})", chunk,
                 ).fetchall()
             for r in rows:
-                out[r["id"]] = Episode(
-                    id=r["id"], content=r["content"], role=r["role"], user_id=r["user_id"],
-                    agent_id=r["agent_id"], run_id=r["run_id"],
-                    metadata=json.loads(r["metadata"]), created_at=r["created_at"],
-                )
+                out[r["id"]] = _row_to_episode(r)
+        return out
+
+    def set_episode_vectors(self, vectors: dict[str, list[float]], embedding_model: str) -> None:
+        rows = [(np.asarray(vector, dtype=np.float32).tobytes(), embedding_model, episode_id)
+                for episode_id, vector in vectors.items() if vector]
+        if not rows:
+            return
+        with self._lock:
+            self._db.executemany(
+                "UPDATE episodes SET embedding = ?, embedding_model = ? WHERE id = ?", rows)
+            self._db.commit()
+
+    def episode_vectors_of(
+        self, episode_ids: list[str], embedding_model: str
+    ) -> dict[str, np.ndarray]:
+        out: dict[str, np.ndarray] = {}
+        ids = list(dict.fromkeys(episode_ids))
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    f"SELECT id, embedding FROM episodes WHERE id IN ({','.join('?' * len(chunk))}) "
+                    "AND embedding IS NOT NULL AND embedding_model = ?",
+                    (*chunk, embedding_model),
+                ).fetchall()
+            out.update((r["id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows)
+        return out
+
+    def episodes_to_embed(self, embedding_model: str, *, limit: int = 1000) -> list[Episode]:
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {_EPISODE_COLS} FROM episodes "
+                "WHERE embedding_model IS NOT ? ORDER BY rowid LIMIT ?",
+                (embedding_model, limit),
+            ).fetchall()
+        return [_row_to_episode(r) for r in rows]
+
+    def episode_keyword_scores(self, query: str, episode_ids: list[str]) -> dict[str, float]:
+        tokens = _WORD_RE.findall(query)
+        ids = list(dict.fromkeys(episode_ids))
+        if not tokens or not ids:
+            return {}
+        match = " OR ".join(f'"{t}"' for t in tokens[:32])
+        out: dict[str, float] = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT e.id, bm25(episodes_fts) AS rank_score FROM episodes_fts "
+                    "JOIN episodes e ON e.rowid = episodes_fts.rowid "
+                    f"WHERE episodes_fts MATCH ? AND e.id IN ({','.join('?' * len(chunk))})",
+                    (match, *chunk),
+                ).fetchall()
+            # bm25() is lower-is-better (negative); flipped to higher-is-better
+            out.update((r["id"], -float(r["rank_score"])) for r in rows)
+        return out
+
+    def evidence_episodes(self, episode_ids: list[str]) -> list[Episode]:
+        ids = list(dict.fromkeys(episode_ids))
+        if not ids:
+            return []
+        episodes: list[tuple[int, Episode]] = []
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    f"SELECT rowid AS seq, {_EPISODE_COLS} FROM episodes "
+                    f"WHERE id IN ({','.join('?' * len(chunk))}) AND withheld_at IS NULL",
+                    chunk,
+                ).fetchall()
+            episodes.extend((r["seq"], _row_to_episode(r)) for r in rows)
+        if not episodes:
+            return []
+        # the memories resting on an episode are of the episode's own user
+        users = sorted({e.user_id for _, e in episodes if e.user_id is not None})
+        owner = " OR ".join(
+            ([f"m.user_id IN ({','.join('?' * len(users))})"] if users else [])
+            + (["m.user_id IS NULL"] if any(e.user_id is None for _, e in episodes) else []))
+        wanted = [e.id for _, e in episodes]
+        in_use: set[str] = set()
+        removed: set[str] = set()
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT j.value AS episode_id, m.invalid_at, m.superseded_by, "
+                    f"({_history_clause('m')}) AS history "
+                    "FROM memories m, json_each(m.source_episode_ids) j "
+                    f"WHERE ({owner}) AND j.value IN ({','.join('?' * len(chunk))})",
+                    (*users, *chunk),
+                ).fetchall()
+            for r in rows:
+                # a memory kept as history rests on what was said while it
+                # held: its turns are shown as a memory's in use are
+                if r["invalid_at"] is None or r["history"]:
+                    in_use.add(r["episode_id"])
+                elif r["superseded_by"] is None:
+                    removed.add(r["episode_id"])
+        shown = [(e.created_at, seq, e) for seq, e in episodes
+                 if e.id in in_use and e.id not in removed]
+        return [e for *_, e in sorted(shown, key=lambda item: (item[0], item[1]))]
+
+    def history_ids(self, memory_ids: list[str]) -> set[str]:
+        ids = list(dict.fromkeys(memory_ids))
+        out: set[str] = set()
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    f"SELECT id FROM memories WHERE id IN ({','.join('?' * len(chunk))}) "
+                    f"AND {_history_clause('memories')}",
+                    chunk,
+                ).fetchall()
+            out.update(r["id"] for r in rows)
         return out
 
     # -- memories -------------------------------------------------------
@@ -1170,8 +1319,17 @@ class LocalBackend(MemoryBackend):
                     (memory_id,),
                 ).fetchall()
             ]
+            sources = self._db.execute(
+                "SELECT source_episode_ids FROM memories WHERE id = ?", (memory_id,)).fetchone()
             cur = self._db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             if cur.rowcount:
+                # what it rested on is never shown as evidence again
+                episode_ids = json.loads(sources["source_episode_ids"] or "[]")
+                if episode_ids:
+                    self._db.execute(
+                        "UPDATE episodes SET withheld_at = ? WHERE withheld_at IS NULL "
+                        f"AND id IN ({','.join('?' * len(episode_ids))})",
+                        (utcnow(), *episode_ids))
                 self._ann_remove(memory_id)
                 self._db.execute("DELETE FROM ann_keys WHERE memory_id = ?", (memory_id,))
                 self._db.execute("DELETE FROM entity_mentions WHERE memory_id = ?", (memory_id,))

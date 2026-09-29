@@ -106,15 +106,32 @@ environment variable, CLI flag, REST option, or server option that selects it.
 
 | Record | Purpose | Lifecycle |
 |---|---|---|
-| `Episode` | Raw input captured before derived processing | Append-only source evidence. |
+| `Episode` | Raw input captured before derived processing, one per message | Append-only source evidence. Not searched on its own: it is shown as evidence of the memories found that rest on it (section 5). `withheld_at` ends that for good. |
 | `Memory` | One derived or verbatim claim | May be updated, invalidated, or superseded; hard deletion is explicit. |
 | `MemoryEvent` | Audit event for add/update/supersede/delete decisions | Append-only audit trail. |
-| Embedding and FTS row | Search representation of a memory | Derived and rebuildable. |
+| Embedding and FTS row | Search representation of a memory, and of an episode for choosing it as evidence | Derived and rebuildable (`memry reindex` embeds episodes an older store has no vector for). |
 
 A memory has content, one memory type, importance, public `categories`, compatibility
 `entities`, metadata, scope (`user_id`, `agent_id`, `run_id`), timestamps, source episode
 IDs, and validity fields (`valid_from`, `invalid_at`, `superseded_by`). The validity fields
 preserve old claims instead of pretending that the latest claim erased history.
+
+The source episode IDs are the lines a memory rests on. Extraction numbers the lines of the
+transcript it reads ("[1] Ada: ..."), one per message and so one per episode, and each fact
+it returns names the lines it rests on (`sources`). The memory is linked to the episodes of
+those lines. A fact that names no line, or a line the transcript does not have, rests on
+every episode of its save, as every fact did before facts named their lines. A verbatim
+memory rests on its own message, and a distilled fact on the raw saves of its lines. An
+update merges the sources of the memories it joins (a MORE's merged text carries those of
+the memory it replaced), and a restatement (reconcile's SAME, section 4) adds the episodes
+of the lines it rests on to the memory it restates.
+
+An episode's validity as evidence is `withheld_at`, beside a memory's `invalid_at`. It is
+set on a memory's own source episodes when that memory is deleted for good. From then on the
+episode is never shown as evidence, even of another memory resting on it, because it still
+says what was deleted. A forgotten memory (out of use with nothing in its place) withholds
+its episodes while it stays forgotten. This is checked when evidence is chosen, so bringing
+the memory back shows them again.
 
 ### Tags (backend names: categories and topics)
 
@@ -393,7 +410,9 @@ The default `save_memories(infer=true)` path is intentionally split at the safe 
    label are then sent through one extraction pass, capped at eight raw records per pass.
    Optional client `tags` are prompt hints, not grouping identifiers.
 4. The extractor sees the whole related input while still producing small atomic facts.
-   Every derived fact keeps the source episode IDs of the group and the save's context
+   The group's episodes are embedded first, since the save made no provider call. Every
+   derived fact keeps the source episode IDs of the saves whose lines it names (all of the
+   group's when it names none) and the save's context
    label (before 28066d1 the label was lost; `memry restore-context`, or
    `POST /api/v1/memories/restore-context`, puts it back from the episodes, with
    `--dry-run` / `{"dry_run": true}` to count first). On success, reconcile the
@@ -414,7 +433,8 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
 
 `store.add(...)` and the REST write route retain the synchronous workflow:
 
-1. Store raw input as episodes before inference.
+1. Store raw input as episodes before inference, one per message, each with its embedding
+   and full-text entry (an embedding failure leaves the episode to its words).
 2. With an LLM, extract small candidate memories, types, importance, topics, entities, and
    possible relations, offered the user's tags from every run. Without an LLM, store the
    input verbatim.
@@ -427,9 +447,10 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    - NEW: new information, including another occurrence of the same kind of event (two
      yoga classes stay two). The fact is added.
    - SAME: it says nothing the memory does not. No second copy is stored: the save is
-     recorded on the memory as evidence. Its episodes join the memory's
-     `source_episode_ids`, and a NONE event at the save's time says when it was last said.
-     The memory's `updated_at` does not move.
+     recorded on the memory as evidence. Its episodes (those of the lines the fact rests
+     on) join the memory's `source_episode_ids`, so they are among the turns a search
+     shows with it (section 5), and a NONE event at the save's time says when it was last
+     said. The memory's `updated_at` does not move.
    - MORE: it adds detail to a memory that stays true. The text model writes one text of
      both, stored as a new memory dated at the save (in the save's run, with the old one's
      tags and sources), which supersedes the old one as an update. Its names are read as an
@@ -509,7 +530,11 @@ For a normal text query:
    linked strongly enough (read within the user, agent and run searched before the newest
    500 are taken, as the set pool's topic scan is), and orders every candidate by how well
    it states the property asked (its property vector, entity names read as "it") times how
-   strongly it is about the entity named. The keyword search's best match keeps a place
+   strongly it is about the entity named. A question naming several hubs is compared as
+   written with each memory's ordinary vector, names kept, as the judge reads it: masked,
+   "Why do Ada and Kai find Mira inspiring?" reads "Why do it and it find it
+   inspiring?", which cannot tell the memories about Mira from anything one of them finds
+   inspiring. The keyword search's best match keeps a place
    among the first 20 (`decision.rerank_pool`) whatever its score: an identifier the
    question names ("invoice 2024-117") is seen by the words alone. This is the only link
    mode; the earlier "typed"
@@ -541,8 +566,37 @@ For a normal text query:
    thing between them (the version it builds on). The same blend, with a call of its own,
    re-ranks a search that was neither ordered by the linked search nor judged (a tag or
    entity filter, or `relational=False`).
-7. Context reconstruction may prepend a bounded, lazily refreshed entity description and
-   then packs exact memories into the remaining token budget.
+7. The memories found are returned with their evidence (`MemoryStore.evidence`). This is
+   provenance, not a second search. The candidates are the source episodes of the results
+   in use or kept as history (below), each once, credited to the best ranked memory
+   resting on it. A memory kept as history shows its turns under the same rules as any
+   memory: they are what was said while it held, each with its date, which a model reads
+   beside the memory's "[until <date>]". A memory out of use otherwise (a contradiction,
+   asked for with `include_invalid`) shows none. Only episodes of the scope searched count:
+   a search of a run finds a memory another run's save restated there (section 4) and
+   shows that run's turns only. None is withheld, none rests under a forgotten memory, and
+   none says no more than a memory resting on it (a verbatim save). They are taken by the
+   similarity of their vector to the query, with their full-text match breaking a tie. Each
+   is taken while it fits `retrieval.evidence_tokens` (600 by default; 0 shows none), and
+   they are returned in the order they were said. A result carries the turns credited to
+   it (`SearchResult.evidence`).
+8. Context reconstruction may prepend a bounded, lazily refreshed entity description. It
+   then packs exact memories into the remaining token budget, leaving a share for their
+   evidence (`retrieval.evidence_tokens`, at most half of what is left). The evidence of
+   the memories that fit fills that share. One function renders memories for a model
+   (`intelligence.context.memory_lines`), used by `reconstruct_context` and the
+   benchmark runner alike. A memory reads "[happened 2023-05-07] <text> (said 8 May
+   2023)": when the thing it tells happens (`metadata["when"]`, where known), and the day
+   it was recorded (its last change). Both are labelled so that a model does not take the
+   day a fact was written down for the day it happened. A memory kept as history reads
+   "<text> (said 8 May 2023) [until 15 July 2023]": said the day it began to hold
+   (`valid_from`, since taking it out of use moved its `updated_at`), and held until the
+   day the memory that replaced it was said, written as that memory's "said" date is. The
+   memories are followed by their evidence turns in the order they were said, each "<said
+   date>: <speaker>: <text>". The MCP `search_memories` rows carry the same as data:
+   `said`, `happened`, `invalid_at` for a memory out of use, and `evidence` (said,
+   speaker, text). The benchmark runner passes these lines as Mem0's memory list
+   (`evals/mem0_judge.py` renders nothing of its own).
 
 Every ranked read breaks a tie by memory id (`ORDER BY updated_at DESC, id` and the like),
 so memories of one time (a bulk import, a restore) rank alike in every build of a store.
@@ -556,9 +610,10 @@ until its `invalid_at`. They are out of the ANN index with the rest of what is o
 and few, so the vector search scans them exactly beside it. When the memory in use that
 replaced one (followed through a chain of updates) is among the results, it is moved up to
 just before it, so for one question the current value comes first and a question about the
-past keeps its answer where it ranked. The answer context writes such a memory with the
-date it was said and "[until <date>]" after its text; MCP rows carry its `invalid_at`.
-Hiding them lost LoCoMo questions about the past. A memory superseded otherwise (a
+past keeps its answer where it ranked. It is rendered with the date it was said and
+"[until <date>]" (step 8), its source turns are shown as its evidence under the same rules
+as any memory's (step 7), and MCP rows carry its `invalid_at`. Hiding them lost LoCoMo
+questions about the past. A memory superseded otherwise (a
 contradiction, a consolidation, a distillation) or deleted is excluded unless a caller
 explicitly requests every memory (`include_invalid`). Reconcile's candidates are memories
 in use only.
@@ -699,6 +754,14 @@ up as a red run within a week instead of in a user's terminal.
   a clean schema and synthetic benchmarks do not establish "best in class" quality.
 - Exact inline entity highlighting is deferred because mention surfaces do not provide
   unambiguous character spans. Reliable entity chips are the shipped navigation path.
+- The keyword search matches every word of the question, function words included, so in a
+  store of third-person facts a rare "did" or "do" can outweigh the name a question asks
+  about, and the one keyword match the linked search keeps in its first 20 is then the wrong
+  one.
+- A question names an entity only by one of its names or aliases in full: "Arvel" does
+  not find the place stored as "Mount Arvel", so a memory naming the place beside the
+  person the question names is compared through that person's links, with the place's name
+  read as "it".
 
 ## 9. Decision record
 
@@ -715,6 +778,7 @@ up as a red run within a week instead of in a user's terminal.
 | Anthropic defaults to claude-haiku-4-5 | Memory extraction is frequent background work, so the lower-cost, lower-latency model is the useful default; operators can explicitly select a larger model when quality justifies the extra cost. | Yes |
 | Provider HTTP clients are reused for the store lifetime | Reusing connections removes repeated connection setup from enrichment latency without adding a service or a second execution path. | Yes |
 | Reconcile answers NEW, SAME, MORE, CHANGED or WRONG and acts alike in every run; a changed value stays searchable as history; a restatement is recorded as evidence on the memory it restates | Acting only on a memory of the save's own run left every changed value live and every restatement duplicated when each session was its own run. Keeping the older value dated answers questions about the past, and the save's episodes already say which run said it, so no new record is needed. | Yes |
+| A memory is linked to the lines it rests on, and memories found are shown with those source turns as evidence | A memory is a summary, and the words it came from keep what the summary left out (a feeling, a name, what a photo showed). Episodes stay provenance: they are never searched on their own, only chosen among the sources of the memories found, within a token budget, and a deleted or forgotten memory never shows them; an update's old value kept as history shows its own, as any memory found does. | Yes |
 
 Any future consequential architecture change must be added here with its product reason and
 implementation status before it is treated as decided work.
