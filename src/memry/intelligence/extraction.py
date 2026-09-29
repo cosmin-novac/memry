@@ -106,9 +106,14 @@ Extract:
   them apart in the conversation ("Invoice 2024-117 from LexNova GmbH"). Use
   that name for the thing in every fact, also in a fact that names only one.
 - procedural learnings (how the user wants things done)
+- what people did, went to, saw, made, bought or were given, with its specifics (who, where,
+  when, the name or title of the thing), and how they felt about it in their own words
+- what one person told, advised, praised or wished the other, when it says something about
+  either of them or their lives
 
 Do NOT extract:
-- small talk, transient context ("I'm tired today"), or assistant boilerplate
+- greetings, thanks and pleasantries that tell nothing ("Hi!", "Thanks!", "That's great!"),
+  or assistant boilerplate
 - secrets or credentials (passwords, API keys, tokens) - never store these
 - information the user asked to keep out of memory
 
@@ -125,8 +130,12 @@ Rules:
 - prefer several precise facts over one compressed summary
 - what a person shares (a photo, file or link, shown with its description) is
   part of what they said: extract a fact from it when it tells something about
-  them or their life, naming who shared it ("Ada knitted a scarf for her
-  sister; she shared a photo of it")
+  them or their life, naming who shared it and what it shows, including any
+  text on it ("Ada knitted a scarf for her sister; she shared a photo of it,
+  a red scarf with white stars")
+- keep the words that carry the specifics: names and titles of things (a book,
+  a song, a pet, a place, a brand), the exact feeling or reaction a person names
+  ("relieved", "overwhelmed"), and quoted text (a sign, a motto, a line someone said)
 - when several inputs describe one plan, decision, or design, preserve their
   shared subject and any stated why/how relationship in every affected fact;
   never turn related statements into context-free standalone instructions
