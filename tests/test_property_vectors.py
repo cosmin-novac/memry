@@ -13,6 +13,7 @@ import pytest
 
 from memry.config import Config
 from memry.models import CandidateFact, Entity, EntityMention, MergeProposal, Memory, Scope
+from memry.providers.decisions import Answer, Answers, NoneDecider
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
 from memry.store import MemoryStore, _text_hash
@@ -23,6 +24,25 @@ ROOT = Path(__file__).resolve().parent.parent
 
 NEITHER_BUT = {"a_kind_of_b": 0.9, "a_part_of_b": 0.0, "b_kind_of_a": 0.0,
                "b_part_of_a": 0.0, "neither": 0.1}
+
+
+class _Same(NoneDecider):
+    """A calibrated judge that finds a pair one thing unless it names one of
+    ``apart``."""
+
+    name = "stub"
+    available = True
+    calibrated = True
+    pair_merge_probability = 0.95
+
+    def __init__(self, apart=()) -> None:
+        self.apart = apart
+
+    def decide(self, state, questions):
+        same = 0.0 if any(f'"{name}"' in state for name in self.apart) else 0.99
+        probabilities = {"same": same, "different": 0.99 - same, "unsure": 0.01}
+        return Answers({key: Answer(max(probabilities, key=probabilities.get), probabilities,
+                                    0.9, True) for key in questions if key == "pair"})
 
 
 class _Recording(HashEmbedder):
@@ -105,6 +125,118 @@ def test_deleting_a_memory_deletes_its_property_vector(store):
     assert store.backend.property_vector_hashes([memory.id])
     store.backend.delete_memory(memory.id)
     assert store.backend.property_vector_hashes([memory.id]) == {}
+
+
+def test_a_reset_deletes_every_property_vector(store):
+    quillon = _entity(store, "Quillon")
+    memory = _memory(store, "Quillon runs on Linux", [quillon])
+    store.refresh_property_vectors(user_id="ada")
+    assert store.backend.property_vector_hashes([memory.id])
+    store.reset()
+    assert store.backend.property_vector_hashes([memory.id]) == {}
+
+
+def test_editing_a_memory_re_embeds_its_property_vector(store):
+    """A manual edit masks the new text; an edit that leaves no name to mask
+    drops the row, and search reads the ordinary vector, which is the same."""
+    quillon = _entity(store, "Quillon")
+    memory = _memory(store, "Quillon runs on Linux", [quillon])
+    store.refresh_property_vectors(user_id="ada")
+    store.update(memory.id, content="Quillon runs on FreeBSD")
+    assert store.embedder.texts[-1] == "it runs on FreeBSD"
+    assert store.backend.property_vector_hashes([memory.id]) == {
+        memory.id: (_text_hash("it runs on FreeBSD"), store._property_label())}
+    store.update(memory.id, content="The build server runs on FreeBSD")
+    assert store.backend.property_vector_hashes([memory.id]) == {}
+
+
+def test_a_removed_entity_reads_as_a_name_again_at_the_next_refresh(store):
+    """Once "Quillon" is removed its memory names nothing, so the refresh
+    drops the row that read it as "it"; brought back, the name is masked
+    again."""
+    quillon = _entity(store, "Quillon")
+    memory = _memory(store, "Quillon runs on Linux", [quillon])
+    store.refresh_property_vectors(user_id="ada")
+    assert store.remove_entities([quillon.id]) == 1
+    store.refresh_property_vectors(user_id="ada")
+    assert store.backend.property_vector_hashes([memory.id]) == {}
+    assert store.restore_entities([quillon.id]) == 1
+    assert store.refresh_property_vectors(user_id="ada") == 1
+
+
+def _masked(store, memory):
+    """The masked text the stored property vector of ``memory`` was made from."""
+    stored = store.backend.property_vector_hashes([memory.id]).get(memory.id)
+    for text in reversed(store.embedder.texts):
+        if stored and (_text_hash(text), store._property_label()) == stored:
+            return text
+    return None
+
+
+def _tarnby(store):
+    """ "Tarnby Labs" with a memory that also writes the short name, "Tarnby"
+    with one of its own, and a version of Tarnby Labs whose memory writes the
+    short name too, all refreshed."""
+    labs, short = _entity(store, "Tarnby Labs"), _entity(store, "Tarnby")
+    v2 = _entity(store, "Tarnby Labs v2")
+    store.backend.add_proposal(MergeProposal(
+        entity_a=v2.id, entity_b=labs.id, user_id="ada", confidence=0.7,
+        different=0.3, belongs=NEITHER_BUT, compared_step=1))
+    staff = _memory(store, "Tarnby Labs, called Tarnby by its staff, hired two engineers", [labs])
+    office = _memory(store, "Tarnby moved to a bigger office", [short])
+    release = _memory(store, "The second release of Tarnby added sync", [v2])
+    store.refresh_property_vectors(user_id="ada")
+    assert _masked(store, staff) == "it, called Tarnby by its staff, hired two engineers"
+    assert _masked(store, release) is None  # nothing of its own to mask yet
+    return labs, short, (staff, office, release)
+
+
+def test_a_merge_masks_the_merged_name_at_once(store):
+    """Before, a merged name read as a name in the memories of the entity it
+    joined, and of that entity's versions and parts, until the weekly
+    refresh."""
+    labs, short, (staff, office, release) = _tarnby(store)
+    assert store.merge_entities(labs.id, short.id)
+    assert _masked(store, staff) == "it, called it by its staff, hired two engineers"
+    assert _masked(store, office) == "it moved to a bigger office"
+    assert _masked(store, release) == "The second release of it added sync"
+    assert store.refresh_property_vectors(user_id="ada") == 0  # nothing left for the week
+
+
+def test_a_merge_the_judge_decided_masks_the_merged_name_at_once(store):
+    labs, short, (staff, _, release) = _tarnby(store)
+    store.decider = _Same(apart=["Tarnby Labs v2"])
+    store.backend.add_proposal(MergeProposal(
+        entity_a=labs.id, entity_b=short.id, user_id="ada", reason="not yet compared"))
+    assert store.resolve_entities(user_id="ada")["confirmed"] == 1
+    assert _masked(store, staff) == "it, called it by its staff, hired two engineers"
+    assert _masked(store, release) == "The second release of it added sync"
+
+
+def test_a_rename_or_a_new_alias_masks_the_new_name_at_once(store):
+    quillon = _entity(store, "Quillon")
+    mobile = _memory(store, "Quillon Mobile added an offline mode", [quillon])
+    nickname = _memory(store, "Quillon, Q-Mob to its users, dropped the web app", [quillon])
+    store.refresh_property_vectors(user_id="ada")
+    assert _masked(store, mobile) == "it Mobile added an offline mode"
+    store.rename_entity(quillon.id, "Quillon Mobile")
+    assert _masked(store, mobile) == "it added an offline mode"
+    store.add_entity_alias(quillon.id, "Q-Mob")
+    assert _masked(store, nickname) == "it, it to its users, dropped the web app"
+
+
+def test_a_name_that_is_also_a_common_word_reads_it_in_its_own_memories(store):
+    """An accepted limit. Masking matches a name as a whole word in any case,
+    so the verb "go" reads "it" in the memories of the language "Go", which a
+    mention wrote as "go". No rule without a list of common words tells the
+    verb from the name there; the memories of other entities keep the word."""
+    go, team = _entity(store, "Go"), _entity(store, "Harrow team")
+    code = _memory(store, "The services are written in Go and the team wants to go faster", [go])
+    store.backend.add_mention(EntityMention(entity_id=go.id, memory_id=code.id, surface="go"))
+    other = _memory(store, "The Harrow team will go paperless in May", [team])
+    store.refresh_property_vectors(user_id="ada")
+    assert _masked(store, code) == "The services are written in it and the team wants to it faster"
+    assert _masked(store, other) == "The it will go paperless in May"
 
 
 def test_the_weekly_upkeep_refreshes_them(store):

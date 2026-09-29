@@ -9,7 +9,10 @@ provider merely vouched for lands in the upkeep queue instead of happening.
 
 from __future__ import annotations
 
+import ast
+import pathlib
 import re
+import sys
 
 import pytest
 from starlette.testclient import TestClient
@@ -848,3 +851,112 @@ def test_a_stated_part_of_wins_over_a_judged_home():
                         [("part", "orion", 0.9)])["part"]["source"] == "relation"
     assert derive_homes(nodes, [], [("part", "orion", 0.9)]) == {
         "part": {"id": "orion", "share": 0.9, "source": "judged"}}
+
+
+# ------------------------------ the structure benchmark on a public fixture
+#: 22 invented names with one reader label each, what a provider might have
+#: answered about 21 of them (it abstained on one), and 8 candidate homes, in
+#: the layout ``evals/entity_structure_benchmark.py`` documents. The labels
+#: behind the shipped numbers are private; the numbers below are worked out by
+#: hand from the rules, name by name, and the benchmark is checked on them.
+STRUCTURE_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "entity_structure"
+
+
+def _structure_benchmark(command: str, monkeypatch, capsys) -> str:
+    from evals import entity_structure_benchmark as bench
+
+    monkeypatch.setattr(sys, "argv", ["entity_structure_benchmark.py", command,
+                                      "--data", str(STRUCTURE_FIXTURE)])
+    bench.main()
+    return capsys.readouterr().out
+
+
+def test_the_mechanical_rule_on_the_fixture_fires_on_values_and_on_one_bare_year(
+        monkeypatch, capsys):
+    """It fires on "250 ms", "2026-03-14", "34 euros", "Sehr geehrte Frau
+    Quint" and "3 open tickets", five of the six values ("the second draft"
+    needs a reader), and on the board game "1987", a thing: the harm it
+    lists."""
+    out = _structure_benchmark("mechanical", monkeypatch, capsys)
+    assert "fires on        6 of 22" in out
+    assert "precision       5/6 = 83% against label 'value'" in out
+    assert "recall          5/6 = 83% of labelled values" in out
+    assert "by label        thing 1, value 5" in out
+    [reasons] = re.findall(r"by reason\s+(\{.*\})", out)
+    assert ast.literal_eval(reasons) == {
+        "a date or time span, not a referent": 2, "a count of things, not a referent": 2,
+        "an amount or measurement, not a referent": 1, "a salutation, not a referent": 1}
+    assert "HARM: 1 name(s) labelled 'thing' are rejected outright:" in out
+    assert "'1987'  -> a date or time span, not a referent" in out
+
+
+def test_the_screen_on_the_fixture_harms_nothing_from_the_shipped_gate(monkeypatch, capsys):
+    """The provider calls the product "Tarnby ledger" a value at 0.72, so it
+    is screened out at the gates from 0.50 to 0.70 only: at ``SCREEN_GATE``
+    nobody believes it. "invoices", a topic called a value at 0.85, goes at
+    every gate up to 0.85; "the accountant", a role at 0.70, below 0.75."""
+    out = _structure_benchmark("screen", monkeypatch, capsys)
+    assert "=== name screen: 21 of 22 names answered" in out
+    labels = ("thing", "generic", "value", "role", "event")
+    table = {row[0]: [int(n) for n in row[1:]]
+             for row in (line.split() for line in out.splitlines()) if row[:1] and row[0] in labels}
+    # columns: named_thing, generic_topic, role, value_or_fragment
+    assert table == {"thing": [7, 0, 0, 1], "generic": [0, 3, 0, 1], "value": [0, 1, 0, 5],
+                     "role": [0, 0, 2, 0], "event": [1, 0, 0, 0]}
+    assert "exact agreement 17/20 = 85% (events excluded: no verdict fits)" in out
+    sweep = {float(row[0]): [int(n) for n in row[1:6]]
+             for row in (line.replace("<-", " ").split() for line in out.splitlines())
+             if row and re.fullmatch(r"0\.\d\d", row[0])}
+    # per gate: screened out, of them values or roles, topics, events, things
+    assert sweep == {0.5: [9, 7, 1, 0, 1], 0.6: [9, 7, 1, 0, 1], 0.7: [9, 7, 1, 0, 1],
+                     0.75: [6, 5, 1, 0, 0], 0.8: [6, 5, 1, 0, 0], 0.85: [6, 5, 1, 0, 0],
+                     0.9: [4, 4, 0, 0, 0], 0.95: [1, 1, 0, 0, 0]}
+    harmed = [line.split()[0] for line in out.splitlines() if "'Tarnby ledger'" in line]
+    assert harmed == ["0.50", "0.60", "0.70"]
+    assert " 0.80 <-" in out and f"currently {SCREEN_GATE:.2f}" in out
+
+
+def test_the_hub_rule_on_the_fixture_gains_precision_from_the_verdict(monkeypatch, capsys):
+    """Without a verdict every anchor type and every name of two memories is
+    a hub: 15 of 22, 8 of them things. With one, a named thing from 0.6 is a
+    hub ("orchard-sync", one memory), a skip verdict from 0.80 takes hub
+    status away ("landlord"), and any other verdict keeps two memories from
+    counting ("billing", and "Quillon API" at 0.55): 9 hubs, 7 of them
+    things."""
+    out = _structure_benchmark("hubs", monkeypatch, capsys)
+    rows = {label.strip(): numbers for label, *numbers in re.findall(
+        r"^  (.{34}) hubs\s+(\d+)  precision\s+(\d+)%  recall\s+(\d+)%   (.*)$", out, re.M)}
+    assert rows == {
+        "is_hub(type, mentions)": ["15", "53", "89", "event 1 generic 3 role 2 value 1"],
+        "anchor type only": ["9", "78", "78", "role 2"],
+        "two or more memories only": ["9", "33", "33", "event 1 generic 3 role 1 value 1"],
+        "is_hub(type, mentions, screen)": ["9", "78", "88", "event 1 role 1"],
+        "is_hub, same names, no verdict": ["14", "50", "88", "event 1 generic 3 role 2 value 1"],
+        f"verdict named_thing >= {NAMED_THING_MIN} only": ["7", "86", "75", "event 1"],
+    }
+    assert "with the provider's verdict (21 answered):" in out
+
+
+def test_the_homes_report_on_the_fixture(monkeypatch, capsys):
+    """Memry no longer derives homes from co-mention; the report still scores
+    what that rule kept: a project or product home, a share of at least 0.7,
+    and a part seen once only where the home is its sole anchor."""
+    out = _structure_benchmark("homes", monkeypatch, capsys)
+
+    def split(label: str) -> tuple[int, ...]:
+        [line] = [line for line in out.splitlines() if line.strip().startswith(label)]
+        return tuple(int(n) for n in re.findall(
+            r"n=\s*(\d+)  precision\s+(\d+)%  \(yes\s+(\d+), no\s+(\d+), unsure\s+(\d+)\)",
+            line)[0])
+
+    assert split("every candidate") == (8, 57, 4, 3, 1)
+    assert [split(f"share >= {share:.2f}") for share in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)] == [
+        (8, 57, 4, 3, 1), (7, 50, 3, 3, 1), (6, 60, 3, 2, 1),
+        (4, 67, 2, 1, 1), (3, 100, 2, 0, 1), (2, 100, 1, 0, 1)]
+    assert split("home is a organization") == (2, 50, 1, 1, 0)
+    assert split("home is a product") == (4, 67, 2, 1, 1)
+    assert split("home is a project") == (2, 50, 1, 1, 0)
+    assert split("seen once, sole anchor") == (2, 100, 1, 0, 1)
+    assert split("seen once, other anchors present") == (1, 0, 0, 1, 0)
+    assert split("seen twice or more") == (5, 60, 3, 2, 0)
+    assert split("what the co-mention rule kept") == (3, 100, 2, 0, 1)

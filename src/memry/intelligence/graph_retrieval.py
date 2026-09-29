@@ -336,6 +336,15 @@ def homes_of(backend: MemoryBackend, entity_ids: list[str]) -> dict[str, set[str
     return homes
 
 
+def parts_of(backend: MemoryBackend, entity_ids: list[str]) -> set[str]:
+    """The entities that are a kind or a part of any of these at ``HOME_P``
+    or more (``homes_of`` the other way round): their memories read these
+    names as "it" too."""
+    wholes = set(entity_ids)
+    return {link.child for link in links_of(backend, sorted(wholes))
+            if link.kind in ("kind", "part") and link.p >= HOME_P and link.parent in wholes}
+
+
 def mask_names(text: str, names: Iterable[str], keep: Iterable[str] = ()) -> str:
     """``text`` with each of ``names`` replaced by "it" ("its" for a
     possessive), matched as whole words in any case, the longest name first.

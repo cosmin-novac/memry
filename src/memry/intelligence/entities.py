@@ -945,7 +945,9 @@ def resolve_open_proposals(
             keep, drop = ((entity_a, entity_b) if facts_a or not facts_b
                           else (entity_b, entity_a))
             if backend.merge_entities(keep.id, drop.id):
-                backend.set_proposal_status(proposal.id, "confirmed")
+                backend.set_proposal_status(
+                    proposal.id, "confirmed",
+                    reason="one name, and one of the two has no memories")
                 outcome["confirmed"] += 1
                 continue
         if judge is not None:
@@ -993,7 +995,26 @@ def resolve_open_proposals(
     )
     namesakes: list[tuple[float, MergeProposal, Entity, Entity]] = []
     held_apart: list[tuple[str, str]] = []
-    for (proposal, entity_a, entity_b), verdict in zip(pending, decided):
+    # An answer speaks for the two entities it compared. Once one of them
+    # has been merged into a third in this pass, applying it would join the
+    # other to that third, which nothing compared: "Johnny" found to be both
+    # Johnny the electrician and Johnny the plumber made the two one. Such a
+    # pair is left as the merge left it, started again on the merged
+    # evidence (``compared_step`` 0). Merges go first, the likeliest first.
+    order = sorted(zip(pending, decided), key=lambda item: (
+        item[1].action != "merge", -(item[1].probabilities or {}).get("same", 0.0)))
+    for (proposal, entity_a, entity_b), verdict in order:
+        if any(backend.resolve_entity_id(e.id) != e.id for e in (entity_a, entity_b)):
+            outcome["kept"] += 1
+            continue
+        if verdict.action == "merge" and auto_confirm:
+            # the answer that decides it stays on the pair
+            probabilities = verdict.probabilities
+            backend.update_proposal_judgement(
+                proposal.id, confidence=probabilities["same"],
+                reason=pair_reason(judge, probabilities), compared_step=verdict.step,
+                different=probabilities["different"], belongs=verdict.belongs,
+            )
         if (verdict.action == "merge" and auto_confirm
                 and merge_pair(backend, entity_a, entity_b)):
             backend.set_proposal_status(proposal.id, "confirmed")
@@ -1082,7 +1103,10 @@ def join_namesakes(
                 keep, drop = drop, keep
             if not merge_pair(backend, keep, drop):
                 continue
-        backend.set_proposal_status(proposal.id, "confirmed")
+            backend.set_proposal_status(
+                proposal.id, "confirmed", reason="one name, and the judge did not say different")
+        else:  # joined through another pair of this pass
+            backend.set_proposal_status(proposal.id, "confirmed")
         joined += 1
     return joined
 
@@ -1133,6 +1157,8 @@ def choose_among_candidates(
             continue
         keep, thin = backend.get_entity(keep_id), backend.get_entity(thin_id)
         if keep is not None and thin is not None and merge_pair(backend, keep, thin):
-            backend.set_proposal_status(best.id, "confirmed")
+            backend.set_proposal_status(best.id, "confirmed", reason=(
+                f"the likeliest of {len(open_pairs)} entities this name may be, ahead by "
+                f"{best.confidence - second.confidence:.2f}"))
             chosen += 1
     return chosen

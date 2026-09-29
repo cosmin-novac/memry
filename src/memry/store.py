@@ -74,6 +74,7 @@ from .intelligence.graph_retrieval import (
     homes_of,
     mask_first_person,
     mask_names,
+    parts_of,
     set_members,
     speaks_in_first_person,
 )
@@ -462,6 +463,7 @@ class MemoryStore:
         # lost and every group was sent to the model twice.
         self._pass_locks: dict[tuple[str, str | None], threading.RLock] = {}
         self._pass_locks_guard = threading.Lock()
+        self.backend.names_changed = self._names_changed
 
     # ------------------------------------------------------------------
     # write path
@@ -862,6 +864,25 @@ class MemoryStore:
             self.refresh_property_vectors(memory_ids=memory_ids)
         except Exception as exc:
             log.warning("property vectors not computed on save: %s", exc)
+
+    def _names_changed(self, entity_ids: list[str]) -> None:
+        """Property vectors after a merge, a rename or a new alias
+        (``MemoryBackend.names_changed``): of the memories of these entities,
+        and of their versions and parts, which read the names of what they
+        belong to as "it" too. Left to the weekly refresh, a merged name read
+        as a name in them for up to a week. A tag's memories mask no tag, so
+        a tag's change refreshes nothing. A failure never fails the change:
+        the weekly refresh computes what is missing."""
+        try:
+            named = {entity_id for entity_id in entity_ids
+                     if (entity := self.backend.get_entity(entity_id)) is not None
+                     and entity.entity_type != TOPIC_TYPE}
+            named |= parts_of(self.backend, sorted(named))
+            memory_ids = {memory.id for entity_id in sorted(named)
+                          for memory in self.backend.entity_memories(entity_id, limit=1_000_000)}
+            self.refresh_property_vectors(memory_ids=sorted(memory_ids))
+        except Exception as exc:
+            log.warning("property vectors not refreshed after a name changed: %s", exc)
 
     def _open_proposals_to_recheck(self, scope: Scope) -> list[MergeProposal]:
         """Open proposals a save may compare again, or none when the provider
@@ -2077,9 +2098,10 @@ class MemoryStore:
         new, changed (a merge, a rename, a new home) or was embedded by another
         model, in batches of 64. A memory whose masked text is its text gets no
         row: search reads its ordinary vector, which is the same. With
-        ``memory_ids`` only those memories (a save); otherwise every memory of
-        the namespace that names an entity (the weekly upkeep, a backfill).
-        Returns how many it embedded."""
+        ``memory_ids`` only those memories (a save, an edit, a merge or a
+        rename); otherwise every memory of the namespace that names an entity
+        or holds a row (the weekly upkeep, a backfill). Returns how many it
+        embedded."""
         if not self.embedder.dimensions:
             return 0
         entities: dict[str, list[str]] = defaultdict(list)
@@ -2087,9 +2109,11 @@ class MemoryStore:
             scope = Scope(user_id=user_id)
             for entity_id, memory_id in self.backend.entity_memory_links(scope, kind="named"):
                 entities[memory_id].append(entity_id)
-            contents = {m.id: m.content
-                        for m in self.backend.list_memories(scope, limit=10_000_000)
-                        if m.id in entities}
+            listed = self.backend.list_memories(scope, limit=10_000_000)
+            # A memory whose last entity was removed names nothing now, but
+            # its row still reads the name as "it" until it is dropped here.
+            held = self.backend.property_vector_hashes([m.id for m in listed])
+            contents = {m.id: m.content for m in listed if m.id in entities or m.id in held}
         else:
             contents = {}
             for memory_id in memory_ids:
@@ -3185,7 +3209,7 @@ class MemoryStore:
             return False
         if entity_a != entity_b and not self.backend.merge_entities(entity_a, entity_b):
             return False
-        self.backend.set_proposal_status(proposal_id, "confirmed")
+        self.backend.set_proposal_status(proposal_id, "confirmed", reason="confirmed by you")
         return True
 
     def reject_merge(

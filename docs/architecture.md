@@ -244,7 +244,11 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
 5. **The funnel.** A waiting pair is compared again only when its smaller side reaches
    3, 10 and 50 memories, and never after that. With Jev this check runs on every save
    that mentions either side; it costs nothing unless a step was reached. A merge
-   restarts the funnel for the merged entity's open pairs.
+   restarts the funnel for the merged entity's open pairs. An answer speaks for the two
+   entities it compared: a pass applies its merges likeliest first, and once one side of
+   a pair has been merged into a third, that pair is compared again on its own instead
+   of joining the other side to the third ("Johnny" found to be both Johnny the
+   electrician and Johnny the plumber joins the likelier; the two are then compared).
    **Conversation step (step 2).** A pair still waiting after the first comparison,
    with a side of fewer than 3 memories, is compared once more with up to 5 other
    memories from the conversations that saved that side's memories (same session, or
@@ -278,8 +282,12 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    into context, not on the save path.
 
 Merge proposals never reach the Upkeep queue when a calibrated judge decides pairs.
-Merges cannot be undone. Without a calibrated judge (a text model only), only identical
-names are compared and nothing merges on the model's own confidence.
+Merges cannot be undone. A merge keeps what decided it on its proposal: the two entities
+(the one merged away stays as a tombstone pointing at the other), the judge's answer and
+the step it was given at, and, where no single answer decided it, the rule (one name that
+the judge did not call different, the clear favourite among namesakes, one side with no
+memories) or "confirmed by you". Without a calibrated judge (a text model only), only
+identical names are compared and nothing merges on the model's own confidence.
 
 Tags follow the same pattern (`judged_tag_merges`): candidate pairs from the name index
 (no shared-word signal for tags), judged in both orders with the 10 most recent memories

@@ -252,6 +252,9 @@ CREATE INDEX IF NOT EXISTS idx_relations_subject ON relations(subject);
 CREATE INDEX IF NOT EXISTS idx_relations_object ON relations(object);
 CREATE INDEX IF NOT EXISTS idx_relations_user ON relations(user_id);
 """
+#: The tables of the schema; the full-text index follows ``memories`` by its
+#: triggers.
+_TABLES = tuple(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _SCHEMA))
 
 _MEMORY_COLS = (
     "id, content, memory_type, user_id, agent_id, run_id, importance, categories, "
@@ -2624,7 +2627,8 @@ class LocalBackend(MemoryBackend):
                 raw_aliases = [raw_aliases]
             aliases = [str(value).strip() for value in raw_aliases if str(value).strip()]
             known = {row["name"].strip().lower(), *(value.lower() for value in aliases)}
-            if display.lower() not in known:
+            added = display.lower() not in known
+            if added:
                 aliases.append(display)
                 metadata["aliases"] = aliases
                 self._db.execute(
@@ -2634,6 +2638,8 @@ class LocalBackend(MemoryBackend):
                 )
                 self._has_metadata_aliases = True
                 self._db.commit()
+        if added and self.names_changed is not None:
+            self.names_changed([entity_id])
         return self.get_entity(entity_id)
 
     def rename_entity(self, entity_id: str, name: str) -> Entity | None:
@@ -2679,6 +2685,8 @@ class LocalBackend(MemoryBackend):
                 ),
             )
             self._db.commit()
+        if display != old_name and self.names_changed is not None:
+            self.names_changed([entity_id])
         return self.get_entity(entity_id)
 
     def set_entity_description(
@@ -3243,14 +3251,17 @@ class LocalBackend(MemoryBackend):
         kept: the thing keeps its type, relations and name, and the tag's
         memories become its mentions. A side found folded meanwhile (the
         fold's UPDATE matched no row) rolls back: the UPDATE opened the
-        transaction, which would otherwise hold the write lock."""
+        transaction, which would otherwise hold the write lock. A fold
+        written is announced to ``names_changed`` with the entity kept."""
         with self._lock:
             folded = self._merge_entities_locked(keep_id, merge_id)
             if folded:
                 self._db.commit()
             elif folded is None and self._db.in_transaction:
                 self._db.rollback()
-            return folded is not None
+        if folded and self.names_changed is not None:
+            self.names_changed([self.resolve_entity_id(keep_id) or keep_id])
+        return folded is not None
 
     def _merge_entities_locked(self, keep_id: str, merge_id: str) -> bool | None:
         """The writes of ``merge_entities``, left uncommitted, so that a caller
@@ -3298,18 +3309,25 @@ class LocalBackend(MemoryBackend):
             "WHERE subject = object AND invalid_at IS NULL",
             (changed_at,),
         )
-        self._db.execute(
-            "UPDATE entity_proposals SET entity_a = ? WHERE entity_a = ?",
-            (keep_root, merge_root),
-        )
-        self._db.execute(
-            "UPDATE entity_proposals SET entity_b = ? WHERE entity_b = ?",
-            (keep_root, merge_root),
-        )
+        # The pair of the two keeps its ends, which say which two entities
+        # were found to be one, beside the answer or the rule that decided
+        # it; so do the pairs earlier merges confirmed. The merged entity's
+        # other pairs, open or kept apart, become the kept one's.
         self._db.execute(
             "UPDATE entity_proposals SET status = 'confirmed', decided_at = ? "
-            "WHERE entity_a = entity_b AND status = 'proposed'",
-            (changed_at,),
+            "WHERE status = 'proposed' AND ((entity_a = ? AND entity_b = ?) "
+            "OR (entity_a = ? AND entity_b = ?))",
+            (changed_at, keep_root, merge_root, merge_root, keep_root),
+        )
+        self._db.execute(
+            "UPDATE entity_proposals SET entity_a = ? "
+            "WHERE entity_a = ? AND entity_b != ? AND status != 'confirmed'",
+            (keep_root, merge_root, keep_root),
+        )
+        self._db.execute(
+            "UPDATE entity_proposals SET entity_b = ? "
+            "WHERE entity_b = ? AND entity_a != ? AND status != 'confirmed'",
+            (keep_root, merge_root, keep_root),
         )
         # The merged entity carries both sides' memories now: its open
         # pairs start the comparison funnel again on that evidence.
@@ -3394,11 +3412,14 @@ class LocalBackend(MemoryBackend):
             )
             self._db.commit()
 
-    def set_proposal_status(self, proposal_id: str, status: str) -> MergeProposal | None:
+    def set_proposal_status(
+        self, proposal_id: str, status: str, reason: str | None = None
+    ) -> MergeProposal | None:
         with self._lock:
             cur = self._db.execute(
-                "UPDATE entity_proposals SET status = ?, decided_at = ? WHERE id = ?",
-                (status, utcnow(), proposal_id),
+                "UPDATE entity_proposals SET status = ?, decided_at = ?, "
+                "reason = COALESCE(?, reason) WHERE id = ?",
+                (status, utcnow(), reason, proposal_id),
             )
             self._db.commit()
         return self.get_proposal(proposal_id) if cur.rowcount else None
@@ -3761,13 +3782,13 @@ class LocalBackend(MemoryBackend):
         }
 
     def reset(self) -> None:
+        """Empty every table of the schema but ``meta``, the store's own
+        settings. Read from the schema: a list kept by hand missed each table
+        added after it."""
         with self._lock:
-            for table in (
-                "memory_topics", "topic_relations", "topics", "memories", "episodes",
-                "memory_events", "entities", "entity_mentions", "entity_proposals", "ann_keys",
-                "memory_property_vectors",
-            ):
-                self._db.execute(f"DELETE FROM {table}")
+            for table in _TABLES:
+                if table != "meta":
+                    self._db.execute(f"DELETE FROM {table}")
             self._db.commit()
         for sidecar in self._anns.values():
             sidecar.rebuild([])

@@ -42,6 +42,39 @@ def test_env_overrides(monkeypatch, tmp_path):
     assert cfg.default_user_id == "marcus"
 
 
+def test_extraction_asks_the_model_the_comparison_kept():
+    """Extraction sends each save to the OpenAI default, gpt-6-luna. Compared
+    with gpt-5.6-luna on generated saves and owner texts it was as good on
+    every measure, within run noise, at half the price, so the default
+    stayed."""
+    import httpx
+
+    from memry.config import DEFAULT_LLM_MODELS, LLMConfig
+    from memry.intelligence.extraction import extract_facts
+    from memry.providers.llm import OpenAILLM
+
+    assert DEFAULT_LLM_MODELS["openai"] == "gpt-6-luna"
+    sent = []
+
+    def reply(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": json.dumps({"facts": []})}}]})
+
+    llm = OpenAILLM(LLMConfig(provider="openai", api_key="k"))
+    llm._client = httpx.Client(transport=httpx.MockTransport(reply))
+    assert extract_facts(llm, [{"role": "user", "content": "Ada moved to Leeds"}]) == []
+    assert [body["model"] for body in sent] == ["gpt-6-luna"]
+    llm.close()
+
+
+def test_the_extraction_model_is_a_setting(monkeypatch):
+    monkeypatch.setenv("MEMRY_LLM_PROVIDER", "openai")
+    assert Config.load().llm.resolved_model() == "gpt-6-luna"
+    monkeypatch.setenv("MEMRY_LLM_MODEL", "gpt-5.6-luna")
+    assert Config.load().llm.resolved_model() == "gpt-5.6-luna"
+
+
 def test_file_config_env_wins(monkeypatch, tmp_path):
     file = tmp_path / "config.json"
     file.write_text(json.dumps({"default_user_id": "from-file",

@@ -9,7 +9,7 @@ utilities; it is not a runtime configuration choice.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from typing import TYPE_CHECKING
@@ -459,6 +459,13 @@ class MemoryBackend(ABC):
                         return matches
         return matches
 
+    #: Called after a write changed what an entity is called, with the ids of
+    #: the entities whose names changed: the one a merge kept, one renamed,
+    #: one given an alias. ``MemoryStore`` sets it to refresh the property
+    #: vectors of the memories that read those names as "it", which would
+    #: otherwise keep the old names until the weekly refresh.
+    names_changed: Callable[[list[str]], None] | None = None
+
     def entity_aliases(self, entity_id: str) -> list[str]:
         entity = self.get_entity(entity_id)
         return [entity.name] if entity else []
@@ -654,7 +661,11 @@ class MemoryBackend(ABC):
     ) -> list[MergeProposal]:
         return []
 
-    def set_proposal_status(self, proposal_id: str, status: str) -> MergeProposal | None:
+    def set_proposal_status(
+        self, proposal_id: str, status: str, reason: str | None = None
+    ) -> MergeProposal | None:
+        """Decide a proposal; ``reason``, when given, says what decided it (a
+        rule, or a person) in place of the answer it held."""
         return None
 
     # -- synthetic tags + key/value meta ----------------------------------

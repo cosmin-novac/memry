@@ -1,0 +1,8 @@
+{"id": "h01", "name": "sync worker", "home": "Tarnby ledger", "home_type": "product", "share": 0.9, "mentions": 3, "other_anchors": []}
+{"id": "h02", "name": "export dialog", "home": "Tarnby ledger", "home_type": "product", "share": 0.75, "mentions": 1, "other_anchors": []}
+{"id": "h03", "name": "pricing page", "home": "Pelwick Studio", "home_type": "organization", "share": 0.8, "mentions": 2, "other_anchors": []}
+{"id": "h04", "name": "invoice parser", "home": "Quillon", "home_type": "project", "share": 0.6, "mentions": 2, "other_anchors": []}
+{"id": "h05", "name": "beta invite", "home": "Brisk", "home_type": "product", "share": 0.7, "mentions": 1, "other_anchors": ["Pelwick Studio"]}
+{"id": "h06", "name": "release notes", "home": "Brisk", "home_type": "product", "share": 1.0, "mentions": 1, "other_anchors": []}
+{"id": "h07", "name": "hiring plan", "home": "Pelwick Studio", "home_type": "organization", "share": 1.0, "mentions": 4, "other_anchors": []}
+{"id": "h08", "name": "login flow", "home": "Quillon", "home_type": "project", "share": 0.5, "mentions": 3, "other_anchors": []}
