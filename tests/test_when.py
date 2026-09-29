@@ -328,17 +328,19 @@ def test_an_update_keeps_the_stored_when(store, fake_llm):
     store.add("Helios launches on 3 October", user_id="u")
     original = store.get_all(user_id="u")[0]
 
-    # A refinement that says nothing about time: the occurrence time stands.
+    # A refinement that says nothing about time: the merged text keeps the
+    # occurrence time of the memory it replaces.
     fake_llm.queue(
         json.dumps({"facts": [_fact("The Helios launch is in Lisbon", None)]}),
-        json.dumps({"action": "UPDATE", "target": 0,
+        json.dumps({"action": "MORE", "target": 0,
                     "content": "The Helios launch is on 2026-10-03 in Lisbon",
                     "reason": "adds the place"}),
         json.dumps({"facts": []}),
         json.dumps({"missing": []}),
     )
     store.add("the Helios launch is in Lisbon", user_id="u")
-    kept = store.get(original.id)
+    [kept] = store.get_all(user_id="u")
+    assert kept.id != original.id and store.get(original.id).superseded_by == kept.id
     assert kept.content.endswith("in Lisbon")
     assert kept.metadata["when"] == {"start": "2026-10-03"}
 
@@ -356,14 +358,16 @@ def test_an_update_that_carries_a_when_replaces_it(store, fake_llm):
             _fact("The Helios launch moved to 2026-10-10",
                   {"start": "2026-10-10", "end": None, "recurrence": None}),
         ]}),
-        json.dumps({"action": "UPDATE", "target": 0,
+        json.dumps({"action": "MORE", "target": 0,
                     "content": "The Helios launch is on 2026-10-10",
                     "reason": "the date moved"}),
         json.dumps({"facts": []}),
         json.dumps({"missing": []}),
     )
     store.add("Helios now launches on 10 October", user_id="u")
-    assert store.get(original.id).metadata["when"] == {"start": "2026-10-10"}
+    [merged] = store.get_all(user_id="u")
+    assert merged.id != original.id
+    assert merged.metadata["when"] == {"start": "2026-10-10"}
 
 
 # ----------------------------------------------------------------- backfilling

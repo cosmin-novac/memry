@@ -425,20 +425,20 @@ def test_entity_typing_falls_back_when_the_provider_abstains():
 def test_reconcile_asks_for_an_action_and_a_target():
     from memry.intelligence.reconcile import _decide_action
 
-    stub = _stub(lambda k, q: Answer("UPDATE" if k == "action" else "1",
+    stub = _stub(lambda k, q: Answer("CHANGED" if k == "action" else "1",
                                      {}, 0.93, True))
     out = _decide_action(stub, "EXISTING…\nNEW…", count=3)
-    assert out["action"] == "UPDATE" and out["target"] == 1
-    assert out["content"] is None       # writing the merged sentence is not its job
+    assert out["action"] == "CHANGED" and out["target"] == 1
+    assert out["content"] is None       # writing a merged text is not its job
     assert set(stub.last_questions) == {"action", "target"}
 
 
 def test_reconcile_with_one_candidate_skips_the_target_question():
     from memry.intelligence.reconcile import _decide_action
 
-    stub = _stub(lambda k, q: Answer("NONE", {}, 0.99, True))
+    stub = _stub(lambda k, q: Answer("SAME", {}, 0.99, True))
     out = _decide_action(stub, "state", count=1)
-    assert out["action"] == "NONE" and out["target"] == 0
+    assert out["action"] == "SAME" and out["target"] == 0
     assert set(stub.last_questions) == {"action"}
 
 
@@ -450,9 +450,9 @@ def test_reconcile_abstention_leaves_the_text_model_in_charge():
 
 
 def _updating(llm):
-    """A store whose decision provider answers UPDATE of the first similar
+    """A store whose decision provider answers MORE of the first similar
     memory, holding "Ada works at Northwind"."""
-    decider = _stub(lambda k, q: Answer("UPDATE" if k == "action" else "0", {}, 0.95, True))
+    decider = _stub(lambda k, q: Answer("MORE" if k == "action" else "0", {}, 0.95, True))
     store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64),
                         decider=decider)
     first = store.add("Ada works at Northwind", user_id="u", infer=False).actions[0]
@@ -460,19 +460,22 @@ def _updating(llm):
 
 
 def test_an_update_under_a_decision_provider_has_the_text_model_write_the_merge():
-    """The provider chooses the action; the merged sentence is the text
-    model's, asked with the reconcile prompt, and replaces the target's text."""
+    """The provider chooses the answer; the merged text is the text model's,
+    asked with the reconcile prompt, and is a new memory that supersedes the
+    target."""
     from conftest import decision, facts_response
     from memry.intelligence.reconcile import MERGE_REQUEST, RECONCILE_SYSTEM
 
     llm = FakeLLM()
     store, target = _updating(llm)
     merged = "Ada works at Northwind as a data engineer since 2024"
-    llm.queue(decision("UPDATE", target=0, content=merged), facts_response())
+    llm.queue(decision("MORE", target=0, content=merged), facts_response())
     result = store.add("Ada is a data engineer there since 2024", user_id="u", infer=False)
 
-    assert [(a.event, a.memory_id) for a in result.actions] == [("UPDATE", target)]
-    assert store.get(target).content == merged
+    [action] = result.actions
+    assert action.event == "UPDATE" and action.memory_id != target
+    assert store.get(action.memory_id).content == merged
+    assert store.get(target).superseded_by == action.memory_id
     system, prompt = llm.calls[0]
     assert system == RECONCILE_SYSTEM and MERGE_REQUEST in prompt
     assert "[0] Ada works at Northwind" in prompt
@@ -527,13 +530,13 @@ def test_an_update_kept_and_superseded_is_no_contradiction_and_undo_keeps_both()
 
 
 def test_an_important_target_of_an_update_nobody_could_write_is_kept_and_asked_about():
-    """An UPDATE with no merged text supersedes its target only where a
+    """A MORE with no merged text supersedes its target only where a
     contradiction could (``held_back``): a target rated important stays in
     use beside the new memory, which carries the conflict marker, and the
     pair waits under Upkeep."""
     from memry.intelligence.reconcile import CONFLICT_KEY
 
-    decider = _stub(lambda k, q: Answer("UPDATE" if k == "action" else "0", {}, 0.95, True))
+    decider = _stub(lambda k, q: Answer("MORE" if k == "action" else "0", {}, 0.95, True))
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64),
                         decider=decider)
     target = store.add("Ada works at Northwind", user_id="u", infer=False,
@@ -567,14 +570,16 @@ def test_an_update_the_text_model_chose_without_text_asks_it_for_the_merge():
     store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64))
     target = store.add("Ada works at Northwind", user_id="u", infer=False).actions[0].memory_id
     merged = "Ada works at Northwind as a data engineer"
-    llm.queue(decision("UPDATE", target=0, content=None),
-              decision("UPDATE", target=0, content=merged), facts_response())
+    llm.queue(decision("MORE", target=0, content=None),
+              decision("MORE", target=0, content=merged), facts_response())
     result = store.add("Ada is a data engineer there", user_id="u", infer=False)
 
-    assert [(a.event, a.memory_id) for a in result.actions] == [("UPDATE", target)]
-    assert store.get(target).content == merged
+    [action] = result.actions
+    assert action.event == "UPDATE" and store.get(action.memory_id).content == merged
     assert MERGE_REQUEST not in llm.calls[0][1] and MERGE_REQUEST in llm.calls[1][1]
-    assert store.replaced(user_id="u") == []
+    # superseded as an update: listed as replaced, no contradiction
+    assert [(row["memory"].id, row["contradiction"])
+            for row in store.replaced(user_id="u")] == [(target, False)]
     store.close()
 
 
@@ -588,7 +593,7 @@ def test_a_contradiction_is_listed_as_one_and_its_undo_forgets_the_newer():
     old = store.add("I live in Munich", user_id="u").actions[0].memory_id
     llm.queue(facts_response({"content": "Ada lives in Amsterdam", "type": "semantic",
                               "importance": 0.5, "categories": [], "entities": []}),
-              decision("DELETE", target=0, reason="moved cities"))
+              decision("WRONG", target=0, reason="it was never Munich"))
     new = store.add("I moved to Amsterdam", user_id="u").actions[0]
     assert new.event == "DELETE"
     [row] = store.replaced(user_id="u")

@@ -197,9 +197,9 @@ class RetrievalConfig(BaseModel):
 
 
 class SupersedeConfig(BaseModel):
-    """When a contradiction may replace a stored memory without asking.
+    """When a change or a correction may replace a stored memory without asking.
 
-    Replacing is the one reconcile action that takes a fact out of use, and it
+    Replacing takes a fact out of use (or leaves it only as history), and it
     rests on a single model judgement. It went wrong in the way that matters:
     a document was misread as saying someone's wife was their mother, and that
     "corrected" the true fact out of the store. So the judgement only acts on
@@ -209,10 +209,13 @@ class SupersedeConfig(BaseModel):
 
     #: A memory at or above this importance is never replaced without asking.
     protect_importance: float = 0.8
-    #: Nor is one that this many separate saves have stated.
+    #: Nor is one that this many separate saves have stated: the saves behind
+    #: its evidence, not its episodes (``reconcile.saves_of``).
     protect_sources: int = 2
-    #: A typed decision below this confidence asks too. The prompt path
-    #: reports no confidence, so there only the two protections above apply.
+    #: The confidence from which a typed reconcile answer acts, for a
+    #: decision provider with no bars measured (``Decider.reconcile_bars``).
+    #: The prompt path reports no confidence, so there only the two
+    #: protections above apply.
     confidence: float = 0.9
 
 

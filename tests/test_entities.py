@@ -612,8 +612,8 @@ def test_two_things_that_share_a_name_stay_two_entities_through_a_save(store, fa
 # ------------------------------------------ names a save already knows
 class _TextModel(FakeLLM):
     """A text model that answers by what it is asked: the scripted facts for
-    an extraction; for a reconcile, an UPDATE of the memory holding a key of
-    ``rewrite`` (its value is the merged text) and an ADD otherwise; "same"
+    an extraction; for a reconcile, a MORE of the memory holding a key of
+    ``rewrite`` (its value is the merged text) and a NEW otherwise; "same"
     at 0.9 to an identity question, which it counts; nothing missing to the
     coverage audit."""
 
@@ -627,8 +627,8 @@ class _TextModel(FakeLLM):
             for key, merged in self.rewrite.items():
                 found = re.search(rf"\[(\d+)\] [^\n]*{re.escape(key)}", user)
                 if found:
-                    return decision("UPDATE", target=int(found.group(1)), content=merged)
-            return decision("ADD")
+                    return decision("MORE", target=int(found.group(1)), content=merged)
+            return decision("NEW")
         if system == IDENTITY_SYSTEM:
             self.identity_calls += 1
             return identity("same", 0.9)
@@ -638,8 +638,8 @@ class _TextModel(FakeLLM):
 
 
 class _Judge(NoneDecider):
-    """A calibrated judge. Asked what a save does, it rewrites the memory
-    about mugs; asked about a pair, it keeps what it was shown and answers
+    """A calibrated judge. Asked what a save does, it adds detail to the
+    memory about mugs (MORE); asked about a pair, it keeps what it was shown and answers
     ``same`` and ``different`` (one thing, unless told otherwise)."""
 
     name = "stub"
@@ -654,7 +654,7 @@ class _Judge(NoneDecider):
     def decide(self, state, questions):
         answers = {}
         if "action" in questions:
-            answers["action"] = Answer("UPDATE", {}, 0.95, True)
+            answers["action"] = Answer("MORE", {}, 0.95, True)
             found = re.search(r"\[(\d+)\] [^\n]*mugs", state)
             if found:
                 answers["target"] = Answer(found.group(1), {}, 0.95, True)
@@ -699,6 +699,27 @@ def _shop(judge):
     return store, llm, kettlebay, glazeworks, shop
 
 
+def _rewrite(store, llm, path, shop, extracted, distilled):
+    """Rewrite the shop memory by ``path``; the id of the memory holding the
+    rewritten text: the shop memory edited in place, or the new memory a
+    MORE wrote (a save, or a distilled save), which supersedes it."""
+    if path == "manual edit":
+        llm.queue(extracted)
+        store.update(shop.id, content=REWRITTEN)
+        return shop.id
+    if path == "reconcile update":
+        llm.queue(extracted)
+        actions = store.add(ADDED, user_id="ada", infer=False).actions
+    else:
+        pending = store.add_deferred(ADDED, user_id="ada").actions[0].memory_id
+        llm.queue(distilled, extracted)
+        actions = store.distill(pending).actions
+    [action] = actions
+    assert action.event == "UPDATE" and action.memory_id != shop.id
+    assert store.get(shop.id).superseded_by == action.memory_id
+    return action.memory_id
+
+
 @pytest.mark.parametrize("judged", [True, False], ids=["calibrated judge", "text model only"])
 @pytest.mark.parametrize("path", ["reconcile update", "manual edit", "distillation"])
 def test_a_rewritten_memory_keeps_the_names_it_had(path, judged):
@@ -707,26 +728,19 @@ def test_a_rewritten_memory_keeps_the_names_it_had(path, judged):
     Before, the rewritten memory was compared with the entity it already
     belonged to; a memory both sides share is left out of a comparison, so
     nothing was left to compare, and a second "Kettlebay" was made. A name
-    new to the memory is still resolved, and on the rewritten text."""
+    new to the memory is still resolved, and on the rewritten text. A save
+    that adds detail (MORE) writes the text as a new memory, read as an edit
+    of the one it replaces."""
     judge = _Judge() if judged else None
     store, llm, kettlebay, glazeworks, shop = _shop(judge)
     extracted = facts_response(fact(REWRITTEN, entities=["Kettlebay", "Glazeworks"]))
-    if path == "reconcile update":
-        llm.queue(extracted)
-        action = store.add(ADDED, user_id="ada", infer=False).actions[0]
-        assert (action.event, action.memory_id) == ("UPDATE", shop.id)
-    elif path == "manual edit":
-        llm.queue(extracted)
-        store.update(shop.id, content=REWRITTEN)
-    else:
-        pending = store.add_deferred(ADDED, user_id="ada").actions[0].memory_id
-        llm.queue(facts_response(fact(ADDED, entities=["Glazeworks"])), extracted)
-        store.distill(pending)
+    rewritten = _rewrite(store, llm, path, shop, extracted,
+                         facts_response(fact(ADDED, entities=["Glazeworks"])))
 
-    assert store.get(shop.id).content == REWRITTEN
+    assert store.get(rewritten).content == REWRITTEN
     kettlebays = [e.id for e in store.entities(user_id="ada") if e.normalized == "kettlebay"]
     assert kettlebays == [kettlebay.id]
-    linked = {e.id for e in store.backend.entities_of_memory(shop.id)}
+    linked = {e.id for e in store.backend.entities_of_memory(rewritten)}
     assert linked == {kettlebay.id, glazeworks.id}
     assert store.merge_proposals(user_id="ada") == []
     assert llm.identity_calls == 0
@@ -751,19 +765,11 @@ def test_a_rewritten_memorys_mentions_keep_what_decided_them(path, judged):
     extracted = facts_response(fact(REWRITTEN, entities=[
         {"name": "Kettlebay", "type": "organization"},
         {"name": "Glazeworks", "type": "organization"}]))
-    if path == "reconcile update":
-        llm.queue(extracted)
-        store.add(ADDED, user_id="ada", infer=False)
-    elif path == "manual edit":
-        llm.queue(extracted)
-        store.update(shop.id, content=REWRITTEN)
-    else:
-        pending = store.add_deferred(ADDED, user_id="ada").actions[0].memory_id
-        llm.queue(facts_response(fact(ADDED, entities=["Glazeworks"])), extracted)
-        store.distill(pending)
+    rewritten = _rewrite(store, llm, path, shop, extracted,
+                         facts_response(fact(ADDED, entities=["Glazeworks"])))
 
     mentions = {m.surface: m for entity in (kettlebay, glazeworks)
-                for m in store.backend.entity_mentions(entity.id) if m.memory_id == shop.id}
+                for m in store.backend.entity_mentions(entity.id) if m.memory_id == rewritten}
     assert mentions["Kettlebay"].decided == {"reason": "the memory already names it"}
     joined = mentions["Glazeworks"].decided
     if judged:

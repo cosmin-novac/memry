@@ -140,13 +140,13 @@ class Mem0ComparisonAdapter(MemoryBackend):
 
     def vector_search(
         self, embedding, embedding_model, scope, limit=20, include_invalid=False,
-        categories=None, entity_id=None,
+        categories=None, entity_id=None, history=False,
     ):
         return []  # native_search covers retrieval for this backend
 
     def keyword_search(
         self, query, scope, limit=20, include_invalid=False,
-        categories=None, entity_id=None,
+        categories=None, entity_id=None, history=False,
     ):
         return []  # native_search covers retrieval for this backend
 

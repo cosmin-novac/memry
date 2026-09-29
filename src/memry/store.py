@@ -302,9 +302,11 @@ def _forgetting_trigger(event: Any) -> str:
 
 
 def _is_update_supersede(event: MemoryEvent) -> bool:
-    """A SUPERSEDE of an UPDATE nobody could write a merged text for: the newer
-    memory adds to the old one, which is kept and was never contradicted. Read
-    from the event's ``kind``; an older row without one, from its reason."""
+    """A SUPERSEDE of an update (``reconcile.SUPERSEDE_KIND``): a newer memory
+    said what changed, merged a detail in, or added to it with no merged text
+    written. The old one was never contradicted: it held until then, and
+    stays searchable as history (``models.HISTORY_KINDS``). Read from the
+    event's ``kind``; an older row without one, from its reason."""
     if event.kind is not None:
         return event.kind == "update"
     return (event.reason or "").startswith(UPDATE_SUPERSEDE_REASON)
@@ -321,7 +323,7 @@ def _coverage_warning(missing: list[str]) -> str:
 def _conflict_mark(memory: Memory) -> dict[str, Any]:
     """The conflict marker of a memory kept beside the one it would have
     replaced (``reconcile.CONFLICT_KEY``), empty when it has none. Its
-    ``kind`` is "update" when an UPDATE nobody wrote the merged text for was
+    ``kind`` is "update" when a change (or a MORE with no merged text) was
     held back, and absent for a contradiction."""
     mark = (memory.metadata or {}).get(CONFLICT_KEY)
     return mark if isinstance(mark, dict) else {}
@@ -433,11 +435,11 @@ def _across_runs(scope: Scope) -> Scope:
     whole user (with the agent), not one run. Reconcile's candidates and the
     tag vocabulary offered to extraction use it; topic canonicalization and
     entity lookup (``entities.resolve_mentions``) read the whole user too.
-    Reconcile then acts by where the memory it matched lives
-    (``reconcile.reconcile_candidate``): a contradiction supersedes a memory
-    of any run, but a duplicate or an update of another run's memory adds the
-    fact to the save's run, so a search of the run finds it (the
-    consolidation pass merges duplicates across runs)."""
+    Reconcile acts on the memory it matched whatever its run
+    (``reconcile.reconcile_candidate``); the save's run decides only where a
+    new memory is stored, and a restatement of another run's memory is
+    recorded on it as evidence of the save, whose episodes keep it findable
+    by a search of the save's run."""
     if scope.user_id is None:
         return scope
     return Scope(user_id=scope.user_id, agent_id=scope.agent_id)
@@ -502,10 +504,10 @@ class MemoryStore:
         every memory the save produces (a key Memry sets itself, such as
         "when", is kept). ``created_at`` (ISO 8601) is the time of the save:
         the episodes' and new memories' ``created_at``, ``updated_at`` and
-        ``valid_from``, the ``updated_at`` of a memory it rewrites, the
-        ``invalid_at`` of one it supersedes, and the time of the events it
-        records. A memory it rewrites or supersedes keeps a later
-        ``updated_at`` it has (``repair_updated_at`` reads the same).
+        ``valid_from`` (a merged text of a MORE included), the ``invalid_at``
+        of one it supersedes, and the time of the events it records (the
+        NONE event of a memory it restates). A memory it supersedes keeps a
+        later ``updated_at`` it has (``repair_updated_at`` reads the same).
         ``now`` is the reference date extraction resolves "yesterday"
         against, and the when-confirmation reads as the day of writing,
         instead of the clock. All three are for replaying dated
@@ -515,6 +517,10 @@ class MemoryStore:
         messages = (
             [{"role": "user", "content": content}] if isinstance(content, str) else content
         )
+        # One time for every message of the save: a save is its run and its
+        # time, which is how the saves stating a memory are counted
+        # (``reconcile.saves_of``).
+        saved_at = created_at or utcnow()
         episodes = [
             Episode(
                 content=m.get("content", ""),
@@ -523,7 +529,7 @@ class MemoryStore:
                 agent_id=agent_id,
                 run_id=run_id,
                 metadata=metadata or {},
-                **({"created_at": created_at} if created_at else {}),
+                created_at=saved_at,
             )
             for m in messages
             if (m.get("content") or "").strip()
@@ -807,8 +813,8 @@ class MemoryStore:
         excluded: set[str] = set(exclude_ids or ())
         actions: list[AddAction] = []
         for candidate in candidates:
-            # the user's memories across runs; the save's own scope (run
-            # included) decides what a match may do (``reconcile_candidate``)
+            # the user's memories across runs, judged alike whatever their
+            # run; the save's scope is where a new memory goes
             similar = hybrid_search(
                 backend=self.backend,
                 embedder=self.embedder,
@@ -1547,6 +1553,8 @@ class MemoryStore:
             relational and not categories and not entity_id
         )
         fetch = limit if not wide else min(max(limit * 8, 40), 500)
+        # what was true until an update replaced it is searchable too, for
+        # questions about the past (``_current_first`` orders it)
         results = hybrid_search(
             backend=self.backend,
             embedder=self.embedder,
@@ -1557,6 +1565,7 @@ class MemoryStore:
             include_invalid=include_invalid,
             categories=categories,
             entity_id=entity_id,
+            history=True,
         )
         # The linked search: the memories of the entities linked to the query's
         # join the ranking (multi-hop answers hybrid alone scores at zero).
@@ -1570,7 +1579,44 @@ class MemoryStore:
             ]
         # a question needing several memories returns every member found
         members = sum(1 for r in results if r.signals.get("member"))
-        return self._rerank(query, results)[:max(limit, min(members, SET_RESULT_CAP))]
+        ranked = self._current_first(self._rerank(query, results))
+        return ranked[:max(limit, min(members, SET_RESULT_CAP))]
+
+    def _current_first(self, results: list[SearchResult]) -> list[SearchResult]:
+        """A memory kept as history (``models.HISTORY_KINDS``) comes right
+        after the memory in use that replaced it, followed through a chain
+        of updates, when that one is among the results: for one question the
+        current value comes first. It is moved up, not the history down, so a
+        question about the past keeps its answer as high as it ranked. The
+        rest keep their order."""
+        if all(r.memory.invalid_at is None for r in results):
+            return results
+        by_id = {r.memory.id: r for r in results}
+
+        def current(memory: Memory) -> Memory:
+            seen: set[str] = set()
+            while memory.invalid_at is not None and memory.superseded_by and memory.id not in seen:
+                seen.add(memory.id)
+                found = by_id.get(memory.superseded_by)
+                later = found.memory if found else self.backend.get_memory(memory.superseded_by)
+                if later is None:
+                    break
+                memory = later
+            return memory
+
+        ordered: list[SearchResult] = []
+        placed: set[str] = set()
+        for result in results:
+            if result.memory.id in placed:
+                continue
+            head = current(result.memory) if result.memory.invalid_at is not None else None
+            if head is not None and head.id != result.memory.id and head.id in by_id \
+                    and head.id not in placed:
+                ordered.append(by_id[head.id])
+                placed.add(head.id)
+            ordered.append(result)
+            placed.add(result.memory.id)
+        return ordered
 
     def _reranks(self) -> bool:
         """Whether the decision provider re-ranks. The setting decides where it
@@ -2711,17 +2757,17 @@ class MemoryStore:
         _, new, old = found
         if not (_owned(new, owner_prefix) and _owned(old, owner_prefix)):
             return False
-        # held back from an UPDATE nobody wrote the merged text for: the new
-        # one adds to the old one, so a confirmed replacement is an update's,
-        # which the Archive's undo reverses keeping both (``undo_replacement``)
+        # held back from an update (a change, or a MORE with no merged text):
+        # a confirmed replacement is an update's, which keeps the old one as
+        # history and which the Archive's undo reverses keeping both
+        # (``undo_replacement``)
         update = _conflict_mark(new).get("kind") == "update"
         if decision == "accept":  # the new one is right
             self.backend.invalidate_memory(old.id, superseded_by=new.id)
             self.backend.add_event(MemoryEvent(
                 memory_id=old.id, event="SUPERSEDE", old_content=old.content,
                 new_content=new.content, actor="user",
-                reason=(f"{UPDATE_SUPERSEDE_REASON}: you confirmed that memory {new.id} "
-                        "replaces it" if update
+                reason=(f"you confirmed that memory {new.id} updates it" if update
                         else f"you confirmed that memory {new.id} replaces it"),
                 kind="update" if update else "contradiction",
             ))
@@ -2750,15 +2796,17 @@ class MemoryStore:
     def replaced(
         self, *, user_id: str | None = None, limit: int = 200
     ) -> list[dict[str, Any]]:
-        """Memories a contradiction, or an update kept and superseded, took
-        out of use, newest first; ``contradiction`` says which.
+        """Memories a contradiction or an update took out of use, newest
+        first; ``contradiction`` says which.
 
         A memory that was consolidated or distilled lives on inside what
         replaced it, so there is nothing to undo. One that was contradicted is
         the opposite case - the store stopped believing it on one model's
         say-so - and that is the judgement worth a second look. One an update
-        superseded, with no merged text written, holds what the newer memory
-        does not say: its undo brings it back beside the newer one.
+        superseded (a change, a merged detail, or an addition with no merged
+        text written) held until then and stays searchable as history: if the
+        update was a mistake, its undo brings it back into use beside the
+        newer one.
         """
         scope = Scope(user_id=user_id)
         out: list[dict[str, Any]] = []
@@ -2794,8 +2842,8 @@ class MemoryStore:
         self, memory_id: str, *, keep_new: bool = False,
         owner_prefix: str | None = None,
     ) -> bool:
-        """Bring back a memory that a contradiction, or an update kept and
-        superseded, replaced.
+        """Bring back into use a memory that a contradiction or an update
+        replaced.
 
         ``keep_new`` leaves the replacement in use as well, for when both turn
         out to be true. Otherwise the replacement is forgotten - it goes to the
@@ -4811,8 +4859,8 @@ class MemoryStore:
             items.append({
                 "kind": "conflict", "id": new.id,
                 "title": new.content,
-                "detail": ("This updates a memory you already have, and no merged "
-                           "text was written for the two." if update
+                "detail": ("This updates a memory you already have: the older one "
+                           "would stay as history." if update
                            else "This contradicts a memory you already have.")
                           + (f" Memry kept both because {held}." if held else ""),
                 "replaces": [old.content],

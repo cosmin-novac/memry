@@ -194,10 +194,19 @@ class Memory(BaseModel):
 
 
 #: What took a memory out of use, on its SUPERSEDE event (``MemoryEvent.kind``):
-#: a newer memory contradicting it, an update kept beside the newer memory
-#: with no merged text written, a merge of duplicates, or the distilling of a
-#: raw saved message.
+#: a newer memory contradicting it (it was never true), a newer memory
+#: updating it (what it said changed, or a text merging a detail into it, or
+#: a newer memory adding to it with no merged text written), a merge of
+#: duplicates, or the distilling of a raw saved message.
 SUPERSEDE_KINDS: tuple[str, ...] = ("contradiction", "update", "consolidation", "distillation")
+
+#: The SUPERSEDE kinds after which a memory stays retrievable as history: an
+#: update ends what it said at the newer memory's date (``invalid_at``), and
+#: it held until then. Search returns it, after the memory that replaced it,
+#: and shows that date (``context.until_note``). The other kinds leave search
+#: as before: a contradiction was never true, and a consolidated or distilled
+#: memory lives on in what replaced it.
+HISTORY_KINDS: tuple[str, ...] = ("update",)
 
 
 class MemoryEvent(BaseModel):

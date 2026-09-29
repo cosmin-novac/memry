@@ -223,8 +223,15 @@ def locomo_time(stamp: Any) -> str:
 
 def memories_json(memories: list[Any]) -> str:
     """The memories as ``ANSWER_PROMPT`` shows them: a JSON list of
-    "<timestamp>: <memory>" strings, each timestamped with its ``created_at``."""
-    return json.dumps([f"{locomo_time(m.created_at)}: {m.content}" for m in memories], indent=4)
+    "<timestamp>: <memory>" strings, each timestamped with its ``created_at``.
+    A memory a later one updated, which search returns as history, ends in
+    the date it held until ("[until 2023-07-15]", ``context.until_note``), so
+    the answer does not read it as current."""
+    from memry.intelligence.context import until_note
+
+    return json.dumps([f"{locomo_time(m.created_at)}: {m.content}"
+                       + (f" {until_note(m)}" if getattr(m, "invalid_at", None) else "")
+                       for m in memories], indent=4)
 
 
 def answer_messages(question: str, memories: list[Any]) -> list[dict[str, str]]:

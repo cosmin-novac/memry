@@ -18,8 +18,9 @@ it is a product (its listing safety text); versions and a part of one product
 and synonym variants, and tags that are an entity's name. About 220 saves over
 ten simulated weeks, a third of them through the MCP server's deferred path
 (``add_deferred``, distilled once the conversation is quiet): new facts, one-off
-facts that make the frequent names gather memories, refinements (UPDATE),
-exact and reworded restatements (NONE), contradictions (supersede), and a
+facts that make the frequent names gather memories, refinements (MORE),
+exact and reworded restatements (SAME), changed values (CHANGED, a quarter of
+them corrections, WRONG), and a
 person's own actions through the store's API: edits (a value, a name added, a
 name taken out), deletes (one for good), a retag, a merge, a mistaken merge
 and its undo, renames, a removed place and person brought back a week later,
@@ -77,7 +78,11 @@ kind and by operation.
    entity merged away (a confirmed proposal may keep a tombstone); no relation
    in use whose memory is out of use; one row per pair of entities;
 8. after each weekly cycle, the memory answering each of 20 questions about
-   the world is in the top 10 of the linked search with a stub judge.
+   the world is in the top 10 of the linked search with a stub judge. The
+   documented exception: a memory a changed value superseded stays
+   retrievable as history (``models.HISTORY_KINDS``) and may be among the
+   results, but only a memory in use counts as the answer (a value can come
+   back, and its old statement is not the current one).
 
 A violation of the store's state (1, 2, 2b, 5, 6, 7) is reported with the
 operation that made it and the one after which it was gone, if it went.
@@ -114,6 +119,7 @@ import memry.store as store_mod
 from memry.config import Config
 from memry.intelligence.entities import non_referent_reason, screened_out
 from memry.intelligence.identity import CANDIDATES_PER_NAME, Mention
+from memry.intelligence.reconcile import MERGE_REQUEST, MERGED_REASON
 from memry.models import TOPIC_TYPE, Scope
 from memry.providers.decisions import Answer, Answers, Choice, Decider, Noul, Score
 from memry.providers.embeddings import HashEmbedder
@@ -353,7 +359,7 @@ EPISODES: list[Slot] = [
     Slot("rent_paid", "vessa", "{owner} paid {E} the rent for {d}", ("",), ("apartment",)),
 ]
 
-#: Refinements an UPDATE appends; some name something the memory did not.
+#: Refinements a MORE appends; some name something the memory did not.
 REFINEMENTS = (", confirmed by email", ", as {owner} noted", ", which {tomas} double-checked")
 #: A manual edit that adds a name to a memory.
 EDIT_ADDS = " (recommended by {tomas})"
@@ -799,36 +805,40 @@ class WorldLLM(LLM):
     # -- reconciliation -----------------------------------------------------
     def _reconcile(self, user: str) -> str:
         listing, new = parse_reconcile_state(user)
-        if "The action is decided: UPDATE memory [0]" in user:
+        if MERGE_REQUEST in user:
             self.calls.count("merge_text")
             plan = self.world.plans.get(norm(new))
-            return json.dumps({"action": "UPDATE", "target": 0,
+            return json.dumps({"action": "MORE", "target": 0,
                                "content": plan.info.text if plan else f"{listing[0]} {new}",
                                "reason": "merged"})
         self.calls.count("reconcile_text")
         action, target = decide_action(self.world, listing, new)
-        content = self.world.plans[norm(new)].info.text if action == "UPDATE" else None
+        content = self.world.plans[norm(new)].info.text if action == "MORE" else None
         return json.dumps({"action": action, "target": target, "content": content,
                            "reason": "world"})
 
 
 def parse_reconcile_state(state: str) -> tuple[list[str], str]:
-    head, new = state.split("\n\nNEW fact:\n", 1)
+    """The memories and the new fact of a reconcile state, without the dates
+    each was said (``reconcile.reconcile_state``)."""
+    head, new = re.split(r"\n\nNEW fact(?: \(said [^)]*\))?:\n", state, maxsplit=1)
     new = new.split("\n\n", 1)[0].strip()
-    listing = re.findall(r"^\[\d+\] (.*)$", head, re.MULTILINE)
+    listing = re.findall(r"^\[\d+\] (?:\(said [^)]*\) )?(.*)$", head, re.MULTILINE)
     return listing, new
 
 
 def decide_action(world: World, listing: list[str], new: str) -> tuple[str, int | None]:
     plan = world.plans.get(norm(new))
     if plan is None or plan.op == "new":
-        return "ADD", None
+        return "NEW", None
     slots = [(world.info(text).slot if world.info(text) else None) for text in listing]
     target = next((i for i, slot in enumerate(slots) if slot == plan.info.slot), None)
     if target is None:
-        return "ADD", None  # the model cannot act on what it was not shown
-    return {"restate": "NONE", "reword": "NONE", "update": "UPDATE",
-            "contradict": "DELETE"}[plan.op], target
+        return "NEW", None  # the model cannot act on what it was not shown
+    if plan.op == "contradict":
+        # a value that changed; now and then a correction of one never true
+        return ("WRONG" if stable_rng("wrong", new).random() < 0.25 else "CHANGED"), target
+    return {"restate": "SAME", "reword": "SAME", "update": "MORE"}[plan.op], target
 
 
 # ------------------------------------------------------------ the judges
@@ -1498,14 +1508,14 @@ class Checker:
 
         * text model: 1 extraction and 1 coverage audit (per group of
           messages a deferred save distills together), and per fact 1
-          reconcile (only without a decision provider), and per UPDATE 1
+          reconcile (only without a decision provider), and per MORE 1
           merged text (only with one: it decides the action, the text model
           writes) and 1 re-extraction of the new text;
         * the typed questions go to the decision provider, the text model
           when an operator sends them there (``LLMDecider``), and count as
           the provider's;
         * decision provider: per fact 1 action and 1 screen of names new to
-          the store, and 1 more screen per UPDATE;
+          the store, and 1 more screen per MORE;
         * identity: none without a calibrated judge. With one, per name
           compared, at most 6 questions per candidate (2 orders, at a step
           of 10 memories and one of 50, and once in context), the candidates
@@ -1550,7 +1560,8 @@ class Checker:
                 self.calls.question = (slot.question, value)
                 results = store.search(slot.question, user_id=USER, limit=10)
                 rank = next((i for i, r in enumerate(results)
-                             if contains_name(r.memory.content, value)), None)
+                             if contains_name(r.memory.content, value)
+                             and r.memory.invalid_at is None), None)
                 if rank is not None and rank < 10:
                     found += 1
                     continue
@@ -1630,7 +1641,9 @@ class Replay:
             return
         self.begin(f"distill {len(self.pending)} facts", at)
         db = self.store.backend._db
-        updates_sql = "SELECT COUNT(*) FROM memory_events WHERE event = 'UPDATE'"
+        # a MORE's merged text is a new memory: counted by its ADD event
+        updates_sql = ("SELECT COUNT(*) FROM memory_events WHERE event = 'ADD' "
+                       f"AND reason LIKE '{MERGED_REASON} %'")
         before = db.execute(updates_sql).fetchone()[0]
         outcome = self.store.process_pending_enrichments(limit=50, quiet_seconds=120, now=at)
         assert not outcome["failed"], outcome

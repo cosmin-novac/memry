@@ -418,22 +418,52 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
 2. With an LLM, extract small candidate memories, types, importance, topics, entities, and
    possible relations, offered the user's tags from every run. Without an LLM, store the
    input verbatim.
-3. Retrieve similar active memories of the user across runs (with the agent), and
-   reconcile each candidate as add, update, supersede, or no-op. What a decision does
-   depends on where the memory it matched lives. In the save's own run: as decided. In
-   another run: a contradiction supersedes that memory and adds the new one to the save's
-   run; a no-op or an update adds the new memory to the save's run anyway and leaves the
-   other run's memory alone, so a search of the run finds what was said in it (the
-   consolidation pass may merge the duplicate later). An exact duplicate needs no model
-   call: within the save's run it is skipped, and one of another run is added to the
-   save's run by the same rule. (Tags, topic canonicalization and entity
-   lookup read the whole user too.) An UPDATE's merged sentence is written by the text
-   model, also when a decision provider chose the action; when none is written, the old
-   memory is kept and superseded by the new one instead of being overwritten with the new
-   fact alone. The Archive lists that old memory as replaced (not contradicted), and its
-   undo brings it back beside the newer one. Each SUPERSEDE event records its `kind`
-   (contradiction, update, consolidation or distillation), which the Archive reads; an
-   event from before the column is classified by its reason.
+3. Retrieve the five most similar memories in use of the user across runs (with the
+   agent) and reconcile each candidate (`intelligence/reconcile.py`). The judge (the
+   decision provider, or the text model where it abstains) sees each memory with the date
+   it was said and the new fact with the save's date, and gives one of five answers. The
+   answer acts the same way whatever run the memory it names belongs to; the save's run
+   decides only where a new memory is stored.
+   - NEW: new information, including another occurrence of the same kind of event (two
+     yoga classes stay two). The fact is added.
+   - SAME: it says nothing the memory does not. No second copy is stored: the save is
+     recorded on the memory as evidence. Its episodes join the memory's
+     `source_episode_ids`, and a NONE event at the save's time says when it was last said.
+     The memory's `updated_at` does not move.
+   - MORE: it adds detail to a memory that stays true. The text model writes one text of
+     both, stored as a new memory dated at the save (in the save's run, with the old one's
+     tags and sources), which supersedes the old one as an update. Its names are read as an
+     edit of the old memory's. With no merged text written, the new fact itself supersedes
+     the old one as an update.
+   - CHANGED: the memory was true and is no longer. The new memory is added and the old
+     one's validity ends at its date (`invalid_at`, `superseded_by`), superseded as an
+     update.
+   - WRONG: the memory was never true (a correction). It is superseded as a contradiction.
+   SAME, MORE, CHANGED and WRONG act only at or above the decision provider's bar for that
+   answer (`Decider.reconcile_bars`, measured for Jev with `evals/reconcile_benchmark.py`;
+   `supersede.confidence` for a provider nobody measured; the text model's prompt answers
+   carry no confidence). Below its bar a SAME or a MORE is stored as NEW, and a CHANGED or
+   a WRONG keeps both memories in use, the new one marked as a conflict that waits under
+   Upkeep. CHANGED, WRONG and a MORE with no merged text also wait there when the old
+   memory is rated important or was stated in two or more separate saves: the saves behind
+   its evidence (the episodes it was made from and those of each save that said it again),
+   a save being its run and its time, which every message of one save shares. A fact from
+   one save counts once however many of its messages it rests on. An exact duplicate (normalized text) is SAME
+   with no model asked, unless it is an event (either memory episodic, or with an occurrence
+   time) said on another day, which the judge decides. Each SUPERSEDE event records its `kind`
+   (contradiction, update, consolidation or distillation), which the Archive and search
+   read; an event from before the column is classified by its reason. The Archive lists a
+   memory an update or a contradiction replaced; the undo of an update brings the old one
+   back beside the newer one, the undo of a contradiction forgets the newer one unless the
+   person keeps both.
+
+   Runs are read from evidence. A search restricted to a run returns the memories said in
+   it: the run's own, and those whose source episodes include an episode of the run, such
+   as a memory of another run a save of this one restated (SAME) or a merged text that
+   carries the sources of what it replaced. No table or key records it apart from the
+   episodes, so backups, restores and deletes carry it with the memory. Listing a run
+   (`get_all`, `delete_all`) still reads the memories it holds as its own. (Tags, topic
+   canonicalization and entity lookup read the whole user too.)
 4. Store or update the memory, its tags (the column, the filter index and the topic
    mentions, `_file_tags_locked`), embedding, and FTS row.
 5. Resolve entity mentions conservatively. Alias matches only narrow the candidates. A new
@@ -444,18 +474,19 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    warning on the result.
 
 `add` (and `add_deferred`) take `created_at` (the episodes' and new memories' time and
-`valid_from`, the `updated_at` of a memory the save rewrites, the `invalid_at` of one it
-supersedes, a distilled raw memory included, and the time of the events the save records;
-a rewritten or superseded memory keeps a later `updated_at` it has, so
-`repair_updated_at` reads the same times), `memory_metadata`
+`valid_from`, a MORE's merged text included, the `invalid_at` of a memory the save
+supersedes, a distilled raw memory included, and the time of the events the save records,
+the NONE event of a restatement included; a superseded memory keeps a later `updated_at`
+it has, so `repair_updated_at` reads the same times), `memory_metadata`
 (merged into every memory the save produces; a key Memry sets, such as "when", is kept)
 and `now` (the day extraction and the when-check read as today). They exist for replaying
 dated conversations (`evals/external_benchmarks.py`).
 
-When existing memory text is edited manually or rewritten by reconciliation, Memry analyzes
-the final text before committing the change and replaces that memory's entity-name snapshot
-and authoritative mention links together. A failed LLM analysis leaves the old text and links
-unchanged. In zero-key mode, existing links are retained or removed by exact known-alias
+When existing memory text is edited manually, Memry analyzes the final text before
+committing the change and replaces that memory's entity-name snapshot and authoritative
+mention links together. A MORE's merged text is analyzed the same way, as an edit of the
+memory it replaces, before anything is written, and its links go to the new memory. A
+failed LLM analysis leaves the old text and links unchanged. In zero-key mode, existing links are retained or removed by exact known-alias
 matching; discovering a brand-new entity still requires an LLM.
 
 Entity descriptions and synthetic topic hierarchy are not mandatory write-path work. This
@@ -517,8 +548,20 @@ Every ranked read breaks a tie by memory id (`ORDER BY updated_at DESC, id` and 
 so memories of one time (a bulk import, a restore) rank alike in every build of a store.
 
 The ANN file is a cache. SQLite remains authoritative, ANN candidates are exact-rescored,
-and the index can be rebuilt. Invalidated memories are excluded unless a caller explicitly
-requests history.
+and the index can be rebuilt.
+
+A search reads the memories in use and, as history, those superseded as an update
+(`models.HISTORY_KINDS`: a changed value, or a text a detail was merged into): each held
+until its `invalid_at`. They are out of the ANN index with the rest of what is out of use
+and few, so the vector search scans them exactly beside it. When the memory in use that
+replaced one (followed through a chain of updates) is among the results, it is moved up to
+just before it, so for one question the current value comes first and a question about the
+past keeps its answer where it ranked. The answer context writes such a memory with the
+date it was said and "[until <date>]" after its text; MCP rows carry its `invalid_at`.
+Hiding them lost LoCoMo questions about the past. A memory superseded otherwise (a
+contradiction, a consolidation, a distillation) or deleted is excluded unless a caller
+explicitly requests every memory (`include_invalid`). Reconcile's candidates are memories
+in use only.
 
 ## 6. Product surfaces and security
 
@@ -671,6 +714,7 @@ up as a red run within a week instead of in a user's terminal.
 | Background work uses bounded database batches but separate prompts per memory | Bounded draining improves throughput; separate prompts preserve each user scope, provenance, retry, and failure boundary. | Yes |
 | Anthropic defaults to claude-haiku-4-5 | Memory extraction is frequent background work, so the lower-cost, lower-latency model is the useful default; operators can explicitly select a larger model when quality justifies the extra cost. | Yes |
 | Provider HTTP clients are reused for the store lifetime | Reusing connections removes repeated connection setup from enrichment latency without adding a service or a second execution path. | Yes |
+| Reconcile answers NEW, SAME, MORE, CHANGED or WRONG and acts alike in every run; a changed value stays searchable as history; a restatement is recorded as evidence on the memory it restates | Acting only on a memory of the save's own run left every changed value live and every restatement duplicated when each session was its own run. Keeping the older value dated answers questions about the past, and the save's episodes already say which run said it, so no new record is needed. | Yes |
 
 Any future consequential architecture change must be added here with its product reason and
 implementation status before it is treated as decided work.

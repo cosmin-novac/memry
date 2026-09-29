@@ -276,9 +276,18 @@ class MemoryBackend(ABC):
         include_invalid: bool = False,
         categories: list[str] | None = None,
         entity_id: str | None = None,
+        history: bool = False,
     ) -> list[tuple[Memory, float]]:
         """Cosine similarity over stored vectors (same embedding model only),
-        best first, a tie by memory id."""
+        best first, a tie by memory id. Reads the memories in use; with
+        ``history`` also those superseded as an update (``models.
+        HISTORY_KINDS``), which hold what was true until then; with
+        ``include_invalid`` every memory.
+
+        A ``scope`` with a run reads the memories said in that run: the run's
+        own, and those whose evidence (``source_episode_ids``) includes an
+        episode of the run, such as a restatement recorded on a memory of
+        another run."""
 
     @abstractmethod
     def keyword_search(
@@ -289,8 +298,10 @@ class MemoryBackend(ABC):
         include_invalid: bool = False,
         categories: list[str] | None = None,
         entity_id: str | None = None,
+        history: bool = False,
     ) -> list[tuple[Memory, float]]:
-        """Full-text (BM25) search. Higher score = better, a tie by memory id."""
+        """Full-text (BM25) search. Higher score = better, a tie by memory id.
+        Reads what ``vector_search`` reads."""
 
     def native_search(
         self, query: str, scope: Scope, limit: int = 20

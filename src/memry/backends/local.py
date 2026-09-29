@@ -31,6 +31,7 @@ from ..models import (
     MergeProposal,
     Relation,
     ENTITY_TYPES,
+    HISTORY_KINDS,
     TOPIC_TYPE,
     Scope,
     SyntheticTag,
@@ -334,6 +335,38 @@ def _scope_clause(scope: Scope, prefix: str = "") -> tuple[str, list[Any]]:
             clauses.append(f"{prefix}{field} = ?")
             params.append(value)
     return (" AND ".join(clauses) if clauses else "1=1"), params
+
+
+def _search_scope_clause(scope: Scope, memory: str) -> tuple[str, list[Any]]:
+    """``_scope_clause`` for a search of memories (``memory`` is the table or
+    its alias). Its run is where a memory was said, read from the memory's
+    evidence: a memory is in a run when it is the run's own or when one of
+    its source episodes is of the run (a save that restated a memory of
+    another run, reconcile's SAME, or a merged text carrying the sources of
+    the memory it replaced)."""
+    clause, params = _scope_clause(
+        Scope(user_id=scope.user_id, agent_id=scope.agent_id), prefix=f"{memory}.")
+    if scope.run_id is None:
+        return clause, params
+    return (
+        f"{clause} AND ({memory}.run_id = ? OR EXISTS (SELECT 1 FROM "
+        f"json_each({memory}.source_episode_ids) AS source JOIN episodes "
+        "ON episodes.id = source.value WHERE episodes.run_id = ?))",
+        [*params, scope.run_id, scope.run_id],
+    )
+
+
+def _history_clause(memory: str) -> str:
+    """A memory out of use that stays retrievable as history: superseded, and
+    its latest SUPERSEDE event of a kind in ``HISTORY_KINDS`` (an update). A
+    memory brought back and superseded again is read by its latest event."""
+    kinds = ", ".join(f"'{kind}'" for kind in HISTORY_KINDS)
+    return (
+        f"{memory}.invalid_at IS NOT NULL AND {memory}.superseded_by IS NOT NULL AND "
+        "(SELECT event.kind FROM memory_events AS event WHERE event.memory_id = "
+        f"{memory}.id AND event.event = 'SUPERSEDE' ORDER BY event.rowid DESC LIMIT 1) "
+        f"IN ({kinds})"
+    )
 
 
 def _category_clause(categories: list[str] | None, memory_id: str) -> tuple[str, list[Any]]:
@@ -1395,13 +1428,35 @@ class LocalBackend(MemoryBackend):
         include_invalid: bool = False,
         categories: list[str] | None = None,
         entity_id: str | None = None,
+        history: bool = False,
     ) -> list[tuple[Memory, float]]:
-        clause, params = _scope_clause(scope)
+        clause, params = _search_scope_clause(scope, "memories")
         cat_clause, cat_params = _category_clause(categories, "memories.id")
         entity_clause, entity_params = _entity_clause(entity_id, "memories.id")
-        if not include_invalid:
-            clause += " AND invalid_at IS NULL"
+        filters = f"{clause} AND {cat_clause} AND {entity_clause}"
+        filter_params = (*params, *cat_params, *entity_params)
+        found = self._vector_rows(
+            embedding, embedding_model, limit,
+            filters if include_invalid else f"{filters} AND memories.invalid_at IS NULL",
+            filter_params)
+        if history and not include_invalid:
+            # out of the ANN index with the rest of what is out of use, and
+            # few: an exact scan of them alone
+            with self._lock:
+                rows = self._db.execute(
+                    f"SELECT {_MEMORY_COLS}, embedding FROM memories "
+                    f"WHERE {filters} AND {_history_clause('memories')} "
+                    "AND embedding IS NOT NULL AND embedding_model = ?",
+                    (*filter_params, embedding_model),
+                ).fetchall()
+            found = sorted(found + self._score_rows(rows, embedding, limit),
+                           key=lambda pair: (-pair[1], pair[0].id))[:limit]
+        return found
 
+    def _vector_rows(
+        self, embedding: list[float], embedding_model: str, limit: int, filters: str,
+        params: tuple[Any, ...],
+    ) -> list[tuple[Memory, float]]:
         # ANN fast path: over-fetch approximate neighbors, filter in SQL,
         # exact-rescore. Falls back to the full scan if it can't fill `limit`.
         index = self._ann_index(embedding_model, len(embedding))
@@ -1414,9 +1469,8 @@ class LocalBackend(MemoryBackend):
                     rows = self._db.execute(
                         f"SELECT {_MEMORY_COLS}, embedding FROM memories "
                         f"WHERE id IN (SELECT memory_id FROM ann_keys WHERE key IN ({key_ph})) "
-                        f"AND {clause} AND {cat_clause} AND {entity_clause} "
-                        "AND embedding IS NOT NULL AND embedding_model = ?",
-                        (*keys, *params, *cat_params, *entity_params, embedding_model),
+                        f"AND {filters} AND embedding IS NOT NULL AND embedding_model = ?",
+                        (*keys, *params, embedding_model),
                     ).fetchall()
                 if len(rows) >= limit:
                     return self._score_rows(rows, embedding, limit)
@@ -1425,9 +1479,8 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             rows = self._db.execute(
                 f"SELECT {_MEMORY_COLS}, embedding FROM memories "
-                f"WHERE {clause} AND {cat_clause} AND {entity_clause} "
-                "AND embedding IS NOT NULL AND embedding_model = ?",
-                (*params, *cat_params, *entity_params, embedding_model),
+                f"WHERE {filters} AND embedding IS NOT NULL AND embedding_model = ?",
+                (*params, embedding_model),
             ).fetchall()
         return self._score_rows(rows, embedding, limit)
 
@@ -1439,16 +1492,18 @@ class LocalBackend(MemoryBackend):
         include_invalid: bool = False,
         categories: list[str] | None = None,
         entity_id: str | None = None,
+        history: bool = False,
     ) -> list[tuple[Memory, float]]:
         tokens = _WORD_RE.findall(query)
         if not tokens:
             return []
         match = " OR ".join(f'"{t}"' for t in tokens[:32])
-        clause, params = _scope_clause(scope, prefix="m.")
+        clause, params = _search_scope_clause(scope, "m")
         cat_clause, cat_params = _category_clause(categories, "m.id")
         entity_clause, entity_params = _entity_clause(entity_id, "m.id")
         if not include_invalid:
-            clause += " AND m.invalid_at IS NULL"
+            clause += (f" AND (m.invalid_at IS NULL OR ({_history_clause('m')}))" if history
+                       else " AND m.invalid_at IS NULL")
         sql = (
             f"SELECT {', '.join('m.' + c.strip() for c in _MEMORY_COLS.split(','))}, "
             "bm25(memories_fts) AS rank_score "

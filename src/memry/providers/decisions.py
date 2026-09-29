@@ -195,6 +195,15 @@ class Decider(ABC):
     #: P(same subject), averaged over both orders, from which two tags merge.
     tag_merge_probability: float = NEVER_AUTO_MERGE
 
+    #: The confidence from which each reconcile answer acts on the memory it
+    #: names (``intelligence.reconcile``): SAME records the save on it, MORE
+    #: merges the two, CHANGED ends it as history, WRONG retracts it. Below
+    #: its bar a SAME or a MORE is stored as new, and a CHANGED or a WRONG
+    #: keeps both and asks a person. Measured per provider, like the gates
+    #: above; None (not measured) leaves every answer at
+    #: ``SupersedeConfig.confidence``.
+    reconcile_bars: dict[str, float] | None = None
+
     #: Whether an open merge proposal is compared again as soon as a new
     #: memory mentions either side of it. New evidence is the only thing that
     #: can change the answer, so that is when to ask again. The question is
@@ -375,6 +384,18 @@ class JevDecider(Decider):
     # 379 candidate tag pairs from a real store, 10 memories per tag, two runs:
     # nothing wrong from 0.55, the highest pair of two subjects at 0.46.
     tag_merge_probability = 0.55
+    # Measured with evals/reconcile_benchmark.py: Jev's answers to the
+    # reconcile question, with the dates shown, on its synthetic update cases
+    # and on labelled pairs of memories from a conversation benchmark (kept
+    # outside the repository). A SAME drops what was said, so it acts only
+    # above every SAME that dropped a detail of its own, with a little
+    # headroom. MORE sits above every MORE that merged two separate events;
+    # the few above it that the labels file under another answer joined a
+    # plan with its outcome or two accounts of one event, which the merged
+    # text holds whole. No CHANGED and no WRONG was wrong in either set, so
+    # the data sets no bar for them: they act from the middle of the scale,
+    # and one Jev is less sure of still waits for a person.
+    reconcile_bars = {"SAME": 0.85, "MORE": 0.8, "CHANGED": 0.5, "WRONG": 0.5}
 
     def __init__(self, cfg: DecisionConfig) -> None:
         self.cfg = cfg
