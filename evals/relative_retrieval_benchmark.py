@@ -1480,6 +1480,9 @@ def main() -> None:
     parser.add_argument("--tags", action="store_true",
                         help="tag every memory as an agent does when it saves (tag_world); "
                              "the store keeps the tags as the memories' categories")
+    parser.add_argument("--families", nargs="*", default=None,
+                        help="only the questions of these families (all by default); "
+                             "the world, its memories and links stay the same")
     args = parser.parse_args()
     decider = None
     try:
@@ -1545,6 +1548,12 @@ def main() -> None:
         embedder.warm(texts)
         if args.rerank or args.jev:  # a Jev call a question
             world["queries"] = {f: q[:args.per_family] for f, q in world["queries"].items()}
+        if args.families:
+            unknown = sorted(set(args.families) - set(world["queries"]))
+            if unknown:
+                parser.error(f"unknown family {', '.join(map(repr, unknown))}; "
+                             f"the families are {', '.join(world['queries'])}")
+            world["queries"] = {f: q for f, q in world["queries"].items() if f in args.families}
         print(f"\n===== {len(world['memories'])} memories, embedder {embedder.model_id} =====",
               flush=True)
         for links in args.links:
