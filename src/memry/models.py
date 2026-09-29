@@ -233,6 +233,11 @@ class CandidateFact(BaseModel):
     # when extraction is deferred or skipped, so a managed worker or explicit
     # distillation can process the active verbatim memory later.
     metadata: dict[str, Any] = Field(default_factory=dict)
+    #: The numbers of the transcript lines the fact rests on (1 is the first
+    #: line that says something, ``extraction._transcript``). The store links
+    #: the memory to the episodes of those lines; with none, or a number no
+    #: line has, to every episode of the save.
+    sources: list[int] = Field(default_factory=list)
 
 
 class AddAction(BaseModel):

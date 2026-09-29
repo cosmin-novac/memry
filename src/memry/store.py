@@ -443,6 +443,20 @@ def _across_runs(scope: Scope) -> Scope:
     return Scope(user_id=scope.user_id, agent_id=scope.agent_id)
 
 
+def _rests_on(
+    candidate: CandidateFact, line_episodes: list[list[str]] | None, episode_ids: list[str]
+) -> list[str]:
+    """The episodes a candidate fact rests on: those of the transcript lines it
+    names (``CandidateFact.sources``). A fact that names no line, or a line the
+    transcript does not have, rests on every episode of the save, as a fact
+    did before facts named their lines: a number out of range says the model
+    lost count, so none of its numbers is trusted."""
+    lines = candidate.sources
+    if not lines or not line_episodes or any(not 1 <= n <= len(line_episodes) for n in lines):
+        return episode_ids
+    return list(dict.fromkeys(e for n in lines for e in line_episodes[n - 1])) or episode_ids
+
+
 def _text_hash(text: str) -> str:
     """Identifies a property vector's masked text, to tell when it changed."""
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
@@ -583,7 +597,8 @@ class MemoryStore:
         _keep_context(candidates, _ingestion_context(metadata))
         _with_memory_metadata(candidates, memory_metadata)
         actions = self._apply_candidates(candidates, scope, episode_ids, created_at=created_at,
-                                         messages=messages)
+                                         messages=messages,
+                                         line_episodes=[[e] for e in episode_ids])
 
         missing = self._coverage_gaps(messages, actions) if infer else []
         if missing:
@@ -788,11 +803,17 @@ class MemoryStore:
         exclude_ids: set[str] | None = None,
         created_at: str | None = None,
         messages: list[dict[str, str]] | None = None,
+        line_episodes: list[list[str]] | None = None,
     ) -> list[AddAction]:
         """Reconcile candidates into the store (shared by add and distill).
 
         ``messages`` are what the candidates were extracted from: they say
         whether an owner without a name is "the user" (``owner_name``).
+
+        ``line_episodes`` are the episodes of each transcript line, in order:
+        a candidate rests on the episodes of the lines it names
+        (``CandidateFact.sources``), and on all ``episode_ids`` when it names
+        none or a line there is not (``_rests_on``).
 
         ``exclude_ids`` keeps memories out of the similarity set: distillation
         must not reconcile facts against the verbatim memory they came from,
@@ -826,7 +847,7 @@ class MemoryStore:
                 backend=self.backend,
                 embedder=self.embedder,
                 llm=self.llm,
-                episode_ids=episode_ids,
+                episode_ids=_rests_on(candidate, line_episodes, episode_ids),
                 decider=self.decider,
                 retrieval_cfg=self.config.retrieval,
                 supersede_cfg=self.config.supersede,
@@ -1458,6 +1479,9 @@ class MemoryStore:
             episode_ids,
             exclude_ids={memory.id for memory in active},
             created_at=created_at,
+            # one transcript line per raw memory: the episodes it rests on
+            line_episodes=[memory.source_episode_ids for memory in active
+                           if memory.content.strip()],
         )
         landed = sum(1 for action in actions if action.event != "NONE")
         new_id = next(

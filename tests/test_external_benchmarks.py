@@ -447,8 +447,8 @@ def test_aggregate_groups_by_category():
 
 
 class RuleLLM(LLM):
-    """Extraction keeps each line of the transcript as a fact; every other
-    question gets the answer that changes nothing."""
+    """Extraction keeps each numbered line of the transcript as a fact resting
+    on that line; every other question gets the answer that changes nothing."""
 
     name = "rule"
     available = True
@@ -460,10 +460,12 @@ class RuleLLM(LLM):
         if system.startswith("You are the long-term memory extraction system"):
             self.todays.append(re.search(r"Today's date is (\S+?)\.", system).group(1))
             transcript = user.split("Conversation:\n", 1)[1].split("\n\n", 1)[0]
+            lines = [re.match(r"\[(\d+)\] (.*)", line) for line in transcript.splitlines()]
             return json.dumps({"facts": [
-                {"content": line, "type": "episodic", "importance": 0.5, "categories": [],
-                 "entities": [], "relations": [], "when": None}
-                for line in transcript.splitlines() if line.strip()]})
+                {"content": line.group(2), "type": "episodic", "importance": 0.5,
+                 "categories": [], "entities": [], "relations": [], "when": None,
+                 "sources": [int(line.group(1))]}
+                for line in lines if line]})
         if system.startswith("You audit"):
             return json.dumps({"missing": []})
         if "decide one action" in system:
