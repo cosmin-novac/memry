@@ -9,6 +9,7 @@ utilities; it is not a runtime configuration choice.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from typing import Any
 
 from typing import TYPE_CHECKING
@@ -375,12 +376,36 @@ class MemoryBackend(ABC):
     ) -> Entity | None:
         """The active topic entity of tag ``name`` for ``scope.user_id``,
         created when missing and ``create`` (one per user and name, however
-        many processes create it at once). A tag merged away has none; with
-        ``follow_merged`` it resolves to the entity it went into (another
-        topic, or a named thing), as a memory's column naming it is filed
-        there. Merges resolve their names without it, so a name merged away
-        is never merged again through its tombstone."""
+        many processes create it at once). A tag merged away has none of its
+        own and is never given a fresh one: with ``follow_merged`` or
+        ``create`` it resolves to the entity it went into (another topic, or a
+        named thing), as a memory's column naming it is filed there; else
+        None. Merges resolve the names they merge away without it, so a name
+        merged away is never merged again through its tombstone.
+
+        ``user_id`` is a namespace exactly: "" is a user of its own, not the
+        memories without one (None)."""
         return None
+
+    def tag_filing(self, names: Iterable[str], scope: Scope) -> dict[str, str]:
+        """For each tag (normalized), the name a memory's column files it
+        under for ``scope.user_id``, creating nothing: itself, when it is an
+        active topic or no topic at all; for a tag merged away, its survivor,
+        following tombstones topic to topic; for one merged into a named
+        thing, the last tag name of its chain (its mention goes to the
+        thing). The one resolution every write of a column applies."""
+        return {str(name).strip().lower(): str(name).strip().lower()
+                for name in names if str(name).strip()}
+
+    def topic_names(
+        self, scope: Scope, *, prefixes: Iterable[str] | None = None
+    ) -> dict[str, bool]:
+        """The tag names of ``scope.user_id``'s topic entities, each with
+        whether an active topic has it (False: only merged away). With
+        ``prefixes``, only the names starting with one of them (leading
+        separators aside), which is how the store narrows the vocabulary to a
+        few tags' obvious variants."""
+        return {}
 
     def topic_mention_counts(
         self, scope: Scope, *, exact_user: bool = False

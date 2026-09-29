@@ -396,21 +396,80 @@ def test_another_runs_memory_already_saying_it_is_left_alone_and_the_fact_added(
         store, fake_llm, answer):
     """A NONE or an UPDATE against a memory of another run adds the new fact
     to the save's run and leaves the other run's memory as it was, so a
-    search of the save's run finds the fact. An exact duplicate of another
-    run's memory is asked about like any other fact."""
+    search of the save's run finds the fact."""
     fake_llm.queue(facts_response(fact("User likes green tea")), coverage())
     first = store.add("I like green tea", user_id="ada", run_id="s1").actions[0]
-    fake_llm.queue(facts_response(fact("User likes green tea")), answer, coverage())
-    again = store.add("I like green tea", user_id="ada", run_id="s2").actions[0]
+    fake_llm.queue(facts_response(fact("User enjoys green tea")), answer, coverage())
+    again = store.add("I enjoy green tea", user_id="ada", run_id="s2").actions[0]
     assert again.event == "ADD" and again.memory_id != first.memory_id
     kept = store.get(first.memory_id)
     assert (kept.content, kept.invalid_at, kept.run_id) == ("User likes green tea", None, "s1")
     assert [e.event for e in store.history(first.memory_id)] == ["ADD"]
     added = store.get(again.memory_id)
-    assert (added.content, added.run_id) == ("User likes green tea", "s2")
+    assert (added.content, added.run_id) == ("User enjoys green tea", "s2")
     found = store.search("green tea", user_id="ada", run_id="s2", limit=5)
-    assert [r.memory.id for r in found] == [again.memory_id]
+    assert again.memory_id in [r.memory.id for r in found]
+    assert first.memory_id not in [r.memory.id for r in found]
     assert fake_llm.responses == []  # the other run's memory was asked about
+
+
+def test_an_exact_duplicate_of_another_runs_memory_is_added_without_asking(store, fake_llm):
+    """An exact duplicate (normalized text) of another run's memory is added
+    to the save's run by rule, as a NONE of it would be: no model is asked
+    (nothing is queued for a reconcile answer), and that memory is left
+    alone."""
+    fake_llm.queue(facts_response(fact("User likes green tea")), coverage())
+    first = store.add("I like green tea", user_id="ada", run_id="s1").actions[0]
+    fake_llm.queue(facts_response(fact("user likes  green tea.")), coverage())
+    again = store.add("I like green tea", user_id="ada", run_id="s2").actions[0]
+    assert again.event == "ADD" and again.memory_id != first.memory_id
+    assert f"exact duplicate of memory {first.memory_id} of another run" in again.reason
+    assert (store.get(again.memory_id).run_id, store.get(first.memory_id).invalid_at) == (
+        "s2", None)
+    assert [e.event for e in store.history(first.memory_id)] == ["ADD"]
+    assert fake_llm.responses == []
+    # within the run it is the fact already known there, as before
+    fake_llm.queue(facts_response(fact("User likes green tea")), coverage())
+    same = store.add("I like green tea", user_id="ada", run_id="s2").actions[0]
+    assert (same.event, same.memory_id) == ("NONE", again.memory_id)
+
+
+def test_reconcile_never_asks_the_decider_about_another_runs_exact_duplicate():
+    from conftest import FakeLLM
+
+    from memry.backends.local import LocalBackend
+    from memry.intelligence.reconcile import reconcile_candidate
+    from memry.models import CandidateFact, Memory, SearchResult
+    from memry.providers.decisions import NoneDecider
+    from memry.providers.embeddings import HashEmbedder
+
+    class Recording(NoneDecider):
+        name = "stub"
+        available = True
+        asked: list = []
+
+        def decide(self, state, questions):
+            self.asked.append(questions)
+            raise AssertionError("the decider was asked")
+
+    backend = LocalBackend(":memory:")
+    try:
+        other = backend.insert_memory(Memory(content="User likes green tea", user_id="ada",
+                                             run_id="s1"))
+        decider = Recording()
+        action = reconcile_candidate(
+            candidate=CandidateFact(content="User likes green tea"),
+            scope=Scope(user_id="ada", run_id="s2"),
+            similar=[SearchResult(memory=other, score=1.0)],
+            backend=backend, embedder=HashEmbedder(64), llm=FakeLLM(),
+            episode_ids=[], decider=decider,
+        )
+        assert decider.asked == []
+        assert action.event == "ADD" and action.memory_id != other.id
+        assert backend.get_memory(action.memory_id).run_id == "s2"
+        assert backend.get_memory(other.id).invalid_at is None
+    finally:
+        backend.close()
 
 
 def test_within_one_run_none_and_update_act_on_the_runs_memory(store, fake_llm):
@@ -558,6 +617,32 @@ def test_a_dated_supersede_never_moves_updated_at_back_and_repair_agrees(store, 
     assert store.repair_updated_at(user_id="ada") == {"fixed": 0}
     assert store.get(munich).updated_at == live
     assert store.get(moved.memory_id).updated_at == replayed
+
+
+def test_repair_compares_times_as_times_not_as_text(store):
+    """A live "...T10:00:00.500000+00:00" is later than a replayed
+    "...T10:00:00Z", though the replayed one sorts later as text: repair keeps
+    the live updated_at, as the write path does (``later_ts``), and does not
+    rewrite one that names the same instant in another form. A housekeeping
+    bump past the last content event is still repaired."""
+    from memry.models import Memory, MemoryEvent
+
+    live, replayed = "2024-01-01T10:00:00.500000+00:00", "2024-01-01T10:00:00Z"
+    memory = store.backend.insert_memory(Memory(
+        content="User lives in Munich", user_id="ada", created_at=live, updated_at=live))
+    store.backend.add_event(MemoryEvent(memory_id=memory.id, event="ADD",
+                                        new_content=memory.content, created_at=live))
+    store.backend.add_event(MemoryEvent(memory_id=memory.id, event="SUPERSEDE",
+                                        old_content=memory.content, created_at=replayed))
+    same = store.backend.insert_memory(Memory(
+        content="User likes tea", user_id="ada", created_at="2024-01-01T09:00:00+00:00",
+        updated_at="2024-01-01T09:00:00Z"))
+    assert store.repair_updated_at(user_id="ada") == {"fixed": 0}
+    assert store.get(memory.id).updated_at == live
+    assert store.get(same.id).updated_at == "2024-01-01T09:00:00Z"
+    store.backend.set_memory_timestamp(memory.id, "2024-02-01T00:00:00+00:00")
+    assert store.repair_updated_at(user_id="ada") == {"fixed": 1}
+    assert store.get(memory.id).updated_at == live
 
 
 def test_a_deferred_save_keeps_its_time_metadata_and_date_for_distillation(store, fake_llm):

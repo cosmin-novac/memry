@@ -34,6 +34,7 @@ from .config import Config
 from .intelligence.clustering import (
     judge_tag_pairs,
     obvious_canonical_merges,
+    obvious_variant_prefix,
     propose_synthetic_tags,
     semantic_duplicate_tags,
     suggest_canonical_merges,
@@ -127,7 +128,9 @@ from .models import (
     clean_tags,
     Topic,
     TopicRelation,
+    later_ts,
     parse_ts,
+    same_ts,
     utcnow,
 )
 from .providers.embeddings import Embedder, build_embedder
@@ -669,13 +672,24 @@ class MemoryStore:
         for candidate, canonical in zip(candidates, tags):
             candidate.categories = canonical
 
-    def _canonical_tags(self, tag_lists: list[list[str]], scope: Scope) -> list[list[str]]:
+    def _canonical_tags(
+        self, tag_lists: list[list[str]], scope: Scope, *, merge_stored: bool = True
+    ) -> list[list[str]]:
         """Each list of tags as the store writes it, on a save and on an
         update alike: each tag in the obvious canonical form (singular,
-        plural, spacing) it shares with the user's topic entities, folding a
-        stored variant into it (``_merge_topics``), and a tag merged into
-        another topic written as that topic, so the column names the tag its
-        memory is counted and filtered under."""
+        plural, spacing) it shares with the user's tags, and a name merged
+        away written as its survivor (``MemoryBackend.tag_filing``), so the
+        column names the tag its memory is counted and filtered under.
+
+        Names merged away are resolved before obvious variants are grouped: a
+        group holding one ("tax", merged into "levies", beside "taxes") is
+        written as that name's survivor ("levies"), so a group never brings a
+        retired name back. A save (``merge_stored``) runs the pass over the
+        whole vocabulary and folds each stored variant into the form its
+        group is written as (``_merge_topics``). An update rewrites its own
+        tags only (``merge_stored`` False): it reads just the incoming tags'
+        obvious variants and merges nothing, so no other memory is retagged;
+        the vocabulary-wide pass is the next save's, or upkeep's."""
         incoming = {
             str(tag).strip().casefold()
             for tags in tag_lists
@@ -685,27 +699,31 @@ class MemoryStore:
         if not incoming:
             return [list(tags) for tags in tag_lists]
         user = Scope(user_id=scope.user_id)
-        existing = {
-            topic.normalized
-            for topic in self.backend.list_entities(user, limit=1_000_000, kind="topic")
-            if topic.user_id == scope.user_id
-        }
-        groups = obvious_canonical_merges(
-            [{"category": topic} for topic in existing | incoming]
+        vocabulary = self.backend.topic_names(
+            user,
+            prefixes=None if merge_stored else {obvious_variant_prefix(tag) for tag in incoming},
         )
+        retired = {name for name, active in vocabulary.items() if not active}
+        groups = [
+            group for group in obvious_canonical_merges(
+                [{"category": name} for name in set(vocabulary) | incoming])
+            if merge_stored or incoming.intersection(group["variants"])
+        ]
+        # only names merged away need resolving here; every other tag is
+        # resolved once, where the backend files the column
+        survivor = self.backend.tag_filing(sorted((incoming & retired) | {
+            name for group in groups for name in group["variants"] if name in retired
+        }), user)
         replacements: dict[str, str] = {}
         for group in groups:
-            canonical = group["canonical"]
-            variants = set(group["variants"])
-            replacements.update({variant: canonical for variant in variants})
-            stored_variants = (variants - {canonical}) & existing
-            if stored_variants:
-                self._merge_topics(scope.user_id, stored_variants, canonical, exact_user=True)
-        for name in {replacements.get(tag, tag) for tag in incoming}:
-            survivor = self.backend.topic_entity(name, user, create=False, follow_merged=True)
-            if (survivor is not None and survivor.entity_type == TOPIC_TYPE
-                    and survivor.normalized != name):
-                replacements[name] = survivor.normalized  # merged away: its survivor
+            variants = list(group["variants"])
+            gone = sorted((name for name in variants if name in retired),
+                          key=lambda name: (name != group["canonical"], name))
+            target = survivor.get(gone[0], gone[0]) if gone else group["canonical"]
+            replacements.update({variant: target for variant in variants})
+            stored = {name for name in variants if vocabulary.get(name) and name != target}
+            if merge_stored and stored:
+                self._merge_topics(scope.user_id, stored, target, exact_user=True)
         rewritten_lists: list[list[str]] = []
         for tags in tag_lists:
             rewritten: list[str] = []
@@ -713,7 +731,7 @@ class MemoryStore:
             for raw in tags:
                 normalized = str(raw).strip().casefold()
                 canonical = replacements.get(normalized, normalized)
-                canonical = replacements.get(canonical, canonical)
+                canonical = survivor.get(canonical, canonical)  # merged away: its survivor
                 if canonical and canonical not in seen:
                     seen.add(canonical)
                     rewritten.append(canonical)
@@ -2268,9 +2286,11 @@ class MemoryStore:
         if not _owned(old, owner_prefix):
             return None
         if categories is not None:
-            # written as a save writes them: the column names the tags the
-            # memory is counted and filtered under
-            [categories] = self._canonical_tags([clean_tags(categories)], old.scope())
+            # written as a save writes them (the column names the tags the
+            # memory is counted and filtered under), without retagging any
+            # other memory: the vocabulary-wide merge is the save's and upkeep's
+            [categories] = self._canonical_tags(
+                [clean_tags(categories)], old.scope(), merge_stored=False)
         entity_update: dict[str, Any] = {}
         if content is not None and content != old.content:
             entity_update = self._reanalyze_edited_entities(
@@ -2683,6 +2703,10 @@ class MemoryStore:
         updated_at; this recomputes the true value as the time of the last
         content-changing event (ADD/UPDATE/SUPERSEDE), or created_at if there was
         none. Token-free; idempotent. Fixes recency and decay after such a run.
+
+        Times are compared as times (``later_ts``, ``same_ts``), as the write
+        path compares them: a replayed save's "...T10:00:00Z" is earlier than
+        a live "...T10:00:00.500000+00:00", though it sorts later as text.
         """
         fixed = 0
         for memory in self.get_all(user_id=user_id, include_invalid=True, limit=1_000_000):
@@ -2690,8 +2714,10 @@ class MemoryStore:
                 e.created_at for e in self.backend.history(memory.id)
                 if e.event in ("ADD", "UPDATE", "SUPERSEDE")
             ]
-            true_ts = max([memory.created_at, *times])
-            if true_ts != memory.updated_at:
+            true_ts = memory.created_at
+            for stamp in times:
+                true_ts = later_ts(true_ts, stamp)
+            if not same_ts(true_ts, memory.updated_at):
                 self.backend.set_memory_timestamp(memory.id, true_ts)
                 fixed += 1
         return {"fixed": fixed}
@@ -2943,7 +2969,10 @@ class MemoryStore:
         """Rename the canonical entity while retaining its old name as an alias.
 
         A tag (topic entity) is renamed as a tag: on every memory carrying it
-        (``rename_tag``), so its memories' ``categories`` say the new name."""
+        (``rename_tag``), so its memories' ``categories`` say the new name.
+        Returned is the entity the tag went into: a new topic of that name,
+        the topic already named so, or, for a name merged away, its survivor
+        (``_merge_topics``)."""
         entity = self.backend.get_entity(entity_id)
         if not _owned(entity, owner_prefix) or not name.strip():
             return None
@@ -2953,7 +2982,7 @@ class MemoryStore:
                 return None
             self._retag(entity.user_id, {entity.normalized}, tag, exact_user=True)
             return self.backend.topic_entity(
-                tag.lower(), Scope(user_id=entity.user_id), create=False)
+                tag.lower(), Scope(user_id=entity.user_id), create=False, follow_merged=True)
         return self.backend.rename_entity(entity_id, name)
 
     def merge_proposals(
@@ -3402,23 +3431,28 @@ class MemoryStore:
         active topic entity of ``user_id`` is folded into the topic entity of
         ``into`` (``MemoryBackend.merge_entities``: its mentions move, its id
         redirects), then the ``categories`` column is rewritten
-        (``retag_topics``), which brings every rewritten memory's mentions in
-        line with its column. ``into`` None drops the tags. Returns how many
-        memories changed, or None when the backend keeps no tag index.
+        (``retag_topics``), which files every rewritten memory's tags again.
+        ``into`` None drops the tags. Returns how many memories changed, or
+        None when the backend keeps no tag index.
 
-        The names merged away resolve among the active topics only, never
-        through a tombstone: a name merged away before names nothing to merge
-        again ("taxes" into "tax", then "taxes" into "levies" leaves "tax"
-        alone). And no survivor is renamed: when ``into`` has no active topic
-        it gets one of its own and the others fold into it, so every name
-        merged away keeps its tombstone and a column still naming it is filed
-        under the survivor. A tag found to be a named thing ("bildy" the tag
-        into "Bildy" the product) takes what is merged into it into that
-        thing."""
+        ``into`` is read as a column files it (``MemoryBackend.tag_filing``):
+        a name merged away means its survivor, never a fresh topic of a
+        retired name. After "tax" went into "levies", merging "taxes" into
+        "tax" merges it into "levies"; after "bildy" the tag went into
+        "Bildy" the product, merging "bildy app" into "bildy" folds it into
+        the product. The names merged away resolve among the active topics
+        only, never through a tombstone: a name merged away before names
+        nothing to merge again ("taxes" into "tax", then "taxes" into
+        "levies" leaves "tax" alone). When ``into`` names no topic at all it
+        gets one of its own and the others fold into it, so every name merged
+        away keeps its tombstone; one tag folded into a new name is a rename,
+        and the new topic takes over the old one's description and metadata
+        (``_carry_renamed_topic``)."""
         scope = Scope(user_id=user_id)
         wanted = {str(tag).strip().lower() for tag in remove if str(tag).strip()}
         target = str(into).strip().lower() if into and str(into).strip() else None
         if target is not None:
+            target = self.backend.tag_filing([target], scope).get(target, target)
             variants = [
                 other for other in (
                     self.backend.topic_entity(tag, scope, create=False)
@@ -3427,18 +3461,30 @@ class MemoryStore:
                 if other is not None
             ]
             if variants:
-                keep = self.backend.topic_entity(target, scope, create=False)
-                if keep is None:
-                    merged = self.backend.topic_entity(target, scope, create=False,
-                                                       follow_merged=True)
-                    if merged is not None and merged.entity_type != TOPIC_TYPE:
-                        keep = merged  # the named thing the tag was found to be
+                # the active topic of that name, or the named thing a tag of
+                # that name went into
+                keep = self.backend.topic_entity(target, scope, create=False,
+                                                 follow_merged=True)
+                fresh = keep is None
                 if keep is None:
                     keep = self.backend.topic_entity(target, scope)
                 for other in variants:
                     if keep is not None and other.id != keep.id:
                         self.backend.merge_entities(keep.id, other.id)
+                if fresh and keep is not None and len(variants) == 1:
+                    self._carry_renamed_topic(variants[0], keep)
         return self.backend.retag_topics(scope, wanted, target, exact_user=exact_user)
+
+    def _carry_renamed_topic(self, old: Entity, new: Entity) -> None:
+        """A renamed tag's topic entity (``new``, made for the new name) takes
+        over what the old one (``old``, now a tombstone pointing to it) had:
+        its description with the time it was written, since the tag files the
+        same memories, and its metadata, with ``renamed_from`` naming the old
+        id, so a reference stored under it can be followed."""
+        self.backend.set_entity_metadata(new.id, {**old.metadata, "renamed_from": old.id})
+        if old.description:
+            self.backend.set_entity_description(
+                new.id, old.description, old.description_updated_at)
 
     def _entities_named(
         self, scope: Scope, tags: list[dict[str, Any]]

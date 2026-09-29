@@ -562,9 +562,13 @@ def test_a_supersedes_kind_is_recorded_and_read_before_its_reason(tmp_path):
     from memry.store import _is_contradiction, _is_update_supersede
 
     path = tmp_path / "events.db"
-    LocalBackend(str(path)).close()
-    with sqlite3.connect(path) as db:  # the database as it was before the column
-        db.execute("ALTER TABLE memory_events DROP COLUMN kind")
+    # the table as it was before the column, built as such rather than by
+    # dropping the column (ALTER TABLE ... DROP COLUMN needs SQLite 3.35);
+    # the open creates the rest of the schema and adds the column
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE memory_events (id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, "
+                   "event TEXT NOT NULL, old_content TEXT, new_content TEXT, reason TEXT, "
+                   "actor TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL)")
         for event_id, reason in (("old-update", f"{UPDATE_SUPERSEDE_REASON}: kept and superseded."),
                                  ("old-contradiction", "moved cities"),
                                  ("old-merge", "consolidated into m2")):

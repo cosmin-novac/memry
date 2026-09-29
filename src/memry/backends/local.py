@@ -13,6 +13,7 @@ import json
 import re
 import sqlite3
 import threading
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -102,8 +103,9 @@ CREATE TABLE IF NOT EXISTS topics (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_scope_norm ON topics(
-    IFNULL(user_id, ''), IFNULL(agent_id, ''), IFNULL(run_id, ''), normalized
+CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_scope_ns ON topics(
+    user_id IS NULL, IFNULL(user_id, ''), agent_id IS NULL, IFNULL(agent_id, ''),
+    run_id IS NULL, IFNULL(run_id, ''), normalized
 );
 CREATE TABLE IF NOT EXISTS memory_topics (
     memory_id TEXT NOT NULL,
@@ -277,6 +279,18 @@ _BACKUP_USER_TABLES = {
 }
 _BACKUP_BYTES = "__memry_base64__"
 
+#: The partial unique index holding one active topic entity per namespace
+#: (``user_id`` exactly, None apart from "") and tag, and the one it replaced,
+#: which keyed ``IFNULL(user_id, '')`` and so folded the two namespaces
+#: (``LocalBackend._ensure_one_active_topic_per_name``).
+_ACTIVE_TOPIC_INDEX = "ux_entities_active_topic_ns"
+_ACTIVE_TOPIC_INDEX_V1 = "ux_entities_active_topic"
+
+#: Set once the columns still naming a tag merged away (written before a
+#: memory's tags were filed through ``LocalBackend._file_tags_locked``) name
+#: its survivor, and their index and mentions follow.
+_TAG_SURVIVORS_MARKER = "schema:tag-survivors:v1"
+
 _WORD_RE = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -356,6 +370,11 @@ def _exact_scope_clause(scope: Scope, prefix: str = "") -> tuple[str, list[Any]]
     return " AND ".join(clauses), params
 
 
+def _row_scope(row: sqlite3.Row) -> Scope:
+    """The scope of a row carrying ``user_id``, ``agent_id`` and ``run_id``."""
+    return Scope(user_id=row["user_id"], agent_id=row["agent_id"], run_id=row["run_id"])
+
+
 def _row_to_memory(row: sqlite3.Row) -> Memory:
     return Memory(
         id=row["id"],
@@ -389,10 +408,12 @@ class LocalBackend(MemoryBackend):
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
         self._ensure_entity_description_columns()
+        self._ensure_exact_topic_scopes()
         self._ensure_one_active_topic_per_name()
         self._backfill_topics()
         self._migrate_synthetic_topic_relations()
         self._migrate_tags_to_topic_entities()
+        self._refile_merged_tags()
         self._db.commit()
         self._has_metadata_aliases = self._db.execute(
             "SELECT 1 FROM entities WHERE metadata LIKE '%\"aliases\"%' LIMIT 1"
@@ -475,50 +496,13 @@ class LocalBackend(MemoryBackend):
             updated_at=row["updated_at"],
         )
 
-    def _sync_memory_topics_locked(
-        self,
-        memory_id: str,
-        categories: list[str],
-        scope: Scope,
-        provenance: str = "memory",
-    ) -> None:
-        """Index a memory's ``categories`` column in the legacy tag tables the
-        filters read (``_category_clause``). A tag merged into another topic
-        is indexed under that topic's name (``_surviving_tag_locked``), where
-        the memory's mention of it goes too: ``categories()`` and a filter on
-        the surviving tag agree, and a filter on the name merged away finds
-        nothing."""
-        self._db.execute("DELETE FROM memory_topics WHERE memory_id = ?", (memory_id,))
-        seen: set[str] = set()
-        for raw in categories:
-            name = self._surviving_tag_locked(str(raw).strip(), scope.user_id)
-            normalized = name.lower()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            topic = self._topic_locked(name, scope, provenance)
-            self._db.execute(
-                "INSERT OR IGNORE INTO memory_topics (memory_id, topic_id) VALUES (?,?)",
-                (memory_id, topic.id),
-            )
-
     def _backfill_topics(self) -> None:
         marker = self._db.execute(
             "SELECT value FROM meta WHERE key = 'schema:topics:v1'"
         ).fetchone()
         if marker:
             return
-        rows = self._db.execute(
-            "SELECT id, categories, user_id, agent_id, run_id FROM memories"
-        ).fetchall()
-        for row in rows:
-            self._sync_memory_topics_locked(
-                row["id"],
-                json.loads(row["categories"]),
-                Scope(
-                    user_id=row["user_id"], agent_id=row["agent_id"], run_id=row["run_id"]
-                ),
-            )
+        self._refile_locked("1=1", (), cache={})
         self._db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema:topics:v1', ?)",
             (utcnow(),),
@@ -588,47 +572,66 @@ class LocalBackend(MemoryBackend):
                     value for value in categories
                     if str(value).strip().lower() != tag.lower()
                 ]
-                self._db.execute(
-                    "UPDATE memories SET categories = ? WHERE id = ?",
-                    (json.dumps(kept), memory["id"]),
-                )
-                self._sync_memory_topics_locked(
-                    memory["id"], kept,
-                    Scope(
-                        user_id=memory["user_id"], agent_id=memory["agent_id"],
-                        run_id=memory["run_id"],
-                    ),
-                )
+                self._file_tags_locked(
+                    memory["id"], kept, _row_scope(memory), stored=categories)
         self._db.execute(
             "INSERT OR REPLACE INTO meta (key, value) "
             "VALUES ('schema:topic-relations:v1', ?)",
             (utcnow(),),
         )
 
+    def _ensure_exact_topic_scopes(self) -> None:
+        """The legacy ``topics`` rows are unique per scope and name with each
+        scope field read exactly, "" apart from None, as ``_topic_locked``
+        looks them up (``idx_topics_scope_ns``, in the schema). The index it
+        replaces (``idx_topics_scope_norm``) keyed ``IFNULL(field, '')``, so a
+        tag of the user "" beside the same tag without a user failed its
+        insert and the save with it. That index is dropped; it held no pair
+        the new one refuses."""
+        self._db.execute("DROP INDEX IF EXISTS idx_topics_scope_norm")
+
     def _ensure_one_active_topic_per_name(self) -> None:
-        """One active topic entity per user and tag, held by a partial unique
-        index, so two processes creating the same topic at once end with one
-        (``_topic_entity_locked`` inserts or ignores and reads back). A
-        database from before the index may hold such twins: each later one is
-        folded into the earliest (``merge_entities``), then the index is
-        made."""
-        if self._db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'ux_entities_active_topic'"
-        ).fetchone():
+        """One active topic entity per namespace and tag, held by a partial
+        unique index, so two processes creating the same topic at once end
+        with one (``_create_topic_locked`` inserts or ignores and reads back).
+
+        The namespace is ``user_id`` exactly, as every lookup reads it
+        (``user_id IS ?``, ``_scope_clause``, ``_exact_scope_clause``): ""
+        is a user of its own, not the memories without one (None). The index
+        keys ``(user_id IS NULL, IFNULL(user_id, ''))`` for that, since a
+        NULL key never collides. An index from before
+        (``ux_entities_active_topic``, keyed ``IFNULL(user_id, '')``) folded
+        the two, so a topic of one blocked the other's insert and that
+        memory's mention was dropped: it is replaced, and the memories of
+        both namespaces are filed again (``_file_tags_locked``). A database
+        from before any index may hold twins: each later one is folded into
+        the earliest of its namespace (``merge_entities``), never across
+        namespaces, then the index is made."""
+        indexes = {
+            row["name"] for row in self._db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
+                (_ACTIVE_TOPIC_INDEX, _ACTIVE_TOPIC_INDEX_V1),
+            ).fetchall()
+        }
+        if _ACTIVE_TOPIC_INDEX in indexes:
             return
+        folded_namespaces = _ACTIVE_TOPIC_INDEX_V1 in indexes
+        if folded_namespaces:
+            self._db.execute(f"DROP INDEX {_ACTIVE_TOPIC_INDEX_V1}")
         twins = self._db.execute(
             "SELECT e.id, e.user_id, e.normalized FROM entities e JOIN ("
-            "SELECT IFNULL(user_id, '') AS owner, normalized FROM entities "
-            "WHERE entity_type = ? AND merged_into IS NULL "
-            "GROUP BY IFNULL(user_id, ''), normalized HAVING COUNT(*) > 1) d "
-            "ON IFNULL(e.user_id, '') = d.owner AND e.normalized = d.normalized "
+            "SELECT user_id IS NULL AS nobody, IFNULL(user_id, '') AS owner, normalized "
+            "FROM entities WHERE entity_type = ? AND merged_into IS NULL "
+            "GROUP BY user_id IS NULL, IFNULL(user_id, ''), normalized HAVING COUNT(*) > 1) d "
+            "ON (e.user_id IS NULL) = d.nobody AND IFNULL(e.user_id, '') = d.owner "
+            "AND e.normalized = d.normalized "
             "WHERE e.entity_type = ? AND e.merged_into IS NULL "
-            "ORDER BY d.owner, e.normalized, e.created_at, e.id",
+            "ORDER BY d.nobody, d.owner, e.normalized, e.created_at, e.id",
             (TOPIC_TYPE, TOPIC_TYPE),
         ).fetchall()
-        kept: dict[tuple[str, str], str] = {}
+        kept: dict[tuple[str | None, str], str] = {}
         for twin in twins:
-            key = (twin["user_id"] or "", twin["normalized"])
+            key = (twin["user_id"], twin["normalized"])  # None and "" apart
             if key not in kept:
                 kept[key] = twin["id"]
                 continue
@@ -641,10 +644,16 @@ class LocalBackend(MemoryBackend):
                 (keep_id, keep_id),
             )
         self._db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_entities_active_topic "
-            "ON entities(IFNULL(user_id, ''), normalized) "
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {_ACTIVE_TOPIC_INDEX} "
+            "ON entities(user_id IS NULL, IFNULL(user_id, ''), normalized) "
             f"WHERE entity_type = '{TOPIC_TYPE}' AND merged_into IS NULL"
         )
+        if folded_namespaces and self._db.execute(
+            "SELECT 1 FROM memories WHERE user_id = '' LIMIT 1"
+        ).fetchone():
+            # a mention dropped while "" and None shared the index comes back
+            self._refile_locked(
+                "user_id = '' OR user_id IS NULL", (), cache={})
         self._db.commit()
 
     def _migrate_tags_to_topic_entities(self) -> None:
@@ -829,8 +838,11 @@ class LocalBackend(MemoryBackend):
                     blob,
                 ),
             )
-            self._sync_memory_topics_locked(memory.id, memory.categories, memory.scope())
-            self._sync_topic_mentions_locked(memory.id, memory.categories, memory.user_id)
+            # the column as filed: a tag merged away names its survivor
+            memory.categories = self._file_tags_locked(
+                memory.id, memory.categories, memory.scope(),
+                stored=json.loads(json.dumps(memory.categories)),
+            )
             if embedding and memory.embedding_model:
                 self._ann_add(memory.id, embedding, memory.embedding_model)
             self._db.commit()
@@ -896,18 +908,6 @@ class LocalBackend(MemoryBackend):
             cur = self._db.execute(
                 f"UPDATE memories SET {', '.join(sets)} WHERE id = ?", (*params, memory_id)
             )
-            if cur.rowcount and categories is not None:
-                row = self._db.execute(
-                    "SELECT user_id, agent_id, run_id FROM memories WHERE id = ?",
-                    (memory_id,),
-                ).fetchone()
-                self._sync_memory_topics_locked(
-                    memory_id,
-                    categories,
-                    Scope(
-                        user_id=row["user_id"], agent_id=row["agent_id"], run_id=row["run_id"]
-                    ),
-                )
             if cur.rowcount and mentions is not None:
                 old_entity_ids = {
                     row["entity_id"] for row in self._db.execute(
@@ -916,7 +916,7 @@ class LocalBackend(MemoryBackend):
                     ).fetchall()
                 }
                 # The named mentions are replaced; the tags' mentions follow the
-                # categories column, and are brought in line with it below.
+                # categories column, and are filed with it below.
                 self._db.execute(
                     "DELETE FROM entity_mentions WHERE memory_id = ? AND entity_id NOT IN "
                     "(SELECT id FROM entities WHERE entity_type = ?)",
@@ -940,11 +940,11 @@ class LocalBackend(MemoryBackend):
                     )
             if cur.rowcount and (categories is not None or mentions is not None):
                 row = self._db.execute(
-                    "SELECT categories, user_id FROM memories WHERE id = ?", (memory_id,)
+                    "SELECT categories, user_id, agent_id, run_id FROM memories WHERE id = ?",
+                    (memory_id,),
                 ).fetchone()
-                self._sync_topic_mentions_locked(
-                    memory_id, json.loads(row["categories"]), row["user_id"]
-                )
+                stored = json.loads(row["categories"])
+                self._file_tags_locked(memory_id, stored, _row_scope(row), stored=stored)
             if cur.rowcount and embedding is not None and embedding_model is not None:
                 self._ann_add(memory_id, embedding, embedding_model)
             if cur.rowcount and touch and mentions is None:
@@ -996,8 +996,8 @@ class LocalBackend(MemoryBackend):
 
         with self._lock:
             row = self._db.execute(
-                "SELECT embedding, embedding_model, categories, user_id FROM memories "
-                "WHERE id = ? AND invalid_at IS NOT NULL",
+                "SELECT embedding, embedding_model, categories, user_id, agent_id, run_id "
+                "FROM memories WHERE id = ? AND invalid_at IS NOT NULL",
                 (memory_id,),
             ).fetchone()
             if row is None:
@@ -1008,10 +1008,11 @@ class LocalBackend(MemoryBackend):
                 "updated_at = ? WHERE id = ?",
                 (changed_at, memory_id),
             )
-            # Its mentions are brought back in line with its column, which a
-            # tag merge while it was gone rewrote too (``retag_topics``).
-            self._sync_topic_mentions_locked(
-                memory_id, json.loads(row["categories"]), row["user_id"])
+            # Its column is filed again: a tag merge while it was gone
+            # rewrote it too (``retag_topics``), and one it did not reach
+            # names the survivor now.
+            stored = json.loads(row["categories"])
+            self._file_tags_locked(memory_id, stored, _row_scope(row), stored=stored)
             if row["embedding"] is not None and row["embedding_model"]:
                 embedding = np.frombuffer(row["embedding"], dtype=np.float32)
                 self._ann_add(memory_id, embedding.tolist(), row["embedding_model"])
@@ -1526,14 +1527,14 @@ class LocalBackend(MemoryBackend):
         self, scope: Scope, remove: set[str], add: str | None, *, exact_user: bool = False
     ) -> int:
         """Rewrite the ``categories`` column of the memories carrying a tag in
-        ``remove``: those tags go, ``add`` (if any) comes in. A column still
-        naming a tag merged into one of them (``_surviving_tag_locked``) is
-        rewritten too. The column's index and the memories' tag mentions
-        follow the column. Invalid
-        memories are rewritten too, so one restored later does not bring back
-        a tag merged or deleted meanwhile; the count returned is of the active
-        ones. ``exact_user`` confines it to ``scope.user_id`` even when that
-        is None (the memories without a user), as a topic entity is confined."""
+        ``remove``: those tags go, ``add`` (if any) comes in. Each tag is read
+        as filed (``_file_tags_locked``), so one naming a tag merged into one
+        of them goes too, and the column is filed through the same function,
+        which brings its index and mentions in line. Invalid memories are
+        rewritten too, so one restored later does not bring back a tag merged
+        or deleted meanwhile; the count returned is of the active ones.
+        ``exact_user`` confines it to ``scope.user_id`` even when that is None
+        (the memories without a user), as a topic entity is confined."""
         normalized = {item.strip().lower() for item in remove if item.strip()}
         if not normalized:
             return 0
@@ -1570,37 +1571,24 @@ class LocalBackend(MemoryBackend):
                 (*memory_params, *sorted(normalized)),
             ).fetchall()
             changed = 0
-
-            def dropped(item: Any, user_id: str | None) -> bool:
-                # a column still naming a tag merged away means the tag it
-                # went into, as its index and mention do
-                name = str(item).strip().lower()
-                if name in normalized:
-                    return True
-                survivor = self._surviving_tag_locked(name, user_id).lower()
-                return survivor != name and (survivor in normalized or survivor == add)
-
+            cache: dict[Any, Any] = {}  # one resolution per tag for the whole rewrite
             for row in rows:
                 categories = json.loads(row["categories"])
-                kept = [item for item in categories if not dropped(item, row["user_id"])]
-                if add and add not in {str(item).strip().lower() for item in kept}:
+                kept: list[str] = []
+                for item in categories:
+                    written = str(item).strip()
+                    if not written or written.lower() in normalized:
+                        continue
+                    name, _ = self._filed_tag_locked(written, row["user_id"], cache)
+                    if name.lower() not in normalized:
+                        kept.append(name)
+                if add and add not in {name.lower() for name in kept}:
                     kept.append(add)
-                if kept == categories:
-                    continue
-                self._db.execute(
-                    "UPDATE memories SET categories = ? WHERE id = ?",
-                    (json.dumps(kept), row["id"]),
+                filed = self._file_tags_locked(
+                    row["id"], kept, _row_scope(row), stored=categories,
+                    provenance="user", cache=cache,
                 )
-                self._sync_memory_topics_locked(
-                    row["id"], kept,
-                    Scope(
-                        user_id=row["user_id"], agent_id=row["agent_id"],
-                        run_id=row["run_id"],
-                    ),
-                    provenance="user",
-                )
-                self._sync_topic_mentions_locked(row["id"], kept, row["user_id"])
-                if row["invalid_at"] is None:
+                if filed != categories and row["invalid_at"] is None:
                     changed += 1
 
             if old_ids:
@@ -1709,31 +1697,27 @@ class LocalBackend(MemoryBackend):
         ]
 
     # -- tags as topic entities ----------------------------------------------
-    # A tag is an entity of type ``TOPIC_TYPE``, one per user and normalized
-    # tag, created the first time a memory carries it. Each memory carrying a
-    # tag in its ``categories`` column mentions that entity; the column stays
-    # the record every filter, backup and export reads, and whatever writes it
-    # here brings the mentions in line (``_sync_topic_mentions_locked``).
-    def _root_locked(self, entity_id: str) -> sqlite3.Row | None:
-        """The active entity an id ends at through ``merged_into``."""
-        current: str | None = entity_id
-        seen: set[str] = set()
-        while current is not None and current not in seen:
-            seen.add(current)
-            row = self._db.execute(
-                "SELECT id, entity_type, normalized, merged_into FROM entities WHERE id = ?",
-                (current,),
-            ).fetchone()
-            if row is None:
-                return None
-            if row["merged_into"] is None:
-                return row
-            current = row["merged_into"]
-        return None
-
+    # A tag is an entity of type ``TOPIC_TYPE``, one per namespace (``user_id``
+    # exactly) and normalized tag, created the first time a memory carries it.
+    #
+    # One invariant ties a memory's ``categories`` column, the legacy index
+    # the filters read (``memory_topics``, ``_category_clause``) and its tag
+    # mentions, and one function holds it, ``_file_tags_locked``, which every
+    # writer of a memory's tags goes through: insert, update, revalidate,
+    # backup import, ``retag_topics`` and the migrations (at open and
+    # ``tags_to_topics``).
+    # - The column names surviving tags only. A tag merged into another topic
+    #   is written as that topic's name, following tombstones topic to topic;
+    #   one merged into a named thing keeps the last tag name of its chain and
+    #   its mention goes to the thing. A name merged away never gets a fresh
+    #   topic.
+    # - The index holds the column's names, and the memory mentions the entity
+    #   each resolves to, once, under the name as the column writes it.
+    # Each tag is resolved once per write (``_filed_tag_locked``), and once per
+    # call over a bulk write (its ``cache``).
     def _active_topic_locked(self, normalized: str, user_id: str | None) -> str | None:
         """The id of the active topic entity named ``normalized`` of ``user_id``
-        (one at most: ``ux_entities_active_topic``)."""
+        (one at most: ``_ACTIVE_TOPIC_INDEX``)."""
         row = self._db.execute(
             "SELECT id FROM entities WHERE entity_type = ? AND user_id IS ? "
             "AND normalized = ? AND merged_into IS NULL ORDER BY created_at, id LIMIT 1",
@@ -1741,55 +1725,45 @@ class LocalBackend(MemoryBackend):
         ).fetchone()
         return row["id"] if row is not None else None
 
-    def _merged_topic_root_locked(
+    def _merged_topic_locked(
         self, normalized: str, user_id: str | None
-    ) -> sqlite3.Row | None:
+    ) -> tuple[str, str] | None:
         """For a tag merged away (a topic entity of that name folded into
-        another), the active entity it went into: another topic ("taxes" into
-        "tax"), or a named thing it was judged to be ("bildy" the tag into
-        "Bildy" the product). None when no topic of that name was merged."""
+        another): (the tag name a column files it under, the active entity
+        its mention goes to). Its tombstone is followed topic to topic
+        ("taxes" into "tax" into "levies": "levies"); where the chain reaches
+        a named thing ("bildy" the tag into "Bildy" the product) the name is
+        the last tag's and the entity the thing. None when no topic of that
+        name was merged."""
         for tombstone in self._db.execute(
-            "SELECT id FROM entities WHERE entity_type = ? AND user_id IS ? "
+            "SELECT id, merged_into FROM entities WHERE entity_type = ? AND user_id IS ? "
             "AND normalized = ? AND merged_into IS NOT NULL ORDER BY created_at, id",
             (TOPIC_TYPE, user_id, normalized),
         ).fetchall():
-            root = self._root_locked(tombstone["id"])
-            if root is not None:
-                return root
+            name = normalized
+            current: str | None = tombstone["merged_into"]
+            seen = {tombstone["id"]}
+            while current is not None and current not in seen:
+                seen.add(current)
+                row = self._db.execute(
+                    "SELECT id, entity_type, normalized, merged_into FROM entities WHERE id = ?",
+                    (current,),
+                ).fetchone()
+                if row is None:
+                    break
+                if row["entity_type"] == TOPIC_TYPE:
+                    name = row["normalized"]
+                if row["merged_into"] is None:
+                    return name, row["id"]
+                current = row["merged_into"]
         return None
 
-    def _topic_entity_locked(
-        self, name: str, user_id: str | None, *, create: bool = True,
-        follow_merged: bool = False,
-    ) -> tuple[str | None, bool]:
-        """(entity id, created) for the tag ``name`` of ``user_id``.
-
-        The active topic entity of that name. With ``follow_merged``, used
-        only where a memory's column is filed (its mentions,
-        ``_sync_topic_mentions_locked``; the legacy index's links,
-        ``_tags_to_topics_locked``; the tags a save or an update writes,
-        ``MemoryStore._canonical_tags``): for a tag merged away, the entity
-        it went into (``_merged_topic_root_locked``). A merge rewrites every
-        column carrying the old tag, but a column it did not reach (a
-        restored backup, an import) must not bring the merged tag back. A
-        merge resolves the names it merges among the active topics only
-        (``MemoryStore._merge_topics``). Else a new topic entity, when
-        ``create``: inserted or ignored against ``ux_entities_active_topic``
-        and read back, so two processes creating one topic at once end with
-        one.
-        """
-        normalized = str(name).strip().lower()
-        if not normalized:
-            return None, False
-        active = self._active_topic_locked(normalized, user_id)
-        if active is not None:
-            return active, False
-        if follow_merged:
-            root = self._merged_topic_root_locked(normalized, user_id)
-            if root is not None:
-                return root["id"], False
-        if not create:
-            return None, False
+    def _create_topic_locked(self, normalized: str, user_id: str | None) -> tuple[str, bool]:
+        """(id, created) of a new active topic ``normalized`` of ``user_id``:
+        inserted or ignored against ``_ACTIVE_TOPIC_INDEX`` and read back, so
+        two processes creating one topic at once end with one. The index keys
+        the namespace the lookup reads, so an ignored insert always finds the
+        topic that won; it never yields nothing (a mention is never dropped)."""
         entity = Entity(
             name=normalized, normalized=normalized, entity_type=TOPIC_TYPE, user_id=user_id
         )
@@ -1806,34 +1780,139 @@ class LocalBackend(MemoryBackend):
         if cur.rowcount:
             return entity.id, True
         # another process created it between the lookup and the insert
-        return self._active_topic_locked(normalized, user_id), False
+        existing = self._active_topic_locked(normalized, user_id)
+        if existing is None:
+            raise sqlite3.IntegrityError(
+                f"topic {normalized!r} of {user_id!r} was neither created nor found")
+        return existing, False
 
-    def _surviving_tag_locked(self, name: str, user_id: str | None) -> str:
-        """The tag a column's ``name`` is filed under: ``name`` itself, or,
-        for a tag merged into another topic, that topic's name, so the legacy
-        filter index and the tag mentions agree. A tag merged into a named
-        thing stays as written (its filter still finds its memories)."""
-        normalized = str(name).strip().lower()
-        if not normalized or self._active_topic_locked(normalized, user_id) is not None:
-            return name
-        root = self._merged_topic_root_locked(normalized, user_id)
-        if root is not None and root["entity_type"] == TOPIC_TYPE:
-            return root["normalized"]
-        return name
+    def _resolve_tag_locked(
+        self, normalized: str, user_id: str | None, *, create: bool = True
+    ) -> tuple[str | None, str | None, bool]:
+        """How the tag ``normalized`` of ``user_id`` is filed: (the name a
+        column writes instead of it, None when it is written as it is; the
+        entity its mention goes to; whether that entity was created now).
 
-    def _sync_topic_mentions_locked(
-        self, memory_id: str, categories: list[str], user_id: str | None
+        The active topic of that name; else, for a name merged away, its
+        survivor (``_merged_topic_locked``): a merge rewrites every column it
+        reaches, and one it did not (a backup restored, a column written
+        straight to the backend) must not bring the merged tag back; else a
+        new topic, when ``create``."""
+        active = self._active_topic_locked(normalized, user_id)
+        if active is not None:
+            return None, active, False
+        merged = self._merged_topic_locked(normalized, user_id)
+        if merged is not None:
+            name, entity_id = merged
+            return (name if name != normalized else None), entity_id, False
+        if not create:
+            return None, None, False
+        entity_id, created = self._create_topic_locked(normalized, user_id)
+        return None, entity_id, created
+
+    def _filed_tag_locked(
+        self, written: str, user_id: str | None, cache: dict[Any, Any],
+        counts: dict[str, Any] | None = None,
+    ) -> tuple[str, str | None]:
+        """(the name the column writes, the entity mentioned) for one tag as
+        written (stripped), resolved once per ``cache``: a bulk write passes
+        one cache for all its memories. ``counts`` tallies the entities
+        created and found (``tags_to_topics``)."""
+        normalized = written.lower()
+        key = ("tag", user_id, normalized)
+        if key not in cache:
+            renamed, entity_id, created = self._resolve_tag_locked(normalized, user_id)
+            cache[key] = (renamed, entity_id)
+            if counts is not None and entity_id is not None:
+                counts["entities_created" if created else "entities_existing"] += 1
+        renamed, entity_id = cache[key]
+        return renamed or written, entity_id
+
+    def _file_tags_locked(
+        self,
+        memory_id: str,
+        tags: list[Any] | None,
+        scope: Scope,
+        *,
+        stored: list[Any] | None = None,
+        provenance: str = "memory",
+        cache: dict[Any, Any] | None = None,
+        counts: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """File a memory's tags: the one path by which its ``categories``
+        column, its legacy index and its tag mentions are written, so the
+        three agree (the invariant above). Returns the column as written.
+
+        Each tag is resolved once (``_filed_tag_locked``); a tag merged away
+        is written as its survivor, and a tag named twice once. The column is
+        written when it differs from ``stored`` (read when None); the index
+        and the mentions are brought in line with it, adding and removing
+        what differs, so filing an unchanged memory writes nothing. Mentions
+        of named things are never removed here. ``scope`` is the memory's."""
+        cache = {} if cache is None else cache
+        column: list[str] = []
+        filed: dict[str, str] = {}  # entity id -> the name it is mentioned under
+        seen: set[str] = set()
+        for raw in tags or []:
+            written = str(raw).strip()
+            if not written:
+                continue
+            name, entity_id = self._filed_tag_locked(written, scope.user_id, cache, counts)
+            if name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            column.append(name)
+            if entity_id is not None:
+                filed.setdefault(entity_id, name)
+        if stored is None:
+            row = self._db.execute(
+                "SELECT categories FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+            stored = json.loads(row["categories"]) if row is not None else column
+        if column != stored:
+            self._db.execute(
+                "UPDATE memories SET categories = ? WHERE id = ?",
+                (json.dumps(column), memory_id),
+            )
+        self._index_tags_locked(memory_id, column, scope, provenance, cache)
+        self._mention_tags_locked(memory_id, filed, counts)
+        return column
+
+    def _index_tags_locked(
+        self, memory_id: str, column: list[str], scope: Scope, provenance: str,
+        cache: dict[Any, Any],
     ) -> None:
-        """Make a memory's tag mentions say what its ``categories`` say: one
-        mention of each tag's entity (created on first use), surface the tag as
-        written; a mention of a topic entity the column no longer names goes.
-        Mentions of named things are never touched here."""
-        wanted: dict[str, str] = {}
-        for raw in categories or []:
-            surface = str(raw).strip()
-            entity_id, _ = self._topic_entity_locked(surface, user_id, follow_merged=True)
-            if entity_id is not None and entity_id not in wanted:
-                wanted[entity_id] = surface
+        """The legacy index of a memory's column (``_file_tags_locked``): a
+        link to the ``topics`` row of each name in the memory's scope."""
+        wanted: set[str] = set()
+        for name in column:
+            key = ("topic", scope.user_id, scope.agent_id, scope.run_id, name.lower())
+            if key not in cache:
+                cache[key] = self._topic_locked(name, scope, provenance).id
+            wanted.add(cache[key])
+        present = {
+            row["topic_id"] for row in self._db.execute(
+                "SELECT topic_id FROM memory_topics WHERE memory_id = ?", (memory_id,)
+            ).fetchall()
+        }
+        for topic_id in sorted(present - wanted):
+            self._db.execute(
+                "DELETE FROM memory_topics WHERE memory_id = ? AND topic_id = ?",
+                (memory_id, topic_id),
+            )
+        for topic_id in sorted(wanted - present):
+            self._db.execute(
+                "INSERT OR IGNORE INTO memory_topics (memory_id, topic_id) VALUES (?,?)",
+                (memory_id, topic_id),
+            )
+
+    def _mention_tags_locked(
+        self, memory_id: str, filed: dict[str, str], counts: dict[str, Any] | None
+    ) -> None:
+        """A memory's tag mentions (``_file_tags_locked``): one mention of each
+        entity in ``filed`` under its name; a mention of a topic entity it no
+        longer names goes. Mentions of named things stay, and one of a thing a
+        tag was merged into counts as that tag's."""
         rows = self._db.execute(
             "SELECT em.id, em.entity_id, em.surface, e.entity_type FROM entity_mentions em "
             "LEFT JOIN entities e ON e.id = em.entity_id "
@@ -1845,10 +1924,10 @@ class LocalBackend(MemoryBackend):
         for row in rows:
             entity_id = row["entity_id"]
             if row["entity_type"] == TOPIC_TYPE:
-                if entity_id not in wanted or entity_id in present:
+                if entity_id not in filed or entity_id in present:
                     stale.append(row["id"])
                     continue
-                surface = wanted[entity_id]
+                surface = filed[entity_id]
                 if row["surface"].strip().lower() != surface.lower():
                     # moved here by a merge: "taxes" on the entity of "tax"
                     self._db.execute(
@@ -1862,24 +1941,150 @@ class LocalBackend(MemoryBackend):
                 stale,
             )
         now = utcnow()
-        for entity_id, surface in wanted.items():
-            if entity_id not in present:
-                self._db.execute(
-                    "INSERT INTO entity_mentions (id, entity_id, memory_id, surface, created_at) "
-                    "VALUES (?,?,?,?,?)",
-                    (new_id(), entity_id, memory_id, surface, now),
-                )
+        for entity_id, surface in filed.items():
+            if entity_id in present:
+                if counts is not None:
+                    counts["mentions_existing"] += 1
+                continue
+            self._db.execute(
+                "INSERT INTO entity_mentions (id, entity_id, memory_id, surface, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (new_id(), entity_id, memory_id, surface, now),
+            )
+            if counts is not None:
+                counts["mentions_created"] += 1
+
+    def _refile_locked(
+        self, where: str, params: tuple[Any, ...], *, cache: dict[Any, Any],
+        counts: dict[str, Any] | None = None,
+    ) -> int:
+        """File again the tags of every memory matching ``where`` (valid or
+        not; ``_file_tags_locked``). Returns how many columns changed."""
+        changed = 0
+        for row in self._db.execute(
+            "SELECT id, categories, user_id, agent_id, run_id FROM memories "
+            f"WHERE {where} ORDER BY created_at, id",
+            params,
+        ).fetchall():
+            stored = json.loads(row["categories"])
+            filed = self._file_tags_locked(
+                row["id"], stored, _row_scope(row), stored=stored, cache=cache, counts=counts
+            )
+            changed += filed != stored
+        return changed
+
+    def _refile_merged_tags(self) -> None:
+        """File again, once, every column still naming a tag merged away.
+
+        Before every writer filed its tags through ``_file_tags_locked``, such
+        a column (restored from a backup, written straight to the backend, or
+        missed by a merge) was indexed under the old name while its mention
+        followed the merge, so ``categories()``, a filter on the survivor and
+        ``delete_tag`` of it disagreed about the memory. Its column is
+        rewritten to the survivor and its index and mentions follow. Each
+        user's share is committed on its own and the marker set after the
+        last, as the migration does (``_migrate_tags_to_topic_entities``)."""
+        if self._db.execute(
+            "SELECT 1 FROM meta WHERE key = ?", (_TAG_SURVIVORS_MARKER,)
+        ).fetchone():
+            return
+        self._db.commit()  # the open's earlier steps, before the first user's commit
+        users = [
+            row["user_id"] for row in self._db.execute(
+                "SELECT DISTINCT user_id FROM entities "
+                "WHERE entity_type = ? AND merged_into IS NOT NULL",
+                (TOPIC_TYPE,),
+            ).fetchall()
+        ]
+        for user in users:
+            with self._lock:
+                try:
+                    retired = {
+                        row["normalized"] for row in self._db.execute(
+                            "SELECT DISTINCT t.normalized FROM entities t "
+                            "WHERE t.entity_type = ? AND t.user_id IS ? "
+                            "AND t.merged_into IS NOT NULL AND NOT EXISTS ("
+                            "SELECT 1 FROM entities a WHERE a.entity_type = t.entity_type "
+                            "AND a.user_id IS t.user_id AND a.normalized = t.normalized "
+                            "AND a.merged_into IS NULL)",
+                            (TOPIC_TYPE, user),
+                        ).fetchall()
+                    }
+                    ids = [
+                        row["id"] for row in self._db.execute(
+                            "SELECT id, categories FROM memories WHERE user_id IS ?", (user,)
+                        ).fetchall()
+                        if any(str(tag).strip().lower() in retired
+                               for tag in json.loads(row["categories"]))
+                    ]
+                    cache: dict[Any, Any] = {}
+                    for start in range(0, len(ids), 500):
+                        chunk = ids[start:start + 500]
+                        self._refile_locked(
+                            f"id IN ({','.join('?' * len(chunk))})", tuple(chunk), cache=cache)
+                except Exception:
+                    self._db.rollback()
+                    raise
+                self._db.commit()
+        self._db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (_TAG_SURVIVORS_MARKER, utcnow()),
+        )
+        self._db.commit()
 
     def topic_entity(
         self, name: str, scope: Scope, *, create: bool = True, follow_merged: bool = False
     ) -> Entity | None:
+        normalized = str(name).strip().lower()
+        if not normalized:
+            return None
         with self._lock:
-            entity_id, _ = self._topic_entity_locked(
-                name, scope.user_id, create=create, follow_merged=follow_merged
-            )
+            entity_id = self._active_topic_locked(normalized, scope.user_id)
+            if entity_id is None and (follow_merged or create):
+                merged = self._merged_topic_locked(normalized, scope.user_id)
+                if merged is not None:
+                    entity_id = merged[1]  # never a fresh topic of a name merged away
+                elif create:
+                    entity_id, _ = self._create_topic_locked(normalized, scope.user_id)
             if self._db.in_transaction:  # created, or an insert another process won
                 self._db.commit()
         return self.get_entity(entity_id) if entity_id else None
+
+    def tag_filing(self, names: Iterable[str], scope: Scope) -> dict[str, str]:
+        with self._lock:
+            filed: dict[str, str] = {}
+            for raw in names:
+                normalized = str(raw).strip().lower()
+                if not normalized or normalized in filed:
+                    continue
+                renamed, _, _ = self._resolve_tag_locked(
+                    normalized, scope.user_id, create=False)
+                filed[normalized] = renamed or normalized
+        return filed
+
+    def topic_names(
+        self, scope: Scope, *, prefixes: Iterable[str] | None = None
+    ) -> dict[str, bool]:
+        clause = "entity_type = ? AND user_id IS ?"
+        params: list[Any] = [TOPIC_TYPE, scope.user_id]
+        if prefixes is not None:
+            wanted = sorted({str(prefix) for prefix in prefixes})
+            if not wanted:
+                return {}
+            # a name's leading separators do not count (``obvious_topic_key``)
+            clause += " AND (" + " OR ".join(
+                ["ltrim(normalized, ' -_') LIKE ? ESCAPE '\\'"] * len(wanted)) + ")"
+            params.extend(
+                prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                for prefix in wanted
+            )
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT normalized, MIN(merged_into IS NOT NULL) AS merged FROM entities "
+                f"WHERE {clause} GROUP BY normalized ORDER BY normalized",
+                params,
+            ).fetchall()
+        return {row["normalized"]: not row["merged"] for row in rows}
 
     def topic_mention_counts(
         self, scope: Scope, *, exact_user: bool = False
@@ -1923,11 +2128,14 @@ class LocalBackend(MemoryBackend):
     def tags_to_topics(
         self, *, user_id: str | None = None, all_users: bool = True, dry_run: bool = False
     ) -> list[dict[str, Any]]:
-        """Topic entities for the rows of the legacy ``topics`` table and
-        mentions for its ``memory_topics`` links, one user at a time; the
-        legacy tables are read, never written. Returns what was (or with
-        ``dry_run``, would be) created per user. Idempotent: an entity or a
-        mention that exists is counted as existing and left alone.
+        """Topic entities and mentions for the tags of the memories' columns,
+        one user at a time, each memory filed as every writer files it
+        (``_file_tags_locked``): an upgraded database's legacy tag index
+        (``topics``, ``memory_topics``) is derived from the same columns, and
+        is left as it is where it already agrees with them. Returns what was
+        (or with ``dry_run``, would be) created per user, with the user's
+        legacy ``topics`` rows counted. Idempotent: an entity or a mention
+        that exists is counted as existing and left alone.
 
         A synthetic parent that no memory carries is skipped: it lived only as
         a hierarchy edge (``topic_relations``), which is not carried over.
@@ -1937,7 +2145,9 @@ class LocalBackend(MemoryBackend):
             if all_users:
                 users = [
                     row["user_id"] for row in self._db.execute(
-                        "SELECT DISTINCT user_id FROM topics ORDER BY IFNULL(user_id, '')"
+                        "SELECT user_id FROM (SELECT user_id FROM topics UNION "
+                        "SELECT user_id FROM memories WHERE categories != '[]') "
+                        "ORDER BY user_id IS NOT NULL, user_id"
                     ).fetchall()
                 ]
             else:
@@ -1963,52 +2173,17 @@ class LocalBackend(MemoryBackend):
             "entities_created": 0, "entities_existing": 0,
             "mentions_created": 0, "mentions_existing": 0,
         }
-        topics = self._db.execute(
-            "SELECT t.id, t.name, t.normalized, t.provenance, "
+        for topic in self._db.execute(
+            "SELECT t.provenance, "
             "EXISTS (SELECT 1 FROM memory_topics mt WHERE mt.topic_id = t.id) AS used "
-            "FROM topics t WHERE t.user_id IS ? ORDER BY t.normalized, t.created_at, t.id",
+            "FROM topics t WHERE t.user_id IS ?",
             (user_id,),
-        ).fetchall()
-        entity_of: dict[str, str] = {}
-        for topic in topics:
+        ).fetchall():
             counts["topics"] += 1
             if topic["provenance"] == "synthetic" and not topic["used"]:
                 counts["skipped_parents"] += 1
-                continue
-            name = topic["normalized"]
-            if name in entity_of or not name.strip():
-                continue
-            # the legacy index mirrors the columns: a tag merged away goes
-            # where the column's mention goes (``_sync_topic_mentions_locked``)
-            entity_id, created = self._topic_entity_locked(name, user_id, follow_merged=True)
-            if entity_id is None:
-                continue
-            entity_of[name] = entity_id
-            counts["entities_created" if created else "entities_existing"] += 1
-        links = self._db.execute(
-            "SELECT mt.memory_id, t.name, t.normalized FROM memory_topics mt "
-            "JOIN topics t ON t.id = mt.topic_id "
-            "JOIN memories m ON m.id = mt.memory_id "
-            "WHERE t.user_id IS ? ORDER BY mt.memory_id, t.normalized",
-            (user_id,),
-        ).fetchall()
-        now = utcnow()
-        for link in links:
-            entity_id = entity_of.get(link["normalized"])
-            if entity_id is None:
-                continue
-            if self._db.execute(
-                "SELECT 1 FROM entity_mentions WHERE memory_id = ? AND entity_id = ? LIMIT 1",
-                (link["memory_id"], entity_id),
-            ).fetchone() is not None:
-                counts["mentions_existing"] += 1
-                continue
-            self._db.execute(
-                "INSERT INTO entity_mentions (id, entity_id, memory_id, surface, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (new_id(), entity_id, link["memory_id"], link["name"], now),
-            )
-            counts["mentions_created"] += 1
+        self._refile_locked(
+            "user_id IS ? AND categories != '[]'", (user_id,), cache={}, counts=counts)
         return counts
 
     # -- synthetic tags + meta ---------------------------------------------
@@ -2366,7 +2541,7 @@ class LocalBackend(MemoryBackend):
             ") SELECT e.* FROM matched JOIN entities e ON e.id = matched.id "
             "WHERE e.merged_into IS NULL "
             # a name finds named things: a tag is never what a save or a
-            # question names (``_topic_entity_locked`` finds tags)
+            # question names (``topic_entity`` finds tags)
             f"AND {_kind_clause('named', 'e.')} "
             f"AND {scope_clause} ORDER BY e.updated_at DESC LIMIT ?"
         )
@@ -3213,7 +3388,13 @@ class LocalBackend(MemoryBackend):
     def import_backup(
         self, backup: dict[str, Any], *, owner_prefix: str | None = None
     ) -> dict[str, Any]:
-        """Restore exact records transactionally; never rewrite an identity."""
+        """Restore exact records transactionally; never rewrite an identity.
+
+        Each restored memory's tags are then filed as every writer files them
+        (``_file_tags_locked``): a column naming a tag merged away here is
+        written as its survivor, and its index and mentions follow the column
+        (a backup of one agent or run holds no topic entities, which carry
+        no agent or run). A consistent backup restores unchanged."""
         with self._lock:
             tables = self._validate_backup(backup, owner_prefix)
             inserted = unchanged = 0
@@ -3244,6 +3425,12 @@ class LocalBackend(MemoryBackend):
                         )
                         table_inserted += 1; inserted += 1
                     by_table[table] = {"inserted": table_inserted, "unchanged": table_unchanged}
+                restored = [row["id"] for row in tables["memories"]]
+                cache: dict[Any, Any] = {}
+                for start in range(0, len(restored), 500):
+                    chunk = restored[start:start + 500]
+                    self._refile_locked(
+                        f"id IN ({','.join('?' * len(chunk))})", tuple(chunk), cache=cache)
                 self._db.execute(
                     "INSERT OR IGNORE INTO ann_keys (memory_id) SELECT id FROM memories WHERE embedding IS NOT NULL"
                 )

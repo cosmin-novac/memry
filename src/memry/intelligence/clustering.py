@@ -129,6 +129,17 @@ def _obvious_topic_key(value: str) -> str:
     return " ".join(words)
 
 
+def obvious_variant_prefix(value: str) -> str:
+    """What every tag sharing ``value``'s obvious key (formatting and
+    singular/plural, ``obvious_canonical_merges``) starts with once leading
+    separators are dropped: the key's first word, less a final "y" when it
+    is the only word ("companies" and "company" share "compan"). It narrows a
+    lookup of one tag's obvious variants; the key decides which they are."""
+    words = _obvious_topic_key(value).split(" ")
+    first = words[0]
+    return first[:-1] if len(words) == 1 and first.endswith("y") else first
+
+
 def obvious_canonical_merges(tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Find deterministic formatting and singular/plural duplicates.
 

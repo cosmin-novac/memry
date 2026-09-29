@@ -230,21 +230,27 @@ def reconcile_candidate(
     The clock when None."""
     stamped: dict[str, Any] = {"created_at": created_at} if created_at else {}
 
-    # Fast path: an exact duplicate in the save's own run needs no LLM
-    # round-trip. One of another run is asked about like any other memory.
+    # Fast path: an exact duplicate needs no model call. One in the save's
+    # own run is the fact already known there (NONE); one of another run is
+    # added to this run by rule, as a NONE of it would be below, so a search
+    # of the run finds it and that memory is left alone.
     norm = _normalize(candidate.content)
-    for result in similar:
-        if _normalize(result.memory.content) == norm and in_save_scope(result.memory, scope):
+    duplicates = [r.memory for r in similar if _normalize(r.memory.content) == norm]
+    for memory in duplicates:
+        if in_save_scope(memory, scope):
             return AddAction(
                 event="NONE",
-                memory_id=result.memory.id,
-                content=result.memory.content,
+                memory_id=memory.id,
+                content=memory.content,
                 reason="exact duplicate",
             )
 
     decision: dict[str, Any] = {"action": "ADD", "target": None, "content": None, "reason": "new information"}
     judged: dict[str, Any] | None = None
-    if similar:
+    if duplicates:
+        decision["reason"] = (f"exact duplicate of memory {duplicates[0].id} of another run, "
+                              "left as it is; added to this run")
+    elif similar:
         listing = "\n".join(
             f"[{i}] {r.memory.content}" for i, r in enumerate(similar)
         )

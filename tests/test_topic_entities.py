@@ -254,17 +254,20 @@ def test_a_memory_restored_after_a_tag_merge_carries_the_merged_tag(tagged):
 
 
 def test_a_column_still_naming_a_merged_tag_mentions_the_tag_it_went_into(tagged):
-    """A column the merge did not rewrite (a memory invalidated before merges
-    reached invalid memories, a restored backup, an import) names the tag
-    merged away: its mention follows the merge to the surviving topic instead
-    of bringing the old one back, and so does the filter index, so the count
-    and the filter agree. A filter on the name merged away finds nothing."""
+    """A column written with a tag merged away (a restored backup, an import,
+    a memory written straight to the backend) is filed as every write files
+    it: the column names the surviving tag, the mention goes to its topic
+    instead of bringing the old one back, and so does the filter index, so
+    the count and the filter agree. A filter on the name merged away finds
+    nothing."""
     a = tagged.backend.insert_memory(Memory(content="a", user_id="ada", categories=["taxes"]))
     b = tagged.backend.insert_memory(Memory(content="b", user_id="ada", categories=["tax"]))
     tax = tagged.backend.topic_entity("tax", Scope(user_id="ada"), create=False)
     assert tagged.merge_tags(["taxes"], "tax", user_id="ada") == 1
     old = tagged.backend.insert_memory(Memory(content="c", user_id="ada", categories=["taxes"]))
-    assert tagged.backend.get_memory(old.id).categories == ["taxes"]  # kept as written
+    assert old.categories == ["tax"]  # the column names the survivor
+    assert tagged.backend.get_memory(old.id).categories == ["tax"]
+    _agree(tagged, "ada")
     assert _active_topics(tagged, "taxes") == []
     assert [e.id for e in tagged.backend.entities_of_memory(old.id, kind="topic")] == [tax.id]
     # a lookup reads the active topics; following the tombstone is asked for
@@ -288,30 +291,30 @@ def _tombstones(store, name):
         "AND merged_into IS NOT NULL", (name,))]
 
 
-def test_a_tag_merged_back_the_other_way_keeps_the_name_asked_for(tagged):
-    """Merging "tax" into "taxes" and then "taxes" into "tax" ends with one
-    active topic named "tax". No survivor is renamed: "tax" gets a topic of
-    its own and "taxes" folds into it, so both names resolve to that topic
-    and "taxes" keeps its tombstone. A column still saying "taxes" afterwards
-    mentions it and creates no topic."""
+def test_merging_a_tag_back_into_a_name_merged_away_keeps_its_survivor(tagged):
+    """After "tax" went into "taxes", the name "tax" means "taxes": merging
+    "taxes" into "tax" merges it into its own survivor, which changes
+    nothing, and never makes a fresh topic of the retired name. A column
+    saying "tax" afterwards is written as "taxes"."""
     tagged.backend.insert_memory(Memory(content="a", user_id="ada", categories=["tax"]))
     tagged.backend.insert_memory(Memory(content="b", user_id="ada", categories=["taxes"]))
     tagged.merge_tags(["tax"], "taxes", user_id="ada")
     assert tagged.categories(user_id="ada") == [{"category": "taxes", "count": 2}]
-    tagged.merge_tags(["taxes"], "tax", user_id="ada")
-    assert tagged.categories(user_id="ada") == [{"category": "tax", "count": 2}]
-    assert _active_topics(tagged, "taxes") == []
-    [tax] = _active_topics(tagged, "tax")
-    assert _tombstones(tagged, "taxes") and _tombstones(tagged, "tax")
-    for tombstone in _tombstones(tagged, "taxes") + _tombstones(tagged, "tax"):
-        assert tagged.backend.resolve_entity_id(tombstone) == tax
+    [taxes] = _active_topics(tagged, "taxes")
+    assert tagged.merge_tags(["taxes"], "tax", user_id="ada") == 0
+    assert tagged.categories(user_id="ada") == [{"category": "taxes", "count": 2}]
+    assert _active_topics(tagged, "tax") == [] and _active_topics(tagged, "taxes") == [taxes]
+    assert _tombstones(tagged, "tax") and not _tombstones(tagged, "taxes")
     _agree(tagged, "ada")
     later = tagged.backend.insert_memory(Memory(content="c", user_id="ada",
-                                                categories=["taxes"]))
-    assert [e.id for e in tagged.backend.entities_of_memory(later.id, kind="topic")] == [tax]
-    assert _active_topics(tagged, "taxes") == [] and _active_topics(tagged, "tax") == [tax]
-    assert tagged.categories(user_id="ada") == [{"category": "tax", "count": 3}]
-    assert len(tagged.get_all(user_id="ada", categories=["tax"])) == 3
+                                                categories=["tax"]))
+    assert later.categories == ["taxes"]
+    assert [e.id for e in tagged.backend.entities_of_memory(later.id, kind="topic")] == [taxes]
+    assert _active_topics(tagged, "tax") == []
+    assert tagged.categories(user_id="ada") == [{"category": "taxes", "count": 3}]
+    assert len(tagged.get_all(user_id="ada", categories=["taxes"])) == 3
+    assert tagged.get_all(user_id="ada", categories=["tax"]) == []
+    _agree(tagged, "ada")
 
 
 def test_a_name_merged_away_is_not_merged_again_through_its_tombstone(tagged):
@@ -368,16 +371,19 @@ def test_an_update_naming_a_merged_tag_files_it_under_the_topic_it_went_into(tag
     _agree(tagged, "ada")
 
 
-def test_a_tag_merged_away_can_be_asked_for_again(tagged):
-    """After "tax" went into "taxes", merging "levies" into "tax" makes "tax"
-    a topic again, of the levies alone; "taxes" keeps its memories."""
+def test_a_merge_into_a_name_merged_away_goes_into_its_survivor(tagged):
+    """After "tax" went into "taxes", merging "levies" into "tax" merges it
+    into "taxes", the survivor of the name asked for: a retired name never
+    becomes a topic again."""
     for content, tag in (("a", "tax"), ("b", "taxes"), ("c", "levies")):
         tagged.backend.insert_memory(Memory(content=content, user_id="ada", categories=[tag]))
     tagged.merge_tags(["tax"], "taxes", user_id="ada")
+    [taxes] = _active_topics(tagged, "taxes")
+    levies = tagged.backend.topic_entity("levies", Scope(user_id="ada"), create=False)
     assert tagged.merge_tags(["levies"], "tax", user_id="ada") == 1
-    assert tagged.categories(user_id="ada") == [
-        {"category": "taxes", "count": 2}, {"category": "tax", "count": 1}]
-    assert len(_active_topics(tagged, "tax")) == 1 and _active_topics(tagged, "levies") == []
+    assert tagged.categories(user_id="ada") == [{"category": "taxes", "count": 3}]
+    assert _active_topics(tagged, "tax") == [] and _active_topics(tagged, "levies") == []
+    assert tagged.backend.get_entity(levies.id).merged_into == taxes
     _agree(tagged, "ada")
 
 
@@ -390,7 +396,8 @@ def test_renaming_a_tag_folds_it_into_a_topic_of_the_new_name(tagged):
     assert tagged.rename_tag("budget", "money", user_id="ada") == 1
     money = tagged.backend.topic_entity("money", Scope(user_id="ada"), create=False)
     assert money.id != budget.id
-    assert (money.name, money.merged_into, money.metadata) == ("money", None, {})
+    assert (money.name, money.merged_into, money.metadata) == (
+        "money", None, {"renamed_from": budget.id})
     assert tagged.backend.get_entity(budget.id).merged_into == money.id
     _agree(tagged, "ada")
     assert tagged.delete_tag("money", user_id="ada") == 1
@@ -841,7 +848,7 @@ def test_a_database_with_two_active_topics_of_one_name_opens_with_one(tmp_path):
         "SELECT id FROM entities WHERE entity_type = 'topic'")]
     backend.close()
     with sqlite3.connect(path) as db:
-        db.execute("DROP INDEX IF EXISTS ux_entities_active_topic")
+        db.execute("DROP INDEX IF EXISTS ux_entities_active_topic_ns")
         db.execute("INSERT INTO entities (id, name, normalized, entity_type, user_id, metadata, "
                    "created_at, updated_at) VALUES ('twin', 'tax', 'tax', 'topic', 'ada', '{}', "
                    "'2999-01-01T00:00:00+00:00', '2999-01-01T00:00:00+00:00')")
@@ -858,7 +865,7 @@ def test_a_database_with_two_active_topics_of_one_name_opens_with_one(tmp_path):
         assert reopened.topic_mention_counts(Scope(user_id="ada")) == [
             {"category": "tax", "count": 2}]
         assert reopened._db.execute(
-            "SELECT 1 FROM sqlite_master WHERE name = 'ux_entities_active_topic'").fetchone()
+            "SELECT 1 FROM sqlite_master WHERE name = 'ux_entities_active_topic_ns'").fetchone()
     finally:
         reopened.close()
 
@@ -992,3 +999,308 @@ def test_stats_count_topics_apart_from_named_entities(tagged):
     tagged.backend.insert_entity(Entity(name="Ada", entity_type="person", user_id="ada"))
     stats = tagged.stats()
     assert (stats["entities"], stats["topics"]) == (1, 2)
+
+
+# ---------------------------------------------- one invariant, one code path
+def _index_of(store, memory_id):
+    """The names the legacy filter index files a memory under."""
+    return sorted(row["normalized"] for row in store.backend._db.execute(
+        "SELECT t.normalized FROM memory_topics mt JOIN topics t ON t.id = mt.topic_id "
+        "WHERE mt.memory_id = ?", (memory_id,)))
+
+
+def test_a_column_left_naming_a_merged_tag_is_filed_again_at_open(tmp_path):
+    """A database from before every write filed its tags through one function:
+    a memory's column still names "taxes", merged into "tax", its legacy index
+    files it under "taxes", and its mention followed the merge. The first
+    open rewrites the column to the survivor, once (a marker), and its index
+    and mention follow, so the column, the index, the mentions and
+    ``categories()`` agree, and deleting "tax" takes the tag off it too.
+    Another user's own "taxes" is theirs and stays."""
+    import sqlite3
+
+    db = tmp_path / "survivors.db"
+
+    def opened():
+        return MemoryStore(Config(db_path=str(db)), llm=NoneLLM(), embedder=HashEmbedder(64))
+
+    store = opened()
+    try:
+        insert = store.backend.insert_memory
+        a = insert(Memory(content="a", user_id="ada", categories=["taxes"])).id
+        b = insert(Memory(content="b", user_id="ada", categories=["tax"])).id
+        stale = insert(Memory(content="c", user_id="ada", categories=["home"])).id
+        bob = insert(Memory(content="d", user_id="bob", categories=["taxes"])).id
+        assert store.merge_tags(["taxes"], "tax", user_id="ada") == 1
+        tax = store.backend.topic_entity("tax", Scope(user_id="ada"), create=False).id
+    finally:
+        store.close()
+    stamp = "2024-01-01T00:00:00+00:00"
+    with sqlite3.connect(db) as raw:  # as the writes before this change left it
+        raw.execute("UPDATE memories SET categories = ? WHERE id = ?",
+                    (json.dumps(["taxes", "home"]), stale))
+        raw.execute("INSERT INTO topics (id, name, normalized, user_id, provenance, "
+                    "created_at, updated_at) VALUES ('old', 'taxes', 'taxes', 'ada', "
+                    "'memory', ?, ?)", (stamp, stamp))
+        raw.execute("INSERT INTO memory_topics (memory_id, topic_id) VALUES (?, 'old')",
+                    (stale,))
+        raw.execute("INSERT INTO entity_mentions (id, entity_id, memory_id, surface, "
+                    "created_at) VALUES ('m-old', ?, ?, 'taxes', ?)", (tax, stale, stamp))
+        raw.execute("DELETE FROM meta WHERE key = 'schema:tag-survivors:v1'")
+    raw.close()
+
+    store = opened()
+    try:
+        assert store.get(stale).categories == ["tax", "home"]
+        assert _index_of(store, stale) == ["home", "tax"]
+        assert _topics_of(store, stale) == ["home", "tax"]
+        _agree(store, "ada")
+        assert store.categories(user_id="ada") == [
+            {"category": "tax", "count": 3}, {"category": "home", "count": 1}]
+        assert {m.id for m in store.get_all(user_id="ada", categories=["tax"])} == {
+            a, b, stale}
+        assert store.get_all(user_id="ada", categories=["taxes"]) == []
+        assert store.get(bob).categories == ["taxes"]
+        assert store.delete_tag("tax", user_id="ada") == 3
+        assert store.get(stale).categories == ["home"]
+        assert _index_of(store, stale) == ["home"]
+        assert store.categories(user_id="ada") == [{"category": "home", "count": 1}]
+        _agree(store, "ada")
+    finally:
+        store.close()
+    with sqlite3.connect(db) as raw:  # the marker holds: a later open does not run it
+        raw.execute("UPDATE memories SET categories = ? WHERE id = ?",
+                    (json.dumps(["taxes"]), a))
+    raw.close()
+    store = opened()
+    try:
+        assert store.get(a).categories == ["taxes"]
+    finally:
+        store.close()
+
+
+def test_saves_file_a_retired_name_and_its_obvious_variants_under_its_survivor(tagged):
+    """After "tax" went into "levies", "tax" means "levies", and so do its
+    obvious variants: names merged away are resolved before obvious variants
+    are grouped. A save tagged "taxes" and one tagged "tax" both land under
+    "levies"; a stored "taxes" (written straight to the backend) is folded
+    into "levies" by the save's pass; and no "tax" or "taxes" topic is
+    active afterwards."""
+    insert = tagged.backend.insert_memory
+    insert(Memory(content="paid the tax", user_id="ada", categories=["tax"]))
+    insert(Memory(content="levy notice", user_id="ada", categories=["levies"]))
+    assert tagged.merge_tags(["tax"], "levies", user_id="ada") == 1
+    [levies] = _active_topics(tagged, "levies")
+    plural = tagged.add("paid the taxes", user_id="ada", infer=False,
+                        categories=["taxes"]).actions[0].memory_id
+    single = tagged.add("tax office letter", user_id="ada", infer=False,
+                        categories=["Tax"]).actions[0].memory_id
+    assert tagged.get(plural).categories == ["levies"]
+    assert tagged.get(single).categories == ["levies"]
+    assert _active_topics(tagged, "tax") == [] and _active_topics(tagged, "taxes") == []
+    assert tagged.categories(user_id="ada") == [{"category": "levies", "count": 4}]
+    _agree(tagged, "ada")
+
+    stored = insert(Memory(content="old taxes", user_id="ada", categories=["taxes"])).id
+    assert _active_topics(tagged, "taxes")  # written straight to the backend
+    tagged.add("tax refund", user_id="ada", infer=False, categories=["tax"])
+    assert _active_topics(tagged, "tax") == [] and _active_topics(tagged, "taxes") == []
+    assert _active_topics(tagged, "levies") == [levies]
+    assert tagged.get(stored).categories == ["levies"]
+    assert tagged.categories(user_id="ada") == [{"category": "levies", "count": 6}]
+    _agree(tagged, "ada")
+
+
+def test_a_renamed_tag_keeps_its_description_and_metadata(tagged):
+    """A rename is a merge into a topic of the new name; that topic takes over
+    the old one's description (with the time it was written) and metadata,
+    and records the old id as ``renamed_from``, so a reference stored under
+    the old id can be followed. A merge into a tag that exists is no rename:
+    the kept topic keeps its own."""
+    tagged.add("a", user_id="ada", infer=False, categories=["budget"])
+    budget = tagged.backend.topic_entity("budget", Scope(user_id="ada"), create=False)
+    written = "2026-01-02T03:04:05+00:00"
+    tagged.backend.set_entity_description(budget.id, "The household budget.", written)
+    tagged.backend.set_entity_metadata(budget.id, {"home": "finances", "note": "kept"})
+    assert tagged.rename_tag("budget", "money", user_id="ada") == 1
+    money = tagged.backend.topic_entity("money", Scope(user_id="ada"), create=False)
+    assert (money.description, money.description_updated_at) == (
+        "The household budget.", written)
+    assert money.metadata == {"home": "finances", "note": "kept", "renamed_from": budget.id}
+    assert tagged.backend.resolve_entity_id(money.metadata["renamed_from"]) == money.id
+    # the entity route renames a tag the same way
+    cash = tagged.rename_entity(money.id, "cash")
+    assert (cash.name, cash.description, cash.metadata["renamed_from"]) == (
+        "cash", "The household budget.", money.id)
+    tagged.add("b", user_id="ada", infer=False, categories=["savings"])
+    savings = tagged.backend.topic_entity("savings", Scope(user_id="ada"), create=False)
+    assert tagged.merge_tags(["cash"], "savings", user_id="ada") == 1
+    kept = tagged.backend.get_entity(savings.id)
+    assert (kept.merged_into, kept.description, kept.metadata) == (None, None, {})
+    _agree(tagged, "ada")
+
+
+def test_the_empty_user_and_no_user_are_two_namespaces_for_tags(tagged):
+    """ "" is a user of its own, not the memories without one (None), for
+    tags as for every memory lookup: each namespace has its own "tax" topic,
+    every memory mentions its own, and neither save fails or drops a
+    mention. A merge in one leaves the other alone."""
+    insert = tagged.backend.insert_memory
+    nobody = insert(Memory(content="a", user_id=None, categories=["tax"])).id
+    empty = insert(Memory(content="b", user_id="", categories=["tax"])).id
+    also = insert(Memory(content="c", user_id="", categories=["tax"], run_id="r1")).id
+    topics = {row["user_id"]: row["id"] for row in tagged.backend._db.execute(
+        "SELECT id, user_id FROM entities WHERE entity_type = 'topic' "
+        "AND normalized = 'tax' AND merged_into IS NULL")}
+    assert set(topics) == {None, ""}
+    mentioned = {memory_id: [e.id for e in tagged.backend.entities_of_memory(
+        memory_id, kind="topic")] for memory_id in (nobody, empty, also)}
+    assert mentioned == {nobody: [topics[None]], empty: [topics[""]], also: [topics[""]]}
+    assert tagged.backend.topic_mention_counts(Scope(user_id=""), exact_user=True) == [
+        {"category": "tax", "count": 2}]
+    assert tagged.backend.topic_mention_counts(Scope(user_id=None), exact_user=True) == [
+        {"category": "tax", "count": 1}]
+    assert tagged.merge_tags(["tax"], "levies", user_id="") == 2
+    assert tagged.get(nobody).categories == ["tax"]
+    assert [tagged.get(m).categories for m in (empty, also)] == [["levies"], ["levies"]]
+    assert tagged.backend.get_entity(topics[None]).merged_into is None
+
+
+def test_an_index_that_folded_the_two_namespaces_is_replaced_at_open(tmp_path):
+    """A database whose unique index keyed ``IFNULL(user_id, '')`` held one
+    "tax" topic for None and "" together, so a memory of "" lost its mention
+    to the other namespace's topic. The open replaces the index, files the
+    memories of both namespaces again (the mention comes back, on a topic of
+    its own namespace), and folds no topic of one into the other's."""
+    import sqlite3
+
+    from memry.backends.local import LocalBackend
+
+    path = tmp_path / "namespaces.db"
+    backend = LocalBackend(str(path))
+    nobody = backend.insert_memory(Memory(content="a", user_id=None, categories=["tax"])).id
+    empty = backend.insert_memory(Memory(content="b", user_id="", categories=["tax"])).id
+    backend.close()
+    with sqlite3.connect(path) as raw:  # the "" topic never made it under the old index
+        raw.execute("DROP INDEX ux_entities_active_topic_ns")
+        raw.execute("DELETE FROM entity_mentions WHERE memory_id = ?", (empty,))
+        raw.execute("DELETE FROM entities WHERE user_id = ''")
+        raw.execute("CREATE UNIQUE INDEX ux_entities_active_topic ON entities("
+                    "IFNULL(user_id, ''), normalized) "
+                    "WHERE entity_type = 'topic' AND merged_into IS NULL")
+    raw.close()
+    def owners(backend):
+        return {memory_id: [(e.user_id, e.entity_type) for e in backend.entities_of_memory(
+            memory_id, kind="topic")] for memory_id in (nobody, empty)}
+
+    def active(backend):
+        return sorted(repr(row["user_id"]) for row in backend._db.execute(
+            "SELECT user_id FROM entities WHERE entity_type = 'topic' AND merged_into IS NULL"))
+
+    reopened = LocalBackend(str(path))
+    try:
+        indexes = {row["name"] for row in reopened._db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'")}
+        assert "ux_entities_active_topic_ns" in indexes
+        assert "ux_entities_active_topic" not in indexes
+        assert owners(reopened) == {nobody: [(None, TOPIC_TYPE)], empty: [("", TOPIC_TYPE)]}
+        assert active(reopened) == ["''", "None"]
+    finally:
+        reopened.close()
+    # a database from before any index, one "tax" in each namespace: no twins
+    with sqlite3.connect(path) as raw:
+        raw.execute("DROP INDEX ux_entities_active_topic_ns")
+    raw.close()
+    reopened = LocalBackend(str(path))
+    try:
+        assert active(reopened) == ["''", "None"]
+        assert owners(reopened) == {nobody: [(None, TOPIC_TYPE)], empty: [("", TOPIC_TYPE)]}
+    finally:
+        reopened.close()
+
+
+def test_an_update_retags_its_own_memory_only(tagged, monkeypatch):
+    """PATCHing one memory's tags writes them in their obvious canonical form
+    and files a name merged away under its survivor, without the
+    vocabulary-wide merge: the other memories tagged "taxes" keep their
+    column and history, and only the incoming tags' obvious variants are
+    read, not every topic of the user. The next save runs the merge."""
+    from memry.backends.local import LocalBackend
+
+    insert = tagged.backend.insert_memory
+    a = insert(Memory(content="a", user_id="ada", categories=["taxes"])).id
+    b = insert(Memory(content="b", user_id="ada", categories=["taxes"])).id
+    c = insert(Memory(content="c", user_id="ada", categories=["home"])).id
+    before = {m: (tagged.get(m).updated_at, tagged.history(m)) for m in (a, b)}
+    read: list = []
+    names = LocalBackend.topic_names
+    listed = LocalBackend.list_entities
+    monkeypatch.setattr(LocalBackend, "topic_names", lambda self, scope, **kw: (
+        read.append(kw.get("prefixes")) or names(self, scope, **kw)))
+    monkeypatch.setattr(LocalBackend, "list_entities", lambda self, *args, **kw: (
+        read.append(("list_entities", kw.get("kind"))) or listed(self, *args, **kw)))
+    assert tagged.update(c, categories=["Tax"]).categories == ["tax"]
+    assert read == [{"tax"}]
+    for memory_id in (a, b):
+        memory = tagged.get(memory_id)
+        assert memory.categories == ["taxes"]
+        assert (memory.updated_at, tagged.history(memory_id)) == before[memory_id]
+    assert _active_topics(tagged, "taxes") and _active_topics(tagged, "tax")
+    _agree(tagged, "ada")
+    monkeypatch.undo()
+    tagged.add("tax refund", user_id="ada", infer=False, categories=["tax"])
+    assert [tagged.get(m).categories for m in (a, b, c)] == [["tax"], ["tax"], ["tax"]]
+    assert _active_topics(tagged, "taxes") == []
+    _agree(tagged, "ada")
+
+
+def test_a_restored_backup_naming_a_merged_tag_is_filed_under_its_survivor():
+    """A backup taken before "taxes" went into "tax" restores into a store
+    where it did: the restored column names "tax", and its index and mention
+    follow it (the invariant holds for the import as for any write)."""
+    source = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    target = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    try:
+        memory_id = source.add("paid the taxes", user_id="ada", infer=False,
+                               categories=["taxes"]).actions[0].memory_id
+        backup = source.export_backup(user_id="ada")
+        for table in ("topics", "memory_topics", "entities", "entity_mentions"):
+            backup["tables"][table] = []  # the memory row alone, as an older export
+        target.add("tax return", user_id="ada", infer=False, categories=["tax"])
+        target.backend.insert_memory(Memory(content="x", user_id="ada", categories=["taxes"]))
+        assert target.merge_tags(["taxes"], "tax", user_id="ada") == 1
+        target.import_backup(backup, owner_prefix="ada")
+        assert target.get(memory_id).categories == ["tax"]
+        assert _index_of(target, memory_id) == ["tax"]
+        assert _topics_of(target, memory_id) == ["tax"]
+        assert target.categories(user_id="ada") == [{"category": "tax", "count": 3}]
+        assert _active_topics(target, "taxes") == []
+        _agree(target, "ada")
+    finally:
+        source.close()
+        target.close()
+
+
+def test_a_column_follows_tombstones_topic_to_topic_and_keeps_the_tag_of_a_thing(tagged):
+    """"taxes" went into "tax", and "tax" was then found to be "Tax Office"
+    the organization. A column naming "taxes" is written "tax", the last tag
+    name of the chain, and its mention goes to the organization; the filter
+    on "tax" finds it, and no topic of either name comes back."""
+    insert = tagged.backend.insert_memory
+    insert(Memory(content="a", user_id="ada", categories=["taxes"]))
+    insert(Memory(content="b", user_id="ada", categories=["tax"]))
+    assert tagged.merge_tags(["taxes"], "tax", user_id="ada") == 1
+    office = tagged.backend.insert_entity(Entity(
+        name="Tax Office", normalized="tax office", entity_type="organization",
+        user_id="ada"))
+    tax = tagged.backend.topic_entity("tax", Scope(user_id="ada"), create=False)
+    assert tagged.backend.merge_entities(office.id, tax.id)
+    later = insert(Memory(content="c", user_id="ada", categories=["taxes", "home"]))
+    assert later.categories == ["tax", "home"]
+    assert _index_of(tagged, later.id) == ["home", "tax"]
+    assert [e.id for e in tagged.backend.entities_of_memory(later.id)] == [office.id]
+    assert _topics_of(tagged, later.id) == ["home"]
+    assert _active_topics(tagged, "tax") == [] and _active_topics(tagged, "taxes") == []
+    assert later.id in {m.id for m in tagged.get_all(user_id="ada", categories=["tax"])}
+    assert tagged.backend.tag_filing(["Taxes", "tax", "home", "new"], Scope(user_id="ada")) == {
+        "taxes": "tax", "tax": "tax", "home": "home", "new": "new"}

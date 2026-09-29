@@ -121,24 +121,36 @@ preserve old claims instead of pretending that the latest claim erased history.
 The product and dashboard call deterministic classification labels such as `liver health`
 or `2026 taxes` **tags**. The existing Python/REST field remains `categories`, and the memory's
 JSON `categories` list stays the record every filter, backup and export reads. Each tag is also
-an entity of type `topic` (one active one per user and normalized tag, held by a partial
-unique index, created on first use) and each tagged memory mentions it, so tags, people,
-products and projects are one kind of thing with one merge machinery: a tag merge is an
-entity merge plus a rewrite of the `categories` column, and whatever writes the column
-brings the mentions in line. A merge resolves the names merged away among the active
-topics only, never through a merged one's tombstone, and never renames a survivor: a name
-asked for that has no active topic gets a new one and the others fold into it, so every
-name merged away keeps its tombstone (a rename is such a merge; a name found to be a named
-thing takes what is merged into it into that thing). A merge rewrites the column of invalid
-memories too, and a column still naming a merged tag (a restored backup, an import) is
-mentioned under, and indexed for the filters under, the topic it went into, so restoring a
-memory never brings a merged tag back and the counts and the filters agree; a filter on the
-name merged away finds nothing. A save and an update write a merged tag as its survivor in
-the column itself. Tag counts and the vocabulary offered to extraction are read from the
-topic entities. The normalized `topics` table plus the indexed `memory_topics` join remain
-the filter index derived from the column (and the record the first open of an upgraded
-database, or `memry tags-to-things`, migrates from, committing user by user and marking
-the migration done after the last, so an open stopped midway resumes where it stopped).
+an entity of type `topic` (one active one per namespace and normalized tag, held by a
+partial unique index, created on first use; the namespace is `user_id` exactly, so `""` is
+a user of its own, apart from the memories without one) and each tagged memory mentions
+it, so tags, people, products and projects are one kind of thing with one merge machinery:
+a tag merge is an entity merge plus a rewrite of the `categories` column.
+
+One invariant ties the column, the legacy filter index (`topics`/`memory_topics`) and the
+tag mentions, and one backend function holds it (`_file_tags_locked`), which every writer
+goes through: insert, update, restore, backup import, the tag rewrite and the migrations.
+The column names surviving tags only: a tag merged into another topic is written as that
+topic's name, following tombstones topic to topic; one merged into a named thing keeps the
+tag name and its mention goes to the thing. The index and the mentions are derived from
+the column, each tag resolved once per write (once per call in a bulk rewrite). A merge
+resolves the names merged away among the active topics only, never through a merged one's
+tombstone, and never renames a survivor; the name it merges into is read as a column files
+it, so a name merged away means its survivor and never gets a fresh topic. A name asked for
+that has no topic at all gets a new one and the others fold into it, so every name merged
+away keeps its tombstone. A rename is such a merge, and the new topic takes over the old
+one's description, its time and metadata, with `renamed_from` naming the old id. A merge
+rewrites the column of invalid memories too, so restoring a memory never brings a merged
+tag back and the counts and the filters agree; a filter on the name merged away finds
+nothing. A save writes each tag in the obvious canonical form it shares with the user's
+tags, names merged away resolved before variants are grouped (after "tax" went into
+"levies", "taxes" is written "levies"), and folds stored variants into it; an update does
+the same for its own tags alone, reading just their obvious variants and merging nothing,
+so no other memory is retagged. Tag counts and the vocabulary offered to extraction are
+read from the topic entities. The legacy index is the record the first open of an upgraded
+database, or `memry tags-to-things`, migrates from, committing user by user and marking the
+migration done after the last, so an open stopped midway resumes where it stopped; a later
+one-off pass at open files again any column a merge left naming a tag merged away.
 A topic entity is never a hub, is never masked in a property vector, and is never found by
 a name lookup; a tag and a named thing of the same name are compared by the entity identity
 funnel, two tags by the tag question.
@@ -334,8 +346,9 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    another run: a contradiction supersedes that memory and adds the new one to the save's
    run; a no-op or an update adds the new memory to the save's run anyway and leaves the
    other run's memory alone, so a search of the run finds what was said in it (the
-   consolidation pass may merge the duplicate later). An exact duplicate is skipped
-   without asking only within the save's run. (Tags, topic canonicalization and entity
+   consolidation pass may merge the duplicate later). An exact duplicate needs no model
+   call: within the save's run it is skipped, and one of another run is added to the
+   save's run by the same rule. (Tags, topic canonicalization and entity
    lookup read the whole user too.) An UPDATE's merged sentence is written by the text
    model, also when a decision provider chose the action; when none is written, the old
    memory is kept and superseded by the new one instead of being overwritten with the new

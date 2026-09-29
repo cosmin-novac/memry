@@ -125,6 +125,18 @@ def later_ts(current: str | None, stamp: str) -> str:
         return max(current, stamp)
 
 
+def same_ts(a: str | None, b: str | None) -> bool:
+    """Whether two ISO 8601 times name the same instant, compared as times
+    ("...T10:00:00Z" is "...T10:00:00+00:00"; a time without a zone is UTC).
+    A time that does not parse compares as text."""
+    if not a or not b:
+        return a == b
+    try:
+        return parse_ts(a) == parse_ts(b)
+    except (ValueError, TypeError):
+        return a == b
+
+
 class Scope(BaseModel):
     """Memory scoping, mem0-compatible: any combination of user/agent/run.
 
