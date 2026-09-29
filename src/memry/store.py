@@ -135,7 +135,7 @@ from .models import (
     utcnow,
 )
 from .providers.embeddings import Embedder, build_embedder
-from .providers.decisions import Decider, Noul, build_decider
+from .providers.decisions import NEVER_AUTO_MERGE, Decider, Noul, build_decider
 from .providers.llm import LLM, build_llm
 from .retrieval import hybrid_search
 
@@ -872,28 +872,52 @@ class MemoryStore:
             log.warning("property vectors not computed on save: %s", exc)
 
     def _names_changed(self, entity_ids: list[str]) -> None:
-        """Property vectors after a merge, a rename or a new alias
-        (``MemoryBackend.names_changed``): of the memories of these entities,
-        and of their versions and parts, which read the names of what they
-        belong to as "it" too. Left to the weekly refresh, a merged name read
-        as a name in them for up to a week. A tag's memories mask no tag, so
-        a tag's change refreshes nothing. A failure never fails the change:
-        the weekly refresh computes what is missing."""
+        """Property vectors after a merge, a rename, a new alias or a restore
+        (``MemoryBackend.names_changed``): of the memories that read these
+        entities' names as "it" (``_memories_reading``). Left to the weekly
+        refresh, a merged name read as a name in them for up to a week. A
+        failure never fails the change: the weekly refresh computes what is
+        missing."""
         try:
-            named = {entity_id for entity_id in entity_ids
-                     if (entity := self.backend.get_entity(entity_id)) is not None
-                     and entity.entity_type != TOPIC_TYPE}
-            named |= parts_of(self.backend, sorted(named))
-            memory_ids = {memory.id for entity_id in sorted(named)
-                          for memory in self.backend.entity_memories(entity_id, limit=1_000_000)}
-            self.refresh_property_vectors(memory_ids=sorted(memory_ids))
+            self.refresh_property_vectors(memory_ids=self._memories_reading(entity_ids))
         except Exception as exc:
             log.warning("property vectors not refreshed after a name changed: %s", exc)
 
+    def _memories_reading(self, entity_ids: list[str]) -> list[str]:
+        """The memories that read these entities' names as "it": their own,
+        and their versions' and parts', which read the names of what they
+        belong to as "it" too. A tag's memories mask no tag, so a tag's
+        change concerns none."""
+        named = {entity_id for entity_id in entity_ids
+                 if (entity := self.backend.get_entity(entity_id)) is not None
+                 and entity.entity_type != TOPIC_TYPE}
+        named |= parts_of(self.backend, sorted(named))
+        return sorted({memory.id for entity_id in sorted(named)
+                       for memory in self.backend.entity_memories(entity_id, limit=1_000_000)})
+
+    def _retire(self, entity_id: str, reason: str) -> bool:
+        """Retire an entity (``MemoryBackend.retire_entity``) and refresh at
+        once the property vectors of the memories that read its names as
+        "it", which read them as names again. Once it is gone nothing links
+        them to it, so they are read first."""
+        try:
+            reading = self._memories_reading([entity_id])
+        except Exception as exc:
+            log.warning("property vectors of a removed name not found: %s", exc)
+            reading = []
+        if not self.backend.retire_entity(entity_id, reason):
+            return False
+        try:
+            self.refresh_property_vectors(memory_ids=reading)
+        except Exception as exc:
+            log.warning("property vectors not refreshed after a name was removed: %s", exc)
+        return True
+
     def _open_proposals_to_recheck(self, scope: Scope) -> list[MergeProposal]:
-        """Open proposals a save may compare again, or none when the provider
-        is too slow to ask inside a save."""
-        if not (self.decider.rejudges_on_new_evidence and self.decider.available):
+        """Open proposals a save may compare again: none without a calibrated
+        judge, whose answer is the only thing new evidence can change, or
+        when the judge is too slow to ask inside a save."""
+        if not (judges_pairs(self.decider) and self.decider.rejudges_on_new_evidence):
             return []
         return self.backend.list_proposals(scope, status="proposed", limit=1000)
 
@@ -918,7 +942,7 @@ class MemoryStore:
             return
         try:
             outcome = resolve_open_proposals(
-                backend=self.backend, llm=self.llm, decider=self.decider,
+                backend=self.backend, decider=self.decider,
                 scope=scope, proposal_ids=touched,
             )
         except Exception as exc:  # a provider hiccup must not fail a save
@@ -965,9 +989,10 @@ class MemoryStore:
         caller replaces the stored text and mentions: a name the memory
         already names an entity by keeps that entity, with nothing compared,
         and only a name new to the memory is resolved (``resolve_mentions``).
-        Without one, Memry can still retain or remove existing links by
-        matching their known aliases; zero-key mode cannot discover a
-        brand-new entity name.
+        Each mention is written with what decided it and the type extraction
+        gave the name, as a save writes it. Without one, Memry can still
+        retain or remove existing links by matching their known aliases;
+        zero-key mode cannot discover a brand-new entity name.
         """
         if not self.llm.available:
             surfaces: list[str] = []
@@ -994,6 +1019,7 @@ class MemoryStore:
                             entity_id=entity.id,
                             memory_id=memory_id,
                             surface=surface,
+                            decided={"reason": "the memory already names it"},
                         )
                     )
             return {"entities": surfaces, "mentions": mentions}
@@ -1013,7 +1039,9 @@ class MemoryStore:
                     if normalized and normalized not in seen:
                         seen.add(normalized)
                         surfaces.append(surface.strip())
-            resolved = resolve_mentions(
+            # written as resolved: with what decided each and its type
+            mentions = []
+            resolve_mentions(
                 backend=self.backend,
                 llm=self.llm,
                 decider=self.decider,
@@ -1024,20 +1052,12 @@ class MemoryStore:
                 types=types,
                 attach=False,
                 owner=self._owner_for(scope, surfaces),
+                mentions=mentions,
             )
         except Exception as exc:
             raise ValueError(
                 f"memory text was not changed because entity re-analysis failed: {exc}"
             ) from exc
-        mentions = [
-            EntityMention(
-                entity_id=resolved[surface.lower()].id,
-                memory_id=memory_id,
-                surface=surface,
-            )
-            for surface in surfaces
-            if surface.lower() in resolved
-        ]
         return {"entities": surfaces, "mentions": mentions}
 
     def _has_near_duplicate(
@@ -2517,7 +2537,7 @@ class MemoryStore:
         if not _owned(memory, owner_prefix):
             return False
         if hard:
-            ok = self.backend.delete_memory(memory_id)
+            ok = self._delete_for_good(memory_id)
         else:
             ok = self.backend.invalidate_memory(memory_id) is not None
         if ok:
@@ -2532,6 +2552,23 @@ class MemoryStore:
             )
         return ok
 
+    def _delete_for_good(self, memory_id: str) -> bool:
+        """Delete a memory for good (``MemoryBackend.delete_memory``). The
+        memories it had replaced (consolidated or distilled into it, or
+        contradicted or updated by it) have nothing standing in for them any
+        more: no pointer to it is left, and each is listed under Forgotten,
+        where it can be brought back, with why it is there."""
+        originals = self.backend.replaced_by(memory_id)
+        if not self.backend.delete_memory(memory_id):
+            return False
+        for original in originals:
+            self.backend.add_event(MemoryEvent(
+                memory_id=original.id, event="DELETE", old_content=original.content,
+                actor="system",
+                reason=f"The memory that had replaced it ({memory_id}) was deleted for good.",
+            ))
+        return True
+
     def forgotten(
         self,
         *,
@@ -2545,7 +2582,9 @@ class MemoryStore:
         Removed, not replaced: a memory that was superseded (reconciled away,
         consolidated, distilled) has ``superseded_by`` pointing at whatever took
         its place and is part of that memory's history, not something the user
-        threw out. Only records with nothing standing in for them belong here.
+        threw out. Only records with nothing standing in for them belong here,
+        which includes those whose replacement was deleted for good
+        (``_delete_for_good``).
         """
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         out: list[dict[str, Any]] = []
@@ -2807,7 +2846,7 @@ class MemoryStore:
             return False
         if memory.invalid_at is None:
             raise ValueError("only a forgotten memory can be permanently deleted")
-        return self.backend.delete_memory(memory_id)
+        return self._delete_for_good(memory_id)
 
     def delete_all(
         self,
@@ -3276,7 +3315,8 @@ class MemoryStore:
 
         Retired, not deleted: the name lands in Upkeep > Archive with its
         mentions, aliases and relations kept, so a removal made in error - by
-        the user or by an automatic pass - can be taken back.
+        the user or by an automatic pass - can be taken back. Its memories'
+        property vectors read its names as names again at once (``_retire``).
         """
         removed = 0
         for entity_id in entity_ids:
@@ -3286,7 +3326,7 @@ class MemoryStore:
             if entity is not None and entity.entity_type == TOPIC_TYPE:
                 continue
             if _owned(entity, owner_prefix):
-                removed += int(self.backend.retire_entity(entity_id, reason))
+                removed += int(self._retire(entity_id, reason))
         return removed
 
     def retired_entities(
@@ -3298,7 +3338,9 @@ class MemoryStore:
     def restore_entities(
         self, entity_ids: list[str], *, owner_prefix: str | None = None
     ) -> int:
-        """Bring retired entities back, with the evidence that still exists."""
+        """Bring retired entities back, with the evidence that still exists
+        (``MemoryBackend.restore_entity``), each then met as a save meets a
+        name the store has (``_meet_namesakes``)."""
         owners = {
             row["entity_id"]: row.get("user_id")
             for row in self.backend.list_retired_entities(Scope(), limit=1_000_000)
@@ -3309,8 +3351,46 @@ class MemoryStore:
                 continue
             if not _owned(_Owner(owners[entity_id]), owner_prefix):
                 continue
-            restored += int(self.backend.restore_entity(entity_id))
+            if self.backend.restore_entity(entity_id):
+                restored += 1
+                self._meet_namesakes(entity_id)
         return restored
+
+    def _meet_namesakes(self, entity_id: str) -> None:
+        """A restored entity and the entities that took its name while it was
+        gone (a save named it, found no entity and made one), treated as at
+        save: with a calibrated judge each is a pair the funnel compares, at
+        once when the judge is quick enough to ask inside a save
+        (``Decider.rejudges_on_new_evidence``) and otherwise in the weekly
+        pass; without one, two of one name are joined by rule
+        (``entities.resolve_open_proposals``). Left alone, the two stood
+        side by side with no pair between them. A pair the snapshot brought
+        back, kept apart by a person, stays apart. A failure never fails the
+        restore: the weekly pass pairs them."""
+        entity = self.backend.get_entity(entity_id)
+        if entity is None or entity.entity_type == TOPIC_TYPE or not entity.normalized:
+            return
+        scope = Scope(user_id=entity.user_id)
+        try:
+            pairs: set[str] = set()
+            for other in self.backend.find_entity_candidates(entity.normalized, scope):
+                if other.id == entity.id:
+                    continue
+                proposal = self.backend.find_proposal(entity.id, other.id)
+                if proposal is None:
+                    # the restored one first: a merge the judge decides keeps it
+                    proposal = self.backend.add_proposal(MergeProposal(
+                        entity_a=entity.id, entity_b=other.id, user_id=entity.user_id,
+                        confidence=0.5, reason="not yet compared"))
+                if proposal.status == "proposed":
+                    pairs.add(proposal.id)
+            # a judge too slow to ask inside a save compares them weekly
+            slow = judges_pairs(self.decider) and not self.decider.rejudges_on_new_evidence
+            if pairs and not slow:
+                resolve_open_proposals(backend=self.backend, decider=self.decider,
+                                       scope=scope, proposal_ids=pairs)
+        except Exception as exc:  # a provider hiccup must not fail a restore
+            log.warning("a restored name was not met with its namesakes: %s", exc)
 
     def merges(self, *, user_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
         """Merges of two entities that can be undone, newest first, with what
@@ -3380,7 +3460,7 @@ class MemoryStore:
                         continue
                 tagged += 1
 
-        removed = int(self.backend.retire_entity(
+        removed = int(self._retire(
             entity_id,
             "removed by you, name kept as a tag" if preserve else "removed by you",
         ))
@@ -3530,7 +3610,7 @@ class MemoryStore:
             owner=self.owner_entity(user_id),
         )
         outcome = resolve_open_proposals(
-            backend=self.backend, llm=self.llm, decider=self.decider, scope=scope
+            backend=self.backend, decider=self.decider, scope=scope
         )
         outcome["proposed"] = proposed
         outcome["purged"] = self.backend.purge_orphan_entities(
@@ -4940,9 +5020,12 @@ class MemoryStore:
         return data
 
     def merge_gate(self) -> float:
-        """The automatic-merge gate in force: the provider's own while it can
-        answer, else the text model's. Above 1.0 means merges never happen on
-        their own."""
+        """The automatic-merge gate in force: a calibrated judge's own while it
+        can answer. Without one no model's confidence merges anything
+        (``entities.resolve_open_proposals``): above 1.0, merges never happen
+        on a model's answer."""
+        if not judges_pairs(self.decider):
+            return NEVER_AUTO_MERGE
         return _gate(self.decider, self.llm)
 
     def count_memories(self, *, owner_prefix: str | None = None) -> dict[str, int]:

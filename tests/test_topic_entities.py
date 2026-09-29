@@ -473,13 +473,41 @@ def test_merging_two_topic_entities_merges_their_tags(tagged):
     _agree(tagged, "ada")
 
 
-def test_a_tag_and_a_named_thing_of_its_name_go_through_the_identity_funnel():
-    """ "bildy" the tag against "Bildy" the product: the ordinary entity pair
-    question decides, with the tag's memories as its side."""
+def _pair_judge():
+    """A calibrated judge that finds every pair one thing, and keeps the
+    states it was shown."""
+    from memry.providers.decisions import Answer, Answers, NoneDecider
+
+    class Judge(NoneDecider):
+        name = "stub"
+        available = True
+        calibrated = True
+        pair_merge_probability = 0.95
+
+        def __init__(self):
+            self.states = []
+
+        def decide(self, state, questions):
+            if "pair" not in questions:
+                return Answers({})
+            self.states.append(state)
+            probabilities = {"same": 0.99, "different": 0.0, "unsure": 0.01}
+            return Answers({"pair": Answer("same", probabilities, 0.9, True)})
+
+    return Judge()
+
+
+@pytest.mark.parametrize("judged", [True, False], ids=["calibrated judge", "text model only"])
+def test_a_tag_folds_into_the_named_thing_of_its_name(judged):
+    """ "bildy" the tag and "Bildy" the product. A calibrated judge answers
+    the ordinary pair question, with the tag's memories as its side. Without
+    one the text model is not asked (its answer could fold nothing, and a
+    "different" from it kept the two apart for good): one name is one thing,
+    as at save, and the tag folds into the thing by rule."""
     llm = FakeLLM()
-    config = Config(db_path=":memory:")
-    config.decision.auto_confirm_confidence = 0.95
-    store = MemoryStore(config, llm=llm, embedder=HashEmbedder(64))
+    judge = _pair_judge() if judged else None
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64),
+                        decider=judge)
     backend = store.backend
     try:
         product = backend.insert_entity(Entity(
@@ -492,11 +520,15 @@ def test_a_tag_and_a_named_thing_of_its_name_go_through_the_identity_funnel():
             backend.insert_memory(Memory(content=text, user_id="ada", categories=["bildy"]))
         topic = backend.topic_entity("bildy", Scope(user_id="ada"), create=False)
 
-        llm.queue(json.dumps({"verdict": "same", "confidence": 0.99, "reason": "one app"}))
         outcome = store.resolve_entities(user_id="ada")
         assert (outcome["proposed"], outcome["confirmed"]) == (1, 1)
-        asked = llm.calls[-1][1]
-        assert "Shipped the invoice export" in asked and "Bildy runs on AWS" in asked
+        assert llm.calls == []
+        if judge is not None:
+            assert judge.states and all(
+                "Shipped the invoice export" in state and "Bildy runs on AWS" in state
+                for state in judge.states)
+        [pair] = store.merge_proposals(user_id="ada", status="confirmed")
+        assert pair.reason == ("stub: same" if judged else "one name, joined by rule")
         # the named thing is kept, whichever side the pair listed first
         assert backend.get_entity(topic.id).merged_into == product.id
         assert backend.get_entity(product.id).entity_type == "product"

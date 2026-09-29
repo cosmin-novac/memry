@@ -374,6 +374,40 @@ def test_stats_counts_forgotten_memories_without_listing_them(verbatim_store):
     assert stats["invalidated_memories"] == 2
 
 
+@pytest.mark.parametrize("how", ["hard delete", "purge"])
+def test_what_a_memory_replaced_is_forgotten_once_it_is_deleted_for_good(verbatim_store, how):
+    """Two copies of a fact were consolidated into a third memory, which is
+    then deleted for good. Before, the copies kept pointing at a memory that
+    no longer existed and showed in no list: Forgotten skipped them as
+    replaced, Replaced lists contradictions and updates only. Now nothing
+    points at it, and they are under Forgotten with why, to be brought back."""
+    from memry.models import Memory
+
+    store, backend = verbatim_store, verbatim_store.backend
+    embedder = store.embedder
+    copies = [backend.insert_memory(
+        Memory(content="Kestrel eats salmon kibble", user_id="ada",
+               embedding_model=embedder.model_id),
+        embedder.embed(["Kestrel eats salmon kibble"])[0]) for _ in range(2)]
+    [group] = store.consolidate_memories(user_id="ada")["groups"]
+    survivor = group["survivor"]
+    assert {backend.get_memory(c.id).superseded_by for c in copies} == {survivor}
+    if how == "purge":
+        assert store.delete(survivor)
+        assert store.purge(survivor)
+    else:
+        assert store.delete(survivor, hard=True)
+
+    assert all(backend.get_memory(c.id).superseded_by is None for c in copies)
+    rows = store.forgotten(user_id="ada")
+    assert sorted(row["memory"].id for row in rows) == sorted(c.id for c in copies)
+    assert {(row["actor"], row["trigger"]) for row in rows} == {(
+        "system", f"The memory that had replaced it ({survivor}) was deleted for good.")}
+    assert store.stats()["forgotten_memories"] == 2
+    assert store.unforget(copies[0].id)
+    assert [m.id for m in store.get_all(user_id="ada")] == [copies[0].id]
+
+
 # ------------------------------------------------ one person's saves, any run
 def test_a_duplicate_saved_in_another_run_is_added_to_that_run(verbatim_store):
     """An exact duplicate of another run's memory is added to the save's run,

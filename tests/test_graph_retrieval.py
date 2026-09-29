@@ -818,6 +818,28 @@ def test_a_relation_counts_half_in_the_linked_search(store):
     assert signals[own.id] == 1.0
 
 
+def test_only_a_calibrated_answer_makes_a_pair_a_same_link(store):
+    """A pair nobody judged (raised "not yet compared" at 0.5, or holding a
+    text model's confidence) says nothing about whether the two are one, so
+    the linked search gives it no "same" link; before, it drew the other
+    entity's memories in at that weight. A calibrated judge's answer, which
+    stores P(different) beside P(same), does."""
+    from memry.intelligence.graph_retrieval import activation_paths, links_of
+    from memry.models import MergeProposal
+
+    kettle, other = _entity(store, "Kettlebay"), _entity(store, "Kettle Bay")
+    pair = store.backend.add_proposal(MergeProposal(
+        entity_a=kettle.id, entity_b=other.id, user_id="ada", reason="not yet compared"))
+    store.backend.update_proposal_judgement(pair.id, confidence=0.9, reason="a guess")
+    assert links_of(store.backend, [kettle.id]) == []
+    assert activation_paths(store.backend, [kettle.id])[0] == {kettle.id: 1.0}
+
+    store.backend.update_proposal_judgement(
+        pair.id, confidence=0.8, reason="stub: same", different=0.1)
+    [link] = links_of(store.backend, [kettle.id])
+    assert (link.kind, link.p) == ("same", pytest.approx(0.8))
+
+
 def test_the_linked_search_keeps_to_the_run_searched(store):
     """The memories an entity's family brings into the linked search come from
     the scope searched, as the text ranking's do: a search of run "s2" does

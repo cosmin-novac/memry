@@ -6,12 +6,16 @@ calibrated judge every other candidate is compared (``identity.compare``): a
 name the store already has joins the likeliest entity of that name unless the
 judge says "different", and any other name merges at the judge's bar or makes a
 new entity, its pairs recorded. Without one, a save asks no identity question:
-a name the store has joins its entity by rule, and any other name makes one.
+a name the store has joins its entity by rule, whatever type the mention
+gives it, and any other name makes one. An entity's type is the one most of
+its mentions give.
 
-A shared name never merges two entities on its own. ``resolve_open_proposals``
-follows prior merge chains and auto-confirms only deterministic or
-high-confidence matches; without a calibrated judge it asks the text model,
-whose "same" merges only at a gate measured for that model.
+``resolve_open_proposals`` follows prior merge chains. With a calibrated judge
+it compares the open pairs and auto-confirms only deterministic or
+high-confidence matches. Without one it asks no model anything, and writes no
+model's number on a pair: two entities of one name are joined by rule, as at
+save, a tag into the thing of its very name among them, and any other pair
+waits for a person.
 """
 
 from __future__ import annotations
@@ -23,7 +27,6 @@ from typing import Any, Callable
 from ..backends.base import MemoryBackend
 from ..models import Entity, EntityMention, Memory, MergeProposal, Scope, utcnow
 from ..providers.decisions import (
-    MEASURED_MERGE_GATES,
     Answer,
     Choice,
     Decider,
@@ -83,39 +86,21 @@ Be conservative when only a short/common name matches.
 Respond with JSON only:
 {"verdict": "same"|"unsure"|"different", "confidence": 0..1, "reason": short}"""
 
-# Measured over 56 labelled identity cases: at 0.9 a text model merges two
-# entities that should stay apart, including a partner and a vendor architect
-# who share a first name - the exact confusion the entity handling exists to
-# prevent, waved through at 0.85. Its wrong answers score as high as its right
-# ones, so the only threshold that lets nothing through is 0.95. Fewer merges
-# happen without asking; the ones that do are the ones that should.
-#: That 0.95 is gpt-5-mini's number. Other text models get their own from
-#: ``MEASURED_MERGE_GATES``, and one nobody has measured never merges on its own.
-AUTO_CONFIRM_CONFIDENCE = MEASURED_MERGE_GATES["gpt-5-mini"]
-
-
 def _gate(decider: Decider | None, llm: LLM | None = None) -> float:
-    """How confident a "same" has to be before it merges without asking.
+    """How confident a "same" would have to be to merge without asking, as
+    ``evals/identity_benchmark.py`` measures it for a provider.
 
     Each provider carries its own, because the number only means something
     relative to how that provider's confidence is distributed. When the
     provider cannot answer, the text model is reporting on itself, and that
-    gate depends on which text model it is.
+    gate depends on which text model it is. The store asks no uncalibrated
+    model about identity (``resolve_open_proposals``).
     """
     if decider is not None and decider.available:
         return decider.auto_confirm_confidence
     if decider is not None:
         return decider.fallback_gate
     return merge_gate_for(getattr(llm, "model", None))
-
-
-def _conflict_bar(judgment: dict[str, Any]) -> float:
-    """How confident a "different" has to be to block an obvious-looking merge.
-
-    Never higher than 0.95: a model whose "same" may not merge on its own can
-    still veto one, otherwise raising its gate would make merging *easier*.
-    """
-    return min(judgment.get("gate", AUTO_CONFIRM_CONFIDENCE), AUTO_CONFIRM_CONFIDENCE)
 
 DESCRIPTION_MAX_CHARS = 1200
 DESCRIPTION_MAX_WORDS = 300
@@ -200,14 +185,6 @@ def _same_name_and_no_evidence(
     if existing.entity_type and other_type and existing.entity_type != other_type:
         return False
     return not existing_facts and not (existing.description or "").strip()
-
-
-def _merges_on_gate(judgment: dict[str, Any]) -> bool:
-    """Without a calibrated judge, only a "same" at the provider's gate merges."""
-    return (
-        judgment["verdict"] == "same"
-        and judgment["confidence"] >= judgment.get("gate", AUTO_CONFIRM_CONFIDENCE)
-    )
 
 
 IDENTITY_QUESTION = Choice(
@@ -604,11 +581,14 @@ def resolve_mentions(
     types: dict[str, str] | None = None,
     attach: bool = True,
     owner: Entity | None = None,
+    mentions: list[EntityMention] | None = None,
 ) -> dict[str, Entity]:
     """Attach a memory's entity mentions, creating/reusing entities per the
     conservative policy. Returns a map of normalized surface -> entity, so the
     caller can resolve relation triples to the entities they linked to. Pass
-    ``attach=False`` when the caller will replace all mentions atomically.
+    ``attach=False`` when the caller will replace all mentions atomically, and
+    ``mentions`` to receive them as they are to be written: each with what
+    decided it and the type extraction gave the name.
 
     ``owner`` is the store owner's entity. The extractor was told to list the
     owner under that entity's name, so that name attaches to it directly.
@@ -656,15 +636,22 @@ def resolve_mentions(
               else Memory(id=memory_id, content=memory_content))
     # The entities the memory names as stored: an edited memory's.
     linked = {e.id for e in backend.entities_of_memory(memory_id)}
+
+    def write(mention: EntityMention) -> None:
+        if attach:
+            backend.add_mention(mention)
+        if mentions is not None:
+            mentions.append(mention)
+
     for surface in cleaned:
         normalized = surface.lower()
         if not normalized or normalized in resolved:
             continue
         if owner is not None and surface.casefold() == owner_name:
-            if attach:
-                backend.add_mention(EntityMention(
-                    entity_id=owner.id, memory_id=memory_id, surface=surface,
-                    decided={"reason": "the store owner's name"}))
+            write(EntityMention(
+                entity_id=owner.id, memory_id=memory_id, surface=surface,
+                decided={"reason": "the store owner's name"},
+                entity_type=types.get(normalized)))
             resolved[normalized] = owner
             continue
         if non_referent_reason(surface) or screened_out(verdicts.get(normalized)):
@@ -689,7 +676,7 @@ def resolve_mentions(
             decided = {"reason": "the memory names it by another of its names" if named_here
                        else "the memory already names it"}
         elif judge is None:
-            target, decided = _join_by_rule(backend, memory, candidates, types.get(normalized))
+            target, decided = _join_by_rule(backend, memory, candidates)
         else:
             if index is None:
                 index = NameIndex(backend.list_entities(lookup, limit=100_000))
@@ -719,9 +706,8 @@ def resolve_mentions(
                     if proposal.belongs is not None:
                         _homes_answered(backend, [proposal.entity_a, target.id])
 
-        if attach:
-            backend.add_mention(EntityMention(
-                entity_id=target.id, memory_id=memory_id, surface=surface, decided=decided))
+        write(EntityMention(entity_id=target.id, memory_id=memory_id, surface=surface,
+                            decided=decided, entity_type=types.get(normalized)))
         resolved[normalized] = target
     return resolved
 
@@ -788,38 +774,38 @@ def _judged_join(
 
 
 def _join_by_rule(
-    backend: MemoryBackend, memory: Memory, candidates: list[Entity], kind: str | None
+    backend: MemoryBackend, memory: Memory, candidates: list[Entity]
 ) -> tuple[Entity | None, dict[str, Any] | None]:
     """Without a calibrated judge: the entity a name the store already has
-    joins, and the rule that chose it; (None, None) when no entity of the
-    name has a type the mention's allows (a known type conflict joins
-    nothing).
+    joins, and the rule that chose it; (None, None) when there is none.
 
-    No model is asked. A text model's own confidence merges nothing unless a
-    gate was measured for that model (``MEASURED_MERGE_GATES``), so its answer
-    could neither join the mention nor keep it apart: every memory naming a
-    known person made one more entity and one more open pair. The one entity
-    of the name is joined. Of several (namesakes kept apart by a person, or
-    by type), the mention joins the one its conversation already names
-    (``MemoryBackend.session_memories``, as ``identity.CONTEXT_STEP`` reads
-    it), otherwise the one with the most memories, the oldest on a tie."""
-    options = [c for c in candidates
-               if not (c.entity_type and kind and c.entity_type != kind)]
-    if not options:
+    No model is asked. A text model's own confidence merges nothing, so its
+    answer could neither join the mention nor keep it apart: every memory
+    naming a known person made one more entity and one more open pair. The
+    type extraction gives the name is not asked either: it comes from one
+    sentence ("the shop" is a project in most, a product in its listing's),
+    so it is evidence of the thing's type, not of another thing; the entity's
+    type is the one most of its mentions give
+    (``LocalBackend._settle_types_locked``). The one entity of the name is
+    joined. Of several (namesakes kept apart by a person), the mention joins
+    the one its conversation already names (``MemoryBackend.session_memories``,
+    as ``identity.CONTEXT_STEP`` reads it), otherwise the one with the most
+    memories, the oldest on a tie."""
+    if not candidates:
         return None, None
-    if len(options) == 1:
-        return options[0], {"reason": "the one entity of this name"}
-    ids = {c.id for c in options}
+    if len(candidates) == 1:
+        return candidates[0], {"reason": "the one entity of this name"}
+    ids = {c.id for c in candidates}
     around = backend.session_memories(memory, hours=SESSION_HOURS)
     named = {e.id for entities in backend.entities_of_memories([m.id for m in around]).values()
              for e in entities} & ids
     counts = backend.entity_memory_counts(sorted(ids))
-    pool = [c for c in options if c.id in named] or options
+    pool = [c for c in candidates if c.id in named] or candidates
     chosen = min(pool, key=lambda c: (-counts.get(c.id, 0), c.created_at, c.id))
     why = ("the one this conversation names" if len(named) == 1
            else "the one with the most memories" + (
                " of those this conversation names" if named else ""))
-    return chosen, {"reason": f"of {len(options)} entities of this name, {why}"}
+    return chosen, {"reason": f"of {len(candidates)} entities of this name, {why}"}
 
 
 def _homes_answered(backend: MemoryBackend, entity_ids: list[str]) -> None:
@@ -920,15 +906,9 @@ def propose_same_name_duplicates(
         groups: dict[str, list[Entity]] = {}
         for entity in entities:
             groups.setdefault(entity.normalized or entity.name.lower(), []).append(entity)
-
-        def home_of(entity: Entity) -> str | None:
-            home = (entity.metadata or {}).get("home")
-            return home.get("id") if isinstance(home, dict) else None
-
         for members in groups.values():
             for other in members[1:]:
-                home_a, home_b = home_of(members[0]), home_of(other)
-                if not (home_a and home_b and home_a != home_b):
+                if not _apart_homes(members[0], other):
                     pairs.append((members[0], other))
     named: dict[str, list[Entity]] = {}
     for entity in entities:
@@ -964,7 +944,6 @@ def propose_same_name_duplicates(
 def resolve_open_proposals(
     *,
     backend: MemoryBackend,
-    llm: LLM,
     decider: Decider | None = None,
     scope: Scope,
     auto_confirm: bool = True,
@@ -977,15 +956,26 @@ def resolve_open_proposals(
     ``proposal_ids`` limits the pass to those proposals, for the re-check a save
     runs when a new memory mentions one side of a pair.
 
-    A pair that stays open keeps the latest answer, so the list shows how sure
-    the provider is now, not how sure it was when the pair was first raised.
     With a calibrated judge every pair goes through ``identity.compare``, which
     asks nothing unless the pair has reached a new step of the funnel since it
-    was last compared.
+    was last compared, and a pair that stays open keeps the latest answer, so
+    the list shows how sure the judge is now.
+
+    Without one no identity question is asked, of the text model or of a
+    decision provider whose answers carry no computed probabilities: no
+    number of theirs decides or weighs anything. Their "same" could merge
+    nothing, and a confident "different" kept a pair apart for good on a
+    guess. Two entities of one name are joined by rule instead, as a save
+    joins a name the store has (``_join_by_rule``): the one with more
+    memories is kept, and two kept apart by a person are never joined, not
+    even through a third (``join_namesakes``). That holds for a tag and the
+    thing of its very name as well, whose merge folds the tag into the
+    thing. Any other pair stays open for a person, nothing written on it.
     """
     outcome = {"confirmed": 0, "rejected": 0, "kept": 0}
     judge = decider if judges_pairs(decider) else None
     pending: list[tuple[MergeProposal, Entity, Entity]] = []
+    by_rule: list[tuple[float, MergeProposal, Entity, Entity]] = []
     for proposal in backend.list_proposals(scope, status="proposed", limit=1000):
         if proposal_ids is not None and proposal.id not in proposal_ids:
             continue
@@ -1026,34 +1016,15 @@ def resolve_open_proposals(
                 continue
         if judge is not None:
             pending.append((proposal, entity_a, entity_b))
-            continue
-        judgment = _judge(
-            llm,
-            entity_a,
-            facts_a,
-            " / ".join(facts_b) or f"(entity named {entity_b.name}, no facts)",
-            entity_b.name,
-            decider,
-        )
-        high_conflict = (
-            judgment["verdict"] == "different"
-            and judgment["confidence"] >= _conflict_bar(judgment)
-        )
-        if auto_confirm and _merges_on_gate(judgment) and merge_pair(
-            backend, entity_a, entity_b
-        ):
-            backend.set_proposal_status(proposal.id, "confirmed")
-            outcome["confirmed"] += 1
-        elif high_conflict:
-            backend.set_proposal_status(proposal.id, "rejected")
-            outcome["rejected"] += 1
+        elif auto_confirm and _one_name(entity_a, entity_b) and not _apart_homes(
+                entity_a, entity_b):
+            by_rule.append((0.0, proposal, entity_a, entity_b))
         else:
-            backend.update_proposal_judgement(
-                proposal.id,
-                confidence=judgment["confidence"],
-                reason=judgment.get("reason"),
-            )
             outcome["kept"] += 1
+    if by_rule:
+        joined = join_namesakes(backend, scope, by_rule, reason=JOINED_BY_RULE)
+        outcome["confirmed"] += joined
+        outcome["kept"] += len(by_rule) - joined
     # The judge's calls are independent, so they run side by side; the store
     # is changed one pair at a time afterwards. A pair compared before its
     # P(different) or its belongs answer was stored is asked once more at the
@@ -1140,11 +1111,30 @@ def _one_name(a: Entity, b: Entity) -> bool:
     return bool(a.normalized) and a.normalized == b.normalized
 
 
+def _home_of(entity: Entity) -> str | None:
+    home = (entity.metadata or {}).get("home")
+    return home.get("id") if isinstance(home, dict) else None
+
+
+def _apart_homes(a: Entity, b: Entity) -> bool:
+    """Whether the two live under different homes ("privacy policy" in two
+    projects): one name there is two things."""
+    home_a, home_b = _home_of(a), _home_of(b)
+    return bool(home_a and home_b and home_a != home_b)
+
+
+#: The reason on a pair of one name joined without a calibrated judge.
+JOINED_BY_RULE = "one name, joined by rule"
+#: The reason on a pair of one name the judge did not say were different.
+JOINED_UNLESS_DIFFERENT = "one name, and the judge did not say different"
+
+
 def join_namesakes(
     backend: MemoryBackend,
     scope: Scope,
     pairs: list[tuple[float, MergeProposal, Entity, Entity]],
     held_apart: list[tuple[str, str]] = (),
+    reason: str = JOINED_UNLESS_DIFFERENT,
 ) -> int:
     """Join open pairs of one name that the judge has not said are different.
 
@@ -1153,8 +1143,10 @@ def join_namesakes(
     Entities of one name that split before that rule existed waited for the
     merge bar instead, and with one memory each they never reached it: six
     "FacTShirt" entities in a real store. Here they get the same rule, the
-    likeliest pair first. Two entities kept apart, by the judge (P(different)
-    at the apart bar) or by a person, are never joined through a third."""
+    likeliest pair first, and the one with more memories is kept. Without a
+    calibrated judge every pair of one name is joined so, by rule
+    (``reason``). Two entities kept apart, by the judge (P(different) at the
+    apart bar) or by a person, are never joined through a third."""
     involved = {backend.resolve_entity_id(entity.id)
                 for _, _, a, b in pairs for entity in (a, b)}
     apart = list(held_apart) + [
@@ -1179,8 +1171,7 @@ def join_namesakes(
                 keep, drop = drop, keep
             if not merge_pair(backend, keep, drop):
                 continue
-            backend.set_proposal_status(
-                proposal.id, "confirmed", reason="one name, and the judge did not say different")
+            backend.set_proposal_status(proposal.id, "confirmed", reason=reason)
         else:  # joined through another pair of this pass
             backend.set_proposal_status(proposal.id, "confirmed")
         joined += 1

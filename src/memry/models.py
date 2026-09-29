@@ -331,6 +331,10 @@ class EntityMention(BaseModel):
     #: ``different`` and the funnel ``step``). None for a mention that made
     #: its entity, or was attached otherwise.
     decided: dict[str, Any] | None = None
+    #: The type extraction gave the name in this memory, when it gave one.
+    #: An entity's type is the one most of its mentions give
+    #: (``LocalBackend._settle_types_locked``).
+    entity_type: str | None = None
 
 
 ProposalStatus = Literal["proposed", "confirmed", "rejected"]

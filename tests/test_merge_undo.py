@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from starlette.testclient import TestClient
 
 from memry.config import Config
-from memry.models import CandidateFact, Entity, EntityMention, Memory, MergeProposal, Relation, Scope
+from memry.models import (
+    CandidateFact, Entity, EntityMention, Memory, MergeProposal, Relation, Scope, utcnow,
+)
 from memry.providers.decisions import Answer, Answers, NoneDecider
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
@@ -141,6 +144,40 @@ def test_undoing_a_merge_leaves_both_entities_as_they_were():
         assert (pair.status, pair.reason) == ("rejected", "undone by you")
         assert store.merges(user_id="ada") == []
         assert store.undo_merge(bau.id)["undone"] is False  # nothing left on record
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("status, created_at, stays", [
+    ("rejected", None, "the kept one's"),  # a decision over an open pair
+    ("proposed", "2026-01-01T00:00:00+00:00", "the merged one's"),  # the later answer
+])
+def test_a_merge_leaves_one_row_a_pair_and_the_undo_puts_the_other_back(
+        status, created_at, stays):
+    """Kessler Bau and Kessler Bau GmbH were each compared with Kessler
+    Roofing. The merge points Bau's pair at GmbH, which had a pair with
+    Roofing already: before, one pair had two rows, two answers. One row
+    stays, the more decided, of two open ones the later answer, and the undo
+    puts the other back."""
+    store = _store()
+    try:
+        world = _world(store)
+        gmbh, bau, roofing = world["gmbh"], world["bau"], world["roofing"]
+        [bau_row] = store.backend.proposals_of([bau.id])
+        gmbh_row = store.backend.add_proposal(MergeProposal(
+            entity_a=roofing.id, entity_b=gmbh.id, user_id="ada", status=status,
+            confidence=0.1, different=0.8, reason="stub: different",
+            decided_at=utcnow() if status == "rejected" else None,
+            **({"created_at": created_at} if created_at else {})))
+        before = _state(store, world)
+        assert store.merge_entities(gmbh.id, bau.id)
+        [row] = [p for p in store.backend.list_proposals(ADA, status=None)
+                 if roofing.id in (p.entity_a, p.entity_b)]
+        assert {row.entity_a, row.entity_b} == {gmbh.id, roofing.id}
+        assert row.id == (gmbh_row.id if stays == "the kept one's" else bau_row.id)
+        assert row.status == status
+        assert store.undo_merge(bau.id)["undone"]
+        assert _state(store, world) == before
     finally:
         store.close()
 

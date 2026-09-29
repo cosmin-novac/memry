@@ -191,18 +191,23 @@ def test_editing_a_memory_re_embeds_its_property_vector(store):
     assert store.backend.property_vector_hashes([memory.id]) == {}
 
 
-def test_a_removed_entity_reads_as_a_name_again_at_the_next_refresh(store):
-    """Once "Quillon" is removed its memory names nothing, so the refresh
-    drops the row that read it as "it"; brought back, the name is masked
-    again."""
-    quillon = _entity(store, "Quillon")
+def test_a_removed_entity_reads_as_a_name_again_at_once(store):
+    """Once "Quillon" is removed its memory names nothing, so the row that
+    read it as "it" goes, and the other memory reads it as a name again;
+    brought back, the name is masked again. Both at once: left to the weekly
+    refresh, search read the removed name as "it" for up to a week."""
+    quillon, linux = _entity(store, "Quillon"), _entity(store, "Linux")
     memory = _memory(store, "Quillon runs on Linux", [quillon])
+    both = _memory(store, "Quillon moved from Linux to BSD", [quillon, linux])
     store.refresh_property_vectors(user_id="ada")
+    assert _masked(store, both) == "it moved from it to BSD"
     assert store.remove_entities([quillon.id]) == 1
-    store.refresh_property_vectors(user_id="ada")
     assert store.backend.property_vector_hashes([memory.id]) == {}
+    assert _masked(store, both) == "Quillon moved from it to BSD"
     assert store.restore_entities([quillon.id]) == 1
-    assert store.refresh_property_vectors(user_id="ada") == 1
+    assert _masked(store, memory) == "it runs on Linux"
+    assert _masked(store, both) == "it moved from it to BSD"
+    assert store.refresh_property_vectors(user_id="ada") == 0  # nothing left for the week
 
 
 def _masked(store, memory):

@@ -1463,7 +1463,7 @@ function renderServerInfo(){
     ['Automatic merges',
       (s.merge_gate>1 ? 'never on their own' : `above ${s.merge_gate} confidence`),
       (s.merge_gate>1
-        ? 'The model answering the "same person" question has not been measured on the identity test set, so every proposed merge waits for you under Upkeep. Run evals/identity_benchmark.py on it and set MEMRY_DECISION_MERGE_CONFIDENCE to what it reports.'
+        ? 'No calibrated decision provider answers the "same person" question here, so no answer from a model merges two records: two records of one name are joined by rule, and every other proposed merge waits for you under Upkeep.'
         : 'A "same person" answer at least this sure merges two records without asking. Anything less sure waits for you under Upkeep.')],
     ['Storage',s.backend,'Everything lives in one file on this server.'],
   ];
@@ -1757,7 +1757,7 @@ function renderUpkeepPasses(info){
     ? `Typed questions go to <b>${esc(info.decider)}</b>.`
     : 'No decision provider is configured, so the passes that need one are off.';
   const gate=info.merge_gate>1
-    ? ' Entities never merge without you here, because the model answering has not been measured on the identity set.'
+    ? ' Entities never merge on an answer from a model here, because no calibrated decision provider answers: two of one name are joined by rule, and every other proposed merge is queued above.'
     : ` Entities merge on their own above ${esc(String(info.merge_gate))} confidence; anything less sure is queued above.`;
   const h=info.tag_health||{};
   const health=h.tags!=null?` ${h.tags} tags over ${h.memories} memories, ${h.untagged} untagged, ${h.single_use_tags} used once.`:'';

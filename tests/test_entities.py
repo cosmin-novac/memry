@@ -739,6 +739,42 @@ def test_a_rewritten_memory_keeps_the_names_it_had(path, judged):
     store.close()
 
 
+@pytest.mark.parametrize("judged", [True, False], ids=["calibrated judge", "text model only"])
+@pytest.mark.parametrize("path", ["reconcile update", "manual edit", "distillation"])
+def test_a_rewritten_memorys_mentions_keep_what_decided_them(path, judged):
+    """The mentions a rewritten memory's new text makes are written as a
+    save writes them: with what decided each (``EntityMention.decided``) and
+    the type extraction gave the name. Before, they were written with
+    neither, so the merge history could not say why a name had joined."""
+    judge = _Judge() if judged else None
+    store, llm, kettlebay, glazeworks, shop = _shop(judge)
+    extracted = facts_response(fact(REWRITTEN, entities=[
+        {"name": "Kettlebay", "type": "organization"},
+        {"name": "Glazeworks", "type": "organization"}]))
+    if path == "reconcile update":
+        llm.queue(extracted)
+        store.add(ADDED, user_id="ada", infer=False)
+    elif path == "manual edit":
+        llm.queue(extracted)
+        store.update(shop.id, content=REWRITTEN)
+    else:
+        pending = store.add_deferred(ADDED, user_id="ada").actions[0].memory_id
+        llm.queue(facts_response(fact(ADDED, entities=["Glazeworks"])), extracted)
+        store.distill(pending)
+
+    mentions = {m.surface: m for entity in (kettlebay, glazeworks)
+                for m in store.backend.entity_mentions(entity.id) if m.memory_id == shop.id}
+    assert mentions["Kettlebay"].decided == {"reason": "the memory already names it"}
+    joined = mentions["Glazeworks"].decided
+    if judged:
+        assert joined["reason"] == ("a name the store has: the likeliest of its entities, "
+                                    "not said to be different") and joined["same"] == 0.99
+    else:
+        assert joined == {"reason": "the one entity of this name"}
+    assert {m.entity_type for m in mentions.values()} == {"organization"}
+    store.close()
+
+
 def test_without_a_judge_a_known_name_joins_its_entity_and_asks_nothing():
     """Without a calibrated judge a text model's own confidence merges nothing
     (no gate was measured for it), so asking it whether a mention is a known
@@ -770,8 +806,8 @@ def test_without_a_judge_a_known_name_joins_its_entity_and_asks_nothing():
 def test_without_a_judge_namesakes_are_chosen_by_rule():
     """Of two entities that share a name (two people a person kept apart), a
     mention joins the one its conversation already names, and otherwise the
-    one with the most memories; a known type conflict still makes its own
-    entity. No identity question is asked and no new pair is raised."""
+    one with the most memories, whatever type the mention gives it. No
+    identity question is asked and no new pair is raised."""
     llm = _TextModel()
     store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64))
     backend = store.backend
@@ -802,8 +838,72 @@ def test_without_a_judge_namesakes_are_chosen_by_rule():
         colleague.id, {"reason": "of 2 entities of this name, the one this conversation names"})
     assert save("Jonas booked a table for Friday", "weekend") == (
         partner.id, {"reason": "of 2 entities of this name, the one with the most memories"})
-    app, decided = save("Jonas is also a note-taking app", "weekend", kind="product")
-    assert app not in (partner.id, colleague.id) and decided is None
+    assert save("Jonas is also a note-taking app", "weekend", kind="product") == (
+        partner.id, {"reason": "of 2 entities of this name, the one this conversation names"})
+    assert backend.get_entity(partner.id).entity_type == "person"
     assert llm.identity_calls == 0
     assert store.merge_proposals(user_id="ada") == []
     store.close()
+
+
+def test_without_a_judge_a_name_typed_otherwise_in_one_sentence_joins_its_entity():
+    """An extractor types a name from one sentence: the shop is a project in
+    most, a product in its listing's. That is no evidence of another thing.
+    Before, each such mention made a second entity of the name, every week,
+    until the weekly merge folded it back. It joins the entity of its name
+    by rule, keeping the type it was given on the mention, and the entity's
+    type is the one most of its mentions give, its own on a tie."""
+    llm = _TextModel()
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64))
+    backend = store.backend
+
+    def save(text, kind):
+        llm.queue(facts_response(fact(text, entities=[{"name": "Quirkwear", "type": kind}])))
+        store.add(text, user_id="ada")
+        [shop] = store.entities(user_id="ada")
+        return shop
+
+    save("Quirkwear ships orders every Tuesday", "project")
+    shop = save("Quirkwear listing safety text must say wash cold", "product")
+    assert shop.entity_type == "project"  # one each: it keeps its own
+    assert [(m.entity_type, m.decided) for m in backend.entity_mentions(shop.id)] == [
+        ("project", None), ("product", {"reason": "the one entity of this name"})]
+    assert save("Quirkwear listing for the owl shirt passed the safety review",
+                "product").entity_type == "product"
+    assert store.merge_proposals(user_id="ada") == []
+    assert llm.identity_calls == 0
+    store.close()
+
+
+@pytest.mark.parametrize("original, drifted, kept", [
+    (["project"], ["product"], "project"),  # a tie: the type the store had first
+    (["project", "project"], ["product"], "project"),
+    (["project"], ["product", "product"], "product"),
+])
+def test_a_merge_keeps_the_type_most_mentions_give(verbatim_store, original, drifted, kept):
+    """A merge of two entities of one name keeps the type most of both
+    entities' mentions give, whichever entity the merge keeps; on a tie, the
+    type of the one the store had first, since the second entity of a known
+    name is the one a sentence typed otherwise. Before, the kept entity's
+    type stayed, so a merge that kept the newer one kept the drifted type.
+    Undone, each has its own type again."""
+    backend = verbatim_store.backend
+
+    def entity(kind, texts, at):
+        made = backend.insert_entity(Entity(name="Quirkwear", normalized="quirkwear",
+                                            entity_type=kind, user_id="ada", created_at=at))
+        for text in texts:
+            memory = backend.insert_memory(Memory(content=f"Quirkwear {text}", user_id="ada"))
+            backend.add_mention(EntityMention(entity_id=made.id, memory_id=memory.id,
+                                              surface="Quirkwear", entity_type=kind))
+        return made
+
+    first = entity("project", [f"ships on day {i}" for i in range(len(original))],
+                   "2026-01-01T00:00:00+00:00")
+    second = entity("product", [f"listing {i} passed" for i in range(len(drifted))],
+                    "2026-02-01T00:00:00+00:00")
+    assert verbatim_store.merge_entities(second.id, first.id)  # the newer one kept
+    assert backend.get_entity(second.id).entity_type == kept
+    assert verbatim_store.undo_merge(first.id)["undone"]
+    assert (backend.get_entity(first.id).entity_type,
+            backend.get_entity(second.id).entity_type) == ("project", "product")

@@ -99,7 +99,15 @@ class MemoryBackend(ABC):
 
     @abstractmethod
     def delete_memory(self, memory_id: str) -> bool:
-        """Hard delete (rarely what you want; prefer invalidate)."""
+        """Hard delete (rarely what you want; prefer invalidate). The
+        memories it had replaced point at nothing afterwards: their
+        ``superseded_by`` is cleared (``replaced_by`` lists them first)."""
+
+    def replaced_by(self, memory_id: str) -> list[Memory]:
+        """The memories ``memory_id`` replaced: those whose ``superseded_by``
+        it is (the originals a consolidation or a distillation made it of, or
+        the older memories it contradicted or updated)."""
+        return []
 
     @abstractmethod
     def get_memory(self, memory_id: str) -> Memory | None: ...
@@ -461,12 +469,14 @@ class MemoryBackend(ABC):
 
     #: Called after a write changed which names read "it" in an entity's
     #: memories, with the ids of the entities concerned: by the backend for
-    #: the one a merge kept, one renamed, one given an alias and one a
-    #: mention calls by a new wording; by the identity code for both of a
-    #: pair given a new answer to whether one belongs to the other (a home's
-    #: names read "it" in its parts' memories). ``MemoryStore`` sets it to
-    #: refresh the property vectors of those memories, which would otherwise
-    #: keep the old names until the weekly refresh.
+    #: the one a merge kept, one renamed, one given an alias, one a mention
+    #: calls by a new wording and one restored; by the identity code for both
+    #: of a pair given a new answer to whether one belongs to the other (a
+    #: home's names read "it" in its parts' memories). ``MemoryStore`` sets it
+    #: to refresh the property vectors of those memories, which would
+    #: otherwise keep the old names until the weekly refresh. A retired
+    #: entity has no memories left to name, so the store refreshes those it
+    #: read before retiring it (``MemoryStore._retire``).
     names_changed: Callable[[list[str]], None] | None = None
 
     def entity_aliases(self, entity_id: str) -> list[str]:

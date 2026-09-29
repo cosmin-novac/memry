@@ -241,26 +241,24 @@ Two numbers are not obvious, so both were measured rather than guessed. The data
 harnesses are in `evals/` if you want to re-run them against your own data, which is the
 only way to know whether these hold for your store.
 
-**The automatic-merge gate** (`Decider.auto_confirm_confidence`) is 0.70 with Jev and
-0.95 with gpt-5-mini as the text model. It is a property of the model because the number
-only means something relative to how that model's confidence is spread: a model
+**The automatic-merge gate** (`Decider.auto_confirm_confidence`) is 0.70 with Jev, and
+would be 0.95 for gpt-5-mini as the text model. It is a property of the model because
+the number only means something relative to how that model's confidence is spread: a model
 reporting a number about itself scores its wrong answers about as high as its right ones,
 so the gate has to sit high and little gets automated. Override with
 `MEMRY_DECISION_MERGE_CONFIDENCE`.
 
-**A text model nobody has measured never merges on its own.** On the same 56 cases,
-gpt-5.6-luna got 52 verdicts safe, better than gpt-5-mini's 49, and put its worst wrong
-"same" at 0.98, above any threshold. There is no number that is safe for a model that
-has not been run against the labelled set, so for any text model other than gpt-5-mini,
-gpt-5.6-luna and the OpenAI default gpt-6-luna included, you confirm every proposed merge
-under Upkeep when Memry sends the decision questions to the text model. To measure your own
-model, run `evals/identity_benchmark.py llm --model <name>` and set the gate it reports
-with `MEMRY_DECISION_MERGE_CONFIDENCE`. A confident "different" still blocks an
-obvious-looking merge at 0.95 whatever the gate, so raising the gate never makes merging
-easier.
-
-Raising the gpt-5-mini gate from 0.9 to 0.95 was a change to existing behaviour, and a
-fix: on the labelled set, 0.9 merged two entities that should have stayed apart.
+**A text model does not decide identity.** On the same 56 cases, gpt-5.6-luna got 52
+verdicts safe, better than gpt-5-mini's 49, and put its worst wrong "same" at 0.98, above
+any threshold: a number a model reports about itself says too little to merge on, and a
+confident "different" from it would keep two records of one person apart for good. So
+without a calibrated decision provider (a text model only, or `MEMRY_DECISION_PROVIDER=llm`)
+Memry asks no model whether two entities are one, at save or in upkeep, and writes no
+model's confidence on a pair. A name the store has joins its entity by rule, two entities
+of one name are joined by the same rule in the weekly pass, a tag folds into the thing of
+its very name, and every other pair waits for you under **Upkeep**.
+`evals/identity_benchmark.py llm --model <name>` measures a text model's gate all the same,
+for comparison.
 
 **When a contradiction may replace a memory.** Replacing is the one reconcile action that
 takes a fact out of use, and it rests on one model reading one text. So it only happens

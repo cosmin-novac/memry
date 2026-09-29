@@ -144,11 +144,14 @@ def links_of(backend: MemoryBackend, entity_ids: list[str]) -> list[Link]:
     """Extracted relations and compared pairs touching these entities, every
     answer with its probability.
 
-    None reaches a tag (a topic entity): a tag is never what the linked
-    search is about, as it is never a seed (``MemoryStore._is_hub``), so an
-    open pair of a thing and the tag of its name ("Groceries" and
-    "groceries", a "same" link at 0.5 until judged) does not draw the tag's
-    memories into every question naming the thing."""
+    A pair links as "same" only on a calibrated judge's answer, the one that
+    stores P(different) beside P(same): a pair nobody judged ("not yet
+    compared", 0.5) says nothing about whether the two are one, and no
+    uncalibrated model's confidence weighs anything. None reaches a tag (a
+    topic entity): a tag is never what the linked search is about, as it is
+    never a seed (``MemoryStore._is_hub``), so an open pair of a thing and
+    the tag of its name ("Groceries" and "groceries") does not draw the
+    tag's memories into every question naming the thing."""
     relations = backend.relations_of(entity_ids)
     pairs = []
     for proposal in backend.proposals_of(entity_ids):
@@ -168,7 +171,8 @@ def links_of(backend: MemoryBackend, entity_ids: list[str]) -> list[Link]:
         # close because one belongs to the other, which the belongs answer
         # already says. Only the share of "neither" is left for "same".
         same = proposal.confidence * belongs.get("neither", 1.0)
-        if proposal.status == "proposed" and same >= FLOOR:
+        judged = proposal.different is not None
+        if proposal.status == "proposed" and judged and same >= FLOOR:
             links.append(Link(a, b, "same", same))
         for child, parent, side in ((a, b, "a"), (b, a, "b")):
             other = "b" if side == "a" else "a"

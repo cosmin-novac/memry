@@ -351,17 +351,6 @@ def test_the_gate_override_reaches_the_text_model_path_too():
     assert jev.auto_confirm_confidence == 0.7 and jev.fallback_gate == NEVER_AUTO_MERGE
 
 
-def test_a_confident_different_still_blocks_an_obvious_merge_under_a_never_gate():
-    """The same-name shortcut merges unless the model objects confidently. If
-    that bar followed a never-merge gate it could never be cleared, and raising
-    the gate would make merging *easier*. It is capped at 0.95."""
-    from memry.intelligence.entities import _conflict_bar
-
-    assert _conflict_bar({"gate": NEVER_AUTO_MERGE}) == 0.95
-    assert _conflict_bar({"gate": 0.7}) == 0.7
-    assert _conflict_bar({}) == 0.95
-
-
 def test_the_gate_can_be_overridden_per_deployment():
     d = JevDecider(DecisionConfig(provider="jev", api_key="k",
                                   auto_confirm_confidence=0.85))
@@ -1077,8 +1066,10 @@ def test_rerank_may_be_turned_on_for_a_text_model_measured_to_help():
 
 
 def test_stats_reports_the_merge_gate_in_force():
-    """Someone on an unmeasured text model will see merges stop happening on
-    their own. The About panel and the Upkeep page read this to say why."""
+    """Without a calibrated judge no model's answer merges two entities, a
+    gate set for the text model included: the About panel and the Upkeep page
+    read this to say so. A calibrated judge's own gate is in force while it
+    answers."""
     from memry.config import Config
 
     luna = FakeLLM(); luna.model = "gpt-5.6-luna"
@@ -1089,13 +1080,20 @@ def test_stats_reports_the_merge_gate_in_force():
     cfg = Config(db_path=":memory:")
     cfg.decision.auto_confirm_confidence = 0.9
     chosen = MemoryStore(cfg, llm=luna, embedder=HashEmbedder(64))
-    assert chosen.stats()["merge_gate"] == 0.9
+    assert chosen.stats()["merge_gate"] == NEVER_AUTO_MERGE
     chosen.close()
+
+    uncalibrated = MemoryStore(Config(db_path=":memory:"), llm=luna,
+                               embedder=HashEmbedder(64), decider=_stub(lambda k, q: Answer()))
+    uncalibrated.decider.auto_confirm_confidence = 0.7
+    assert uncalibrated.stats()["merge_gate"] == NEVER_AUTO_MERGE
+    uncalibrated.close()
 
     jev = MemoryStore(Config(db_path=":memory:"), llm=luna, embedder=HashEmbedder(64),
                       decider=_stub(lambda k, q: Answer()))
+    jev.decider.calibrated = True
     jev.decider.auto_confirm_confidence = 0.7
-    assert jev.stats()["merge_gate"] == 0.7      # the provider's own, while it answers
+    assert jev.stats()["merge_gate"] == 0.7      # the judge's own, while it answers
     jev.close()
 
 
@@ -1166,42 +1164,55 @@ def _open_pair(store) -> None:
                                        confidence=0.5, reason="not yet compared"))
 
 
-def test_a_same_below_the_gate_waits_and_merges_once_new_evidence_clears_it():
-    decider = _Identity(0.5)
+@pytest.mark.parametrize("verdict", ["same", "different"])
+def test_without_a_calibrated_judge_upkeep_asks_nothing_and_joins_one_name_by_rule(verdict):
+    """A decider whose answers carry no computed probabilities is asked
+    nothing about identity, at a save's re-check or in the weekly pass: its
+    "same" could merge nothing, and a "different" at 0.96 kept a pair apart
+    for good on a guess. Two entities of one name are joined by rule, as a
+    save joins a name the store has; a pair of two names stays open for a
+    person, with nothing written on it."""
+    from memry.models import Entity, EntityMention, Memory, MergeProposal
+
+    decider = _Identity(0.96, verdict=verdict)
     store, save = _jonas_store(decider)
     _open_pair(store)
-    save("Jonas booked a table for Friday")
-    [proposal] = store.merge_proposals(user_id="ada")
-    assert (proposal.confidence, proposal.reason) == (0.5, "stub: same")
-    assert len(store.entities(user_id="ada")) == 2
-    assert decider.identity_calls == 1, "only the open pair; the name joined by rule"
+    backend = store.backend
+    jo = backend.insert_entity(Entity(name="Jo", normalized="jo", user_id="ada"))
+    memory = backend.insert_memory(Memory(content="Jo called about the lease", user_id="ada"))
+    backend.add_mention(EntityMention(entity_id=jo.id, memory_id=memory.id, surface="Jo"))
+    jonas = next(e for e in store.entities(user_id="ada") if e.normalized == "jonas")
+    other = backend.add_proposal(MergeProposal(entity_a=jonas.id, entity_b=jo.id,
+                                               user_id="ada", reason="not yet compared"))
 
-    decider.confidence = 0.9
-    save("Jonas booked the Thai restaurant for Friday")
-    assert len(store.entities(user_id="ada")) == 1
-    assert store.merge_proposals(user_id="ada") == []
-    store.close()
-
-
-def test_a_slow_provider_leaves_open_pairs_for_the_weekly_pass():
-    decider = _Identity(0.9, rejudges=False)
-    store, save = _jonas_store(decider)
-    _open_pair(store)
-    save("Jonas booked the Thai restaurant for Friday")
-    assert len(store.entities(user_id="ada")) == 2
-    [proposal] = store.merge_proposals(user_id="ada")
-    assert proposal.confidence == 0.5
-    assert decider.identity_calls == 0
-    store.close()
-
-
-def test_a_pair_that_stays_open_keeps_the_latest_answer():
-    decider = _Identity(0.62)
-    store, _ = _jonas_store(decider)
-    _open_pair(store)
+    save("Jonas booked a table for Friday")  # joins a Jonas by rule, re-checks nothing
+    assert len(store.entities(user_id="ada")) == 3
     store.resolve_entities(user_id="ada")
+
+    assert decider.identity_calls == 0
+    [one] = [e for e in store.entities(user_id="ada") if e.normalized == "jonas"]
+    assert backend.count_entity_memories(one.id) == 3
+    [joined] = store.merge_proposals(user_id="ada", status="confirmed")
+    assert joined.reason == "one name, joined by rule"
+    [waiting] = store.merge_proposals(user_id="ada")
+    assert (waiting.id, waiting.confidence, waiting.reason, waiting.different) == (
+        other.id, 0.5, "not yet compared", None)
+    store.close()
+
+
+def test_a_slow_judge_leaves_open_pairs_for_the_weekly_pass():
+    """A calibrated judge too slow to ask inside a save compares the name the
+    save carries, and leaves the open pairs that name touches for the
+    weekly pass."""
+    judge = _PairJudge(lambda state: (0.6, 0.1))
+    judge.rejudges_on_new_evidence = False
+    store, save = _jonas_store(judge)
+    _open_pair(store)
+    save("Jonas booked the Thai restaurant for Friday")
+    assert len(store.entities(user_id="ada")) == 2
     [proposal] = store.merge_proposals(user_id="ada")
-    assert (proposal.confidence, proposal.reason) == (0.62, "stub: same")
+    assert (proposal.confidence, proposal.reason, proposal.compared_step) == (
+        0.5, "not yet compared", 0)
     store.close()
 
 

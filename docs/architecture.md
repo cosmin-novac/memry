@@ -161,7 +161,8 @@ one-off pass at open files again any column a merge left naming a tag merged awa
 A topic entity is never a hub, is never masked in a property vector, is never found by
 a name lookup, and no link of the linked search reaches it (an open pair of a thing and
 the tag of its name included); a tag and a named thing of the same name are compared by
-the entity identity funnel, two tags by the tag question.
+the entity identity funnel (without a calibrated judge the tag folds into the thing by
+rule), two tags by the tag question.
 
 Mechanical separator and singular/plural duplicates are merged deterministically once two
 real stored labels map to the same form. Semantic synonym merges remain reviewable.
@@ -192,13 +193,23 @@ uses vectors, BM25, recency and importance; the linked search follows *relations
 compared pairs between entities, which are a different thing from the entity's own type.
 An `entity_id` filter selects specific entities, never a type. Three things do use it:
 
-1. **Disambiguation guardrail.** A known type conflict blocks an automatic merge, so a
-   `document` never silently absorbs a `person` that happens to share its name. Absent or
-   equal types leave the decision to the evidence.
+1. **Disambiguation guardrail.** With a calibrated judge, a known type conflict blocks an
+   automatic merge, so a `document` never silently absorbs a `person` that happens to
+   share its name. Absent or equal types leave the decision to the evidence. Without one,
+   the type extraction gives a name is not evidence of another thing: it comes from one
+   sentence (a shop is a `project` in most, a `product` in its listing's), so a name the
+   store has joins its entity whatever type the mention gives it.
 2. **Browsing.** Upkeep > Entities groups by type, capped per group.
 3. **Cleanup triage.** Only `concept`, `other` and `event` entities are offered to the
    non-referent review, because those are where extraction puts style instructions and
    task descriptions. A `person` is never proposed for removal.
+
+Each mention keeps the type extraction gave the name in its memory, and an entity's type
+is the one most of its mentions give (a mention that gives none, a tag's or an older one,
+counts for the type the entity has); on a tie it keeps its own. A merge keeps the type
+most of both entities' mentions give, and on a tie the type of the one the store had
+first: a second entity of a known name, made because one sentence typed it otherwise, is
+the newer one.
 
 The set is kept deliberately small. Every additional type is another way for extraction to
 mis-sort, and the benefit is confined to those three uses, none of which is retrieval
@@ -292,12 +303,16 @@ and, where no single answer decided it, the rule (one name that the judge did no
 different, the clear favourite among namesakes, one side with no memories), "confirmed by
 you" or, for a merge made on the entity page, "merged by you". A name a save joins to an
 entity the store has keeps the rule or the answer that joined it on its mention
-(`EntityMention.decided`).
+(`EntityMention.decided`), and so does a mention a rewritten memory's new text makes. A
+merge leaves one row per pair: where both entities had a pair with a third, the more
+decided row stays (a decision over an open pair), of two alike the later answer, and the
+other goes into the merge record.
 
 A merge can be undone (`undo_merge`; Upkeep > Archive > Merged names, `POST
 /api/v1/entities/unmerge`, `memry entities unmerge`). Each merge records what it moved
 (`entity_merges`): both entity rows and names, the merged one's mentions, the relations and
-pairs it pointed at the kept one, and the funnel steps it restarted. The undo puts them
+pairs it pointed at the kept one (and a row it dropped for a pair both had), and the
+funnel steps it restarted. The undo puts them
 back, files a tag folded into a thing under the tag again, and records the pair as kept
 apart ("undone by you"), so no pass merges them again on the same evidence. A memory saved
 since the merge stays with the kept entity unless its mention calls it by a name only the
@@ -305,15 +320,31 @@ merged one had; that mention goes back, with the relations its memory stated sin
 undo is refused while the kept entity is itself merged into another (undo that first), and
 two tags merged into one are not undone (their memories' tags were rewritten).
 
-Without a calibrated judge (a text model only), a save asks no identity question: a text
-model's own confidence merges nothing unless a gate was measured for that model, so its
-answer could neither join a name nor keep it apart, and each memory naming a known person
-made one more entity and one more open pair. A name the store already has (name or alias,
-no known type conflict) joins its entity by rule, and the rule is kept on the mention: the
-one entity of that name, or of several, the one the memory's conversation already names,
-else the one with the most memories. Any other name makes a new entity. The weekly pass
-compares only identical names, and nothing merges on the model's own confidence unless its
-gate was measured.
+Removing an entity (`remove_entities`) takes its whole merge chain to the Archive with it:
+every entity merged into it, however far down ("Tomi" into "T. Vell" into "Tomas Vell"),
+their mentions, relations, pairs and merge records, so nothing is left pointing at an
+entity that is gone. A restore brings them back where both ends still exist, so a merge
+into it can still be undone; a relation comes back in use only while its memory is (one
+whose memory went out of use meanwhile comes back out of use with it). A name that came
+back while the entity was gone (a save named it and made a new entity) meets it as at
+save: with a calibrated judge the two are a pair the funnel compares, at once when the
+judge is quick enough to ask inside a save; without one they are joined by rule. The
+property vectors of the entity's memories follow a removal and a restore at once.
+
+Without a calibrated judge (a text model only, or a decision provider whose answers carry
+no computed probabilities), no model is asked an identity question, at save or in upkeep,
+and no model's number decides or weighs anything: a text model's own confidence could
+merge nothing, and a confident "different" from it kept a pair apart for good on a guess,
+while each memory naming a known person made one more entity and one more open pair. A
+name the store already has (name or alias) joins its entity by rule, whatever type the
+mention gives it, and the rule is kept on the mention: the one entity of that name, or of
+several, the one the memory's conversation already names, else the one with the most
+memories. Any other name makes a new entity. The weekly pass pairs identical names only and
+joins them by the same rule, the one with more memories kept (two kept apart by a person
+are never joined, not even through a third); a tag and a thing of its very name are joined
+so too, the tag folding into the thing. Any other open pair waits for a person with no
+confidence written on it, and the linked search gives a pair no calibrated judge answered
+no "same" link.
 
 Tags follow the same pattern (`judged_tag_merges`): candidate pairs from the name index
 (no shared-word signal for tags), judged in both orders with the 10 most recent memories
@@ -442,7 +473,8 @@ For a normal text query:
 5. If canonical or alias candidate lookup resolves a query entity that is a hub (or the
    question speaks in the first person and the owner is one), the linked search runs: it
    follows the links from that entity, directed and weighted by kind, direction and
-   probability (`relational_depth`, 1 by default), adds the best memories of each entity
+   probability (`relational_depth`, 1 by default; an open pair is a "same" link only on a
+   calibrated judge's answer), adds the best memories of each entity
    linked strongly enough (read within the user, agent and run searched before the newest
    500 are taken, as the set pool's topic scan is), and orders every candidate by how well
    it states the property asked (its property vector, entity names read as "it") times how

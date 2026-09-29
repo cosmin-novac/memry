@@ -8,10 +8,12 @@ years of mentions behind it was unrecoverable. These tests pin the way back.
 
 from __future__ import annotations
 
+import pytest
 from starlette.testclient import TestClient
 
 from memry.config import Config
-from memry.models import Entity, EntityMention, Memory, Relation
+from memry.models import Entity, EntityMention, Memory, MergeProposal, Relation, Scope
+from memry.providers.decisions import Answer, Answers, NoneDecider
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
 from memry.rest import create_app
@@ -261,5 +263,160 @@ def test_rest_round_trip_removes_lists_and_restores():
         assert restored.json() == {"restored": 1}
         assert seeded["ada"].id not in {r["entity_id"] for r in listed_after.json()}
         assert "Ada" in {row["name"] for row in entities}
+    finally:
+        store.close()
+
+
+# ------------------------------------------- what happened while it was gone
+_ORPHANS = {
+    "tombstones": "SELECT COUNT(*) FROM entities e LEFT JOIN entities t "
+                  "ON t.id = e.merged_into WHERE e.merged_into IS NOT NULL AND t.id IS NULL",
+    "merge records": "SELECT COUNT(*) FROM entity_merges g LEFT JOIN entities k "
+                     "ON k.id = g.keep_id LEFT JOIN entities m ON m.id = g.merge_id "
+                     "WHERE k.id IS NULL OR m.id IS NULL",
+    "pairs": "SELECT COUNT(*) FROM entity_proposals p LEFT JOIN entities a "
+             "ON a.id = p.entity_a LEFT JOIN entities b ON b.id = p.entity_b "
+             "WHERE a.id IS NULL OR b.id IS NULL",
+}
+
+
+def _named(store: MemoryStore, name: str, *texts: str, entity_type: str = "person"):
+    """An entity of ``name`` with a memory for each of ``texts``."""
+    backend = store.backend
+    entity = backend.insert_entity(Entity(name=name, normalized=name.lower(),
+                                          entity_type=entity_type, user_id="ada"))
+    for text in texts:
+        memory = backend.insert_memory(Memory(
+            content=text, user_id="ada", embedding_model=store.embedder.model_id),
+            embedding=store.embedder.embed([text])[0])
+        backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
+                                          surface=name))
+    return entity
+
+
+class _Same(NoneDecider):
+    """A calibrated judge that finds every pair one thing."""
+
+    name = "stub"
+    available = True
+    calibrated = True
+    pair_merge_probability = 0.95
+    rejudges_on_new_evidence = True
+
+    def decide(self, state, questions):
+        if "pair" not in questions:
+            return Answers({})
+        probabilities = {"same": 0.99, "different": 0.0, "unsure": 0.01}
+        return Answers({"pair": Answer("same", probabilities, 0.9, True)})
+
+
+@pytest.mark.parametrize("judged", [False, True], ids=["no judge", "calibrated judge"])
+def test_a_restored_name_meets_the_entity_that_took_it_meanwhile(judged):
+    """Vessa Holm is removed; a save names her while she is gone, finds no
+    entity and makes one; she is brought back. Before, two entities of the
+    name stood side by side with no pair between them, until a weekly pass.
+    Now she meets the new one as a save meets a name the store has: without
+    a judge the two are joined by rule, and with one they are a pair the
+    judge compares at once. The restored one, with its history, is kept."""
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(),
+                        embedder=HashEmbedder(64), decider=_Same() if judged else None)
+    try:
+        old = _named(store, "Vessa Holm", "Vessa Holm raised the rent",
+                     "Vessa Holm fixed the balcony door")
+        assert store.remove_entities([old.id]) == 1
+        new = _named(store, "Vessa Holm", "Ilka paid Vessa Holm the rent for March")
+
+        assert store.restore_entities([old.id]) == 1
+        assert [e.id for e in store.entities(user_id="ada")] == [old.id]
+        assert store.backend.get_entity(new.id).merged_into == old.id
+        assert store.backend.count_entity_memories(old.id) == 3
+        [pair] = store.merge_proposals(user_id="ada", status="confirmed")
+        assert pair.reason == ("stub: same" if judged else "one name, joined by rule")
+    finally:
+        store.close()
+
+
+def test_a_restored_name_stays_apart_from_a_namesake_a_person_kept_apart():
+    store = _store()
+    try:
+        electrician = _named(store, "Johnny", "Johnny rewired the kitchen")
+        climber = _named(store, "Johnny", "Johnny belays at the gym")
+        kept = store.backend.add_proposal(MergeProposal(
+            entity_a=electrician.id, entity_b=climber.id, user_id="ada", reason="stub"))
+        assert store.reject_merge(kept.id)
+        store.remove_entities([climber.id])
+        assert store.restore_entities([climber.id]) == 1
+        assert len(store.entities(user_id="ada")) == 2
+        assert [p.status for p in store.merge_proposals(user_id="ada", status=None)] == [
+            "rejected"]
+    finally:
+        store.close()
+
+
+def test_a_restored_relation_follows_its_memory():
+    """While Ada was gone, the memory stating that she runs the workshop was
+    forgotten, and the one stating where she bought a lathe was deleted for
+    good. Before, both relations came back in use, one of them naming a
+    memory that no longer exists. Now the first comes back out of use with
+    its memory, and in use again when the memory is; the second not at all."""
+    store = _store()
+    try:
+        seeded = _seed(store)
+        ada, workshop = seeded["ada"], seeded["workshop"]
+        store.backend.add_relation(Relation(
+            subject=ada.id, predicate="bought_at", object=workshop.id,
+            user_id="ada", memory_id=seeded["second"].id))
+        store.remove_entities([ada.id])
+        assert store.delete(seeded["first"].id)
+        assert store.delete(seeded["second"].id, hard=True)
+
+        assert store.restore_entities([ada.id]) == 1
+
+        def relations():
+            return [(row["predicate"], row["invalid_at"] is None)
+                    for row in store.backend._db.execute("SELECT * FROM relations")]
+
+        assert relations() == [("runs", False)]
+        assert store.unforget(seeded["first"].id)
+        assert relations() == [("runs", True)]
+    finally:
+        store.close()
+
+
+def test_removing_the_end_of_a_merge_chain_leaves_nothing_pointing_at_nothing():
+    """"Tomi" was merged into "T. Vell", "T. Vell" into "Tomas Vell", and the
+    tag "vell" folded into "T. Vell"; "Tomas Vell" is removed. Before, only
+    the tombstones pointing at it straight went with it: Tomi's and the tag's
+    pointed at nothing, and both merge records and a pair named entities
+    that were gone. Now the whole chain goes to the Archive (the tag a tag
+    again), and restored, each merge can be undone, the later one first."""
+    store = _store()
+    backend = store.backend
+    try:
+        tomi = _named(store, "Tomi", "Tomi called about the release")
+        tvell = _named(store, "T. Vell", "T. Vell reviewed the design")
+        tomas = _named(store, "Tomas Vell", "Tomas Vell leads the beta")
+        tagged = backend.insert_memory(Memory(content="The beta starts in April",
+                                              user_id="ada", categories=["vell"]))
+        topic = backend.topic_entity("vell", Scope(user_id="ada"), create=False)
+        assert store.merge_entities(tvell.id, tomi.id)
+        assert store.merge_entities(tvell.id, topic.id)
+        assert store.merge_entities(tomas.id, tvell.id)
+
+        assert store.remove_entities([tomas.id]) == 1
+        db = backend._db
+        assert {kind: db.execute(sql).fetchone()[0] for kind, sql in _ORPHANS.items()} == {
+            "tombstones": 0, "merge records": 0, "pairs": 0}
+        assert backend.get_entity(topic.id).merged_into is None
+        assert [e.id for e in backend.entities_of_memory(tagged.id, kind="any")] == [topic.id]
+
+        assert store.restore_entities([tomas.id]) == 1
+        assert {backend.resolve_entity_id(e.id) for e in (tomi, tvell)} == {tomas.id}
+        assert store.undo_merge(tomi.id)["undone"] is False  # T. Vell went on into another
+        assert store.undo_merge(tvell.id)["undone"]
+        assert store.undo_merge(tomi.id)["undone"]
+        assert {backend.resolve_entity_id(e.id) for e in (tomi, tvell, tomas)} == {
+            tomi.id, tvell.id, tomas.id}
+        assert backend.get_entity(topic.id).merged_into is None
     finally:
         store.close()
