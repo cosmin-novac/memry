@@ -282,12 +282,27 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    into context, not on the save path.
 
 Merge proposals never reach the Upkeep queue when a calibrated judge decides pairs.
-Merges cannot be undone. A merge keeps what decided it on its proposal: the two entities
-(the one merged away stays as a tombstone pointing at the other), the judge's answer and
-the step it was given at, and, where no single answer decided it, the rule (one name that
-the judge did not call different, the clear favourite among namesakes, one side with no
-memories) or "confirmed by you". Without a calibrated judge (a text model only), only
-identical names are compared and nothing merges on the model's own confidence.
+A merge keeps what decided it on its proposal: the two entities (the one merged away stays
+as a tombstone pointing at the other), the judge's answer and the step it was given at,
+and, where no single answer decided it, the rule (one name that the judge did not call
+different, the clear favourite among namesakes, one side with no memories), "confirmed by
+you" or, for a merge made on the entity page, "merged by you". A name a save joins to an
+entity the store has keeps the rule or the answer that joined it on its mention
+(`EntityMention.decided`).
+
+A merge can be undone (`undo_merge`; Upkeep > Archive > Merged names, `POST
+/api/v1/entities/unmerge`, `memry entities unmerge`). Each merge records what it moved
+(`entity_merges`): both entity rows and names, the merged one's mentions, the relations and
+pairs it pointed at the kept one, and the funnel steps it restarted. The undo puts them
+back, files a tag folded into a thing under the tag again, and records the pair as kept
+apart ("undone by you"), so no pass merges them again on the same evidence. A memory saved
+since the merge stays with the kept entity unless its mention calls it by a name only the
+merged one had; that mention goes back, with the relations its memory stated since. An
+undo is refused while the kept entity is itself merged into another (undo that first), and
+two tags merged into one are not undone (their memories' tags were rewritten).
+
+Without a calibrated judge (a text model only), only identical names are compared and
+nothing merges on the model's own confidence.
 
 Tags follow the same pattern (`judged_tag_merges`): candidate pairs from the name index
 (no shared-word signal for tags), judged in both orders with the 10 most recent memories

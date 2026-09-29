@@ -3309,6 +3309,43 @@ class MemoryStore:
             restored += int(self.backend.restore_entity(entity_id))
         return restored
 
+    def merges(self, *, user_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        """Merges of two entities that can be undone, newest first, with what
+        decided each."""
+        return self.backend.list_merges(Scope(user_id=user_id), limit=limit)
+
+    def undo_merge(
+        self, entity_id: str, *, owner_prefix: str | None = None
+    ) -> dict[str, Any]:
+        """Undo the merge of ``entity_id`` into another entity: both are as
+        they were before it, and their pair is kept apart ("undone by you"),
+        so no pass merges them again on the same evidence
+        (``MemoryBackend.undo_merge``, which also says where memories saved
+        since go). Refused, with the reason, when no merge of it is on record
+        or the kept entity was merged into another since: that merge is
+        undone first."""
+        record = self.backend.merge_record(entity_id)
+        if record is None or not _owned(_Owner(record["user_id"]), owner_prefix):
+            return {"undone": False, "reason": "no merge of this entity is on record"}
+        keep = self.backend.get_entity(record["keep_id"])
+        merged = self.backend.get_entity(entity_id)
+        if keep is None:
+            return {"undone": False,
+                    "reason": "the entity it was merged into was removed: restore that first"}
+        if keep.merged_into is not None:
+            later = self.backend.get_entity(self.backend.resolve_entity_id(keep.id) or "")
+            return {"undone": False, "reason": (
+                f'"{keep.name}" was merged into "{later.name if later else keep.merged_into}" '
+                "since: undo that merge first")}
+        if merged is None or merged.merged_into != keep.id:
+            return {"undone": False, "reason": "it is no longer merged into that entity"}
+        if not self.backend.undo_merge(entity_id):
+            return {"undone": False, "reason": "it changed while being undone: try again"}
+        if (merged.metadata or {}).get("owner"):
+            # the store owner was merged away: it is the owner again
+            self._upkeep_set("owner_entity", merged.user_id, entity_id)
+        return {"undone": True, "entity_id": entity_id, "keep_id": keep.id}
+
     def remove_entity_preserving_tag(
         self, entity_id: str, *, owner_prefix: str | None = None
     ) -> dict[str, Any]:

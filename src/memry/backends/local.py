@@ -224,6 +224,21 @@ CREATE TABLE IF NOT EXISTS retired_entities (
 CREATE INDEX IF NOT EXISTS idx_retired_entities_user
     ON retired_entities(user_id, retired_at);
 
+-- What each merge of two entities moved, so that a person can undo it
+-- (``undo_merge``): both entity rows and names as they were, and the ids of
+-- the mentions, relations and pairs the merge pointed at the kept one.
+-- Recovery data, like retired_entities, so not in backups.
+CREATE TABLE IF NOT EXISTS entity_merges (
+    id        TEXT PRIMARY KEY,
+    keep_id   TEXT NOT NULL,
+    merge_id  TEXT NOT NULL,
+    user_id   TEXT,
+    merged_at TEXT NOT NULL,
+    snapshot  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entity_merges_merge ON entity_merges(merge_id);
+CREATE INDEX IF NOT EXISTS idx_entity_merges_user ON entity_merges(user_id, merged_at);
+
 CREATE TABLE IF NOT EXISTS ann_keys (
     key INTEGER PRIMARY KEY AUTOINCREMENT,
     memory_id TEXT NOT NULL UNIQUE
@@ -3300,6 +3315,11 @@ class LocalBackend(MemoryBackend):
         }
         if types.get(keep_root) == TOPIC_TYPE and types.get(merge_root) != TOPIC_TYPE:
             keep_root, merge_root = merge_root, keep_root
+        # A tag kept means two tags merged, and that rewrites their memories'
+        # tags (``retag_topics``), which is not undone here; every other merge
+        # (a tag folded into a thing too) records what it moves.
+        snapshot = (self._merge_snapshot_locked(keep_root, merge_root)
+                    if types.get(keep_root) != TOPIC_TYPE else None)
         changed_at = utcnow()
         cur = self._db.execute(
             "UPDATE entities SET merged_into = ?, updated_at = ?, "
@@ -3358,6 +3378,218 @@ class LocalBackend(MemoryBackend):
             "WHERE id = ?",
             (changed_at, keep_root),
         )
+        if snapshot is not None:
+            self._db.execute(
+                "INSERT INTO entity_merges (id, keep_id, merge_id, user_id, merged_at, snapshot) "
+                "VALUES (?,?,?,?,?,?)",
+                (new_id(), keep_root, merge_root, snapshot["merged"]["user_id"], changed_at,
+                 json.dumps(snapshot)),
+            )
+        return True
+
+    def _merge_snapshot_locked(self, keep_id: str, merge_id: str) -> dict[str, Any]:
+        """What a merge of ``merge_id`` into ``keep_id`` is about to move, read
+        before it moves it: both entity rows and the names each answered to,
+        the merged one's mentions, the relations and the pairs that will point
+        at the kept one (with the ends that will change, and whether a
+        relation between the two becomes a loop and is closed), and the funnel
+        step of each open pair the merge starts again."""
+        def row(entity_id: str) -> dict[str, Any]:
+            return dict(self._db.execute(
+                "SELECT * FROM entities WHERE id = ?", (entity_id,)).fetchone())
+
+        both = {keep_id, merge_id}
+        relations = [
+            {"id": r["id"], "subject": r["subject"] == merge_id, "object": r["object"] == merge_id,
+             "loop": r["invalid_at"] is None and {r["subject"], r["object"]} <= both}
+            for r in self._db.execute(
+                "SELECT id, subject, object, invalid_at FROM relations "
+                "WHERE subject = ? OR object = ?", (merge_id, merge_id)).fetchall()
+        ]
+        proposals = [
+            {"id": p["id"], "a": p["entity_a"] == merge_id, "b": p["entity_b"] == merge_id}
+            for p in self._db.execute(
+                "SELECT id, entity_a, entity_b FROM entity_proposals WHERE status != 'confirmed' "
+                "AND ((entity_a = ? AND entity_b != ?) OR (entity_b = ? AND entity_a != ?))",
+                (merge_id, keep_id, merge_id, keep_id)).fetchall()
+        ]
+        steps = {
+            p["id"]: p["compared_step"] for p in self._db.execute(
+                "SELECT id, compared_step FROM entity_proposals WHERE status = 'proposed' "
+                "AND (entity_a IN (?, ?) OR entity_b IN (?, ?))",
+                (keep_id, merge_id, keep_id, merge_id)).fetchall()
+        }
+        return {
+            "keep": row(keep_id), "merged": row(merge_id),
+            "keep_names": self.entity_aliases(keep_id),
+            "merged_names": self.entity_aliases(merge_id),
+            "mentions": [m["id"] for m in self._db.execute(
+                "SELECT id FROM entity_mentions WHERE entity_id = ?", (merge_id,)).fetchall()],
+            "relations": relations, "proposals": proposals, "steps": steps,
+        }
+
+    def list_merges(self, scope: Scope, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Merges that can be undone, newest first: the entity merged away and
+        the one it went into, by id and by name as they are now, when, and
+        what decided it (the reason on their pair)."""
+        clause, params = _scope_clause(Scope(user_id=scope.user_id), prefix="g.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT g.merge_id AS entity_id, g.keep_id, g.user_id, g.merged_at, "
+                "m.name AS name, m.entity_type AS entity_type, k.name AS keep_name, "
+                "(SELECT p.reason FROM entity_proposals p WHERE p.status = 'confirmed' AND "
+                " ((p.entity_a = g.keep_id AND p.entity_b = g.merge_id) OR "
+                "  (p.entity_a = g.merge_id AND p.entity_b = g.keep_id)) "
+                " ORDER BY p.decided_at DESC LIMIT 1) AS decided "
+                "FROM entity_merges g LEFT JOIN entities m ON m.id = g.merge_id "
+                "LEFT JOIN entities k ON k.id = g.keep_id "
+                f"WHERE {clause} ORDER BY g.merged_at DESC, g.id DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def merge_record(self, entity_id: str) -> dict[str, Any] | None:
+        """The last merge of ``entity_id`` into another on record: the entity
+        it went into (``keep_id``), its namespace and when."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT keep_id, merge_id, user_id, merged_at FROM entity_merges "
+                "WHERE merge_id = ? ORDER BY merged_at DESC, id DESC LIMIT 1",
+                (entity_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def undo_merge(self, entity_id: str) -> bool:
+        """Undo the last merge of ``entity_id`` into another entity, from what
+        the merge recorded (``_merge_snapshot_locked``). The merged entity
+        comes back as it was, with its names; its mentions, relations and
+        pairs point at it again, and the pairs whose funnel the merge started
+        again are back at their steps. A tag folded into a thing is a tag
+        again, and the memories carrying it are filed under it.
+
+        Memories saved since the merge stay with the kept entity, unless a
+        mention of theirs calls it by a name only the merged one answered to
+        before the merge: that mention goes back to the merged entity, and a
+        relation its memory stated since goes with it when the memory no
+        longer names the kept one. A mention another merge into the kept
+        entity brought stays.
+
+        The pair of the two is recorded as kept apart, "undone by you", so the
+        funnel does not merge them again on the same evidence. False, writing
+        nothing, when no merge is on record, or when the two are no longer as
+        the merge left them: the kept entity was merged into another since
+        (undo that one first) or removed, or the merged one is folded
+        elsewhere. ``names_changed`` hears of both."""
+        with self._lock:
+            record = self._db.execute(
+                "SELECT * FROM entity_merges WHERE merge_id = ? "
+                "ORDER BY merged_at DESC, id DESC LIMIT 1", (entity_id,)).fetchone()
+            if record is None:
+                return False
+            keep_id, merged_at = record["keep_id"], record["merged_at"]
+            merged = self._db.execute(
+                "SELECT merged_into FROM entities WHERE id = ?", (entity_id,)).fetchone()
+            keep = self._db.execute(
+                "SELECT merged_into, metadata FROM entities WHERE id = ?", (keep_id,)).fetchone()
+            if (merged is None or merged["merged_into"] != keep_id
+                    or keep is None or keep["merged_into"] is not None):
+                return False
+            snapshot = json.loads(record["snapshot"])
+            now = utcnow()
+            entity = dict(snapshot["merged"])
+            tag = entity["entity_type"] == TOPIC_TYPE
+            # a tag folded into a thing is the active topic of its name again
+            entity["merged_into"] = (self._active_topic_locked(entity["normalized"],
+                                                               entity["user_id"])
+                                     if tag else None)
+            columns = [column for column in entity if column != "id"]
+            self._db.execute(
+                f"UPDATE entities SET {', '.join(f'{c} = ?' for c in columns)} WHERE id = ?",
+                (*(entity[c] for c in columns), entity_id),
+            )
+            moved: set[str] = set()
+            if tag:
+                names = {entity["normalized"]}
+                self._unmention_tags_locked(keep_id, entity["user_id"], names)
+                self._refile_named_locked(entity["user_id"], names)
+            else:
+                self._db.executemany(
+                    "UPDATE entity_mentions SET entity_id = ? WHERE id = ? AND entity_id = ?",
+                    [(entity_id, mention_id, keep_id) for mention_id in snapshot["mentions"]])
+                brought = {
+                    mention_id
+                    for row in self._db.execute(
+                        "SELECT snapshot FROM entity_merges WHERE keep_id = ? AND id != ?",
+                        (keep_id, record["id"])).fetchall()
+                    for mention_id in json.loads(row["snapshot"])["mentions"]
+                }
+                only_theirs = ({n.lower() for n in snapshot["merged_names"]}
+                               - {n.lower() for n in snapshot["keep_names"]})
+                for mention in self._db.execute(
+                    "SELECT id, memory_id, surface FROM entity_mentions "
+                    "WHERE entity_id = ? AND created_at >= ?", (keep_id, merged_at)).fetchall():
+                    if (mention["id"] not in brought
+                            and mention["surface"].strip().lower() in only_theirs):
+                        self._db.execute("UPDATE entity_mentions SET entity_id = ? WHERE id = ?",
+                                         (entity_id, mention["id"]))
+                        moved.add(mention["memory_id"])
+            for relation in snapshot["relations"]:
+                current = self._db.execute(
+                    "SELECT subject, object, invalid_at FROM relations WHERE id = ?",
+                    (relation["id"],)).fetchone()
+                if current is None:
+                    continue
+                subject = (entity_id if relation["subject"] and current["subject"] == keep_id
+                           else current["subject"])
+                obj = (entity_id if relation["object"] and current["object"] == keep_id
+                       else current["object"])
+                invalid_at = (None if relation["loop"] and current["invalid_at"] == merged_at
+                              else current["invalid_at"])
+                self._db.execute(
+                    "UPDATE relations SET subject = ?, object = ?, invalid_at = ? WHERE id = ?",
+                    (subject, obj, invalid_at, relation["id"]))
+            naming_kept = {
+                row["memory_id"] for row in self._db.execute(
+                    "SELECT DISTINCT memory_id FROM entity_mentions WHERE entity_id = ?",
+                    (keep_id,)).fetchall()
+            }
+            for memory_id in sorted(moved - naming_kept):
+                for end in ("subject", "object"):
+                    self._db.execute(
+                        f"UPDATE relations SET {end} = ? WHERE {end} = ? AND memory_id = ? "
+                        "AND created_at >= ?", (entity_id, keep_id, memory_id, merged_at))
+            for proposal in snapshot["proposals"]:
+                for end, flag in (("entity_a", "a"), ("entity_b", "b")):
+                    if proposal[flag]:
+                        self._db.execute(
+                            f"UPDATE entity_proposals SET {end} = ? WHERE id = ? AND {end} = ?",
+                            (entity_id, proposal["id"], keep_id))
+            self._db.executemany(
+                "UPDATE entity_proposals SET compared_step = ? "
+                "WHERE id = ? AND status = 'proposed' AND compared_step = 0",
+                [(step, proposal_id) for proposal_id, step in snapshot["steps"].items()])
+            pairs = self._db.execute(
+                "UPDATE entity_proposals SET status = 'rejected', reason = ?, decided_at = ? "
+                "WHERE (entity_a = ? AND entity_b = ?) OR (entity_a = ? AND entity_b = ?)",
+                ("undone by you", now, keep_id, entity_id, entity_id, keep_id)).rowcount
+            if not pairs:
+                self._db.execute(
+                    "INSERT INTO entity_proposals (id, entity_a, entity_b, user_id, status, "
+                    "confidence, reason, created_at, decided_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (new_id(), keep_id, entity_id, entity["user_id"], "rejected", 0.0,
+                     "undone by you", now, now))
+            # the owner flag a merge moved onto the kept entity goes back
+            metadata = json.loads(keep["metadata"])
+            if (json.loads(entity["metadata"] or "{}").get("owner")
+                    and not json.loads(snapshot["keep"]["metadata"] or "{}").get("owner")):
+                metadata.pop("owner", None)
+            self._db.execute(
+                "UPDATE entities SET metadata = ?, updated_at = ?, description_updated_at = NULL "
+                "WHERE id = ?", (json.dumps(metadata), now, keep_id))
+            self._db.execute("DELETE FROM entity_merges WHERE id = ?", (record["id"],))
+            self._db.commit()
+        if self.names_changed is not None:
+            self.names_changed([keep_id, entity_id])
         return True
 
     def add_proposal(self, proposal: MergeProposal) -> MergeProposal:

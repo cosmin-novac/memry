@@ -421,6 +421,9 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
   <h2 style="font-size:.95rem;margin-top:1.2rem">Removed names</h2>
   <p class="hint">Removing a person or thing leaves the memories alone and puts the name here. Restoring one brings back its aliases, and the mentions and relations whose memories are still around.</p>
   <div id="retiredlist"></div>
+  <h2 style="font-size:.95rem;margin-top:1.2rem">Merged names</h2>
+  <p class="hint">When Memry or you merge two names into one, the one merged away is listed here with what decided it. Undo brings it back as it was, with its memories, and the two are kept apart from then on. A memory saved since stays with the name it was merged into, unless it calls it by the other name.</p>
+  <div id="mergedlist"></div>
 </section>
 <section class="kpanel" id="kpanel-maintenance" hidden>
   <h2 style="font-size:.95rem;margin-top:.2rem">Needs you</h2>
@@ -1479,7 +1482,7 @@ function showKnowledge(tab){
     document.getElementById('ktab-'+name).setAttribute('aria-pressed',name===tab);
   }
   if(tab==='maintenance')loadUpkeep();
-  if(tab==='forgotten'){loadForgotten();loadReplaced();loadRetiredEntities()}
+  if(tab==='forgotten'){loadForgotten();loadReplaced();loadRetiredEntities();loadMerges()}
 }
 
 // -- forgotten: deleted, but still recoverable until purged -----------------
@@ -1551,6 +1554,25 @@ async function restoreEntity(id){
   if(result.error){alert(result.error);return}
   if(!result.restored){alert('That name could not be restored.');return}
   await Promise.all([loadRetiredEntities(),loadEntities(),loadStats(),loadMapData()]);
+}
+// -- merged names: a merge can be taken back ---------------------------------
+async function loadMerges(){
+  const rows=await api('/api/v1/entities/merges');
+  const el=document.getElementById('mergedlist');
+  if(!el)return;
+  if(!rows.length){el.innerHTML='<div class="empty">No merged names.</div>';return}
+  el.innerHTML=rows.map(row=>`<div class="tagrow"><span class="name">
+    ${esc(row.name||'')} <span class="hint">into</span> ${esc(row.keep_name||'')}
+    <div class="hint">merged ${esc((row.merged_at||'').slice(0,10))}${row.decided?' · '+esc(row.decided):''}</div></span>
+    <button class="act" title="take the merge back: both names as they were, kept apart from then on"
+      onclick='undoMerge(${JSON.stringify(row.entity_id)})'>undo</button></div>`).join('');
+}
+async function undoMerge(id){
+  const result=await api('/api/v1/entities/unmerge',
+    {method:'POST',body:JSON.stringify({ids:[id]})});
+  if(result.error){alert(result.error);return}
+  if(!result.undone){alert(Object.values(result.refused||{})[0]||'That merge could not be undone.');return}
+  await Promise.all([loadMerges(),loadEntities(),loadStats(),loadMapData()]);
 }
 
 // -- upkeep: runs on its own; the queue is what it will not decide for you --
@@ -2996,6 +3018,31 @@ def create_app(
         ))
         return JSONResponse({"restored": restored})
 
+    async def merges_route(request: Request) -> Response:
+        """Merges of two entities that can be undone, with what decided each."""
+        rows = await run_in_threadpool(partial(
+            store.merges,
+            user_id=_p(request).namespace(request.query_params.get("user_id")),
+            limit=int(request.query_params.get("limit", 200)),
+        ))
+        return JSONResponse(rows)
+
+    async def unmerge_route(request: Request) -> Response:
+        """Undo the merges of these merged-away entities; a merge that cannot be
+        undone is listed with the reason."""
+        body = await request.json()
+        ids = [str(i) for i in body.get("ids", []) if i]
+        if not ids:
+            return JSONResponse({"error": "ids required"}, status_code=400)
+        results = [await run_in_threadpool(partial(
+            store.undo_merge, entity_id, owner_prefix=_p(request).prefix,
+        )) for entity_id in ids]
+        return JSONResponse({
+            "undone": sum(1 for result in results if result["undone"]),
+            "refused": {entity_id: result["reason"]
+                        for entity_id, result in zip(ids, results) if not result["undone"]},
+        })
+
     async def maintenance_status_route(request: Request) -> Response:
         """What the automatic passes are, when they last ran, and their settings.
 
@@ -3752,6 +3799,8 @@ def create_app(
         # before /{entity_id}, or "retired" is read as an id
         Route("/api/v1/entities/retired", guarded(retired_entities_route), methods=["GET"]),
         Route("/api/v1/entities/restore", guarded(restore_entities_route), methods=["POST"]),
+        Route("/api/v1/entities/merges", guarded(merges_route), methods=["GET"]),
+        Route("/api/v1/entities/unmerge", guarded(unmerge_route), methods=["POST"]),
         Route("/api/v1/relations", guarded(relations_route), methods=["GET"]),
         Route("/api/v1/relations/backfill", guarded(backfill_relations_route), methods=["POST"]),
         Route("/api/v1/entities/backfill-types", guarded(backfill_entity_types_route), methods=["POST"]),

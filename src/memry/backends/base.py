@@ -571,6 +571,20 @@ class MemoryBackend(ABC):
         A tag and a named thing are folded into the thing either way round."""
         return False
 
+    def list_merges(self, scope: Scope, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Merges that can be undone, newest first. A backend that records
+        none lists none."""
+        return []
+
+    def merge_record(self, entity_id: str) -> dict[str, Any] | None:
+        """The last merge of ``entity_id`` into another on record, if any."""
+        return None
+
+    def undo_merge(self, entity_id: str) -> bool:
+        """Undo the last merge of ``entity_id`` into another entity; False
+        when there is none to undo."""
+        return False
+
     # -- typed relations (anchor -> anchor edges) -------------------------
     # Default no-ops; LocalBackend implements. A backend without relations
     # simply has no multi-hop graph; retrieval falls back to hybrid.

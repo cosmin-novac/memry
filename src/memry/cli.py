@@ -180,6 +180,11 @@ def main(argv: list[str] | None = None) -> int:
     ep = entity_sub.add_parser("merge", help="merge entity MERGE_ID into KEEP_ID directly")
     ep.add_argument("keep_id")
     ep.add_argument("merge_id")
+    ep = entity_sub.add_parser("merges", help="list merges that can be undone")
+    _scope_args(ep)
+    ep = entity_sub.add_parser(
+        "unmerge", help="undo the merge of ENTITY_ID (the one merged away); the two stay apart")
+    ep.add_argument("entity_id")
     ep = entity_sub.add_parser("alias", help="add a user-supplied alias to an entity")
     ep.add_argument("entity_id")
     ep.add_argument("alias")
@@ -371,6 +376,13 @@ def main(argv: list[str] | None = None) -> int:
                 _print({"rejected": store.reject_merge(args.proposal_id)})
             elif sub_command == "merge":
                 _print({"merged": store.merge_entities(args.keep_id, args.merge_id)})
+            elif sub_command == "merges":
+                _print(store.merges(user_id=getattr(args, "user", None)))
+            elif sub_command == "unmerge":
+                result = store.undo_merge(args.entity_id)
+                _print(result)
+                if not result["undone"]:
+                    return 1
             elif sub_command == "alias":
                 entity = store.add_entity_alias(args.entity_id, args.alias)
                 if entity is None:

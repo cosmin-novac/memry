@@ -302,11 +302,22 @@ def test_forgotten_panel_lists_removed_names_with_a_way_back():
     assert 'id="retiredlist"' in html
     assert ">Removed names</h2>" in html
     assert ("if(tab==='forgotten'){loadForgotten();loadReplaced();"
-            "loadRetiredEntities()}") in source
+            "loadRetiredEntities();loadMerges()}") in source
     assert "async function loadRetiredEntities()" in source
     assert "api('/api/v1/entities/retired')" in source
     assert "async function restoreEntity(id)" in source
     assert "api('/api/v1/entities/restore'" in source
+
+
+def test_the_archive_lists_merged_names_with_a_way_back():
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+
+    assert 'id="mergedlist"' in html and ">Merged names</h2>" in html
+    assert "async function loadMerges()" in source
+    assert "api('/api/v1/entities/merges')" in source
+    assert "async function undoMerge(id)" in source
+    assert "api('/api/v1/entities/unmerge'" in source
 
 
 def test_memory_cards_show_colored_type_symbols():
