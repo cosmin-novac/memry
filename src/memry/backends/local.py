@@ -285,6 +285,9 @@ _BACKUP_BYTES = "__memry_base64__"
 #: (``LocalBackend._ensure_one_active_topic_per_name``).
 _ACTIVE_TOPIC_INDEX = "ux_entities_active_topic_ns"
 _ACTIVE_TOPIC_INDEX_V1 = "ux_entities_active_topic"
+#: Set once ``_ACTIVE_TOPIC_INDEX`` is in place and the memories of the two
+#: namespaces the old index folded are filed again.
+_ACTIVE_TOPIC_MARKER = "schema:active-topic-ns:v1"
 
 #: Set once the columns still naming a tag merged away (written before a
 #: memory's tags were filed through ``LocalBackend._file_tags_locked``) name
@@ -606,17 +609,51 @@ class LocalBackend(MemoryBackend):
         both namespaces are filed again (``_file_tags_locked``). A database
         from before any index may hold twins: each later one is folded into
         the earliest of its namespace (``merge_entities``), never across
-        namespaces, then the index is made."""
+        namespaces, then the index is made.
+
+        The old index is dropped, the twins folded and the new index made in
+        one transaction, and the refile runs after it and is marked done
+        (``_ACTIVE_TOPIC_MARKER``) only once it ran: an open stopped anywhere
+        in between leaves the old index, or the marker unset, and the next
+        open does the rest."""
         indexes = {
             row["name"] for row in self._db.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
                 (_ACTIVE_TOPIC_INDEX, _ACTIVE_TOPIC_INDEX_V1),
             ).fetchall()
         }
-        if _ACTIVE_TOPIC_INDEX in indexes:
+        refiled = self._db.execute(
+            "SELECT 1 FROM meta WHERE key = ?", (_ACTIVE_TOPIC_MARKER,)
+        ).fetchone() is not None
+        if _ACTIVE_TOPIC_INDEX in indexes and _ACTIVE_TOPIC_INDEX_V1 not in indexes and refiled:
             return
-        folded_namespaces = _ACTIVE_TOPIC_INDEX_V1 in indexes
-        if folded_namespaces:
+        self._db.commit()  # the open's earlier steps, apart from this transaction
+        # One transaction: DDL outside one would be committed on its own, and
+        # a stop between the drop and the create lost the old index's trace.
+        self._db.execute("BEGIN")
+        try:
+            self._replace_active_topic_index_locked(_ACTIVE_TOPIC_INDEX_V1 in indexes)
+        except Exception:
+            self._db.rollback()
+            raise
+        self._db.commit()
+        if not refiled or _ACTIVE_TOPIC_INDEX_V1 in indexes:
+            if self._db.execute(
+                "SELECT 1 FROM memories WHERE user_id = '' LIMIT 1"
+            ).fetchone():
+                # a mention dropped while "" and None shared the index comes back
+                self._refile_locked("user_id = '' OR user_id IS NULL", (), cache={})
+            self._db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (_ACTIVE_TOPIC_MARKER, utcnow()),
+            )
+            self._db.commit()
+
+    def _replace_active_topic_index_locked(self, old_index: bool) -> None:
+        """Inside the open's transaction: drop the index keyed
+        ``IFNULL(user_id, '')`` when ``old_index``, fold the active twins of
+        each namespace, and make ``_ACTIVE_TOPIC_INDEX``."""
+        if old_index:
             self._db.execute(f"DROP INDEX {_ACTIVE_TOPIC_INDEX_V1}")
         twins = self._db.execute(
             "SELECT e.id, e.user_id, e.normalized FROM entities e JOIN ("
@@ -635,7 +672,7 @@ class LocalBackend(MemoryBackend):
             if key not in kept:
                 kept[key] = twin["id"]
                 continue
-            self.merge_entities(kept[key], twin["id"])
+            self._merge_entities_locked(kept[key], twin["id"])
         for keep_id in kept.values():
             # a memory that mentioned both twins mentions the one kept once
             self._db.execute(
@@ -648,13 +685,6 @@ class LocalBackend(MemoryBackend):
             "ON entities(user_id IS NULL, IFNULL(user_id, ''), normalized) "
             f"WHERE entity_type = '{TOPIC_TYPE}' AND merged_into IS NULL"
         )
-        if folded_namespaces and self._db.execute(
-            "SELECT 1 FROM memories WHERE user_id = '' LIMIT 1"
-        ).fetchone():
-            # a mention dropped while "" and None shared the index comes back
-            self._refile_locked(
-                "user_id = '' OR user_id IS NULL", (), cache={})
-        self._db.commit()
 
     def _migrate_tags_to_topic_entities(self) -> None:
         """Give the legacy tags their topic entities and mentions exactly once
@@ -1441,28 +1471,6 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [self._row_to_topic(row) for row in rows]
 
-    def topic_counts(self, scope: Scope) -> list[dict[str, Any]]:
-        root_clause, root_params = _scope_clause(scope, prefix="root.")
-        memory_clause, memory_params = _scope_clause(scope, prefix="m.")
-        with self._lock:
-            rows = self._db.execute(
-                "WITH RECURSIVE descendants(root_id, topic_id, depth) AS ("
-                "SELECT id, id, 0 FROM topics UNION "
-                "SELECT d.root_id, tr.narrower_topic_id, d.depth + 1 "
-                "FROM descendants d JOIN topic_relations tr "
-                "ON tr.broader_topic_id = d.topic_id WHERE d.depth < 8) "
-                "SELECT root.normalized AS category, "
-                "COUNT(DISTINCT mt.memory_id) AS count FROM topics root "
-                "JOIN descendants d ON d.root_id = root.id "
-                "JOIN memory_topics mt ON mt.topic_id = d.topic_id "
-                "JOIN memories m ON m.id = mt.memory_id "
-                f"WHERE m.invalid_at IS NULL AND {root_clause} AND {memory_clause} "
-                "GROUP BY root.normalized HAVING count > 0 "
-                "ORDER BY count DESC, category",
-                (*root_params, *memory_params),
-            ).fetchall()
-        return [{"category": row["category"], "count": row["count"]} for row in rows]
-
     def purge_orphan_entities(
         self, scope: Scope, *, reason: str = "nothing referenced it"
     ) -> int:
@@ -1492,36 +1500,6 @@ class LocalBackend(MemoryBackend):
             purged = sum(self._retire_locked(entity_id, reason) for entity_id in ids)
             self._db.commit()
         return purged
-
-    def topic_memory_ids(self, scope: Scope) -> list[tuple[str, str]]:
-        topic_clause, topic_params = _scope_clause(scope, prefix="t.")
-        memory_clause, memory_params = _scope_clause(scope, prefix="m.")
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT t.normalized AS category, mt.memory_id AS memory_id "
-                "FROM topics t JOIN memory_topics mt ON mt.topic_id = t.id "
-                "JOIN memories m ON m.id = mt.memory_id "
-                f"WHERE m.invalid_at IS NULL AND {topic_clause} AND {memory_clause}",
-                (*topic_params, *memory_params),
-            ).fetchall()
-        return [(row["category"], row["memory_id"]) for row in rows]
-
-    def direct_topic_counts(self, scope: Scope) -> list[dict[str, Any]]:
-        """Counts for directly-attached topics only, without descendant rollup."""
-        topic_clause, topic_params = _scope_clause(scope, prefix="t.")
-        memory_clause, memory_params = _scope_clause(scope, prefix="m.")
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT t.normalized AS category, "
-                "COUNT(DISTINCT mt.memory_id) AS count FROM topics t "
-                "JOIN memory_topics mt ON mt.topic_id = t.id "
-                "JOIN memories m ON m.id = mt.memory_id "
-                f"WHERE m.invalid_at IS NULL AND {topic_clause} AND {memory_clause} "
-                "GROUP BY t.normalized HAVING count > 0 "
-                "ORDER BY count DESC, category",
-                (*topic_params, *memory_params),
-            ).fetchall()
-        return [{"category": row["category"], "count": row["count"]} for row in rows]
 
     def retag_topics(
         self, scope: Scope, remove: set[str], add: str | None, *, exact_user: bool = False
@@ -1665,6 +1643,25 @@ class LocalBackend(MemoryBackend):
                 )
             self._db.commit()
         return changed
+
+    def tag_namespaces(self, names: Iterable[str]) -> list[str | None]:
+        wanted = sorted({str(name).strip().lower() for name in names if str(name).strip()})
+        if not wanted:
+            return []
+        marks = ",".join("?" * len(wanted))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT user_id FROM entities WHERE entity_type = ? AND merged_into IS NULL "
+                f"AND normalized IN ({marks}) "
+                "UNION SELECT m.user_id FROM memories m "
+                "JOIN memory_topics mt ON mt.memory_id = m.id "
+                f"JOIN topics t ON t.id = mt.topic_id WHERE t.normalized IN ({marks}) "
+                f"UNION SELECT user_id FROM synthetic_tags WHERE lower(tag) IN ({marks})",
+                (TOPIC_TYPE, *wanted, *wanted, *wanted),
+            ).fetchall()
+        # None first, then by name: a stable order for the edits made one by one
+        return sorted((row["user_id"] for row in rows),
+                      key=lambda user: (user is not None, user or ""))
 
     def add_topic_relation(self, relation: TopicRelation) -> TopicRelation:
         with self._lock:
@@ -2817,6 +2814,47 @@ class LocalBackend(MemoryBackend):
                 out.append(self._row_to_entity(r))
         return out
 
+    def entities_of_memories(
+        self, memory_ids: list[str], *, kind: str = "named"
+    ) -> dict[str, list[Entity]]:
+        out: dict[str, list[Entity]] = {mid: [] for mid in memory_ids}
+        ids = list(out)
+        seen: set[tuple[str, str]] = set()
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT em.memory_id AS mentioned_in, e.* FROM entity_mentions em "
+                    "JOIN entities e ON e.id = em.entity_id "
+                    f"WHERE em.memory_id IN ({','.join('?' * len(chunk))}) "
+                    f"AND e.merged_into IS NULL AND {_kind_clause(kind, 'e.')}",
+                    chunk,
+                ).fetchall()
+            for r in rows:  # distinct by memory and entity, as entities_of_memory
+                if (r["mentioned_in"], r["id"]) not in seen:
+                    seen.add((r["mentioned_in"], r["id"]))
+                    out[r["mentioned_in"]].append(self._row_to_entity(r))
+        return out
+
+    def entity_memory_counts(
+        self, entity_ids: list[str], *, scope: Scope | None = None
+    ) -> dict[str, int]:
+        out = dict.fromkeys(entity_ids, 0)
+        ids = list(out)
+        scope_clause, scope_params = _scope_clause(scope or Scope(), prefix="m.")
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT em.entity_id AS entity_id, COUNT(DISTINCT m.id) AS n "
+                    "FROM entity_mentions em JOIN memories m ON m.id = em.memory_id "
+                    f"WHERE em.entity_id IN ({','.join('?' * len(chunk))}) "
+                    f"AND m.invalid_at IS NULL AND {scope_clause} GROUP BY em.entity_id",
+                    (*chunk, *scope_params),
+                ).fetchall()
+            out.update((r["entity_id"], int(r["n"])) for r in rows)
+        return out
+
     def touch_entity(self, entity_id: str) -> None:
         with self._lock:
             self._db.execute(
@@ -2896,6 +2934,14 @@ class LocalBackend(MemoryBackend):
         self._db.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
 
     def _retire_locked(self, entity_id: str, reason: str) -> bool:
+        if self._db.execute(
+            "SELECT 1 FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone() is None:
+            return False
+        # A tag folded into it is a tag again: its tombstone would otherwise
+        # point at nothing, filing would make a fresh topic beside it, and a
+        # restore would bring the fold back, two entities claiming one tag.
+        self._unfold_tags_locked(entity_id)
         snapshot = self._entity_snapshot_locked(entity_id)
         if snapshot is None:
             return False
@@ -2911,6 +2957,47 @@ class LocalBackend(MemoryBackend):
         )
         self._remove_entity_rows_locked(entity_id)
         return True
+
+    def _unfold_tags_locked(self, entity_id: str) -> None:
+        """Make each tag folded into ``entity_id`` (a topic entity whose
+        tombstone points at it: "bildy" the tag into "Bildy" the product) a
+        topic again, before the entity is retired: its tombstone becomes the
+        active topic of its name (or, where one is active already, points at
+        that one), and the memories filed under the name are filed again, so
+        their mentions go to the topic instead of the entity going away."""
+        now = utcnow()
+        names: dict[str | None, set[str]] = {}
+        for tombstone in self._db.execute(
+            "SELECT id, user_id, normalized FROM entities "
+            "WHERE merged_into = ? AND entity_type = ? ORDER BY created_at, id",
+            (entity_id, TOPIC_TYPE),
+        ).fetchall():
+            active = self._active_topic_locked(tombstone["normalized"], tombstone["user_id"])
+            self._db.execute(
+                "UPDATE entities SET merged_into = ?, updated_at = ?, "
+                "description_updated_at = NULL WHERE id = ?",
+                (active, now, tombstone["id"]),
+            )
+            names.setdefault(tombstone["user_id"], set()).add(tombstone["normalized"])
+        for user_id, unfolded in names.items():
+            self._refile_named_locked(user_id, unfolded)
+
+    def _refile_named_locked(self, user_id: str | None, names: set[str]) -> None:
+        """File again the memories of ``user_id`` (exactly) whose column names
+        one of ``names`` (``_refile_locked``)."""
+        wanted = sorted(names)
+        ids = [row["id"] for row in self._db.execute(
+            "SELECT DISTINCT m.id FROM memories m "
+            "JOIN memory_topics mt ON mt.memory_id = m.id "
+            "JOIN topics t ON t.id = mt.topic_id "
+            f"WHERE m.user_id IS ? AND t.normalized IN ({','.join('?' * len(wanted))})",
+            (user_id, *wanted),
+        ).fetchall()]
+        cache: dict[Any, Any] = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            self._refile_locked(
+                f"id IN ({','.join('?' * len(chunk))})", tuple(chunk), cache=cache)
 
     def retire_entity(self, entity_id: str, reason: str = "removed") -> bool:
         """Remove an entity the recoverable way: snapshot first, then delete.
@@ -2954,7 +3041,16 @@ class LocalBackend(MemoryBackend):
                 return False  # something already lives under this id
             snapshot = json.loads(row["snapshot"])
             self._insert_row_locked("entities", snapshot["entity"])
+            refile: dict[str | None, set[str]] = {}
             for tombstone in snapshot.get("tombstones", []):
+                if tombstone.get("entity_type") == TOPIC_TYPE:
+                    # a tag folded into it before retiring unfolded tags (a
+                    # snapshot of before) comes back a topic, not folded again:
+                    # the active topic of its name, or pointing at that one
+                    tombstone = {**tombstone, "merged_into": self._active_topic_locked(
+                        tombstone["normalized"], tombstone["user_id"])}
+                    refile.setdefault(tombstone["user_id"], set()).add(
+                        tombstone["normalized"])
                 self._insert_row_locked("entities", tombstone)
             for mention in snapshot.get("mentions", []):
                 if self._db.execute(
@@ -2981,6 +3077,8 @@ class LocalBackend(MemoryBackend):
                     "SELECT 1 FROM entities WHERE id = ?", (other,)
                 ).fetchone() is not None:
                     self._insert_row_locked("entity_proposals", proposal)
+            for user_id, names in refile.items():
+                self._refile_named_locked(user_id, names)
             self._restore_aliases_locked(entity_id, snapshot.get("aliases", []))
             self._db.execute(
                 "DELETE FROM retired_entities WHERE entity_id = ?", (entity_id,)
@@ -3046,73 +3144,82 @@ class LocalBackend(MemoryBackend):
         kept: the thing keeps its type, relations and name, and the tag's
         memories become its mentions."""
         with self._lock:
-            keep_root = self.resolve_entity_id(keep_id)
-            merge_root = self.resolve_entity_id(merge_id)
-            if keep_root is None or merge_root is None:
-                return False
-            if keep_root == merge_root:
-                return True
-            types = {
-                row["id"]: row["entity_type"] for row in self._db.execute(
-                    "SELECT id, entity_type FROM entities WHERE id IN (?, ?)",
-                    (keep_root, merge_root),
-                ).fetchall()
-            }
-            if types.get(keep_root) == TOPIC_TYPE and types.get(merge_root) != TOPIC_TYPE:
-                keep_root, merge_root = merge_root, keep_root
-            changed_at = utcnow()
-            cur = self._db.execute(
-                "UPDATE entities SET merged_into = ?, updated_at = ?, "
-                "description_updated_at = NULL "
-                "WHERE id = ? AND merged_into IS NULL",
-                (keep_root, changed_at, merge_root),
-            )
-            if cur.rowcount == 0:
-                self._db.rollback()
-                return False
-            self._db.execute(
-                "UPDATE entity_mentions SET entity_id = ? WHERE entity_id = ?",
+            folded = self._merge_entities_locked(keep_id, merge_id)
+            if folded:
+                self._db.commit()
+            return folded is not None
+
+    def _merge_entities_locked(self, keep_id: str, merge_id: str) -> bool | None:
+        """The writes of ``merge_entities``, left uncommitted, so that a caller
+        can make them part of its own transaction (the open's
+        ``_ensure_one_active_topic_per_name``). True when a fold was written,
+        False when the two were one already, None when either is missing or
+        was folded meanwhile; nothing is written but for True."""
+        keep_root = self.resolve_entity_id(keep_id)
+        merge_root = self.resolve_entity_id(merge_id)
+        if keep_root is None or merge_root is None:
+            return None
+        if keep_root == merge_root:
+            return False
+        types = {
+            row["id"]: row["entity_type"] for row in self._db.execute(
+                "SELECT id, entity_type FROM entities WHERE id IN (?, ?)",
                 (keep_root, merge_root),
-            )
-            self._db.execute(
-                "UPDATE relations SET subject = ? WHERE subject = ?",
-                (keep_root, merge_root),
-            )
-            self._db.execute(
-                "UPDATE relations SET object = ? WHERE object = ?",
-                (keep_root, merge_root),
-            )
-            self._db.execute(
-                "UPDATE relations SET invalid_at = ? "
-                "WHERE subject = object AND invalid_at IS NULL",
-                (changed_at,),
-            )
-            self._db.execute(
-                "UPDATE entity_proposals SET entity_a = ? WHERE entity_a = ?",
-                (keep_root, merge_root),
-            )
-            self._db.execute(
-                "UPDATE entity_proposals SET entity_b = ? WHERE entity_b = ?",
-                (keep_root, merge_root),
-            )
-            self._db.execute(
-                "UPDATE entity_proposals SET status = 'confirmed', decided_at = ? "
-                "WHERE entity_a = entity_b AND status = 'proposed'",
-                (changed_at,),
-            )
-            # The merged entity carries both sides' memories now: its open
-            # pairs start the comparison funnel again on that evidence.
-            self._db.execute(
-                "UPDATE entity_proposals SET compared_step = 0 "
-                "WHERE status = 'proposed' AND (entity_a = ? OR entity_b = ?)",
-                (keep_root, keep_root),
-            )
-            self._db.execute(
-                "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
-                "WHERE id = ?",
-                (changed_at, keep_root),
-            )
-            self._db.commit()
+            ).fetchall()
+        }
+        if types.get(keep_root) == TOPIC_TYPE and types.get(merge_root) != TOPIC_TYPE:
+            keep_root, merge_root = merge_root, keep_root
+        changed_at = utcnow()
+        cur = self._db.execute(
+            "UPDATE entities SET merged_into = ?, updated_at = ?, "
+            "description_updated_at = NULL "
+            "WHERE id = ? AND merged_into IS NULL",
+            (keep_root, changed_at, merge_root),
+        )
+        if cur.rowcount == 0:
+            return None
+        self._db.execute(
+            "UPDATE entity_mentions SET entity_id = ? WHERE entity_id = ?",
+            (keep_root, merge_root),
+        )
+        self._db.execute(
+            "UPDATE relations SET subject = ? WHERE subject = ?",
+            (keep_root, merge_root),
+        )
+        self._db.execute(
+            "UPDATE relations SET object = ? WHERE object = ?",
+            (keep_root, merge_root),
+        )
+        self._db.execute(
+            "UPDATE relations SET invalid_at = ? "
+            "WHERE subject = object AND invalid_at IS NULL",
+            (changed_at,),
+        )
+        self._db.execute(
+            "UPDATE entity_proposals SET entity_a = ? WHERE entity_a = ?",
+            (keep_root, merge_root),
+        )
+        self._db.execute(
+            "UPDATE entity_proposals SET entity_b = ? WHERE entity_b = ?",
+            (keep_root, merge_root),
+        )
+        self._db.execute(
+            "UPDATE entity_proposals SET status = 'confirmed', decided_at = ? "
+            "WHERE entity_a = entity_b AND status = 'proposed'",
+            (changed_at,),
+        )
+        # The merged entity carries both sides' memories now: its open
+        # pairs start the comparison funnel again on that evidence.
+        self._db.execute(
+            "UPDATE entity_proposals SET compared_step = 0 "
+            "WHERE status = 'proposed' AND (entity_a = ? OR entity_b = ?)",
+            (keep_root, keep_root),
+        )
+        self._db.execute(
+            "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
+            "WHERE id = ?",
+            (changed_at, keep_root),
+        )
         return True
 
     def add_proposal(self, proposal: MergeProposal) -> MergeProposal:

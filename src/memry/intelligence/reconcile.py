@@ -9,7 +9,7 @@ Decisions:
 - UPDATE   - refines/extends an existing memory -> rewrite it in place with
              the merged text the text model writes. When nothing wrote that
              text (no text model), the existing memory is kept and superseded
-             by the new one, so no text is lost.
+             by the new one, so no text is lost; held back as a DELETE is.
 - DELETE   - contradicts an existing memory -> invalidate old, add new,
              link old.superseded_by -> new.id  (temporal supersede).
              Only where little is at stake: see ``held_back``. Otherwise both
@@ -290,15 +290,17 @@ def reconcile_candidate(
             reason=reason or "already known",
         )
 
-    # An UPDATE rewrites the target with merged text. The decision provider
-    # chooses the action only, so the text model writes that text; when
-    # nothing wrote it, overwriting the target with the new fact alone would
-    # lose what only the target said, so the new memory supersedes it instead.
+    # An UPDATE rewrites the target with merged text. A decision provider
+    # chooses the action only, and the text model's own reply can leave the
+    # text out as well, so whenever the decision carries none the text model
+    # is asked to write it; when nothing wrote it, overwriting the target with
+    # the new fact alone would lose what only the target said, so the new
+    # memory supersedes it instead (held back as a contradiction would be).
     superseding = False
     new_content = ""
     if action == "UPDATE" and target is not None:
         new_content = str(decision.get("content") or "").strip()
-        if not new_content and judged is not None:
+        if not new_content:
             new_content = write_merged(llm, target.content, candidate.content) or ""
         superseding = not new_content
 
@@ -340,19 +342,24 @@ def reconcile_candidate(
         )
         return AddAction(event="UPDATE", memory_id=target.id, content=new_content, reason=reason)
 
-    # ADD (possibly preceded by a supersede when action == DELETE)
+    # ADD, possibly preceded by a supersede: of a contradicted target (DELETE)
+    # or of one an UPDATE nobody wrote the merged text for. Both take the
+    # target out of use, so both are held back where that needs asking
+    # (``held_back``); the marker's ``kind`` says which it was.
     held = (
         held_back(target, decision, supersede_cfg or SupersedeConfig())
-        if action == "DELETE" and target is not None
+        if (action == "DELETE" or superseding) and target is not None
         else None
     )
     metadata = dict(candidate.metadata or {})
     if held and target is not None:
         metadata[CONFLICT_KEY] = {
             "with": target.id,
-            "reason": reason or "contradicted by new information",
+            "reason": reason or ("updated by new information" if superseding
+                                 else "contradicted by new information"),
             "held": held,
             "at": utcnow(),
+            **({"kind": "update"} if superseding else {}),
         }
     new_memory = Memory(
         content=candidate.content,
@@ -379,7 +386,8 @@ def reconcile_candidate(
             event="ADD",
             new_content=stored.content,
             reason=(
-                f"kept beside memory {target.id}, which it contradicts, "
+                f"kept beside memory {target.id}, which it "
+                f"{'updates' if superseding else 'contradicts'}, "
                 f"because {held}. {reason}".strip()
                 if held and target is not None
                 else f"updates memory {target.id}, which it supersedes. {reason}".strip()
@@ -395,7 +403,8 @@ def reconcile_candidate(
             event="ADD",
             memory_id=stored.id,
             content=stored.content,
-            reason=f"conflicts with memory {target.id}; waiting for review ({held})",
+            reason=(f"{'updates' if superseding else 'conflicts with'} memory "
+                    f"{target.id}; waiting for review ({held})"),
             conflicts_with=target.id,
         )
 

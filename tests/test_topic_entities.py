@@ -173,7 +173,13 @@ def test_the_vocabulary_offered_to_extraction_is_the_same_as_before(tagged):
                               ["tax"], ["b-tag"], ["a tag"]]):
         tagged.add(f"note {i}", user_id="ada", infer=False, categories=tags)
     scope = Scope(user_id="ada")
-    legacy = [row["category"] for row in tagged.backend.direct_topic_counts(scope)]
+    # the legacy index's direct counts, most used first, then by name
+    legacy = [row["category"] for row in tagged.backend._db.execute(
+        "SELECT t.normalized AS category, COUNT(DISTINCT mt.memory_id) AS count "
+        "FROM topics t JOIN memory_topics mt ON mt.topic_id = t.id "
+        "JOIN memories m ON m.id = mt.memory_id "
+        "WHERE m.invalid_at IS NULL AND t.user_id = 'ada' AND m.user_id = 'ada' "
+        "GROUP BY t.normalized ORDER BY count DESC, category")]
     assert tagged._tag_vocabulary(scope, text="anything") == legacy == [
         "tax", "home", "a tag", "b-tag", "garden"]
 
@@ -1219,6 +1225,93 @@ def test_an_index_that_folded_the_two_namespaces_is_replaced_at_open(tmp_path):
         reopened.close()
 
 
+def test_an_open_stopped_between_the_index_and_the_refile_files_again_at_the_next(
+        tmp_path, monkeypatch):
+    """Replacing the index that folded "" and None dropped it in a commit of
+    its own, and nothing recorded that the memories still had to be filed
+    again: an open stopped after the drop left a database with neither index,
+    and every later open skipped the refile. The refile is marked done once it
+    ran, so a database whose old index is gone but whose marker is absent is
+    filed again at the next open; and the drop, the fold of twins and the new
+    index are one transaction, so a failure among them keeps the old index."""
+    import sqlite3
+
+    from memry.backends.local import LocalBackend
+
+    path = tmp_path / "stopped.db"
+    backend = LocalBackend(str(path))
+    nobody = backend.insert_memory(Memory(content="a", user_id=None, categories=["tax"])).id
+    empty = backend.insert_memory(Memory(content="b", user_id="", categories=["tax"])).id
+    backend.close()
+
+    def owners(backend):
+        return {memory_id: [e.user_id for e in backend.entities_of_memory(
+            memory_id, kind="topic")] for memory_id in (nobody, empty)}
+
+    def stopped_after_the_drop():  # the mention the old index cost, no index, no marker
+        with sqlite3.connect(path) as raw:
+            raw.execute("DROP INDEX IF EXISTS ux_entities_active_topic_ns")
+            raw.execute("DELETE FROM entity_mentions WHERE memory_id = ?", (empty,))
+            raw.execute("DELETE FROM entities WHERE user_id = ''")
+            raw.execute("DELETE FROM meta WHERE key = 'schema:active-topic-ns:v1'")
+        raw.close()
+
+    stopped_after_the_drop()
+    reopened = LocalBackend(str(path))
+    try:
+        assert owners(reopened) == {nobody: [None], empty: [""]}
+    finally:
+        reopened.close()
+
+    # stopped again, this time during the refile: the index is in, the marker
+    # is not, and the next open files the memories again
+    stopped_after_the_drop()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("stopped")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(LocalBackend, "_refile_locked", fail)
+        with pytest.raises(RuntimeError):
+            LocalBackend(str(path))
+    reopened = LocalBackend(str(path))
+    try:
+        assert owners(reopened) == {nobody: [None], empty: [""]}
+    finally:
+        reopened.close()
+
+    # the old index (by its name; not unique here, so twins can stand beside
+    # it) and twins: a failure while folding them leaves the old index
+    with sqlite3.connect(path) as raw:
+        raw.execute("DROP INDEX ux_entities_active_topic_ns")
+        raw.execute("DELETE FROM entity_mentions WHERE memory_id = ?", (empty,))
+        raw.execute("DELETE FROM entities WHERE user_id = ''")
+        raw.execute("CREATE INDEX ux_entities_active_topic ON entities("
+                    "IFNULL(user_id, ''), normalized) "
+                    "WHERE entity_type = 'topic' AND merged_into IS NULL")
+        for twin, created in (("twin", "2999-01-01"), ("first", "2000-01-01")):
+            raw.execute("INSERT INTO entities (id, name, normalized, entity_type, user_id, "
+                        "metadata, created_at, updated_at) VALUES (?, 'home', 'home', "
+                        "'topic', 'ada', '{}', ?, ?)", (twin, created, created))
+    raw.close()
+    with monkeypatch.context() as patch:
+        patch.setattr(LocalBackend, "_merge_entities_locked", fail)
+        with pytest.raises(RuntimeError):
+            LocalBackend(str(path))
+    with sqlite3.connect(path) as raw:
+        indexes = {row[0] for row in raw.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    raw.close()
+    assert "ux_entities_active_topic" in indexes
+    assert "ux_entities_active_topic_ns" not in indexes
+    reopened = LocalBackend(str(path))
+    try:
+        assert owners(reopened) == {nobody: [None], empty: [""]}
+        assert reopened.get_entity("twin").merged_into == "first"
+    finally:
+        reopened.close()
+
+
 def test_an_update_retags_its_own_memory_only(tagged, monkeypatch):
     """PATCHing one memory's tags writes them in their obvious canonical form
     and files a name merged away under its survivor, without the
@@ -1304,3 +1397,92 @@ def test_a_column_follows_tombstones_topic_to_topic_and_keeps_the_tag_of_a_thing
     assert later.id in {m.id for m in tagged.get_all(user_id="ada", categories=["tax"])}
     assert tagged.backend.tag_filing(["Taxes", "tax", "home", "new"], Scope(user_id="ada")) == {
         "taxes": "tax", "tax": "tax", "home": "home", "new": "new"}
+
+
+@pytest.mark.parametrize("retire", ["not an entity", "name kept as a tag", "snapshot of before"])
+def test_a_tag_folded_into_a_thing_is_a_tag_again_once_the_thing_is_retired(
+        tagged, retire, monkeypatch):
+    """"bildy" the tag went into "Bildy" the product, which was then retired
+    (removed as not an entity, or removed keeping its name as a tag): the tag
+    is a topic again and its memories are filed under it, a later save with
+    the tag files there too, and restoring the product does not fold the tag
+    back. Before, the tag's tombstone went with the product, the save made a
+    fresh topic beside memories that mentioned nothing, and the restore
+    brought the tombstone back: two entities claimed "bildy", and the count
+    said 1 where the filter found 3. A product retired before this rule (its
+    snapshot holds the tag's tombstone) is restored the same way: the
+    tombstone points at the topic the save made, and the memories are filed
+    under it."""
+    from memry.backends.local import LocalBackend
+
+    scope = Scope(user_id="ada")
+    old = [tagged.add(f"note {i}", user_id="ada", infer=False,
+                      categories=["bildy"]).actions[0].memory_id for i in range(2)]
+    product = tagged.backend.insert_entity(Entity(
+        name="Bildy", normalized="bildy", entity_type="product", user_id="ada"))
+    tag = tagged.backend.topic_entity("bildy", scope, create=False)
+    assert tagged.merge_entities(product.id, tag.id)
+    assert tagged.backend.get_entity(tag.id).merged_into == product.id
+    if retire == "name kept as a tag":
+        assert tagged.remove_entity_preserving_tag(product.id)["removed"] == 1
+    else:
+        with monkeypatch.context() as patch:
+            if retire == "snapshot of before":
+                patch.setattr(LocalBackend, "_unfold_tags_locked", lambda self, entity_id: None)
+            assert tagged.remove_entities([product.id], reason="not an entity") == 1
+    new = tagged.add("note 2", user_id="ada", infer=False,
+                     categories=["bildy"]).actions[0].memory_id
+    assert tagged.restore_entities([product.id]) == 1
+
+    claimants = {tagged.backend.resolve_entity_id(row["id"]) for row in tagged.backend._db.execute(
+        "SELECT id FROM entities WHERE entity_type = 'topic' AND normalized = 'bildy' "
+        "AND user_id = 'ada'")}
+    [claimant] = claimants
+    assert tagged.backend.get_entity(claimant).entity_type == TOPIC_TYPE
+    if retire != "snapshot of before":
+        assert claimant == tag.id  # the tag's own topic, active again
+    filtered = {m.id for m in tagged.get_all(user_id="ada", categories=["bildy"])}
+    assert filtered == {*old, new}
+    assert tagged.categories(user_id="ada") == [{"category": "bildy", "count": 3}]
+    assert {m.id for m in tagged.backend.entity_memories(claimant, limit=10)} == filtered
+    assert tagged.backend.get_entity(product.id).merged_into is None  # restored, a thing
+    _agree(tagged, "ada")
+
+
+def test_an_edit_with_no_user_is_made_in_every_namespace_that_carries_the_tag(tagged):
+    """An admin's rename (no user) renames "taxes" for each user that has it,
+    each in full: the user's topic folds into a "levies" of that user, which
+    takes over its description, the columns and mentions follow, and no
+    "taxes" topic stays active anywhere. Before, the columns of every user
+    were rewritten but only the topics without a user were merged. A merge
+    and a delete with no user reach every namespace the same way."""
+    from memry.models import utcnow
+
+    memories = {}
+    for user in ("ada", "bob"):
+        memories[user] = tagged.add(f"{user} files taxes", user_id=user, infer=False,
+                                    categories=["taxes"]).actions[0].memory_id
+        topic = tagged.backend.topic_entity("taxes", Scope(user_id=user), create=False)
+        tagged.backend.set_entity_description(topic.id, f"what {user} owes", utcnow())
+    assert tagged.rename_tag("taxes", "levies") == 2
+    assert _active_topics(tagged, "taxes") == []
+    for user in ("ada", "bob"):
+        scope = Scope(user_id=user)
+        levies = tagged.backend.topic_entity("levies", scope, create=False)
+        assert levies.user_id == user and levies.description == f"what {user} owes"
+        assert tagged.backend.topic_entity(
+            "taxes", scope, create=False, follow_merged=True).id == levies.id
+        assert tagged.get(memories[user]).categories == ["levies"]
+        assert tagged.categories(user_id=user) == [{"category": "levies", "count": 1}]
+        _agree(tagged, user)
+
+    tagged.add("ada pays duties", user_id="ada", infer=False, categories=["duties"])
+    tagged.add("bob pays duties", user_id="bob", infer=False, categories=["duties"])
+    assert tagged.merge_tags(["duties"], "levies") == 2
+    assert _active_topics(tagged, "duties") == []
+    assert [tagged.categories(user_id=user) for user in ("ada", "bob")] == [
+        [{"category": "levies", "count": 2}]] * 2
+    assert tagged.delete_tag("levies") == 4
+    assert [tagged.categories(user_id=user) for user in ("ada", "bob")] == [[], []]
+    for user in ("ada", "bob"):
+        _agree(tagged, user)

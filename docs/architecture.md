@@ -408,10 +408,12 @@ For a normal text query:
    needs several memories. A question with one answer, or about everything, is answered
    from that call. A question needing several (a list, a total, a comparison) gets one more
    call on up to `set_pool` (80) memories not judged yet: those filed under the topics
-   (tags) the first 20 share, a small topic most of them carry counting most, or, when
-   they share none, the order past the first 20. The set's members from both calls come
-   first and are returned past the limit, up to 100. In this mode a question naming no hub
-   is judged the same way, in the text ranking's order. The 0.35 re-rank blend runs only
+   (tags) the first 20 share, a small topic most of them carry counting most (its size
+   counted in the scope searched), and, where those are fewer (an untagged store, or
+   they share none), the memories nearest by vector to the members the first call found.
+   Only with no member to start from is it the order past the first 20. The set's
+   members from both calls come first and are returned past the limit, up to 100. In
+   this mode a question naming no hub is judged the same way, in the text ranking's order. The 0.35 re-rank blend runs only
    on a search that was neither ordered by the linked search nor judged (a tag or entity
    filter, or `relational=False`).
 7. Context reconstruction may prepend a bounded, lazily refreshed entity description and

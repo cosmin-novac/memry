@@ -270,6 +270,28 @@ def test_same_scope_burst_coalesces_without_explicit_context(tmp_path):
     store.close()
 
 
+def test_a_distilled_group_takes_its_latest_save_time_compared_as_times(tmp_path):
+    """Two saves of one group given their times in two ISO forms: the facts
+    take the later instant. Compared as text, "...00Z" sorts after
+    "...00.500000+00:00" and the earlier time won."""
+    from datetime import datetime, timezone
+
+    llm = FakeLLM([facts_response(fact("Ada moved to Berlin in spring.")), _audit()])
+    store = _store(str(tmp_path / "memry.db"), llm)
+    store.add_deferred("Ada moved", user_id="ada", created_at="2026-01-01T10:00:00Z")
+    store.add_deferred("to Berlin in spring", user_id="ada",
+                       created_at="2026-01-01T10:00:00.500000+00:00")
+
+    outcome = store.process_pending_enrichments(
+        quiet_seconds=120, now=datetime.now(timezone.utc) + timedelta(seconds=300))
+
+    assert outcome["claimed"] == 2 and outcome["succeeded"] == 2
+    [distilled] = store.get_all(user_id="ada")
+    assert distilled.content == "Ada moved to Berlin in spring."
+    assert parse_ts(distilled.created_at) == parse_ts("2026-01-01T10:00:00.500000+00:00")
+    store.close()
+
+
 def test_mcp_acknowledges_pending_save_before_enrichment(tmp_path):
     llm = FakeLLM()
     store = _store(str(tmp_path / "memry.db"), llm)

@@ -528,6 +528,58 @@ def test_an_update_kept_and_superseded_is_no_contradiction_and_undo_keeps_both()
     store.close()
 
 
+def test_an_important_target_of_an_update_nobody_could_write_is_kept_and_asked_about():
+    """An UPDATE with no merged text supersedes its target only where a
+    contradiction could (``held_back``): a target rated important stays in
+    use beside the new memory, which carries the conflict marker, and the
+    pair waits under Upkeep."""
+    from memry.intelligence.reconcile import CONFLICT_KEY
+
+    decider = _stub(lambda k, q: Answer("UPDATE" if k == "action" else "0", {}, 0.95, True))
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64),
+                        decider=decider)
+    target = store.add("Ada works at Northwind", user_id="u", infer=False,
+                       importance=0.9).actions[0].memory_id
+    action = store.add("Ada is a data engineer there", user_id="u", infer=False).actions[0]
+
+    assert action.event == "ADD" and action.conflicts_with == target
+    old = store.get(target)
+    assert old.invalid_at is None and old.superseded_by is None
+    assert "rated important" in store.get(action.memory_id).metadata[CONFLICT_KEY]["held"]
+    assert [e.event for e in store.history(target)] == ["ADD"]
+    assert store.replaced(user_id="u") == []
+    [item] = [i for i in store.upkeep_queue(user_id="u") if i["kind"] == "conflict"]
+    assert item["id"] == action.memory_id and item["replaces"] == ["Ada works at Northwind"]
+    assert "updates a memory" in item["detail"]
+    # confirmed, the new one replaces the old as an update does: the undo keeps both
+    assert store.decide_upkeep("conflict", action.memory_id, "accept", user_id="u")
+    [event] = [e for e in store.history(target) if e.event == "SUPERSEDE"]
+    assert event.kind == "update"
+    store.close()
+
+
+def test_an_update_the_text_model_chose_without_text_asks_it_for_the_merge():
+    """The text model's own UPDATE with no content is completed as a decision
+    provider's is: the text model is asked for the merged text, and the target
+    is rewritten with it instead of being superseded."""
+    from conftest import decision, facts_response
+    from memry.intelligence.reconcile import MERGE_REQUEST
+
+    llm = FakeLLM()
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64))
+    target = store.add("Ada works at Northwind", user_id="u", infer=False).actions[0].memory_id
+    merged = "Ada works at Northwind as a data engineer"
+    llm.queue(decision("UPDATE", target=0, content=None),
+              decision("UPDATE", target=0, content=merged), facts_response())
+    result = store.add("Ada is a data engineer there", user_id="u", infer=False)
+
+    assert [(a.event, a.memory_id) for a in result.actions] == [("UPDATE", target)]
+    assert store.get(target).content == merged
+    assert MERGE_REQUEST not in llm.calls[0][1] and MERGE_REQUEST in llm.calls[1][1]
+    assert store.replaced(user_id="u") == []
+    store.close()
+
+
 def test_a_contradiction_is_listed_as_one_and_its_undo_forgets_the_newer():
     from conftest import decision, facts_response
 

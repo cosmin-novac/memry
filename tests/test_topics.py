@@ -51,7 +51,9 @@ def test_existing_categories_backfill_once(tmp_path):
         assert [m.id for m in reopened.list_memories(
             Scope(user_id="ada"), categories=["OLD"]
         )] == [memory.id]
-        assert reopened.topic_counts(Scope(user_id="ada")) == [
+        # the legacy index is rebuilt, and the live counter agrees with it
+        assert [t.normalized for t in reopened.list_topics(Scope(user_id="ada"))] == ["old"]
+        assert reopened.topic_mention_counts(Scope(user_id="ada")) == [
             {"category": "old", "count": 1}
         ]
     finally:

@@ -672,11 +672,12 @@ def _shopping(store):
     return prices
 
 
-def test_a_set_question_whose_first_share_no_topic_reads_the_ranking_on(store):
+def test_a_set_question_whose_first_share_no_topic_reads_on_from_its_members(store):
     """"Which car is the cheapest?" needs every price. Nothing in this store is
     tagged, so the memories of the first call share no topic: the second call
-    judges the ranking past them, up to ``retrieval.set_pool``. Every price is
-    a member, and all of them are returned, more than the limit."""
+    judges the memories nearest the members it found, up to
+    ``retrieval.set_pool``. Every price is a member, and all of them are
+    returned, more than the limit."""
     prices = _shopping(store)
     judge = _RoundJudge(specific=0.9, several=0.9, scores={"costs": 0.12})
     store.decider = judge

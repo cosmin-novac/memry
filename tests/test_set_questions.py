@@ -1,7 +1,8 @@
 """Questions that need several memories ("Which car is the cheapest?"): the
 decision provider judges the first ``decision.rerank_pool`` of the ranking and
-then, in one more call, the memories filed under the topics those share, up
-to ``retrieval.set_pool`` (``MemoryStore._set_pool``). A question with one
+then, in one more call, the memories filed under the topics those share, and
+past those the memories nearest the members found, up to
+``retrieval.set_pool`` (``MemoryStore._set_pool``). A question with one
 answer, or about everything, makes one call. Also: the linked search is the
 only one, and a removed mode is refused."""
 
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -48,10 +50,10 @@ def store():
     s.close()
 
 
-def _add(store, text, tags=(), entities=()):
+def _add(store, text, tags=(), entities=(), run_id=None):
     memory = store.backend.insert_memory(
-        Memory(content=text, user_id="ada", embedding_model=store.embedder.model_id,
-               categories=list(tags)),
+        Memory(content=text, user_id="ada", run_id=run_id,
+               embedding_model=store.embedder.model_id, categories=list(tags)),
         embedding=store.embedder.embed([text])[0])
     for entity in entities:
         store.backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
@@ -90,8 +92,11 @@ def test_a_set_whose_members_share_a_topic_takes_two_calls_and_every_member(stor
     """The first 20 judged are the prices the question's words find; they
     share the topic "car prices", so the second call judges the ten dealer
     quotes filed under it, which no word of the question matches. Every price
-    is a member and returned, well past the limit."""
+    is a member and returned, well past the limit. (At a budget of ten the
+    topic fills the call; a larger one is filled from the memories nearest
+    the members, below.)"""
     priced, quoted = _prices(store)
+    store.config.retrieval.set_pool = 10
     store.decider = judge = _set_judge()
     results = store.search(QUESTION, user_id="ada", limit=5)
     assert judge.calls == 2
@@ -144,31 +149,141 @@ def test_the_second_call_orders_each_candidate_once(store, monkeypatch):
     assert len(scored) == len(set(scored)) == 10
 
 
-def test_a_set_whose_first_share_no_topic_reads_the_ranking_past_them(store):
-    """Nothing is tagged: the second call judges the ranking past the first 20
-    instead, and the set question still makes two calls."""
-    _prices(store, tagged=False)
+class _Counting:
+    """A backend's stand-in that counts the calls made to it."""
+
+    def __init__(self, backend):
+        self.backend, self.calls = backend, Counter()
+
+    def __getattr__(self, name):
+        attr = getattr(self.backend, name)
+        if not callable(attr):
+            return attr
+
+        def counted(*args, **kwargs):
+            self.calls[name] += 1
+            return attr(*args, **kwargs)
+        return counted
+
+
+def test_the_second_call_reads_its_hundred_candidates_in_a_handful_of_queries(
+        store, monkeypatch):
+    """A hundred candidates under two shared topics: their entities, the
+    topics' sizes and the candidates' vectors are each read at once, not once
+    per candidate or per topic."""
+    for i in range(120):
+        text = (PRICED if i < 20 else QUOTED).format(i=i, n=14000 + 900 * i)
+        _add(store, text, ["car prices", "cars"])
+    store.config.retrieval.set_pool = 100
+    counting = _Counting(store.backend)
+    set_pool = store._set_pool
+
+    def counted(*args, **kwargs):
+        store.backend = counting
+        try:
+            return set_pool(*args, **kwargs)
+        finally:
+            store.backend = counting.backend
+
+    monkeypatch.setattr(store, "_set_pool", counted)
+    store.decider = judge = _set_judge()
+    store.search(QUESTION, user_id="ada", limit=5)
+    assert judge.calls == 2 and len(judge.batches[1]) == 100
+    assert sum(counting.calls.values()) <= 8, dict(counting.calls)
+
+
+def test_a_topics_size_is_counted_where_the_search_looks(store):
+    """Searched in run r2, "car prices" files 4 memories there (and 400 in
+    r1), "cars" 60. All 20 of the first carry "cars" and two of them "car
+    prices" too: 2 of 4 counts more than 20 of 60, so at a budget of two the
+    two dealer quotes under "car prices" in r2 are judged. Counted over every
+    run, "car prices" had 2 of 404 and the broad topic won."""
+    for i in range(20):
+        _add(store, PRICED.format(i=i, n=14000 + 900 * i),
+             ["cars", "car prices"] if i >= 18 else ["cars"], run_id="r2")
+    quoted = [_add(store, QUOTED.format(i=i, n=14000 + 900 * i), ["car prices"], run_id="r2")
+              for i in range(20, 22)]
+    for i in range(40):
+        _add(store, f"Ada test drove the Carmodel{i} on a rainy day.", ["cars"], run_id="r2")
+    for i in range(400):
+        _add(store, QUOTED.format(i=100 + i, n=9000 + i), ["car prices"], run_id="r1")
+    store.config.retrieval.set_pool = 2
+    store.decider = judge = _set_judge()
+    store.search(QUESTION, user_id="ada", run_id="r2", limit=5)
+    assert judge.calls == 2
+    assert set(judge.batches[1]) == {m.content for m in quoted}
+
+
+class _PriceEmbedder(_KindEmbedder):
+    """Every price near every other however it is worded ("is priced at",
+    "costs"), as a real embedder places them; the question near none."""
+
+    KINDS = ["euros", "insurance", "drove"]
+
+
+def test_a_set_whose_first_share_no_topic_reads_the_memories_nearest_its_members(store):
+    """Nothing is tagged (memories saved with infer=False, or imported
+    verbatim): the second call judges the unjudged memories nearest the
+    members the first call found, by vector, not the ranking past the first
+    20. Here those are the ten dealer quotes, which no word of the question
+    matches and which the ranking does not reach next."""
+    store.embedder = _PriceEmbedder()
+    priced = [_add(store, PRICED.format(i=i, n=14000 + 900 * i)) for i in range(20)]
+    for i in range(30):
+        _add(store, f"Insurance for the Carmodel{i} would be {300 + 20 * i} a year.")
+        _add(store, f"Ada test drove the Carmodel{i} on a rainy day.")
+    quoted = [_add(store, QUOTED.format(i=i, n=14000 + 900 * i)) for i in range(20, 30)]
+    store.config.retrieval.set_pool = 10
     ranking = [r.memory.content for r in
                store.search(QUESTION, user_id="ada", limit=40, relational=False)]
     assert len(ranking) == 40  # the text ranking a limit-5 search reads
+    assert set(ranking[:20]) == {m.content for m in priced}
+    quotes = {m.content for m in quoted}
+    assert not set(ranking[20:30]) & quotes  # what the second call judged before
     store.decider = judge = _set_judge()
     results = store.search(QUESTION, user_id="ada", limit=5)
     assert judge.calls == 2
     assert set(judge.batches[0]) == set(ranking[:20])
-    assert set(judge.batches[1]) == set(ranking[20:])
-    assert results[0].signals["rounds"] == 2 and results[0].signals["pool"] == 20
+    assert set(judge.batches[1]) == quotes
+    members = {r.memory.id for r in results if r.signals.get("member")}
+    assert members == {m.id for m in priced + quoted}
+    assert results[0].signals["rounds"] == 2 and results[0].signals["pool"] == 10
+
+
+def test_a_topic_smaller_than_the_budget_is_filled_from_the_nearest_to_the_members(store):
+    """Four of the dealer quotes are filed under "car prices", six were saved
+    untagged: the second call judges the four the topic gives and fills its
+    budget of ten with the memories nearest the members, the other six
+    quotes, not the insurance costs or test drives."""
+    store.embedder = _PriceEmbedder()
+    priced = [_add(store, PRICED.format(i=i, n=14000 + 900 * i), ["car prices"])
+              for i in range(20)]
+    quoted = [_add(store, QUOTED.format(i=i, n=14000 + 900 * i),
+                   ["car prices"] if i < 24 else []) for i in range(20, 30)]
+    for i in range(30):
+        _add(store, f"Insurance for the Carmodel{i} would be {300 + 20 * i} a year.",
+             ["insurance"])
+        _add(store, f"Ada test drove the Carmodel{i} on a rainy day.", ["test drives"])
+    store.config.retrieval.set_pool = 10
+    store.decider = judge = _set_judge()
+    results = store.search(QUESTION, user_id="ada", limit=5)
+    assert judge.calls == 2
+    assert set(judge.batches[0]) == {m.content for m in priced}
+    assert set(judge.batches[1]) == {m.content for m in quoted}
+    assert results[0].signals["pool"] == 10
 
 
 def test_a_set_question_about_a_named_thing_pools_by_topic_too(store):
     """The linked search runs (the question names a hub): "it" reads for the
     dealer in what the provider reads, and the second call still comes from
-    the topic the first share."""
+    the topic the first share (whose ten fill a budget of ten)."""
     harlow = _entity(store, "Harlow Motors")
     sold = [_add(store, f"Harlow Motors sells the Carmodel{i} for {14000 + 900 * i} euros.",
                  ["car prices"], [harlow]) for i in range(30)]
     for i in range(30):
         _add(store, f"Insurance for the Carmodel{i} would be {300 + 20 * i} a year.",
              ["insurance"])
+    store.config.retrieval.set_pool = 10
     store.decider = judge = _Batches(specific=0.9, several=0.9, scores={"sells": 0.12})
     results = store.search("Which car at Harlow Motors is the cheapest?", user_id="ada",
                            limit=5)

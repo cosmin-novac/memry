@@ -301,6 +301,23 @@ def _is_update_supersede(event: MemoryEvent) -> bool:
     return (event.reason or "").startswith(UPDATE_SUPERSEDE_REASON)
 
 
+def _coverage_warning(missing: list[str]) -> str:
+    """The warning a save returns when the coverage audit
+    (``MemoryStore._coverage_gaps``) names details no fact captured; the
+    same for a direct save and a distillation."""
+    return ("some details were not captured as facts; consider saving "
+            "them explicitly: " + "; ".join(missing))
+
+
+def _conflict_mark(memory: Memory) -> dict[str, Any]:
+    """The conflict marker of a memory kept beside the one it would have
+    replaced (``reconcile.CONFLICT_KEY``), empty when it has none. Its
+    ``kind`` is "update" when an UPDATE nobody wrote the merged text for was
+    held back, and absent for a contradiction."""
+    mark = (memory.metadata or {}).get(CONFLICT_KEY)
+    return mark if isinstance(mark, dict) else {}
+
+
 def _is_contradiction(event: MemoryEvent) -> bool:
     """A SUPERSEDE that reconciliation made because the new memory contradicts
     the old one, as opposed to a merge of duplicates, the distilling of a raw
@@ -550,10 +567,7 @@ class MemoryStore:
 
         missing = self._coverage_gaps(messages, actions) if infer else []
         if missing:
-            warnings.append(
-                "some details were not captured as facts; consider saving "
-                "them explicitly: " + "; ".join(missing)
-            )
+            warnings.append(_coverage_warning(missing))
         return AddResult(episode_ids=episode_ids, actions=actions, warnings=warnings)
 
     def _coverage_gaps(
@@ -1328,7 +1342,10 @@ class MemoryStore:
         # What the saves asked of their memories (add_deferred): the latest
         # time and reference date given, and every memory_metadata merged.
         jobs = [memory.metadata.get(_ENRICHMENT_KEY) or {} for memory in active]
-        created_at = max((j["created_at"] for j in jobs if j.get("created_at")), default=None)
+        created_at: str | None = None
+        for job in jobs:
+            if job.get("created_at"):  # compared as times: "...Z" is "+00:00"
+                created_at = later_ts(created_at, job["created_at"])
         now = max((parse_ts(j["now"]) for j in jobs if j.get("now")), default=None)
         memory_metadata: dict[str, Any] = {}
         for job in jobs:
@@ -1384,10 +1401,7 @@ class MemoryStore:
         warnings = []
         gap = ""
         if missing:
-            warnings.append(
-                "some details were not captured as facts; consider saving "
-                "them explicitly: " + "; ".join(missing)
-            )
+            warnings.append(_coverage_warning(missing))
             gap = "; not captured as facts: " + "; ".join(missing)
             log.warning("distillation of %s did not capture: %s",
                         ", ".join(m.id for m in active), "; ".join(missing))
@@ -1641,10 +1655,10 @@ class MemoryStore:
         property vector, any other by its ordinary one, names kept ("Lena Blum
         works on Project Ekmibo" would otherwise read "It works on it", as
         empty as "What do I know about it?"). ``entities`` caches each memory's
-        entities and is filled in."""
-        for mid in memory_ids:
-            if mid not in entities:
-                entities[mid] = self.backend.entities_of_memory(mid)
+        entities and is filled in, those not cached yet read at once."""
+        missing = [mid for mid in dict.fromkeys(memory_ids) if mid not in entities]
+        if missing:
+            entities.update(self.backend.entities_of_memories(missing))
         reached = [mid for mid in memory_ids if any(e.id in act for e in entities[mid])]
         vectors = self._property_vectors(reached)
         vectors.update(self.backend.vectors_of([mid for mid in memory_ids if mid not in vectors],
@@ -1712,6 +1726,9 @@ class MemoryStore:
 
         def judge(batch: list[SearchResult], meta: bool):
             if link:
+                unread = [r.memory.id for r in batch if r.memory.id not in entities]
+                if unread:  # read at once, not one memory at a time
+                    entities.update(self.backend.entities_of_memories(unread))
                 new = {subject(r.memory.id) for r in batch} - homes.keys() - {None}
                 homes.update(homes_of(self.backend, sorted(new)))
             return self._judged_relevance(
@@ -1731,7 +1748,8 @@ class MemoryStore:
             except Exception:  # embedding service down: the batch keeps its order
                 asked = None
             batch = self._set_pool(ranked, size, judged, scope, include_invalid,
-                                   asked=asked, act=act, entities=entities)
+                                   asked=asked, act=act, entities=entities,
+                                   members=set_members(judged))
             if batch:
                 for result in batch:
                     if result.memory.id not in found:
@@ -1747,7 +1765,7 @@ class MemoryStore:
         # relevance and that override are per property, so they count as far
         # as the question asks for one ("Show everything about it" does not).
         overridden = max((value for mid, value in judged.items()
-                          if any(e.id in seeds for e in ents(mid))), default=0.0)
+                          if seeds and any(e.id in seeds for e in ents(mid))), default=0.0)
         order = []
         for mid, value in judged.items():
             result = found[mid]
@@ -1770,7 +1788,7 @@ class MemoryStore:
     def _set_pool(
         self, ranked: list[SearchResult], size: int, judged: dict[str, float], scope: Scope,
         include_invalid: bool, *, asked: np.ndarray | None, act: dict[str, float],
-        entities: dict[str, list[Entity]],
+        entities: dict[str, list[Entity]], members: set[str],
     ) -> list[SearchResult]:
         """What the second call of a question needing several memories judges:
         at most ``retrieval.set_pool`` memories not judged yet.
@@ -1780,21 +1798,27 @@ class MemoryStore:
         ``size`` of the ranking carry are gathered, and every memory filed
         under one of them (its newest ``SET_SCAN``) scores, over those topics,
         how many of the first carry the topic over how many memories the topic
-        has: a small topic most of them share counts most. The best are taken,
-        a tie by the property ranking. Measured on the dense world's set
-        questions, those held 85 to 100% of each set within 100 candidates.
-        When the first share no topic (or every memory under the topics they
-        share is judged), the ranking past them is taken instead. Either way
-        the batch is ordered as the linked search orders (the property
-        similarity to ``asked``, to the power ``relational_sharpness``, times
-        aboutness)."""
+        has in the scope searched: a small topic most of them share counts
+        most. The best are taken, a tie by the property ranking. Measured on
+        the dense world's set questions, those held 85 to 100% of each set
+        within 100 candidates.
+
+        Where the topics give fewer than the budget (the first share none: an
+        untagged store, memories saved with ``infer=False`` or imported
+        verbatim), the rest are the unjudged memories nearest the ``members``
+        found in the first call (``_nearest_unjudged``): measured, those held
+        76 to 100% of the rest of a set, the ranking past the first 29 to 36%.
+        Only with no member to start from is the ranking past the first taken.
+        Either way the batch is ordered as the linked search orders (the
+        property similarity to ``asked``, to the power
+        ``relational_sharpness``, times aboutness)."""
         budget = max(self.config.retrieval.set_pool, 0)
         if not budget:
             return []
         sharpness = self.config.retrieval.relational_sharpness
 
         def linked_order(memory_ids: list[str]) -> dict[str, float]:
-            if asked is None:
+            if asked is None or not memory_ids:
                 return dict.fromkeys(memory_ids, 0.0)
             scores = self._linked_scores(asked, memory_ids, act, entities)
             return {mid: relevance ** sharpness * about
@@ -1802,22 +1826,26 @@ class MemoryStore:
 
         first = [r.memory.id for r in ranked[:size]]
         done = set(first) | set(judged)
-        carried = Counter(topic.id for mid in first
-                          for topic in self.backend.entities_of_memory(mid, kind="topic"))
+        topics = self.backend.entities_of_memories(first, kind="topic")
+        carried = Counter(topic.id for mid in first for topic in topics.get(mid, []))
+        shared = [topic_id for topic_id, count in carried.items() if count >= SET_SHARED]
+        # how many memories each has where the search looks, as ``filed`` is read
+        sizes = self.backend.entity_memory_counts(shared, scope=scope) if shared else {}
         walk: dict[str, float] = defaultdict(float)
         memories: dict[str, Memory] = {}
-        for topic_id, count in carried.items():
-            if count < SET_SHARED:
-                continue
+        for topic_id in shared:
             # the scope searched is kept to in SQL, before the newest SET_SCAN
             filed = self.backend.entity_memories(topic_id, limit=SET_SCAN,
                                                  include_invalid=include_invalid, scope=scope)
-            share = count / max(self.backend.count_entity_memories(topic_id), len(filed), 1)
+            share = carried[topic_id] / max(sizes.get(topic_id, 0), len(filed), 1)
             for memory in filed:
                 if memory.id in done:
                     continue
                 memories[memory.id] = memory
                 walk[memory.id] += share
+        known = {r.memory.id: r for r in ranked}
+        order: dict[str, float] = {}
+        batch: list[SearchResult] = []
         if walk:
             best = sorted(walk, key=lambda mid: -walk[mid])
             edge = round(walk[best[min(budget, len(best)) - 1]], 9)
@@ -1830,13 +1858,42 @@ class MemoryStore:
                 tied = sorted((mid for mid in best if round(walk[mid], 9) == edge),
                               key=lambda mid: -order[mid])
                 best = chosen + tied[: budget - len(chosen)]
-            known = {r.memory.id: r for r in ranked}
             batch = [known.get(mid) or SearchResult(memory=memories[mid], score=0.0)
                      for mid in best]
-        else:
-            batch = [r for r in ranked[size:] if r.memory.id not in done][:budget]
-            order = linked_order([r.memory.id for r in batch])
+        if len(batch) < budget:
+            taken = done | {r.memory.id for r in batch}
+            rest = [known.get(m.id) or SearchResult(memory=m, score=0.0)
+                    for m in self._nearest_unjudged(members, taken, scope, include_invalid,
+                                                    budget - len(batch))]
+            if not batch and not rest:  # no member to start from
+                rest = [r for r in ranked[size:] if r.memory.id not in done][:budget]
+            order.update(linked_order([r.memory.id for r in rest]))
+            batch += rest
         return sorted(batch, key=lambda r: -order[r.memory.id])
+
+    def _nearest_unjudged(
+        self, members: set[str], taken: set[str], scope: Scope, include_invalid: bool,
+        count: int,
+    ) -> list[Memory]:
+        """The ``count`` memories of the scope searched nearest the members of
+        a set found so far, none of ``taken``: the store's vector search from
+        the centroid of the members' vectors. Members of a set are the same
+        kind of fact ("It costs 21,000 euros"), so they sit closer to each
+        other than to the question. Empty with no member, or none with a
+        vector of the embedder in use."""
+        if count <= 0 or not members:
+            return []
+        model = self.embedder.model_id
+        vectors = list(self.backend.vectors_of(sorted(members), model).values())
+        if not vectors or len({v.shape for v in vectors}) != 1:
+            return []
+        unit = [v / (float(np.linalg.norm(v)) or 1.0) for v in vectors]
+        centre = np.mean(unit, axis=0)
+        centre /= float(np.linalg.norm(centre)) or 1.0
+        hits = self.backend.vector_search(centre.tolist(), model, scope,
+                                          limit=count + len(taken),
+                                          include_invalid=include_invalid)
+        return [memory for memory, _ in hits if memory.id not in taken][:count]
 
     def _judged_relevance(
         self, asked: str, memories: list[tuple[str, str]], meta: bool = True,
@@ -2483,21 +2540,27 @@ class MemoryStore:
         _, new, old = found
         if not (_owned(new, owner_prefix) and _owned(old, owner_prefix)):
             return False
+        # held back from an UPDATE nobody wrote the merged text for: the new
+        # one adds to the old one, so a confirmed replacement is an update's,
+        # which the Archive's undo reverses keeping both (``undo_replacement``)
+        update = _conflict_mark(new).get("kind") == "update"
         if decision == "accept":  # the new one is right
             self.backend.invalidate_memory(old.id, superseded_by=new.id)
             self.backend.add_event(MemoryEvent(
                 memory_id=old.id, event="SUPERSEDE", old_content=old.content,
                 new_content=new.content, actor="user",
-                reason=f"you confirmed that memory {new.id} replaces it",
-                kind="contradiction",
+                reason=(f"{UPDATE_SUPERSEDE_REASON}: you confirmed that memory {new.id} "
+                        "replaces it" if update
+                        else f"you confirmed that memory {new.id} replaces it"),
+                kind="update" if update else "contradiction",
             ))
         elif decision == "decline":  # the old one is right
             self.backend.invalidate_memory(new.id)
             self.backend.add_event(MemoryEvent(
                 memory_id=new.id, event="DELETE", old_content=new.content,
                 actor="user",
-                reason=f"you judged it wrong: it contradicted memory {old.id}, "
-                       "which you kept",
+                reason=f"you judged it wrong: it {'updated' if update else 'contradicted'} "
+                       f"memory {old.id}, which you kept",
             ))
         else:  # both are true
             self.backend.add_event(MemoryEvent(
@@ -3806,12 +3869,23 @@ class MemoryStore:
         ``add``, preserving the other tags and their original casing. The
         tags' topic entities merge with it (``_merge_topics``).
 
+        A topic entity belongs to one namespace, so the edit is made one
+        namespace at a time: ``user_id``'s, or, with ``user_id`` None (an
+        admin's edit, ``exact_user`` unset), every namespace that carries one
+        of the tags (``MemoryBackend.tag_namespaces``), each in full: its
+        entities, mentions, a renamed topic's description, its columns.
+
         Once a tag is curated by hand its synthetic marker is dropped: the tag
         is now the user's, not the system's guess.
         """
         remove = {r for r in remove if r}
         if not remove:
             return 0
+        if user_id is None and not exact_user:
+            namespaces = self.backend.tag_namespaces(remove)
+            if namespaces is not None:
+                return sum(self._retag(namespace, remove, add, exact_user=True)
+                           for namespace in namespaces)
         if add is not None:
             # The new name is a tag like any other, so it is held to the same
             # shape; one that cleans away to nothing is a plain removal.
@@ -3869,7 +3943,7 @@ class MemoryStore:
         outcome: dict[str, Any] = {"scored": 0, "skipped": 0, "provider": self.decider.name}
         if not self.config.decay.durability:
             outcome["skipped"] = -1
-            outcome["off"] = "decay.durability is off (MEMRY_DURABILITY)"
+            outcome["reason"] = self._pass_off_reason("durability")
             return outcome
         if not self.decider.available:
             outcome["skipped"] = -1
@@ -3900,6 +3974,14 @@ class MemoryStore:
             outcome["skipped"],
         )
         return outcome
+
+    def _pass_off_reason(self, key: str) -> str:
+        """Why a pass that is off (``maintenance_enabled``) is off."""
+        if key == "durability" and not self.config.decay.durability:
+            return "decay.durability is off (MEMRY_DURABILITY)"
+        if key == "tag_abstraction" and not self.config.tags.enabled:
+            return "tag abstraction is off (MEMRY_TAG_ABSTRACTION)"
+        return "this pass is off; turn it on under Upkeep to run it"
 
     def maintenance_enabled(self, key: str) -> bool:
         if key == "tag_abstraction" and not self.config.tags.enabled:
@@ -4201,7 +4283,15 @@ class MemoryStore:
         ``at`` is the tick the scheduler is working through, which is what the
         run is stamped with. Stamping the wall clock instead put the next run
         due at a different time than the tick that triggered it.
+
+        A pass that is off (``maintenance_enabled``) runs nowhere: neither the
+        scheduler nor "run now" starts it, and no run is recorded; the result
+        says so (``ran`` False, with the reason).
         """
+        if key not in self._MAINTENANCE_KEYS:
+            raise ValueError(f"unknown pass: {key}")
+        if not self.maintenance_enabled(key):
+            return {"ran": False, "reason": self._pass_off_reason(key)}
         with self._pass_lock(key, user_id):
             stamp = at.isoformat(timespec="seconds") if at is not None else utcnow()
             if key == "dedup_entities":
@@ -4225,7 +4315,7 @@ class MemoryStore:
                 self.backend.set_meta(_consolidation_run_key(user_id), stamp)
             else:
                 raise ValueError(f"unknown pass: {key}")
-            if record and not result.get("off"):  # a pass that is off did not run
+            if record:
                 self._upkeep_set(f"last:{key}", user_id, {"at": stamp, "result": result})
             return result
 
@@ -4388,14 +4478,19 @@ class MemoryStore:
             self._upkeep_set("consolidation:pending", user_id, live)
 
         for entry, new, old in self._open_conflicts(user_id):
-            held = ((new.metadata or {}).get(CONFLICT_KEY) or {}).get("held")
+            mark = _conflict_mark(new)
+            held = mark.get("held")
+            update = mark.get("kind") == "update"
             items.append({
                 "kind": "conflict", "id": new.id,
                 "title": new.content,
-                "detail": "This contradicts a memory you already have."
+                "detail": ("This updates a memory you already have, and no merged "
+                           "text was written for the two." if update
+                           else "This contradicts a memory you already have.")
                           + (f" Memry kept both because {held}." if held else ""),
                 "replaces": [old.content],
-                "replaces_label": "the memory it contradicts",
+                "replaces_label": ("the memory it updates" if update
+                                   else "the memory it contradicts"),
                 "accept": "the new one is right",
                 "decline": "the old one is right",
                 "other": "both are true",

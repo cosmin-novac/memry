@@ -1557,6 +1557,7 @@ const PASS_WORDS={
 };
 function describePass(result){
   if(!result||typeof result!=='object')return 'done';
+  if(result.ran===false)return `not run: ${result.reason||'this pass is off'}`;
   const parts=[];
   for(const [key,word] of Object.entries(PASS_WORDS)){
     const n=result[key];

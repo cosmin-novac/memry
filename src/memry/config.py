@@ -179,8 +179,9 @@ class RetrievalConfig(BaseModel):
     #: A question that needs several memories (a list, a total, a comparison)
     #: has at most this many more judged in one further call, after the first
     #: ``decision.rerank_pool``: the memories filed under the topics the first
-    #: ones share (``store._set_pool``). Measured, those held 85 to 100% of
-    #: each set within 100 candidates.
+    #: ones share, then those nearest the members found (``store._set_pool``).
+    #: Measured, the topics' held 85 to 100% of each set within 100
+    #: candidates.
     set_pool: int = 80
 
     @field_validator("relational_mode", "relational_fusion", mode="before")

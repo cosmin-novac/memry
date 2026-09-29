@@ -295,14 +295,6 @@ class MemoryBackend(ABC):
     def list_topics(self, scope: Scope, *, limit: int = 1000) -> list[Topic]:
         return []
 
-    def topic_counts(self, scope: Scope) -> list[dict[str, Any]] | None:
-        """Active-memory counts, or ``None`` when topics are unsupported.
-
-        Counts roll up through the hierarchy: a parent includes the memories
-        of its descendants. Correct for browsing and for parent filtering.
-        """
-        return None
-
     def delete_entity(self, entity_id: str) -> bool:
         """Remove an entity and its mentions/relations/proposals. Memories stay."""
         return False
@@ -335,28 +327,17 @@ class MemoryBackend(ABC):
         """
         return 0
 
-    def topic_memory_ids(self, scope: Scope) -> list[tuple[str, str]] | None:
-        """``(topic_normalized, memory_id)`` for direct links on active memories.
-
-        Cheap enough to group in Python, which is what tag-health checks need:
-        a tag's centroid is the mean of its members' existing vectors.
-        """
-        return None
-
-    def direct_topic_counts(self, scope: Scope) -> list[dict[str, Any]] | None:
-        """Active-memory counts for directly-attached topics only.
-
-        Abstraction must run on this, never on ``topic_counts``: a rolled-up
-        histogram lists system-generated parents as if they were ordinary tags,
-        so the next run clusters ``liver health`` and ``weekly gym`` into
-        ``health`` and the useful level is lost a run at a time.
-        """
-        return None
-
     def retag_topics(
         self, scope: Scope, remove: set[str], add: str | None, *, exact_user: bool = False
     ) -> int | None:
         """Set-based topic edit, or ``None`` when an adapter has no topic store."""
+        return None
+
+    def tag_namespaces(self, names: Iterable[str]) -> list[str | None] | None:
+        """Every namespace (``user_id``, None for the memories without one)
+        that carries one of these tags: an active topic entity of that name,
+        a memory filed under it, or a synthetic tag of it. ``None`` when an
+        adapter has no topic store."""
         return None
 
     def add_topic_relation(self, relation: TopicRelation) -> TopicRelation:
@@ -543,6 +524,23 @@ class MemoryBackend(ABC):
         """The entities a single memory mentions (for relation backfill).
         ``kind`` as for ``list_entities``: its tags only when asked for."""
         return []
+
+    def entities_of_memories(
+        self, memory_ids: list[str], *, kind: str = "named"
+    ) -> dict[str, list[Entity]]:
+        """``entities_of_memory`` of each of these memories, read at once
+        where the backend can: every id is a key, with an empty list when the
+        memory mentions nothing of that ``kind``."""
+        return {mid: self.entities_of_memory(mid, kind=kind) for mid in memory_ids}
+
+    def entity_memory_counts(
+        self, entity_ids: list[str], *, scope: Scope | None = None
+    ) -> dict[str, int]:
+        """How many active memories mention each of these entities, counting
+        only those of ``scope`` (its user, agent and run; a field None matches
+        any) when given; read at once where the backend can."""
+        return {entity_id: len(self.entity_memories(entity_id, limit=100_000, scope=scope))
+                for entity_id in entity_ids}
 
     def touch_entity(self, entity_id: str) -> None:
         """Mark an entity hub stale after its evidence changes."""

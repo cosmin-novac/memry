@@ -765,6 +765,12 @@ def resolve_mentions(
     return resolved
 
 
+#: A tag and a thing of its very name are raised first, up to this fraction
+#: (1/n) of a pass's limit; the name pairs have the rest, and either takes
+#: what the other leaves (``propose_same_name_duplicates``).
+TAG_PAIR_SHARE = 4
+
+
 def propose_same_name_duplicates(
     *,
     backend: MemoryBackend,
@@ -791,8 +797,10 @@ def propose_same_name_duplicates(
     A tag (a topic entity) is paired with each named thing of its very name
     ("bildy" the tag, "Bildy" the product), with or without a judge, and the
     pair goes through the same comparison as any: the tag's memories are its
-    side. Two tags are never paired here; the tag question decides those
-    (``MemoryStore.merge_obvious_topics``).
+    side. Those pairs have a share of ``limit`` of their own
+    (``TAG_PAIR_SHARE``), so a pass with more name pairs than the limit still
+    raises them. Two tags are never paired here; the tag question decides
+    those (``MemoryStore.merge_obvious_topics``).
     """
     entities = [e for e in backend.list_entities(scope, limit=10_000) if e.merged_into is None]
     pairs: list[tuple[Entity, Entity]] = []
@@ -852,19 +860,30 @@ def propose_same_name_duplicates(
     for entity in entities:
         if not is_owner(entity):
             named.setdefault(entity.normalized or entity.name.strip().lower(), []).append(entity)
-    for topic in backend.list_entities(scope, limit=100_000, kind="topic"):
-        for thing in named.get(topic.normalized, []):
-            pairs.append((thing, topic))
-    created = 0
-    for a, b in pairs:
-        if created >= limit:
-            break
-        if backend.find_proposal(a.id, b.id) is None:
-            backend.add_proposal(MergeProposal(
-                entity_a=a.id, entity_b=b.id, user_id=scope.user_id,
-                confidence=0.5, reason="not yet compared",
-            ))
-            created += 1
+    # the tags, read once for the pass
+    tag_pairs = [(thing, topic)
+                 for topic in backend.list_entities(scope, limit=100_000, kind="topic")
+                 for thing in named.get(topic.normalized, [])]
+
+    def propose(candidates: list[tuple[Entity, Entity]], room: int) -> int:
+        made = 0
+        for a, b in candidates:
+            if made >= room:
+                break
+            if backend.find_proposal(a.id, b.id) is None:
+                backend.add_proposal(MergeProposal(
+                    entity_a=a.id, entity_b=b.id, user_id=scope.user_id,
+                    confidence=0.5, reason="not yet compared",
+                ))
+                made += 1
+        return made
+
+    # A tag and the thing of its name have a share of the limit of their own:
+    # after the name pairs, they went unraised on every pass that had more
+    # name pairs than the limit. What either leaves unused goes to the other.
+    created = propose(tag_pairs, min(limit, max(1, limit // TAG_PAIR_SHARE)))
+    created += propose(pairs, limit - created)
+    created += propose(tag_pairs, limit - created)
     return created
 
 

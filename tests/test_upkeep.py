@@ -205,14 +205,40 @@ def test_the_durability_pass_is_off_unless_configured(store):
     store.set_maintenance_enabled("durability", True)
     assert not store.maintenance_enabled("durability")
     assert "durability" not in store.run_upkeep_cycle(user_id="ada")
+    scored = []
+    score = store.score_memory_durability
+    store.score_memory_durability = lambda **kw: scored.append(kw) or score(**kw)
     outcome = store.run_upkeep_pass("durability", user_id="ada")
-    assert outcome["scored"] == 0 and "off" in outcome
+    assert outcome == {"ran": False, "reason": "decay.durability is off (MEMRY_DURABILITY)"}
+    assert scored == []  # checked before the pass, not by it
     assert store.last_pass_run("durability", "ada") is None
     assert DURABILITY_KEY not in (store.get_all(user_id="ada")[0].metadata or {})
+    # called directly (the REST route), the pass still refuses
+    assert score(user_id="ada")["skipped"] == -1
+    assert DURABILITY_KEY not in (store.get_all(user_id="ada")[0].metadata or {})
+    del store.score_memory_durability
 
     store.config.decay.durability = True
     assert store.maintenance_enabled("durability")
     assert store.run_upkeep_pass("durability", user_id="ada")["scored"] == 1
+
+
+def test_a_pass_switched_off_does_not_run_and_records_no_run(store):
+    """Whatever turned a pass off (its switch here), ``run_upkeep_pass`` asks
+    ``maintenance_enabled`` before running it: nothing runs, no run is
+    recorded, and the result says why."""
+    store.set_maintenance_enabled("structure", False)
+    ran = []
+    store.run_structure_pass = lambda **kw: ran.append(kw) or {}
+    outcome = store.run_upkeep_pass("structure", user_id="ada")
+    assert outcome["ran"] is False and "off" in outcome["reason"]
+    assert ran == [] and store.last_pass_run("structure", "ada") is None
+    store.set_maintenance_enabled("structure", True)
+    assert store.run_upkeep_pass("structure", user_id="ada") == {}
+    assert ran == [{"user_id": "ada"}]
+    assert store.last_pass_run("structure", "ada")["result"] == {}
+    with pytest.raises(ValueError):
+        store.run_upkeep_pass("nonsense")
 
 
 def test_a_durability_score_does_not_move_updated_at(store, monkeypatch):
@@ -299,6 +325,11 @@ def test_status_carries_the_queue_and_the_pause_switch(client):
 
 
 def test_run_now_uses_the_same_pass_as_the_scheduler(client):
+    # off here (the fixture), so "run now" runs nothing, as the scheduler would not
+    result = client.post("/api/v1/maintenance/run/dedup_entities", json={"user_id": "u"})
+    assert result.status_code == 200 and result.json()["ran"] is False
+    assert client.store.last_pass_run("dedup_entities", "u") is None
+    client.post("/api/v1/maintenance/toggle", json={"key": "dedup_entities", "enabled": True})
     result = client.post("/api/v1/maintenance/run/dedup_entities", json={"user_id": "u"})
     assert result.status_code == 200
     assert "purged" in result.json()

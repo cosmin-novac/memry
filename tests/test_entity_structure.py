@@ -687,6 +687,27 @@ def test_a_pair_under_different_homes_is_never_proposed(store):
     assert store.merge_proposals(user_id="ada") == []
 
 
+def test_a_tag_and_the_thing_of_its_name_are_raised_past_many_name_pairs(store):
+    """600 pairs of one name and a limit of 500: the name pairs used the whole
+    limit before the tag "bildy" and the product "Bildy" were reached, on this
+    pass and on each with as many new name pairs. They have a share of the
+    limit of their own, and the name pairs take the rest."""
+    from memry.intelligence.entities import propose_same_name_duplicates
+
+    scope = Scope(user_id="ada")
+    for i in range(600):
+        _entity(store, f"widget {i}", "product")
+        _entity(store, f"widget {i}", "product")
+    product = _entity(store, "Bildy", "product")
+    tag = store.backend.topic_entity("bildy", scope)
+
+    created = propose_same_name_duplicates(backend=store.backend, scope=scope, limit=500)
+
+    assert created == 500
+    assert store.backend.find_proposal(product.id, tag.id) is not None
+    assert len(store.backend.list_proposals(scope, status="proposed", limit=1000)) == 500
+
+
 # ------------------------------------------------------------------------ REST
 @pytest.fixture
 def client():

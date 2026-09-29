@@ -397,7 +397,8 @@ merges below the gate, the memory merges a model proposed, the tag pairs that lo
 subject split in two, and the names the model judged not to be entities, each with a yes
 and a no. Everything else (entity self-healing, word-for-word duplicate consolidation, and
 durability scoring when a decision provider is configured and `MEMRY_DURABILITY=1` is set) runs on its interval, records what it changed, and can be paused with one switch.
-`POST /api/v1/maintenance/run/<pass>` runs any pass now.
+`POST /api/v1/maintenance/run/<pass>` runs any pass that is on now; a pass that is off
+runs neither there nor on its interval, and no run of it is recorded.
 
 ### Hubs, homes and shared names
 
