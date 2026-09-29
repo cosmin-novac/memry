@@ -284,9 +284,12 @@ names are compared and nothing merges on the model's own confidence.
 Tags follow the same pattern (`judged_tag_merges`): candidate pairs from the name index
 (no shared-word signal for tags), judged in both orders with the 10 most recent memories
 per tag, merged from P(same subject) 0.55, compared when found and once more when both
-tags are on 10 memories. The dashboard's suggest button does not run this: its last pass
-asks the judge about the tag names alone, only when at most 20 tags are left that nothing
-else flagged, and only suggests (`clustering.judge_tag_pairs`, from P(yes) 0.5).
+tags are on 10 memories. The dashboard's suggest button asks the same question through the
+same function: its last pass, when at most 20 tags are left that nothing else flagged, hands
+`judged_tag_merges` every pair of them and only suggests the groups that reach 0.55. It
+neither reads nor writes the pass's record of compared pairs, so a click never keeps the
+weekly pass from comparing a pair of its own. No tag question is asked on the names alone:
+judged on their names, "memry" read as a typo of "memory" (0.98).
 
 The measurements behind these numbers are in the PhD repository,
 `papers/memry-field-studies/findings/identity-obvious-merges.md` and

@@ -32,7 +32,6 @@ from .backends.base import MemoryBackend
 from .backends.local import LocalBackend
 from .config import Config
 from .intelligence.clustering import (
-    judge_tag_pairs,
     obvious_canonical_merges,
     obvious_variant_prefix,
     propose_synthetic_tags,
@@ -3879,10 +3878,12 @@ class MemoryStore:
     def suggest_tag_merges(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
         """Suggest duplicate tags: spelling variants, then synonyms, then splits.
 
-        Three detectors, cheapest first, each catching what the previous cannot:
-        deterministic inflection, an LLM synonym pass, and vector-centroid
-        overlap for the near-synonyms that share no words ("liver bloods" beside
-        "liver lab results").
+        Detectors, cheapest first, each catching what the previous cannot:
+        deterministic inflection, an LLM synonym pass, vector-centroid overlap
+        for the near-synonyms that share no words ("liver bloods" beside "liver
+        lab results"), and, with a calibrated judge, the tag question.
+
+        Nothing is merged here; every group waits for the person to apply it.
         """
         tags = self.categories(user_id=user_id)
         proposals = suggest_canonical_merges(self.llm, tags)
@@ -3891,18 +3892,25 @@ class MemoryStore:
             if not seen.intersection(pair["variants"]):
                 proposals.append(pair)
                 seen.update(pair["variants"])
-        # A fourth pass for the synonyms the three above miss. Suggestion only:
-        # every one of these still needs confirming under Upkeep.
+        # The synonyms the passes above miss, by the question tags merge by
+        # (identity.TAG_QUESTION: each tag shown with its 10 most recent
+        # memories, both orders, at the judge's tag merge bar), asked about
+        # every pair of the tags left, when at most 20 are left. The names
+        # alone read two subjects as one: "memry" as a typo of "memory" (0.98).
         names = [str(t["category"]).strip().lower() for t in tags]
         names = [n for n in names if n and n not in seen]
         candidates = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
-        if candidates and len(candidates) <= 200:
-            for a, b in judge_tag_pairs(self.decider, candidates):
-                if a in seen or b in seen:
-                    continue
-                proposals.append({"canonical": a, "variants": [a, b],
-                                  "reason": f"{self.decider.name}: same meaning"})
-                seen.update({a, b})
+        if candidates and len(candidates) <= 200 and judges_pairs(self.decider):
+            scope = Scope(user_id=user_id)
+            for group in judged_tag_merges(
+                self.decider, tags, self._entities_named(scope, tags),
+                lambda tag: [m.content for m in self.get_all(
+                    user_id=user_id, categories=[tag], limit=TAG_EXAMPLES)],
+                pairs=candidates,
+            ):
+                if not seen.intersection(group["variants"]):
+                    proposals.append(group)
+                    seen.update(group["variants"])
         return proposals
 
     # -- manual tag curation -----------------------------------------------

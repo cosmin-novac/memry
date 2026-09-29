@@ -1086,6 +1086,7 @@ def judged_tag_merges(
     vectors: dict[str, np.ndarray] | None = None,
     compared: dict[str, int] | None = None,
     limit: int = 400,
+    pairs: Iterable[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Groups of tags the judge puts at ``decider.tag_merge_probability`` or
     higher, each kept under its most used tag. ``memories_of(tag)`` returns the
@@ -1095,6 +1096,13 @@ def judged_tag_merges(
     last compared at, and is updated in place: only pairs that reached a new
     step are asked about, and pairs of tags that no longer exist are dropped.
 
+    ``pairs``, when given, are asked about in place of the name index's
+    candidates, whatever step they are at, and ``compared`` is neither read nor
+    written: the dashboard's suggest button (``MemoryStore.suggest_tag_merges``)
+    asks this question about every pair of the tags nothing else flagged and
+    suggests the groups instead of merging them. The funnel belongs to the
+    upkeep pass, which merges.
+
     Measured on the 379 candidate pairs of a real 417-tag store, 10 memories per
     tag, two runs: from 0.55 it merged 7-9 of the 16 pairs I labelled one
     subject ("fundation" and "fundation gmbh" at 0.86-0.88, "bildy" and
@@ -1102,24 +1110,32 @@ def judged_tag_merges(
     41 borderline or 322 two-subject pairs; the highest two-subject pair was
     "restart" and "shutdown" at 0.46.
     """
-    compared = {} if compared is None else compared
     counts = {str(t["category"]).strip().casefold(): int(t.get("count") or 0) for t in tags}
     labels = sorted(counts)
-    nodes = [Entity(id=label, name=label, user_id=None) for label in labels]
-    index = NameIndex(nodes, vectors, rare_words=False)
-    step = {
-        pair: tag_step(min(counts[pair[0]], counts[pair[1]]))
-        for pair in {
-            tuple(sorted((label, other.name)))
-            for label in labels
-            for other in index.candidates(label, vector=(vectors or {}).get(label),
-                                          exclude={label})
+    if pairs is not None:
+        compared = {}
+        given = {tuple(sorted((str(a).strip().casefold(), str(b).strip().casefold())))
+                 for a, b in pairs}
+        step = {pair: tag_step(min(counts[pair[0]], counts[pair[1]])) for pair in given
+                if pair[0] != pair[1] and pair[0] in counts and pair[1] in counts}
+        pairs = sorted(step)[:limit]
+    else:
+        compared = {} if compared is None else compared
+        nodes = [Entity(id=label, name=label, user_id=None) for label in labels]
+        index = NameIndex(nodes, vectors, rare_words=False)
+        step = {
+            pair: tag_step(min(counts[pair[0]], counts[pair[1]]))
+            for pair in {
+                tuple(sorted((label, other.name)))
+                for label in labels
+                for other in index.candidates(label, vector=(vectors or {}).get(label),
+                                              exclude={label})
+            }
         }
-    }
-    live = {tag_pair_key(*pair) for pair in step}
-    for key in [key for key in compared if key not in live]:
-        del compared[key]
-    pairs = sorted(p for p in step if step[p] > compared.get(tag_pair_key(*p), 0))[:limit]
+        live = {tag_pair_key(*pair) for pair in step}
+        for key in [key for key in compared if key not in live]:
+            del compared[key]
+        pairs = sorted(p for p in step if step[p] > compared.get(tag_pair_key(*p), 0))[:limit]
     examples = {tag: memories_of(tag) for tag in sorted({t for pair in pairs for t in pair})}
     scores = parallel(
         lambda pair: judge_tag_pair(decider, *pair, counts, known, examples), pairs

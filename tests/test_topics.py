@@ -286,7 +286,9 @@ def test_a_tag_pair_is_compared_when_found_and_once_more_at_10_memories(verbatim
     assert len(judge.states) == 4  # never after
 
 
-def test_the_suggest_merges_button_asks_the_judge_nothing(verbatim_store):
+def test_the_suggest_merges_button_only_suggests(verbatim_store):
+    """The button asks the tag question and returns the pair; the merge is the
+    person's, or the weekly pass's, which still compares the pair as its own."""
     from starlette.testclient import TestClient
 
     from memry.rest import create_app
@@ -300,9 +302,17 @@ def test_the_suggest_merges_button_asks_the_judge_nothing(verbatim_store):
     # Not entered as a context manager, so the upkeep scheduler, whose weekly
     # pass does judge tags, does not start.
     client = TestClient(create_app(verbatim_store))
-    assert client.get("/api/v1/tags/suggest-merges").status_code == 200
-    assert judge.states == []
+    response = client.get("/api/v1/tags/suggest-merges")
+    assert response.status_code == 200
+    assert response.json() == [{"canonical": "quality assurance",
+                                "variants": ["qa", "quality assurance"],
+                                "reason": "stub: same subject"}]
+    assert len(judge.states) == 2  # both orders
     assert len(verbatim_store.categories(user_id="default")) == 2
+    verbatim_store.merge_obvious_topics(user_id="default")
+    assert len(judge.states) == 4
+    assert verbatim_store.categories(user_id="default") == [
+        {"category": "quality assurance", "count": 6}]
 
 
 def test_tags_that_only_share_a_word_are_not_compared(verbatim_store):
