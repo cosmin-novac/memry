@@ -8,6 +8,7 @@ in the store it is.
 from __future__ import annotations
 
 import json
+import re
 
 from conftest import FakeLLM, fact, facts_response
 from starlette.testclient import TestClient
@@ -51,6 +52,51 @@ def test_the_extractor_is_told_who_the_user_is():
     save("The user sails on weekends", "the user")
     # The owner entity exists now, and its name wins over the account's.
     assert 'is the entity "the user"' in _extraction_prompts(llm)[-1]
+    store.close()
+
+
+def test_the_user_is_the_owner_only_of_a_conversation_with_the_user():
+    """Without a real name. Where the speakers are named, "the user" would be
+    one of them: the model wrote one of two people as "the user"."""
+    store, _, _, _ = _store()
+    plain = [{"role": "user", "content": "I sail"}, {"role": "assistant", "content": "Nice"}]
+    named = [[{"role": "Ada", "content": "I sail"}, {"role": "Bea", "content": "Nice"}],
+             [{"role": "user", "name": "Ada", "content": "I sail"}],
+             [{"role": "assistant", "content": "Noted"}]]
+    assert store.owner_name("ada") == store.owner_name("ada", plain) == "the user"
+    assert all(store.owner_name("ada", messages) is None for messages in named)
+    store.set_owner_name("bea", "Bea Holm")
+    assert all(store.owner_name("bea", messages) == "Bea Holm" for messages in [plain, *named])
+    store.close()
+
+
+class _ModelLike(FakeLLM):
+    """Extracts as the model did: the first speaker's fact is written under the
+    owner's entity name when one is offered, else under the speaker's name."""
+
+    def complete(self, system: str, user: str, *, json_schema=None) -> str:
+        if not user.startswith("Conversation:"):
+            return super().complete(system, user, json_schema=json_schema)
+        self.calls.append((system, user))
+        offered = re.search(r'is the entity "([^"]*)"', user)
+        first = offered.group(1) if offered else "Ada"
+        return facts_response(
+            fact(f"{first} passed a driving test", entities=[{"name": first, "type": "person"}]),
+            fact("Bea adopted a cat", entities=[{"name": "Bea", "type": "person"}]))
+
+
+def test_a_conversation_between_named_people_makes_no_owner_without_an_owners_name():
+    llm = _ModelLike()
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64),
+                        decider=_PairJudge(lambda state: (0.5, 0.1)))
+    llm.queue(json.dumps({"missing": []}))  # the coverage audit
+    store.add([{"role": "Ada", "content": "I passed my driving test!"},
+               {"role": "Bea", "content": "Well done! We adopted a cat."}], user_id="ada")
+    [prompt] = _extraction_prompts(llm)
+    assert "these memories belong to" not in prompt and "names its speakers" in prompt
+    assert {e.name for e in store.entities(user_id="ada")} == {"Ada", "Bea"}
+    assert store.owner_entity("ada") is None
+    assert not any((e.metadata or {}).get("owner") for e in store.entities(user_id="ada"))
     store.close()
 
 

@@ -88,9 +88,11 @@ from .intelligence.identity import (
     name_vectors,
 )
 from .intelligence.extraction import (
+    OWNER_PLACEHOLDER,
     VOCABULARY_LIMIT,
     extract_facts,
     extract_relations,
+    speaks_with_the_user,
     verbatim_candidates,
     verify_coverage,
 )
@@ -560,7 +562,7 @@ class MemoryStore:
                     ),
                     context=_ingestion_context(metadata),
                     tag_hints=_client_tag_hints(metadata, categories),
-                    owner=self.owner_name(scope.user_id),
+                    owner=self.owner_name(scope.user_id, messages),
                     entity_names=self._entity_vocabulary(
                         scope,
                         "\n".join(str(m.get("content") or "") for m in messages),
@@ -580,7 +582,8 @@ class MemoryStore:
 
         _keep_context(candidates, _ingestion_context(metadata))
         _with_memory_metadata(candidates, memory_metadata)
-        actions = self._apply_candidates(candidates, scope, episode_ids, created_at=created_at)
+        actions = self._apply_candidates(candidates, scope, episode_ids, created_at=created_at,
+                                         messages=messages)
 
         missing = self._coverage_gaps(messages, actions) if infer else []
         if missing:
@@ -784,8 +787,12 @@ class MemoryStore:
         *,
         exclude_ids: set[str] | None = None,
         created_at: str | None = None,
+        messages: list[dict[str, str]] | None = None,
     ) -> list[AddAction]:
         """Reconcile candidates into the store (shared by add and distill).
+
+        ``messages`` are what the candidates were extracted from: they say
+        whether an owner without a name is "the user" (``owner_name``).
 
         ``exclude_ids`` keeps memories out of the similarity set: distillation
         must not reconcile facts against the verbatim memory they came from,
@@ -848,7 +855,7 @@ class MemoryStore:
                     memory_content=action.content or candidate.content,
                     surfaces=candidate.entities,
                     types=candidate.entity_types,
-                    owner=self._owner_for(scope, candidate.entities),
+                    owner=self._owner_for(scope, candidate.entities, messages),
                 )
                 self._resolve_relations(
                     candidate.relations, resolved, scope, action.memory_id
@@ -3564,22 +3571,36 @@ class MemoryStore:
             entity = entity.model_copy(update={"metadata": metadata})
         return entity
 
-    def owner_name(self, user_id: str | None) -> str:
-        """The name the extractor lists the owner under: the owner entity's,
-        else the account's, else "the user"."""
+    def owner_name(
+        self, user_id: str | None, messages: list[dict[str, str]] | None = None
+    ) -> str | None:
+        """The name the extractor lists the owner of ``messages`` under: the
+        owner entity's, else the account's, else "the user". Without a real
+        name, "the user" is the owner only of a conversation with the user
+        (``speaks_with_the_user``; no ``messages`` asks about one): where the
+        speakers are named it would be one of them, so there is none (None)."""
         entity = self.owner_entity(user_id)
-        if entity is not None:
-            return entity.name
-        return self._upkeep_get("owner_name", user_id, None) or "the user"
+        name = entity.name if entity is not None else self._upkeep_get(
+            "owner_name", user_id, None)
+        if name and name.strip().casefold() != OWNER_PLACEHOLDER:
+            return name
+        if messages is not None and not speaks_with_the_user(messages):
+            return None
+        return name or OWNER_PLACEHOLDER
 
-    def _owner_for(self, scope: Scope, surfaces: list[str]) -> Entity | None:
-        """The owner entity, created when these extracted names first include
-        the owner's. It belongs to the whole namespace, not to one run."""
+    def _owner_for(
+        self, scope: Scope, surfaces: list[str],
+        messages: list[dict[str, str]] | None = None,
+    ) -> Entity | None:
+        """The owner entity, created when these extracted names, from
+        ``messages``, first include the owner's (``owner_name``). It belongs to
+        the whole namespace, not to one run."""
         owner = self.owner_entity(scope.user_id)
         if owner is not None:
             return owner
-        name = self.owner_name(scope.user_id)
-        if not any(str(s).strip().casefold() == name.casefold() for s in surfaces):
+        name = self.owner_name(scope.user_id, messages)
+        if name is None or not any(
+                str(s).strip().casefold() == name.casefold() for s in surfaces):
             return None
         owner = self.backend.insert_entity(Entity(
             name=name, normalized=name.lower(), entity_type="person",

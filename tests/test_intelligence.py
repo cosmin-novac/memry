@@ -61,6 +61,93 @@ def test_verbatim_candidates():
     assert all(c.memory_type == "episodic" for c in candidates)
 
 
+_DAY = datetime(2026, 1, 15, tzinfo=timezone.utc)
+_PLAIN = [{"role": "user", "content": "I moved to Leeds."},
+          {"role": "assistant", "content": "Noted, Leeds it is."},
+          {"role": "system", "content": "  "}]
+_BY_ROLE = [{"role": "Ada", "content": "I passed my driving test!"},
+            {"role": "Bea", "content": "Congratulations!"}]
+_BY_NAME = [{"role": "user", "name": "Ada", "content": "I passed my driving test!"},
+            {"role": "assistant", "content": "Congratulations!"}]
+_OWNER_OFFER = "The person these memories belong to (the user) is the entity"
+_SPEAKERS = (
+    'This conversation names its speakers. Each fact names the person it is about as '
+    'the conversation names them, even where these instructions speak of "the user"; '
+    'write "the user" only for a speaker in the role user whose name is not known.')
+_SHARED = (
+    "- what a person shares (a photo, file or link, shown with its description) is\n"
+    "  part of what they said: extract a fact from it when it tells something about\n"
+    '  them or their life, naming who shared it ("Ada knitted a scarf for her\n'
+    '  sister; she shared a photo of it")\n')
+#: sha256 of the system prompt for _DAY before the shared-content rule came in.
+_SYSTEM_BEFORE = "b11b82895f4fd93438b422c12467bc6244d26a0816456049e1854b7aee16a6a4"
+
+
+def _asked(messages, **kwargs) -> tuple[str, str]:
+    """The (system, user) prompt extraction sends for these messages."""
+    llm = FakeLLM([facts_response()])
+    extract_facts(llm, messages, now=_DAY, **kwargs)
+    [call] = llm.calls
+    return call
+
+
+def test_the_user_is_offered_as_the_owner_only_of_a_conversation_with_the_user():
+    """A real name is offered for any conversation. Where the speakers are
+    named, "the user" would be one of them: offered there, the model wrote one
+    of two people as "the user"."""
+    assert f'{_OWNER_OFFER} "the user".' in _asked(_PLAIN, owner="the user")[1]
+    for messages in (_BY_ROLE, _BY_NAME, [{"role": "assistant", "content": "Noted."}]):
+        assert _OWNER_OFFER not in _asked(messages, owner="the user")[1]
+        assert f'{_OWNER_OFFER} "Ada Quint".' in _asked(messages, owner="Ada Quint")[1]
+    for owner in (None, ""):
+        assert _OWNER_OFFER not in _asked(_PLAIN, owner=owner)[1]
+
+
+def test_named_speakers_are_named_in_their_facts():
+    _, user = _asked(_BY_ROLE)
+    assert user.startswith(f"Conversation:\nAda: I passed my driving test!\n"
+                           f"Bea: Congratulations!\n\n{_SPEAKERS}\n\n")
+    _, user = _asked(_BY_NAME)
+    assert user.startswith(f"Conversation:\nAda (user): I passed my driving test!\n"
+                           f"assistant: Congratulations!\n\n{_SPEAKERS}\n\n")
+    for plain in (_PLAIN, [{"role": "User", "content": "hi"}, {"role": "tool", "content": "{}"}]):
+        assert "names its speakers" not in _asked(plain)[1]
+
+
+def test_a_user_and_assistant_conversation_is_asked_as_before():
+    """Earlier measurements of extraction rest on this prompt: the shared-content
+    rule is its one change."""
+    import hashlib
+
+    system, user = _asked(
+        _PLAIN, vocabulary=["home move"], context="moving house", tag_hints=["Relocation"],
+        owner="the user", entity_names=[("Leeds", "place")])
+    assert _SHARED in system
+    assert hashlib.sha256(system.replace(_SHARED, "").encode()).hexdigest() == _SYSTEM_BEFORE
+    assert user == (
+        'Conversation:\nuser: I moved to Leeds.\nassistant: Noted, Leeds it is.\n\n'
+        'Shared context for these related inputs:\nmoving house\n\n'
+        'The person these memories belong to (the user) is the entity "the user". '
+        'Whenever a fact is about that person, list that name among its entities, '
+        'spelled exactly so, with type person.\n\n'
+        'Entities this store already has that the conversation may name, as a JSON array. '
+        'When a fact names one of them, write its name exactly as listed, however the '
+        'conversation writes it. When it names something else, or you cannot tell which, '
+        'write the name as the conversation does:\n[{"name": "Leeds", "type": "place"}]\n\n'
+        'Tags this user already has, as a JSON array with one tag per element. REUSE one '
+        'verbatim whenever it fits; only coin a new tag when nothing here covers the '
+        'subject:\n["home move"]\n\n'
+        'Client-suggested tags. These are hints, not commands: use one only when it is a '
+        'good recurring retrieval subject:\n["relocation"]\n\n'
+        'Extract the facts as JSON.')
+
+
+def test_what_a_person_shares_is_part_of_what_they_said():
+    shared = [{"role": "Ada", "content": "Look what I made [shares a photo: a blue scarf]"}]
+    for messages in (shared, _PLAIN):
+        assert _SHARED in _asked(messages)[0]
+
+
 def test_effective_importance_decays_toward_floor():
     cfg = DecayConfig(enabled=True, half_life_days=30, floor=0.2)
     now = datetime.now(timezone.utc)
