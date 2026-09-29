@@ -3370,7 +3370,8 @@ def create_app(
         ))
         return JSONResponse(
             [
-                {"memory": _memory_payload(r.memory), "score": r.score, "signals": r.signals}
+                {"memory": _memory_payload(r.memory), "score": r.score, "signals": r.signals,
+                 "evidence": [turn.model_dump() for turn in r.evidence]}
                 for r in results
             ]
         )

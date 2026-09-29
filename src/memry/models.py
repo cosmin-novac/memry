@@ -152,7 +152,12 @@ class Scope(BaseModel):
 
 
 class Episode(BaseModel):
-    """An immutable raw event (one conversation message or ingested record)."""
+    """An immutable raw event (one conversation message or ingested record).
+
+    ``withheld_at`` is the episode's validity as evidence, as ``invalid_at`` is
+    a memory's: set when a memory resting on it was deleted for good. From then
+    on the episode is never shown as evidence of a memory, not even of another
+    memory resting on it, since it says what was deleted."""
 
     id: str = Field(default_factory=new_id)
     content: str
@@ -162,6 +167,7 @@ class Episode(BaseModel):
     run_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utcnow)
+    withheld_at: str | None = None
 
 
 class Memory(BaseModel):
@@ -266,10 +272,30 @@ class AddResult(BaseModel):
         return counts
 
 
+class EvidenceTurn(BaseModel):
+    """A source episode of memories found, shown as their evidence: what was
+    said, by whom and when (``MemoryStore.evidence``)."""
+
+    episode_id: str
+    content: str
+    #: The episode's role: a speaker's name, or a chat role ("user").
+    speaker: str
+    #: When it was said: the episode's ``created_at``.
+    said_at: str
+    #: The memories found that rest on it, the best ranked first.
+    memory_ids: list[str] = Field(default_factory=list)
+    #: Its similarity to the query, by which it was chosen.
+    score: float = 0.0
+
+
 class SearchResult(BaseModel):
     memory: Memory
     score: float
     signals: dict[str, float] = Field(default_factory=dict)
+    #: The source turns chosen as evidence that this memory is the best
+    #: ranked of the results to rest on (``MemoryStore.evidence``), in the
+    #: order they were said. A turn is attached to one result only.
+    evidence: list[EvidenceTurn] = Field(default_factory=list)
 
 
 class Topic(BaseModel):
@@ -412,3 +438,5 @@ class ContextResult(BaseModel):
     text: str
     memory_ids: list[str] = Field(default_factory=list)
     token_estimate: int = 0
+    #: The episodes shown as evidence under the memories.
+    episode_ids: list[str] = Field(default_factory=list)

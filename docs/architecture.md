@@ -106,15 +106,30 @@ environment variable, CLI flag, REST option, or server option that selects it.
 
 | Record | Purpose | Lifecycle |
 |---|---|---|
-| `Episode` | Raw input captured before derived processing | Append-only source evidence. |
+| `Episode` | Raw input captured before derived processing, one per message | Append-only source evidence. Not searched on its own: it is shown as evidence of the memories found that rest on it (section 5). `withheld_at` ends that for good. |
 | `Memory` | One derived or verbatim claim | May be updated, invalidated, or superseded; hard deletion is explicit. |
 | `MemoryEvent` | Audit event for add/update/supersede/delete decisions | Append-only audit trail. |
-| Embedding and FTS row | Search representation of a memory | Derived and rebuildable. |
+| Embedding and FTS row | Search representation of a memory, and of an episode for choosing it as evidence | Derived and rebuildable (`memry reindex` embeds episodes an older store has no vector for). |
 
 A memory has content, one memory type, importance, public `categories`, compatibility
 `entities`, metadata, scope (`user_id`, `agent_id`, `run_id`), timestamps, source episode
 IDs, and validity fields (`valid_from`, `invalid_at`, `superseded_by`). The validity fields
 preserve old claims instead of pretending that the latest claim erased history.
+
+The source episode IDs are the lines a memory rests on. Extraction numbers the lines of the
+transcript it reads ("[1] Ada: ..."), one per message and so one per episode, and each fact
+it returns names the lines it rests on (`sources`). The memory is linked to the episodes of
+those lines. A fact that names no line, or a line the transcript does not have, rests on
+every episode of its save, as every fact did before facts named their lines. A verbatim
+memory rests on its own message, and a distilled fact on the raw saves of its lines. An
+update merges the sources of the memories it joins.
+
+An episode's validity as evidence is `withheld_at`, beside a memory's `invalid_at`. It is
+set on a memory's own source episodes when that memory is deleted for good. From then on the
+episode is never shown as evidence, even of another memory resting on it, because it still
+says what was deleted. A forgotten memory (out of use with nothing in its place) withholds
+its episodes while it stays forgotten. This is checked when evidence is chosen, so bringing
+the memory back shows them again.
 
 ### Tags (backend names: categories and topics)
 
@@ -393,7 +408,9 @@ The default `save_memories(infer=true)` path is intentionally split at the safe 
    label are then sent through one extraction pass, capped at eight raw records per pass.
    Optional client `tags` are prompt hints, not grouping identifiers.
 4. The extractor sees the whole related input while still producing small atomic facts.
-   Every derived fact keeps the source episode IDs of the group and the save's context
+   The group's episodes are embedded first, since the save made no provider call. Every
+   derived fact keeps the source episode IDs of the saves whose lines it names (all of the
+   group's when it names none) and the save's context
    label (before 28066d1 the label was lost; `memry restore-context`, or
    `POST /api/v1/memories/restore-context`, puts it back from the episodes, with
    `--dry-run` / `{"dry_run": true}` to count first). On success, reconcile the
@@ -414,7 +431,8 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
 
 `store.add(...)` and the REST write route retain the synchronous workflow:
 
-1. Store raw input as episodes before inference.
+1. Store raw input as episodes before inference, one per message, each with its embedding
+   and full-text entry (an embedding failure leaves the episode to its words).
 2. With an LLM, extract small candidate memories, types, importance, topics, entities, and
    possible relations, offered the user's tags from every run. Without an LLM, store the
    input verbatim.
@@ -510,8 +528,27 @@ For a normal text query:
    thing between them (the version it builds on). The same blend, with a call of its own,
    re-ranks a search that was neither ordered by the linked search nor judged (a tag or
    entity filter, or `relational=False`).
-7. Context reconstruction may prepend a bounded, lazily refreshed entity description and
-   then packs exact memories into the remaining token budget.
+7. The memories found are returned with their evidence (`MemoryStore.evidence`). This is
+   provenance, not a second search. The candidates are the source episodes of the results
+   in use, each once, credited to the best ranked memory resting on it. Only episodes of the
+   scope searched count. None is withheld, none rests under a forgotten memory, and none
+   says no more than a memory resting on it (a verbatim save). They are taken by the
+   similarity of their vector to the query, with their full-text match breaking a tie. Each
+   is taken while it fits `retrieval.evidence_tokens` (600 by default; 0 shows none), and
+   they are returned in the order they were said. A result carries the turns credited to
+   it (`SearchResult.evidence`).
+8. Context reconstruction may prepend a bounded, lazily refreshed entity description. It
+   then packs exact memories into the remaining token budget, leaving a share for their
+   evidence (`retrieval.evidence_tokens`, at most half of what is left). The evidence of
+   the memories that fit fills that share. One function renders memories for a model
+   (`intelligence.context.memory_lines`), used by `reconstruct_context` and the
+   benchmark runner alike. A memory reads "[happened 2023-05-07] <text> (said 8 May
+   2023)": when the thing it tells happens (`metadata["when"]`, where known), and the day
+   it was recorded (its last change). Both are labelled so that a model does not take the
+   day a fact was written down for the day it happened. The memories are followed by
+   their evidence turns in the order they were said, each "<said date>: <speaker>:
+   <text>". The MCP `search_memories` rows carry the same as data: `said`, `happened`,
+   and `evidence` (said, speaker, text).
 
 Every ranked read breaks a tie by memory id (`ORDER BY updated_at DESC, id` and the like),
 so memories of one time (a bulk import, a restore) rank alike in every build of a store.
@@ -671,6 +708,7 @@ up as a red run within a week instead of in a user's terminal.
 | Background work uses bounded database batches but separate prompts per memory | Bounded draining improves throughput; separate prompts preserve each user scope, provenance, retry, and failure boundary. | Yes |
 | Anthropic defaults to claude-haiku-4-5 | Memory extraction is frequent background work, so the lower-cost, lower-latency model is the useful default; operators can explicitly select a larger model when quality justifies the extra cost. | Yes |
 | Provider HTTP clients are reused for the store lifetime | Reusing connections removes repeated connection setup from enrichment latency without adding a service or a second execution path. | Yes |
+| A memory is linked to the lines it rests on, and memories found are shown with those source turns as evidence | A memory is a summary, and the words it came from keep what the summary left out (a feeling, a name, what a photo showed). Episodes stay provenance: they are never searched on their own, only chosen among the sources of the memories found, within a token budget, and a deleted or forgotten memory never shows them. | Yes |
 
 Any future consequential architecture change must be added here with its product reason and
 implementation status before it is treated as decided work.

@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .config import Config, require_models
 from .enrichment import EnrichmentWorker
+from .intelligence.when import describe_when
 from .models import EventType, MemoryType
 from .principal import ADMIN, Principal
 from .store import MemoryStore
@@ -75,6 +76,12 @@ class MemoryEnrichmentOutput(BaseModel):
     last_error: str | None = None
 
 
+class EvidenceTurnOutput(BaseModel):
+    said: str
+    speaker: str
+    text: str
+
+
 class MemoryRowOutput(BaseModel):
     id: str
     content: str
@@ -83,9 +90,12 @@ class MemoryRowOutput(BaseModel):
     categories: list[str]
     created_at: str
     updated_at: str
+    said: str | None = None
+    happened: str | None = None
     enrichment: MemoryEnrichmentOutput | None = None
     invalid_at: str | None = None
     score: float | None = None
+    evidence: list[EvidenceTurnOutput] | None = None
 
 
 class SaveActionOutput(BaseModel):
@@ -200,7 +210,11 @@ def _tool_result(
     )
 
 
-def _memory_row(m: Any, score: float | None = None) -> dict[str, Any]:
+def _memory_row(m: Any, score: float | None = None, evidence: Any = ()) -> dict[str, Any]:
+    """A memory as the tools return it. "said" is the day it was recorded
+    (its last change) and "happened" when the thing it tells happens, where
+    known: the two dates the context builder labels. "evidence" are the source
+    turns a search chose for it (``MemoryStore.evidence``)."""
     row = {
         "id": m.id,
         "content": m.content,
@@ -209,7 +223,11 @@ def _memory_row(m: Any, score: float | None = None) -> dict[str, Any]:
         "categories": m.categories,
         "created_at": m.created_at,
         "updated_at": m.updated_at,
+        "said": (m.updated_at or m.created_at or "")[:10],
     }
+    happened = describe_when((m.metadata or {}).get("when"))
+    if happened:
+        row["happened"] = happened
     if m.metadata.get("pending_distillation"):
         job = m.metadata.get("_enrichment") or {"status": "pending"}
         row["enrichment"] = {
@@ -221,6 +239,9 @@ def _memory_row(m: Any, score: float | None = None) -> dict[str, Any]:
         row["invalid_at"] = m.invalid_at
     if score is not None:
         row["score"] = round(score, 4)
+    if evidence:
+        row["evidence"] = [{"said": t.said_at[:10], "speaker": t.speaker, "text": t.content}
+                           for t in evidence]
     return row
 
 
@@ -430,7 +451,7 @@ def create_server(
             when_since=when_since or None,
             when_until=when_until or None,
         )
-        memory_rows = [_memory_row(r.memory, r.score) for r in results]
+        memory_rows = [_memory_row(r.memory, r.score, r.evidence) for r in results]
         return _tool_result(
             memory_rows,
             SearchMemoriesOutput(memories=memory_rows),

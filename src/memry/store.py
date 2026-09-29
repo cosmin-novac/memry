@@ -39,7 +39,7 @@ from .intelligence.clustering import (
     suggest_canonical_merges,
 )
 from .intelligence.consolidate import judge_group, representative, similarity_groups
-from .intelligence.context import build_context, estimate_tokens
+from .intelligence.context import build_context, estimate_tokens, fitting, turn_line
 from .intelligence.decay import (
     DURABILITY_KEY,
     decay_sweep,
@@ -119,6 +119,7 @@ from .models import (
     Entity,
     EntityMention,
     Episode,
+    EvidenceTurn,
     Memory,
     MemoryEvent,
     MemoryType,
@@ -546,6 +547,7 @@ class MemoryStore:
             return AddResult()
         if episodes:
             self.backend.add_episodes(episodes)
+            self._embed_episodes(episodes)
         episode_ids = [e.id for e in episodes]
 
         candidates: list[CandidateFact]
@@ -1192,6 +1194,10 @@ class MemoryStore:
         ]
         if episodes:
             self.backend.add_episodes(episodes)
+            # an imported row's episode says what its memory says: one vector
+            self.backend.set_episode_vectors(
+                {episode.id: vector for (_, vector), episode in zip(accepted, episodes) if vector},
+                self.embedder.model_id)
 
         memory_ids: list[str] = []
         for (row, vector), episode in zip(accepted, episodes):
@@ -1433,6 +1439,10 @@ class MemoryStore:
                 for episode_id in memory.source_episode_ids
             )
         )
+        # a deferred save made no provider call: its episodes are embedded now
+        embedded = self.backend.episode_vectors_of(episode_ids, self.embedder.model_id)
+        self._embed_episodes([episode for episode in self.backend.episodes_by_id(
+            [e for e in episode_ids if e not in embedded]).values()])
         # What the saves asked of their memories (add_deferred): the latest
         # time and reference date given, and every memory_metadata merged.
         jobs = [memory.metadata.get(_ENRICHMENT_KEY) or {} for memory in active]
@@ -1551,7 +1561,12 @@ class MemoryStore:
         when_since: str | None = None,
         when_until: str | None = None,
         relational: bool = True,
+        evidence: bool = True,
     ) -> list[SearchResult]:
+        """The memories that best answer ``query``, best first. With
+        ``evidence`` each result carries the source turns it is the best
+        ranked of the results to rest on, chosen within
+        ``retrieval.evidence_tokens`` (``evidence``)."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         if entity_id:
             entity_id = self._resolve_entity_filter(entity_id)
@@ -1571,6 +1586,8 @@ class MemoryStore:
             relational and not categories and not entity_id
         )
         fetch = limit if not wide else min(max(limit * 8, 40), 500)
+        # embedded once: the ranking and the choice of evidence read it
+        query_vector = self._query_vector(query)
         results = hybrid_search(
             backend=self.backend,
             embedder=self.embedder,
@@ -1581,6 +1598,7 @@ class MemoryStore:
             include_invalid=include_invalid,
             categories=categories,
             entity_id=entity_id,
+            query_vector=query_vector,
         )
         # The linked search: the memories of the entities linked to the query's
         # join the ranking (multi-hop answers hybrid alone scores at zero).
@@ -1594,7 +1612,110 @@ class MemoryStore:
             ]
         # a question needing several memories returns every member found
         members = sum(1 for r in results if r.signals.get("member"))
-        return self._rerank(query, results)[:max(limit, min(members, SET_RESULT_CAP))]
+        found = self._rerank(query, results)[:max(limit, min(members, SET_RESULT_CAP))]
+        if evidence:
+            by_id = {r.memory.id: r for r in found}
+            for turn in self.evidence(query, found, user_id=user_id, agent_id=agent_id,
+                                      run_id=run_id, query_vector=query_vector):
+                by_id[turn.memory_ids[0]].evidence.append(turn)
+        return found
+
+    def _query_vector(self, query: str) -> list[float]:
+        """The query's vector, or [] with no embedder or while it is down (the
+        ranking then reads the words alone)."""
+        if not self.embedder.dimensions:
+            return []
+        try:
+            return self.embedder.embed([query])[0] or []
+        except Exception:
+            return []
+
+    def _embed_episodes(self, episodes: list[Episode]) -> None:
+        """Store each episode's vector, as a memory's is stored. Best effort:
+        without one an episode is still chosen as evidence by its words."""
+        if not episodes or not self.embedder.dimensions:
+            return
+        try:
+            vectors = self.embedder.embed([e.content for e in episodes])
+        except Exception:
+            return
+        self.backend.set_episode_vectors(
+            {e.id: v for e, v in zip(episodes, vectors) if v}, self.embedder.model_id)
+
+    def evidence(
+        self,
+        query: str,
+        results: list[SearchResult],
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        token_budget: int | None = None,
+        query_vector: list[float] | None = None,
+    ) -> list[EvidenceTurn]:
+        """The source turns of the memories found that best match the query,
+        in the order they were said: provenance, shown with the facts.
+
+        Only the episodes the results in use rest on are candidates
+        (``Memory.source_episode_ids``), each once, credited to the best
+        ranked memory resting on it; only those of the scope searched; none
+        withheld or resting under a memory removed (``MemoryBackend.
+        evidence_episodes``); none whose words a memory resting on it already
+        says whole (a verbatim save). They are taken by their similarity to
+        the query (the full-text match breaks a tie), each while it fits the
+        budget (``token_budget``, default ``retrieval.evidence_tokens``;
+        ``build_context`` counts a turn as it renders it)."""
+        budget = self.config.retrieval.evidence_tokens if token_budget is None else token_budget
+        if budget <= 0 or not (query or "").strip():
+            return []
+        resting: dict[str, list[str]] = {}
+        texts: dict[str, str] = {}
+        for result in results:
+            memory = result.memory
+            if memory.invalid_at is not None:
+                continue
+            texts[memory.id] = " ".join(memory.content.casefold().split())
+            for episode_id in memory.source_episode_ids or []:
+                resting.setdefault(episode_id, []).append(memory.id)
+        if not resting:
+            return []
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        episodes = [
+            e for e in self.backend.evidence_episodes(list(resting))
+            if all(getattr(scope, f) is None or getattr(scope, f) == getattr(e, f)
+                   for f in ("user_id", "agent_id", "run_id"))
+            and not any(" ".join(e.content.casefold().split()) in texts[mid]
+                        for mid in resting[e.id])
+        ]
+        if not episodes:
+            return []
+        if query_vector is None:
+            query_vector = self._query_vector(query)
+        asked = np.asarray(query_vector, dtype=np.float32) if query_vector else None
+        vectors = (self.backend.episode_vectors_of([e.id for e in episodes],
+                                                   self.embedder.model_id)
+                   if asked is not None else {})
+        if asked is not None:
+            asked /= float(np.linalg.norm(asked)) or 1.0
+        words = self.backend.episode_keyword_scores(query, [e.id for e in episodes])
+        turns = [
+            EvidenceTurn(episode_id=e.id, content=e.content, speaker=e.role,
+                         said_at=e.created_at, memory_ids=resting[e.id],
+                         score=round(_similarity(asked, vectors.get(e.id))
+                                     if asked is not None else 0.0, 6))
+            for e in episodes
+        ]
+        order = {turn.episode_id: i for i, turn in enumerate(turns)}  # as said
+        chosen: set[str] = set()
+        used = 0
+        for turn in sorted(turns, key=lambda t: (-t.score, -words.get(t.episode_id, 0.0),
+                                                 order[t.episode_id])):
+            cost = estimate_tokens(turn_line(turn)) + 1
+            if used + cost > budget:
+                continue
+            chosen.add(turn.episode_id)
+            used += cost
+        return [turn for turn in turns if turn.episode_id in chosen]
 
     def _reranks(self) -> bool:
         """Whether the decision provider re-ranks. The setting decides where it
@@ -2222,15 +2343,26 @@ class MemoryStore:
         token_budget: int = 1200,
         limit: int = 20,
     ) -> ContextResult:
+        """The memories found for ``query`` that fit ``token_budget``, rendered
+        for a model (``intelligence.context``), after a description of the
+        entities the query names. The memories that fit take the budget
+        but a share for their evidence (``retrieval.evidence_tokens``, at most
+        half of what is left), and their source turns that best match the
+        query fill that share (``evidence``)."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         results = self.search(
-            query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit
+            query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit,
+            evidence=False,
         )
         entity_text, entity_memory_ids = self._entity_context(
             scope, query, token_budget=min(300, max(80, token_budget // 4))
         )
         remaining = max(0, token_budget - estimate_tokens(entity_text))
-        memory_context = build_context(results, token_budget=remaining)
+        share = min(max(self.config.retrieval.evidence_tokens, 0), remaining // 2)
+        shown = fitting(results, remaining - share)
+        turns = self.evidence(query, shown, user_id=user_id, agent_id=agent_id,
+                              run_id=run_id, token_budget=share)
+        memory_context = build_context(shown, token_budget=remaining, evidence=turns)
         parts = [part for part in (entity_text, memory_context.text) if part]
         combined = "\n\n".join(parts)
         memory_ids = list(dict.fromkeys([*entity_memory_ids, *memory_context.memory_ids]))
@@ -2238,6 +2370,7 @@ class MemoryStore:
             text=combined,
             memory_ids=memory_ids,
             token_estimate=estimate_tokens(combined) if combined else 0,
+            episode_ids=memory_context.episode_ids,
         )
 
     def _entity_context(
@@ -5035,6 +5168,14 @@ class MemoryStore:
             rebuild(self.embedder.model_id, self.embedder.dimensions)
         for user_id in self.backend.distinct_user_ids() or [None]:
             self.refresh_property_vectors(user_id=user_id)
+        # the episodes' vectors, which evidence is chosen by (older stores had none)
+        while episodes := self.backend.episodes_to_embed(self.embedder.model_id,
+                                                         limit=batch_size):
+            vectors = self.embedder.embed([e.content for e in episodes])
+            self.backend.set_episode_vectors(
+                {e.id: v for e, v in zip(episodes, vectors)}, self.embedder.model_id)
+            if not all(vectors):
+                break  # an episode the embedder gives no vector would come back forever
         return count
 
     def stats(self) -> dict[str, Any]:

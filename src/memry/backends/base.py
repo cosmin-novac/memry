@@ -48,6 +48,35 @@ class MemoryBackend(ABC):
         episodes up by id returns none."""
         return {}
 
+    # An episode is searched only as evidence of the memories resting on it
+    # (``MemoryStore.evidence``): by its vector and its full-text entry.
+    def set_episode_vectors(self, vectors: dict[str, list[float]], embedding_model: str) -> None:
+        """Store each episode's embedding, as a memory's is stored."""
+        return None
+
+    def episode_vectors_of(
+        self, episode_ids: list[str], embedding_model: str
+    ) -> dict[str, "np.ndarray"]:
+        """The stored vectors of these episodes made by ``embedding_model``."""
+        return {}
+
+    def episodes_to_embed(self, embedding_model: str, *, limit: int = 1000) -> list[Episode]:
+        """Episodes with no vector of ``embedding_model`` yet, oldest first."""
+        return []
+
+    def episode_keyword_scores(self, query: str, episode_ids: list[str]) -> dict[str, float]:
+        """The full-text (BM25) score of each of these episodes that matches
+        ``query``, higher is better; an episode that does not match is left out."""
+        return {}
+
+    def evidence_episodes(self, episode_ids: list[str]) -> list[Episode]:
+        """The episodes among these that may be shown as evidence of a memory,
+        in the order they were said (time, then the order they were saved):
+        not withheld (``Episode.withheld_at``), and with at least one memory
+        resting on them in use and none removed (out of use with nothing in its
+        place: forgotten). A backend that cannot tell shows none."""
+        return []
+
     # -- memories -------------------------------------------------------
     @abstractmethod
     def insert_memory(self, memory: Memory, embedding: list[float] | None = None) -> Memory:
