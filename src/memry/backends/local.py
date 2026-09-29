@@ -181,12 +181,15 @@ CREATE INDEX IF NOT EXISTS idx_entities_type_user ON entities(
     entity_type, user_id, normalized
 );
 
+-- decided: what joined a name to an entity the store had (JSON, see
+-- ``EntityMention.decided``); NULL for a mention that made its entity.
 CREATE TABLE IF NOT EXISTS entity_mentions (
     id TEXT PRIMARY KEY,
     entity_id TEXT NOT NULL,
     memory_id TEXT NOT NULL,
     surface TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    decided TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_mentions_entity ON entity_mentions(entity_id);
 CREATE INDEX IF NOT EXISTS idx_mentions_memory ON entity_mentions(memory_id);
@@ -459,6 +462,12 @@ class LocalBackend(MemoryBackend):
             row["name"]
             for row in self._db.execute("PRAGMA table_info(memory_events)").fetchall()
         }
+        mention_columns = {
+            row["name"]
+            for row in self._db.execute("PRAGMA table_info(entity_mentions)").fetchall()
+        }
+        if "decided" not in mention_columns:
+            self._db.execute("ALTER TABLE entity_mentions ADD COLUMN decided TEXT")
         if "kind" not in event_columns:
             # what took a memory out of use (``MemoryEvent.kind``); older rows
             # keep NULL and are read by their reason. The default lets a backup
@@ -2725,12 +2734,16 @@ class LocalBackend(MemoryBackend):
         return [self._row_to_entity(r) for r in rows]
 
     def add_mention(self, mention: EntityMention) -> None:
+        """Attach a memory to an entity. A wording the entity was not called
+        before is one of its names from now on: ``names_changed`` hears of it."""
+        known = {alias.lower() for alias in self.entity_aliases(mention.entity_id)}
         with self._lock:
             self._db.execute(
-                "INSERT INTO entity_mentions (id, entity_id, memory_id, surface, created_at) "
-                "VALUES (?,?,?,?,?)",
+                "INSERT INTO entity_mentions "
+                "(id, entity_id, memory_id, surface, created_at, decided) VALUES (?,?,?,?,?,?)",
                 (mention.id, mention.entity_id, mention.memory_id, mention.surface,
-                 mention.created_at),
+                 mention.created_at,
+                 json.dumps(mention.decided) if mention.decided is not None else None),
             )
             self._db.execute(
                 "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
@@ -2738,6 +2751,9 @@ class LocalBackend(MemoryBackend):
                 (mention.created_at, mention.entity_id),
             )
             self._db.commit()
+        wording = mention.surface.strip().lower()
+        if wording and wording not in known and self.names_changed is not None:
+            self.names_changed([mention.entity_id])
 
     def entity_mentions(self, entity_id: str) -> list[EntityMention]:
         with self._lock:
@@ -2749,6 +2765,7 @@ class LocalBackend(MemoryBackend):
             EntityMention(
                 id=r["id"], entity_id=r["entity_id"], memory_id=r["memory_id"],
                 surface=r["surface"], created_at=r["created_at"],
+                decided=json.loads(r["decided"]) if r["decided"] else None,
             )
             for r in rows
         ]
@@ -3781,14 +3798,20 @@ class LocalBackend(MemoryBackend):
             },
         }
 
-    def reset(self) -> None:
-        """Empty every table of the schema but ``meta``, the store's own
-        settings. Read from the schema: a list kept by hand missed each table
-        added after it."""
+    def reset(self, *, keep_meta: Iterable[str] = ()) -> None:
+        """Empty every table of the schema, read from the schema: a list kept
+        by hand missed each table added after it. Of ``meta`` the migration
+        markers stay (``schema:``) and the keys starting with one of
+        ``keep_meta``; the rest is a namespace's state (queues, the owner,
+        when each pass ran) and goes with its memories."""
+        kept = ("schema:", *keep_meta)
         with self._lock:
             for table in _TABLES:
                 if table != "meta":
                     self._db.execute(f"DELETE FROM {table}")
+            for row in self._db.execute("SELECT key FROM meta").fetchall():
+                if not row["key"].startswith(kept):
+                    self._db.execute("DELETE FROM meta WHERE key = ?", (row["key"],))
             self._db.commit()
         for sidecar in self._anns.values():
             sidecar.rebuild([])

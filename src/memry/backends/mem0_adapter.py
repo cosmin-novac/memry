@@ -11,6 +11,7 @@ It must not be used as persistence for a running Memry product.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from ..models import Episode, Memory, MemoryEvent, Scope, utcnow
@@ -175,5 +176,5 @@ class Mem0ComparisonAdapter(MemoryBackend):
     def stats(self) -> dict[str, Any]:
         return {"backend": "mem0", "note": "stats limited on the mem0 adapter"}
 
-    def reset(self) -> None:
+    def reset(self, *, keep_meta: Iterable[str] = ()) -> None:
         self._m.reset()

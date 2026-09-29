@@ -291,6 +291,31 @@ def test_delete_all_and_reset(verbatim_store):
     assert verbatim_store.stats()["episodes"] == 0
 
 
+def test_a_reset_forgets_each_namespaces_upkeep_state_and_keeps_the_stores_settings(
+        verbatim_store):
+    """Queues, the owner's name and entity, and when each pass last ran belong
+    to the memories a reset deletes; the pause switch, a pass turned off and
+    the schema's migration markers belong to the store."""
+    store = verbatim_store
+    store.add("Ada lives in Leeds", user_id="ada", infer=False)
+    store.set_owner_name("ada", "Ada Quint")
+    store._upkeep_set("consolidation:pending", "ada", [{"ids": ["m1", "m2"]}])
+    assert store.run_upkeep_cycle(user_id="ada")  # stamps when the passes ran
+    assert store.last_pass_run("dedup_entities", "ada") is not None
+    store.set_maintenance_enabled("consolidation", False)
+    store.set_upkeep_paused(True)
+    markers = {key: store.backend.get_meta(key) for key in (
+        "schema:topics:v1", "schema:tag-entities:v1", "schema:tag-survivors:v1")}
+    store.reset()
+    assert store.owner_name("ada") == "the user"
+    assert store._upkeep_get("consolidation:pending", "ada", None) is None
+    assert store.last_pass_run("dedup_entities", "ada") is None
+    assert store.backend.get_meta("entity_dedup:v2:last_run:ada") is None
+    assert store.upkeep_paused() and not store.maintenance_enabled("consolidation")
+    assert all(markers.values())
+    assert {key: store.backend.get_meta(key) for key in markers} == markers
+
+
 def test_reconstruct_context(verbatim_store):
     verbatim_store.add("Ada lives in Berlin", user_id="ada", infer=False)
     verbatim_store.add("Ada prefers dark mode", user_id="ada", infer=False)

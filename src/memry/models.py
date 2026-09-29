@@ -326,6 +326,11 @@ class EntityMention(BaseModel):
     memory_id: str
     surface: str
     created_at: str = Field(default_factory=utcnow)
+    #: What joined a name at save time to an entity the store had: a rule
+    #: (``reason``), or the judge's answer (``reason``, ``same``,
+    #: ``different`` and the funnel ``step``). None for a mention that made
+    #: its entity, or was attached otherwise.
+    decided: dict[str, Any] | None = None
 
 
 ProposalStatus = Literal["proposed", "confirmed", "rejected"]

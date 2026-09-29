@@ -459,11 +459,14 @@ class MemoryBackend(ABC):
                         return matches
         return matches
 
-    #: Called after a write changed what an entity is called, with the ids of
-    #: the entities whose names changed: the one a merge kept, one renamed,
-    #: one given an alias. ``MemoryStore`` sets it to refresh the property
-    #: vectors of the memories that read those names as "it", which would
-    #: otherwise keep the old names until the weekly refresh.
+    #: Called after a write changed which names read "it" in an entity's
+    #: memories, with the ids of the entities concerned: by the backend for
+    #: the one a merge kept, one renamed, one given an alias and one a
+    #: mention calls by a new wording; by the identity code for both of a
+    #: pair given a new answer to whether one belongs to the other (a home's
+    #: names read "it" in its parts' memories). ``MemoryStore`` sets it to
+    #: refresh the property vectors of those memories, which would otherwise
+    #: keep the old names until the weekly refresh.
     names_changed: Callable[[list[str]], None] | None = None
 
     def entity_aliases(self, entity_id: str) -> list[str]:
@@ -717,7 +720,10 @@ class MemoryBackend(ABC):
     def stats(self) -> dict[str, Any]: ...
 
     @abstractmethod
-    def reset(self) -> None: ...
+    def reset(self, *, keep_meta: Iterable[str] = ()) -> None:
+        """Delete everything. Of the key/value meta, only the backend's own
+        schema markers stay, and the keys starting with one of ``keep_meta``
+        (the caller's settings)."""
 
     def close(self) -> None:  # pragma: no cover - trivial default
         pass

@@ -153,6 +153,27 @@ def test_a_backup_from_before_a_column_was_added_still_restores():
         target.close()
 
 
+def test_a_database_from_before_mentions_kept_what_joined_them_gains_the_column(tmp_path):
+    import sqlite3
+
+    from memry.backends.local import LocalBackend
+
+    path = tmp_path / "old.db"
+    LocalBackend(str(path)).close()
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE entity_mentions DROP COLUMN decided")
+    db.execute("INSERT INTO entity_mentions (id, entity_id, memory_id, surface, created_at) "
+               "VALUES ('n1', 'e1', 'm1', 'Quillon', '2026-01-01')")
+    db.commit()
+    db.close()
+    backend = LocalBackend(str(path))
+    try:
+        [mention] = backend.entity_mentions("e1")
+        assert (mention.surface, mention.decided) == ("Quillon", None)
+    finally:
+        backend.close()
+
+
 def test_a_database_from_before_the_funnel_gains_its_column(tmp_path):
     import sqlite3
 

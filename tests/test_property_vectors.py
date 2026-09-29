@@ -5,6 +5,7 @@ memory says rather than whom it names (``store.refresh_property_vectors``)."""
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -94,18 +95,58 @@ def test_a_memory_whose_text_names_no_entity_keeps_its_ordinary_vector(store):
 
 def test_a_new_home_masks_the_things_name_at_the_next_refresh(store):
     """A version's memory often names its product. Once the provider answers
-    that bildy v3 is a version of bildy, "bildy" reads "it" there too; a second
+    that Brisk 3 is a version of Brisk, "Brisk" reads "it" there too; a second
     refresh with nothing changed embeds nothing."""
-    bildy, v3 = _entity(store, "bildy"), _entity(store, "bildy v3")
-    memory = _memory(store, "The third release of bildy added offline mode", [v3])
+    brisk, v3 = _entity(store, "Brisk"), _entity(store, "Brisk 3")
+    memory = _memory(store, "The third release of Brisk added offline maps", [v3])
     assert store.refresh_property_vectors(user_id="ada") == 0  # nothing to mask yet
     store.backend.add_proposal(MergeProposal(
-        entity_a=v3.id, entity_b=bildy.id, user_id="ada", confidence=0.7,
+        entity_a=v3.id, entity_b=brisk.id, user_id="ada", confidence=0.7,
         different=0.3, belongs=NEITHER_BUT, compared_step=1))
     assert store.refresh_property_vectors(user_id="ada") == 1
-    assert store.embedder.texts[-1] == "The third release of it added offline mode"
+    assert store.embedder.texts[-1] == "The third release of it added offline maps"
     assert store.refresh_property_vectors(user_id="ada") == 0
     assert memory.id in store.backend.property_vectors_of([memory.id], store._property_label())
+
+
+class _VersionOf(_Same):
+    """Finds "Brisk 3" a version of "Brisk", and waits on whether they are one."""
+
+    def decide(self, state, questions):
+        if "pair" not in questions:
+            return Answers({})
+        first = re.findall(r'ENTITY [AB]: "([^"]+)"', state)[0]
+        child = "a" if first == "Brisk 3" else "b"
+        pair = {"same": 0.3, "different": 0.1, "unsure": 0.6}
+        belongs = {"a_kind_of_b": 0.0, "a_part_of_b": 0.0, "b_kind_of_a": 0.0,
+                   "b_part_of_a": 0.0, "neither": 0.1}
+        belongs[f"{child}_kind_of_{'b' if child == 'a' else 'a'}"] = 0.9
+        return Answers({"pair": Answer("unsure", pair, 0.9, True),
+                        "belongs": Answer(max(belongs, key=belongs.get), belongs, 0.9, True)})
+
+
+@pytest.mark.parametrize("answered", ["by a save", "by the weekly pass"])
+def test_a_new_home_the_judge_answers_masks_the_things_name_at_once(store, answered):
+    """Where the judge's answer that Brisk 3 is a version of Brisk is stored,
+    at a save naming Brisk for the first time or in the weekly pass, "Brisk"
+    reads "it" in Brisk 3's memory at once rather than at the weekly
+    refresh, which then has nothing to embed."""
+    v3 = _entity(store, "Brisk 3")
+    memory = _memory(store, "The third release of Brisk added offline maps", [v3])
+    store.decider = _VersionOf()
+    store.refresh_property_vectors(user_id="ada")
+    if answered == "by a save":
+        store._apply_candidates(
+            [CandidateFact(content="Brisk runs on Android", entities=["Brisk"])],
+            Scope(user_id="ada"), [])
+    else:
+        _memory(store, "Brisk runs on Android", [_entity(store, "Brisk")])
+        assert _masked(store, memory) is None
+        store.resolve_entities(user_id="ada")
+    [pair] = store.merge_proposals(user_id="ada")
+    assert pair.belongs is not None
+    assert _masked(store, memory) == "The third release of it added offline maps"
+    assert store.refresh_property_vectors(user_id="ada") == 0
 
 
 def test_a_vector_from_another_embedding_model_is_not_read_and_is_replaced(store):
@@ -223,6 +264,40 @@ def test_a_rename_or_a_new_alias_masks_the_new_name_at_once(store):
     assert _masked(store, mobile) == "it added an offline mode"
     store.add_entity_alias(quillon.id, "Q-Mob")
     assert _masked(store, nickname) == "it, it to its users, dropped the web app"
+
+
+def test_a_new_wording_joined_at_save_is_masked_in_the_entitys_other_memories(store):
+    """A save that calls "Tarnby Labs" "Tarnby" gives it a new name, which the
+    staff memory writes too: it reads "it" there at once. The refresh masks
+    every memory of the entity, which is string work, and embeds only what
+    changed: the saved memory and the staff memory, not the office one."""
+    labs = _entity(store, "Tarnby Labs")
+    staff = _memory(store, "Tarnby Labs, called Tarnby by its staff, hired two engineers", [labs])
+    office = _memory(store, "Tarnby Labs opened a second office", [labs])
+    store.refresh_property_vectors(user_id="ada")
+    store.decider = _Same()
+    before = len(store.embedder.texts)
+    [action] = store._apply_candidates(
+        [CandidateFact(content="Tarnby moved to a bigger office", entities=["Tarnby"])],
+        Scope(user_id="ada"), [])
+    assert [e.id for e in store.backend.entities_of_memory(action.memory_id)] == [labs.id]
+    assert _masked(store, staff) == "it, called it by its staff, hired two engineers"
+    assert _masked(store, office) == "it opened a second office"
+    masked = [text for text in store.embedder.texts[before:]
+              if text != "Tarnby moved to a bigger office"]  # the memory's own vector
+    assert sorted(masked) == [
+        "it moved to a bigger office", "it, called it by its staff, hired two engineers"]
+
+
+def test_a_new_name_is_embedded_only_where_a_memory_writes_it(store):
+    quillon = _entity(store, "Quillon")
+    for text in ("Quillon runs on Linux", "Quillon, Q-Mob to its users, dropped the web app",
+                 "Quillon added an offline mode"):
+        _memory(store, text, [quillon])
+    store.refresh_property_vectors(user_id="ada")
+    before = len(store.embedder.texts)
+    store.add_entity_alias(quillon.id, "Q-Mob")
+    assert store.embedder.texts[before:] == ["it, it to its users, dropped the web app"]
 
 
 def test_a_name_that_is_also_a_common_word_reads_it_in_its_own_memories(store):

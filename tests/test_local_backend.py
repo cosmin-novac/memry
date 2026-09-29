@@ -159,7 +159,8 @@ def test_stats_and_reset():
 def test_a_reset_leaves_no_row_behind_but_the_stores_own_settings():
     """The reset listed the tables it empties by hand, and a table added later
     was left out: property vectors once, then relations, removed entities and
-    synthetic tags. Only ``meta`` stays."""
+    synthetic tags. Of ``meta`` the migration markers stay, and the settings
+    the caller keeps."""
     from memry.models import Relation, SyntheticTag
 
     b = make_backend()
@@ -174,14 +175,18 @@ def test_a_reset_leaves_no_row_behind_but_the_stores_own_settings():
     b.set_property_vectors({memory.id: [1.0, 0.0]}, "hash-v1", {memory.id: "masked"})
     b.record_synthetic_tag(SyntheticTag(tag="engineering", source_tags=["build"], user_id="ada"))
     assert b.retire_entity(stray.id)
-    b.set_meta("owner_name", "Ada")
-    b.reset()
+    b.set_meta("upkeep:owner_name:ada", '"Ada"')
+    b.set_meta("maintenance:paused", "true")
+    marker = b.get_meta("schema:tag-entities:v1")
+    b.reset(keep_meta=("maintenance:",))
     assert b.list_relations(Scope(user_id="ada")) == []
     assert b.list_retired_entities(Scope(user_id="ada")) == []
     assert b.list_synthetic_tags(Scope(user_id="ada")) == []
     assert b.property_vector_hashes([memory.id]) == {}
     assert b.list_entities(Scope(user_id="ada"), include_merged=True, kind="any") == []
-    assert b.get_meta("owner_name") == "Ada"
+    assert b.get_meta("upkeep:owner_name:ada") is None
+    assert b.get_meta("maintenance:paused") == "true"
+    assert marker and b.get_meta("schema:tag-entities:v1") == marker
 
 
 def test_count_memories_counts_what_a_walk_of_every_memory_would():

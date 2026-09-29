@@ -254,6 +254,12 @@ def _upkeep_key(name: str, user_id: str | None) -> str:
     return f"upkeep:{name}:{user_id or ''}"
 
 
+#: Meta keys that are the store's own settings, not a namespace's state: the
+#: pause switch and each pass turned on or off (``maintenance:``). A reset
+#: keeps them; the queues, the owner and when each pass ran go.
+_SETTINGS_KEYS = ("maintenance:",)
+
+
 def _group_id(parts) -> str:
     """A stable, URL-safe id for a set of names or memory ids."""
     joined = "\x1f".join(sorted(str(part) for part in parts))
@@ -3367,8 +3373,25 @@ class MemoryStore:
             keep is not None and other is not None and keep_root != merge_root
             and keep.entity_type == TOPIC_TYPE and other.entity_type == TOPIC_TYPE
         ):
-            return self._fold_topic(keep, other)
-        return self.backend.merge_entities(keep_root, merge_root)
+            merged = self._fold_topic(keep, other)
+        else:
+            merged = self.backend.merge_entities(keep_root, merge_root)
+        if merged and keep_root != merge_root:
+            self._record_merged_by_you(keep_root, merge_root)
+        return merged
+
+    def _record_merged_by_you(self, keep_id: str, merge_id: str) -> None:
+        """Record on the pair of the two that a person merged them, where the
+        merge history reads what decided a merge: on their pair, open or
+        decided before, or on a new one."""
+        proposal = self.backend.find_proposal(keep_id, merge_id)
+        if proposal is not None:
+            self.backend.set_proposal_status(proposal.id, "confirmed", reason="merged by you")
+            return
+        entity = self.backend.get_entity(keep_id)
+        self.backend.add_proposal(MergeProposal(
+            entity_a=keep_id, entity_b=merge_id, user_id=entity.user_id if entity else None,
+            status="confirmed", confidence=1.0, reason="merged by you", decided_at=utcnow()))
 
     def _fold_topic(self, keep: Entity, other: Entity) -> bool:
         """Merge the tag ``other`` into the tag ``keep``, both active topic
@@ -4887,7 +4910,7 @@ class MemoryStore:
         return self.backend.count_memories(owner_prefix)
 
     def reset(self) -> None:
-        self.backend.reset()
+        self.backend.reset(keep_meta=_SETTINGS_KEYS)
 
     def close(self) -> None:
         try:

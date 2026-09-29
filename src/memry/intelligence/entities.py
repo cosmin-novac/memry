@@ -40,6 +40,7 @@ from .identity import (
     PAIR_STEPS,
     Mention,
     NameIndex,
+    Verdict,
     belongs_blocks,
     closest_people,
     compare,
@@ -650,9 +651,9 @@ def resolve_mentions(
             continue
         if owner is not None and surface.casefold() == owner_name:
             if attach:
-                backend.add_mention(
-                    EntityMention(entity_id=owner.id, memory_id=memory_id, surface=surface)
-                )
+                backend.add_mention(EntityMention(
+                    entity_id=owner.id, memory_id=memory_id, surface=surface,
+                    decided={"reason": "the store owner's name"}))
             resolved[normalized] = owner
             continue
         if non_referent_reason(surface) or screened_out(verdicts.get(normalized)):
@@ -665,6 +666,8 @@ def resolve_mentions(
                 index = NameIndex(backend.list_entities(lookup, limit=100_000))
             candidates += index.candidates(surface, exclude={c.id for c in candidates})
         target: Entity | None = None
+        # what joined the mention to an entity the store has, kept on it
+        decided: dict[str, Any] | None = None
         proposals: list[MergeProposal] = []
         mention = Mention(surface, types.get(normalized),
                           saved or Memory(id=memory_id, content=memory_content))
@@ -674,7 +677,7 @@ def resolve_mentions(
         # it to the merge bar instead left 88 of 431 mentions of a known name
         # as new one-memory entities in a replayed store, which never gained
         # the evidence to be compared again.
-        likely: list[tuple[float, Entity]] = []
+        likely: list[tuple[float, Entity, dict[str, Any]]] = []
         # The memory may already belong to an entity of this name through
         # another of its names ("Google" merged into "Google LLC" a moment
         # ago, then "Google LLC" itself): nothing is left to compare, and a
@@ -685,6 +688,7 @@ def resolve_mentions(
         for candidate in candidates:
             if holding:
                 target = candidate
+                decided = {"reason": "the memory names it by another of its names"}
                 break
             if likely and candidate.id not in same_name:
                 break  # a known name found its entity; no need to try others
@@ -696,6 +700,7 @@ def resolve_mentions(
                 candidate, facts, surface, types.get(normalized)
             ):
                 target = candidate
+                decided = {"reason": "one name, and the entity has no memories"}
                 break
             if judge is not None:
                 verdict = compare(judge, backend, candidate, mention)
@@ -707,10 +712,13 @@ def resolve_mentions(
                     or (probabilities is not None
                         and probabilities["different"] < judge.pair_apart_probability)
                 ):
-                    likely.append((probabilities["same"] if probabilities else 1.0, candidate))
+                    likely.append((probabilities["same"] if probabilities else 1.0, candidate, {
+                        "reason": "a name the store has: the likeliest of its entities, "
+                                  "not said to be different", **_answer(verdict)}))
                     continue
                 if verdict.action == "merge":
                     target = candidate
+                    decided = {"reason": pair_reason(judge, probabilities), **_answer(verdict)}
                     break
                 proposals.append(MergeProposal(
                     entity_a=candidate.id, entity_b="", user_id=scope.user_id,
@@ -728,6 +736,8 @@ def resolve_mentions(
             )
             if _merges_on_gate(judgment):
                 target = candidate
+                decided = {"reason": judgment.get("reason") or judgment["verdict"],
+                           "confidence": judgment["confidence"]}
                 break
             if judgment["verdict"] in ("same", "unsure"):
                 proposals.append(MergeProposal(
@@ -736,7 +746,7 @@ def resolve_mentions(
                 ))
 
         if target is None and likely:
-            target = max(likely, key=lambda option: option[0])[1]
+            _, target, decided = max(likely, key=lambda option: option[0])
             proposals = []
         if target is None:
             # The screen's verdict is kept on the new entity, as the weekly
@@ -756,13 +766,31 @@ def resolve_mentions(
             for proposal in proposals:
                 if backend.find_proposal(proposal.entity_a, target.id) is None:
                     backend.add_proposal(proposal.model_copy(update={"entity_b": target.id}))
+                    if proposal.belongs is not None:
+                        _homes_answered(backend, [proposal.entity_a, target.id])
 
         if attach:
-            backend.add_mention(
-                EntityMention(entity_id=target.id, memory_id=memory_id, surface=surface)
-            )
+            backend.add_mention(EntityMention(
+                entity_id=target.id, memory_id=memory_id, surface=surface, decided=decided))
         resolved[normalized] = target
     return resolved
+
+
+def _homes_answered(backend: MemoryBackend, entity_ids: list[str]) -> None:
+    """A new answer to whether one of a pair is a version or a part of the
+    other may give either a home or take it away, and a home's names read
+    "it" in its parts' memories: ``MemoryBackend.names_changed`` hears of
+    both. Announced here, where the judge's answer is stored, and not by the
+    backend: loading stored answers (a benchmark's world) computes nothing."""
+    if backend.names_changed is not None:
+        backend.names_changed(entity_ids)
+
+
+def _answer(verdict: Verdict) -> dict[str, Any]:
+    """The judge's answer a mention was joined on, as the mention keeps it."""
+    probabilities = verdict.probabilities or {}
+    return {"same": probabilities.get("same"), "different": probabilities.get("different"),
+            "step": verdict.step}
 
 
 #: A tag and a thing of its very name are raised first, up to this fraction
@@ -1032,6 +1060,8 @@ def resolve_open_proposals(
                     different=probabilities["different"],
                     belongs=verdict.belongs,
                 )
+                if verdict.belongs is not None and verdict.belongs != proposal.belongs:
+                    _homes_answered(backend, [entity_a.id, entity_b.id])
             elif verdict.step != proposal.compared_step:  # a step with nothing to ask
                 backend.update_proposal_judgement(
                     proposal.id, confidence=proposal.confidence, reason=proposal.reason,

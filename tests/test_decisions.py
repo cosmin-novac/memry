@@ -1806,6 +1806,50 @@ def test_a_merge_no_single_answer_decided_records_the_rule_or_the_person():
     store.close()
 
 
+@pytest.mark.parametrize("same, different, second, reason", [
+    # a known name joins its likeliest entity unless the judge says different
+    (0.6, 0.2, "Kessler Bau GmbH",
+     "a name the store has: the likeliest of its entities, not said to be different"),
+    # a name written another way joins on the merge bar
+    (0.99, 0.0, "Kessler Bau", "stub: same"),
+])
+def test_a_name_joined_at_save_records_what_decided_it(same, different, second, reason):
+    """The mention of a name joined at save time to an entity the store had
+    keeps the rule or the answer that joined it, as a merge keeps it on its
+    pair. The mention that made the entity keeps nothing."""
+    judge = _PairJudge(lambda state: (same, different))
+    store, save = _jonas_store(judge, "Kessler Bau GmbH", "organization")
+    save("Kessler Bau GmbH poured the foundation")
+    save("Kessler Bau sent the concrete invoice", as_name=second)
+    [entity] = store.entities(user_id="ada")
+    first, joined = store.backend.entity_mentions(entity.id)
+    assert first.decided is None and joined.surface == second
+    assert joined.decided == {"reason": reason, "same": pytest.approx(same),
+                              "different": pytest.approx(different), "step": 1}
+    store.close()
+
+
+@pytest.mark.parametrize("open_pair", [False, True])
+def test_a_merge_a_person_made_directly_is_recorded_as_theirs(open_pair):
+    """Merged from the entity page, with no proposal between the two or with
+    one still open, the pair records that a person merged them."""
+    from memry.models import MergeProposal
+
+    store, _, _ = _judged_store(lambda state: (0.8, 0.1))
+    tiler = _entity_with(store, "Mira Holt", ["Mira Holt tiled the bathroom"], "person")
+    short = _entity_with(store, "Mira", ["Mira left the grout samples"], "person")
+    if open_pair:
+        store.backend.add_proposal(MergeProposal(
+            entity_a=short.id, entity_b=tiler.id, user_id="ada", confidence=0.8,
+            different=0.1, reason="stub: same", compared_step=1))
+    assert store.merge_entities(tiler.id, short.id)
+    [record] = store.merge_proposals(user_id="ada", status="confirmed")
+    assert {record.entity_a, record.entity_b} == {tiler.id, short.id}
+    assert record.reason == "merged by you" and record.decided_at
+    assert store.merge_proposals(user_id="ada") == []
+    store.close()
+
+
 def test_a_one_word_name_is_compared_with_the_few_names_that_carry_it():
     """Three names carrying "sofia" are too many for the word to count as rare
     in a small store, yet "Sofia" is most likely one of them."""
