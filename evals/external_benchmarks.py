@@ -41,7 +41,12 @@ Every question is asked through ``MemoryStore.search`` (user "bench", the top
 
 With --answer the configured LLM answers each question from the top --k
 memories (--context: from ``MemoryStore.reconstruct_context``) and the
-answer is scored against the gold one:
+answer is scored against the gold one. The memories are shown as Memry's
+context builder renders them for a model (``intelligence.context.
+memory_lines``): each with the date its event happened, where known, and the
+date it was said, then their source turns that best match the question
+(``MemoryStore.evidence``, within the store's ``retrieval.evidence_tokens``;
+--evidence-tokens sets it, 0 shows none):
 
   f1        token F1 after SQuAD normalisation (lower case, punctuation and
             the articles a/an/the removed); by LoCoMo's rules, a multi-hop
@@ -158,6 +163,7 @@ sys.path.insert(0, str(HERE.parent))
 
 from evals import api_usage  # noqa: E402
 from memry.config import Config, DecisionConfig, EmbeddingConfig  # noqa: E402
+from memry.intelligence.context import memory_lines  # noqa: E402
 from memry.intelligence.graph_retrieval import detect_query_entities  # noqa: E402
 from memry.models import Memory, Scope  # noqa: E402
 from memry.providers.decisions import (  # noqa: E402
@@ -958,19 +964,22 @@ def score_answer(prediction: str, question: Question, judge: Judge = containment
 
 
 ANSWER_SYSTEM = """You answer a question about past conversations from memories \
-retrieved for it. Each memory starts with the date it was said. Use only the \
-memories. Resolve relative dates ("yesterday", "last week") against the date of \
-the memory that uses them. Answer with a short phrase, using the memories' own \
-words where you can, not a full sentence. If the memories do not say, answer \
-exactly: No information available."""
+retrieved for it. Each memory says the date it was said and, where known, the \
+date what it tells happened; the lines after the memories are what was said, \
+each after its date and speaker. Use only the memories. Resolve relative dates \
+("yesterday", "last week") against the date the words were said. Answer with a \
+short phrase, using the memories' own words where you can, not a full sentence. \
+If the memories do not say, answer exactly: No information available."""
 
 
-def memories_text(memories: list[Memory]) -> str:
-    lines = []
-    for memory in memories:
-        when = ((memory.metadata or {}).get("when") or {}).get("start")
-        lines.append(f"- [{when or (memory.created_at or '')[:10]}] {memory.content}")
-    return "Memories:\n" + "\n".join(lines) if lines else "Memories: (none found)"
+def memories_text(items: list[Any]) -> str:
+    """The harness's own list: Memry's lines as its context builder renders
+    them (``answer_with``), or, answering from the whole conversation, each
+    turn as "<date>: <speaker>: <text>"."""
+    lines = [item if isinstance(item, str) else f"{(item.created_at or '')[:10]}: {item.content}"
+             for item in items]
+    return "Memories:\n" + "\n".join(f"- {line}" for line in lines) if lines \
+        else "Memories: (none found)"
 
 
 def answer_question(llm: LLM, question: Question, context: str) -> str:
@@ -980,9 +989,11 @@ def answer_question(llm: LLM, question: Question, context: str) -> str:
     return " ".join(str(raw or "").split())
 
 
-#: --answer-prompt: (question, the top k memories) -> the answering call's
-#: messages ([{"role", "content"}, ...]).
-AnswerPrompt = Callable[[str, list[Memory]], list[dict[str, str]]]
+#: --answer-prompt: (question, the memory list) -> the answering call's
+#: messages ([{"role", "content"}, ...]). The memory list is Memry's lines as
+#: its context builder renders them (``answer_with``); answering from the whole
+#: conversation, the turns (``full_context_memories``).
+AnswerPrompt = Callable[[str, list[Any]], list[dict[str, str]]]
 
 
 def chat(llm: LLM, messages: list[dict[str, str]]) -> str:
@@ -1028,11 +1039,11 @@ def count_tokens(text: str) -> int | None:
     return len(encoding.encode(text, disallowed_special=())) if encoding is not None else None
 
 
-def context_text(answer_prompt: AnswerPrompt | None, memories: list[Memory]) -> str:
-    """The memories as the answering call shows them: the prompt function's
+def context_text(answer_prompt: AnswerPrompt | None, items: list[Any]) -> str:
+    """The memory list as the answering call shows it: the prompt function's
     ``context_of`` where it has one, else the harness's own list."""
     shown = getattr(answer_prompt, "context_of", None)
-    return shown(memories) if shown else memories_text(memories)
+    return shown(items) if shown else memories_text(items)
 
 
 def memory_record(result: Any, ingested: Ingested) -> dict[str, Any]:
@@ -1044,20 +1055,31 @@ def memory_record(result: Any, ingested: Ingested) -> dict[str, Any]:
 
 
 def answer_with(answer_llm: LLM, question: Question, memories: list[Memory],
+                answer_prompt: AnswerPrompt | None, evidence: list[Any] = ()) -> dict[str, Any]:
+    """One answering call from ``memories`` and their ``evidence`` turns, as
+    Memry's context builder renders them for a model (``memory_lines``):
+    that list is the memory list of the answer prompt (``answer_from``)."""
+    record = answer_from(answer_llm, question, memory_lines(memories, evidence),
+                         answer_prompt)
+    record["k"] = len(memories)
+    return record
+
+
+def answer_from(answer_llm: LLM, question: Question, items: list[Any],
                 answer_prompt: AnswerPrompt | None) -> dict[str, Any]:
-    """One answering call from ``memories``: the prediction, the call's
-    seconds, the ``cl100k_base`` tokens of the memories shown
+    """One answering call from the memory list ``items``: the prediction, the
+    call's seconds, the ``cl100k_base`` tokens of the list shown
     (``context_tokens``) and the input tokens the reply reports, if any.
     With ``answer_prompt`` the prediction is kept as the model wrote it, as
     Mem0's evaluation keeps it."""
-    record: dict[str, Any] = {"k": len(memories)}
+    record: dict[str, Any] = {"k": len(items)}
     started = time.perf_counter()
     try:
         if answer_prompt is not None:
-            prediction = str(chat(answer_llm, answer_prompt(question.question, memories))
+            prediction = str(chat(answer_llm, answer_prompt(question.question, items))
                              or "").strip()
         else:
-            prediction = answer_question(answer_llm, question, memories_text(memories))
+            prediction = answer_question(answer_llm, question, memories_text(items))
     except Exception as exc:  # one failed call must not end a long run
         prediction, record["answer_error"] = "", str(exc)[:300]
     record["answer_seconds"] = round(time.perf_counter() - started, 3)
@@ -1065,7 +1087,7 @@ def answer_with(answer_llm: LLM, question: Question, memories: list[Memory],
     usage = getattr(answer_llm, "last_usage", lambda: None)()
     if isinstance(usage, dict) and usage.get("prompt_tokens") is not None:
         record["input_tokens"] = usage["prompt_tokens"]
-    record["context_tokens"] = count_tokens(context_text(answer_prompt, memories))
+    record["context_tokens"] = count_tokens(context_text(answer_prompt, items))
     return record
 
 
@@ -1134,7 +1156,8 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
     store = ingested.store
     started = time.perf_counter()
     with api_usage.stage(search_stage):
-        results = store.search(question.question, user_id=BENCH_USER, limit=depth)
+        results = store.search(question.question, user_id=BENCH_USER, limit=depth,
+                               evidence=False)
     ms = (time.perf_counter() - started) * 1000
     results = results[:depth]
     units = [ingested.units_of(r.memory, question.level) for r in results]
@@ -1180,15 +1203,24 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
             answers[k] = record
     else:
         top = [r.memory for r in results]
+        # the source turns of each k's memories, as a search of that depth chooses them
+        with api_usage.stage(search_stage):
+            turns = {at: store.evidence(question.question, results[:at], user_id=BENCH_USER)
+                     for at in ks}
         with api_usage.stage("answer"):
             if pool is not None and len(ks) > 1:
                 futures = {at: pool.submit(contextvars.copy_context().run, answer_with,
-                                           answer_llm, question, top[:at], answer_prompt)
+                                           answer_llm, question, top[:at], answer_prompt,
+                                           turns[at])
                            for at in ks}
                 answers = {at: future.result() for at, future in futures.items()}
             else:
-                answers = {at: answer_with(answer_llm, question, top[:at], answer_prompt)
+                answers = {at: answer_with(answer_llm, question, top[:at], answer_prompt,
+                                           turns[at])
                            for at in ks}
+        for at, record in answers.items():
+            record["evidence"] = [ingested.turn_of_episode.get(t.episode_id, t.episode_id)
+                                  for t in turns[at]]
     with api_usage.stage("judge"):
         judge_answers(answers, question, judge, judge_runs, pool, correction)
     row["answer_k"] = answers[k]["k"]
@@ -1471,7 +1503,7 @@ def answer_in_full(conversation: Conversation, question: Question, context: list
     if correction is not None:
         row["audit"] = {key: correction.get(key) for key in ("error_type", "correct_answer")}
     with api_usage.stage("answer"):
-        record = answer_with(answer_llm, question, context, answer_prompt)
+        record = answer_from(answer_llm, question, context, answer_prompt)
     with api_usage.stage("judge"):
         judge_answers({0: record}, question, judge, judge_runs, pool, correction)
     row["answer_k"] = record["k"]
@@ -1492,7 +1524,8 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                   categories: set[str] | None = None, workers: int = 1,
                   corrections: dict[str, dict[str, Any]] | None = None,
                   decider: str = "config", store_dir: str | os.PathLike[str] | None = None,
-                  full_context: bool = False) -> dict[str, Any]:
+                  full_context: bool = False,
+                  evidence_tokens: int | None = None) -> dict[str, Any]:
     """Ingest each conversation into a fresh store and ask its questions once
     per pass of ``search_deciders`` (name -> the decision provider the store
     asks with, given it once the conversation is loaded; default: the store's
@@ -1505,7 +1538,8 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
     judged against the correction too. ``decider`` and ``store_dir`` go to
     ``make_store`` (a store in memory, or <store_dir>/<conversation>.sqlite).
     ``full_context`` answers from the whole conversation instead, with no
-    store and no search. Returns {config, stores, passes, tables (the first
+    store and no search. ``evidence_tokens`` sets each store's
+    ``retrieval.evidence_tokens`` (None keeps its own). Returns {config, stores, passes, tables (the first
     pass's), rows, warnings, notes, complete}. A call refused at a cap
     (``api_usage.CapReached``) ends the run where it is: what was done is
     kept, "complete" is false and "stopped" says where."""
@@ -1557,7 +1591,10 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
             db_path = fresh_db(pathlib.Path(store_dir) / f"{conv.conv_id}.sqlite") \
                 if store_dir else ":memory:"
             store = make_store(mode, embedder, decider=decider, db_path=db_path)
+        if evidence_tokens is not None:
+            store.config.retrieval.evidence_tokens = evidence_tokens
         entry["decider"] = store.decider.name
+        entry["evidence_tokens"] = store.config.retrieval.evidence_tokens
         try:
             with api_usage.labelled(conv.conv_id):
                 if mode == "extract" and not store.llm.available:
@@ -1624,7 +1661,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                    "judge": getattr(judge, "__qualname__", repr(judge)),
                    "judge_function": _qualname(judge),
                    "search_deciders": names,
-                   "context": use_context, "when": when,
+                   "context": use_context, "when": when, "evidence_tokens": evidence_tokens,
                    "locomo_categories": LOCOMO_CATEGORIES if dataset == "locomo" else None},
         "stores": stores,
         "passes": tables,
@@ -1755,6 +1792,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "(default: the harness's own prompt)")
     parser.add_argument("--context", action="store_true",
                         help="with --answer: answer from reconstruct_context, not the top k")
+    parser.add_argument("--evidence-tokens", type=int, default=None, metavar="N",
+                        help="the source turns shown with the memories, at most N tokens "
+                             "(retrieval.evidence_tokens; 0 shows none; default: the "
+                             "store's own)")
     parser.add_argument("--judge", default=None,
                         help="module:function(question, gold, prediction) -> bool "
                              "(default: containment)")
@@ -2038,7 +2079,8 @@ def main(argv: list[str] | None = None) -> int:
                         ks=args.k_list, judge_runs=args.judge_runs,
                         categories=set(args.category_set) if args.category_set else None,
                         workers=args.workers, corrections=corrections, decider=args.decider,
-                        store_dir=args.store_dir, full_context=args.full_context)
+                        store_dir=args.store_dir, full_context=args.full_context,
+                        evidence_tokens=args.evidence_tokens)
 
         def finish(part: dict[str, Any]) -> dict[str, Any]:
             part["file"] = str(path)

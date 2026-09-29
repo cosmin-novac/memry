@@ -14,9 +14,13 @@ under the Apache License 2.0; the prompts are reproduced here under its terms:
   ACCURACY_PROMPT  evaluation/metrics/llm_judge.py
 
 Answering (``answer_messages``) follows evaluation/src/memzero/search.py: the
-prompt is the system message, and the memories are a JSON list of
-"<timestamp>: <memory>" strings, the timestamp written as LoCoMo writes a
-session's ("1:56 pm on 8 May, 2023"). The model is called at temperature 0.
+prompt is the system message, and the memories are a JSON list of strings,
+the model is called at temperature 0. Mem0 wrote each memory as
+"<timestamp>: <memory>"; here the strings are Memry's own, each memory as
+Memry's context builder renders it for a model ("[happened 2023-05-07] <memory>
+(said 8 May 2023)"), then the source turns shown as its evidence ("8 May 2023:
+<speaker>: <text>"): the runner passes that list (``external_benchmarks.
+answer_with``), and the prompt's text is Mem0's, unchanged.
 
 Judging (``judge``) follows llm_judge.py: the prompt as the user message to
 gpt-4o-mini, JSON response format, temperature 0, and the answer is right
@@ -221,15 +225,15 @@ def locomo_time(stamp: Any) -> str:
             f"{moment:%B}, {moment.year}")
 
 
-def memories_json(memories: list[Any]) -> str:
-    """The memories as ``ANSWER_PROMPT`` shows them: a JSON list of
-    "<timestamp>: <memory>" strings, each timestamped with its ``created_at``."""
-    return json.dumps([f"{locomo_time(m.created_at)}: {m.content}" for m in memories], indent=4)
+def memories_json(lines: list[str]) -> str:
+    """The memory list as ``ANSWER_PROMPT`` shows it: a JSON list of the
+    lines Memry's context builder rendered (``memory_lines``), as given."""
+    return json.dumps(list(lines), indent=4)
 
 
-def answer_messages(question: str, memories: list[Any]) -> list[dict[str, str]]:
-    """The answering call's messages: ``ANSWER_PROMPT`` holding the memories
-    (``memories_json``) and the question, as the system message."""
+def answer_messages(question: str, memories: list[str]) -> list[dict[str, str]]:
+    """The answering call's messages: ``ANSWER_PROMPT`` holding the memory
+    list (``memories_json``) and the question, as the system message."""
     return [{"role": "system", "content": _render(
         ANSWER_PROMPT, {"memories": memories_json(memories), "question": question})}]
 
