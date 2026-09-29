@@ -47,7 +47,7 @@ def memory_line(memory: Memory, now: Any = None) -> str:
 
 
 def turn_line(turn: EvidenceTurn) -> str:
-    """One source turn as a model reads it: "8 May 2023: Caroline: <text>"."""
+    """One source turn as a model reads it: "8 May 2023: Ada: <text>"."""
     return f"{said_date(turn.said_at)}: {turn.speaker}: {turn.content}"
 
 

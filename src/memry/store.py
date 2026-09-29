@@ -1821,7 +1821,7 @@ class MemoryStore:
         act, above = activation_paths(self.backend, seeds, depth=cfg.relational_depth)
         names = [n for seed in seeds for n in self.backend.entity_aliases(seed)]
         # With several hubs named, "it" could stand for any of them: masked,
-        # "Why do Tim and John find LeBron inspiring?" reads "Why do it and it
+        # "Why do Ada and Kai find Mira inspiring?" reads "Why do it and it
         # find it inspiring?", which says nothing about which of their
         # memories answers. So the names stay, as the judge reads them
         # (``_judge_ranking``), and every memory is compared by its ordinary

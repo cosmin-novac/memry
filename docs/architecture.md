@@ -498,8 +498,8 @@ For a normal text query:
    it states the property asked (its property vector, entity names read as "it") times how
    strongly it is about the entity named. A question naming several hubs is compared as
    written with each memory's ordinary vector, names kept, as the judge reads it: masked,
-   "Why do Tim and John find LeBron inspiring?" reads "Why do it and it find it
-   inspiring?", which cannot tell the memories about LeBron from anything one of them finds
+   "Why do Ada and Kai find Mira inspiring?" reads "Why do it and it find it
+   inspiring?", which cannot tell the memories about Mira from anything one of them finds
    inspiring. The keyword search's best match keeps a place
    among the first 20 (`decision.rerank_pool`) whatever its score: an identifier the
    question names ("invoice 2024-117") is seen by the words alone. This is the only link
@@ -701,8 +701,8 @@ up as a red run within a week instead of in a user's terminal.
   store of third-person facts a rare "did" or "do" can outweigh the name a question asks
   about, and the one keyword match the linked search keeps in its first 20 is then the wrong
   one.
-- A question names an entity only by one of its names or aliases in full: "Talkeetna" does
-  not find the place stored as "Mount Talkeetna", so a memory naming the place beside the
+- A question names an entity only by one of its names or aliases in full: "Arvel" does
+  not find the place stored as "Mount Arvel", so a memory naming the place beside the
   person the question names is compared through that person's links, with the place's name
   read as "it".
 
