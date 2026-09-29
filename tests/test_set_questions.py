@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from memry.config import Config, RetrievalConfig
 from memry.models import EntityMention, Memory
+from memry.providers.embeddings import Embedder
 from memry.providers.llm import NoneLLM
 from memry.store import MemoryStore
 
@@ -345,6 +346,62 @@ def test_a_topic_smaller_than_the_budget_is_filled_from_the_nearest_to_the_membe
     assert results[0].signals["pool"] == 10
 
 
+class _NameEmbedder(Embedder):
+    """Vectors in which a car's name weighs ten times the kind of fact, as in
+    an embedder that follows names: "The Carmodel3 costs 16700 euros." is
+    nearest the Carmodel3's insurance and test drive, not the other prices.
+    "it" in place of the name moves nothing."""
+
+    name, _model, dimensions = "names", "v1", 20
+    KINDS = ["costs", "insurance", "drove", "dealer", "range", "seats"]
+
+    def embed(self, texts):
+        import re
+
+        out = []
+        for text in texts:
+            vector = [float(kind in text.lower()) for kind in self.KINDS] + [0.0] * 13 + [0.1]
+            for number in re.findall(r"carmodel(\d+)", text.lower()):
+                vector[len(self.KINDS) + int(number)] += 10.0
+            out.append(vector)
+        return out
+
+
+def test_the_memories_nearest_the_members_are_found_by_what_they_say(store):
+    """Twelve cars, each an entity with a price and five other facts that
+    name it; nothing is tagged, and the vectors follow the names
+    (``_NameEmbedder``). The first call judges four prices. By memory vector
+    the nearest to them are the same four cars' other facts; by property
+    vector, the names read "it", the other cars' prices. The second call
+    takes half its budget each way, so five of its ten are prices it had not
+    seen, and members."""
+    store.embedder = _NameEmbedder()
+    store.config.decision.rerank_pool = 4
+    store.config.retrieval.set_pool = 10
+    ids = (f"m{n:03d}" for n in range(100))
+    prices = []
+    for i in range(12):
+        car = _entity(store, f"Carmodel{i}")
+        prices.append(_add(store, f"The Carmodel{i} costs {14000 + 900 * i} euros.",
+                           entities=[car], memory_id=next(ids)))
+        for fact in ("Insurance for the Carmodel{i} would be {n} a year.",
+                     "Ada test drove the Carmodel{i} on a rainy day.",
+                     "The nearest dealer for the Carmodel{i} is in town {i}.",
+                     "The Carmodel{i} has a range of {n} km.",
+                     "The Carmodel{i} seats {i} people."):
+            _add(store, fact.format(i=i, n=300 + 20 * i), entities=[car], memory_id=next(ids))
+    assert store.refresh_property_vectors(user_id="ada") == 72
+    store.decider = judge = _Batches(specific=0.9, several=0.9, scores={"costs": 0.12})
+    results = store.search("Which car costs the least?", user_id="ada", limit=5)
+    assert judge.calls == 2
+    first, second = judge.batches
+    priced = {m.content for m in prices}
+    assert set(first) == {m.content for m in prices[:4]}
+    assert len(second) == 10 and len(set(second) & priced) == 5
+    members = {r.memory.content for r in results if r.signals.get("member")}
+    assert members == set(first) | (set(second) & priced)
+
+
 def test_a_set_question_about_a_named_thing_pools_by_topic_too(store):
     """The linked search runs (the question names a hub): "it" reads for the
     dealer in what the provider reads, and the second call still comes from
@@ -382,6 +439,87 @@ def test_a_question_about_everything_makes_one_call(store):
     assert judge.calls == 1
     assert not any(r.signals.get("member") for r in results)
     assert len(results) == 5
+
+
+@pytest.mark.parametrize("specific, calls", [(0.54, 2), (0.4999, 1)])
+def test_a_set_question_gets_its_second_call_only_as_a_property_question(
+        store, specific, calls):
+    """The second call also needs P(the question asks for one property) at
+    0.5 or more, or a question about everything ("Tell me about the cars")
+    would read on. A set question read under 0.5 keeps what the first call
+    found and no member is marked; "What does Ada Reid like?", the lowest of
+    the property questions measured, scored 0.54."""
+    _prices(store)
+    store.config.retrieval.set_pool = 10
+    store.decider = judge = _Batches(specific=specific, several=0.9,
+                                     scores={"is priced at": 0.12, "Dealer quote": 0.12})
+    results = store.search(QUESTION, user_id="ada", limit=5)
+    assert judge.calls == calls
+    assert any(r.signals.get("member") for r in results) == (calls == 2)
+
+
+class _BatchReranker(_Batches):
+    """``_Batches`` for a provider that re-ranks by default."""
+
+    may_rerank = reranks_by_default = True
+
+
+def test_the_provider_reads_the_first_twenty_in_one_call(store):
+    """``decision.rerank_pool`` is 20: one call judges the first 20 of the
+    linked search's order, or of the text ranking where it did not run, and
+    the re-rank reads 20 as well."""
+    assert Config().decision.rerank_pool == 20
+    _prices(store)
+    harlow = _entity(store, "Harlow")
+    for i in range(30):
+        _add(store, f"Harlow parked the car at garage marker{i:02d} today.", entities=[harlow])
+    store.decider = judge = _Batches(specific=0.9, several=0.1, scores={})
+    linked = store.search("Where did Harlow park the car?", user_id="ada", limit=5)
+    text = store.search(QUESTION, user_id="ada", limit=5)
+    assert "about" in linked[0].signals and "about" not in text[0].signals
+    assert [len(batch) for batch in judge.batches] == [20, 20]
+    store.config.retrieval.relational_relevance = "vector"
+    store.decider = reranker = _BatchReranker(specific=0.9, several=0.1, scores={})
+    store.search(QUESTION, user_id="ada", limit=5)
+    assert [len(batch) for batch in reranker.batches] == [20]
+
+
+class _Sent(_CallJudge):
+    """``_CallJudge`` that keeps each call's question and instructions."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.sent: list[tuple[str, dict[str, str]]] = []
+
+    def decide(self, state, questions):
+        self.sent.append((state, {key: q.instructions for key, q in questions.items()}))
+        return super().decide(state, questions)
+
+
+def test_the_second_call_sends_the_question_and_its_memories_and_nothing_else(store):
+    """The second call of a set question sends at most ``retrieval.set_pool``
+    memories (80 of the 110 left here), each once, as the first call's
+    instruction followed by the memory's text as saved, and the question
+    once; the meta questions are asked in the first call only. What it sends
+    is the question plus, per memory, the instruction and the text, and so
+    grows with the number of memories and their length alone."""
+    _prices(store)
+    for i in range(40):
+        _add(store, f"Note {i} on the car search: ask about the winter tyres.")
+    store.decider = judge = _Sent(specific=0.9, several=0.9,
+                                  scores={"is priced at": 0.12, "Dealer quote": 0.12})
+    store.search(QUESTION, user_id="ada", limit=5)
+    ask = "Someone who reads only this memory can answer the question. Memory: "
+    (first_state, first), (state, second) = judge.sent
+    assert first_state == state == f"QUESTION: {QUESTION}"
+    assert set(first) - {f"m{i}" for i in range(20)} == {"property", "several"}
+    assert len(second) == store.config.retrieval.set_pool == 80
+    assert all(key.startswith("m") and text.startswith(ask) for key, text in second.items())
+    texts = [text[len(ask):] for text in second.values()]
+    assert len(set(texts)) == 80
+    saved = {m.content for m in store.get_all(user_id="ada", limit=200)}
+    assert set(texts) <= saved - {text[len(ask):] for key, text in first.items()
+                                  if key.startswith("m")}
 
 
 def _parking(store, entities=()):

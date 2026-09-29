@@ -873,3 +873,255 @@ def test_a_runs_memories_of_a_large_entity_reach_the_linked_search(store):
         ada.id, limit=FAMILY_SCAN, scope=Scope(user_id="ada", run_id="s1"))} == own
     found = store.search("What does Ada like?", user_id="ada", run_id="s1", limit=10)
     assert len(found) == 10 and {r.memory.id for r in found} <= own
+
+
+# ------------------------------------ what the judgement does to the order
+def _versions_of_the_database(store, *, builds_on):
+    """bildy stores its data in SQLite, bildy v3 moved its data to Postgres,
+    bildy v4 says nothing about its data; both versions belong to bildy, and
+    with ``builds_on`` the provider also answered that v4 is a version of v3.
+    The provider is surer of the thing's plainer wording (0.9) than of v3's
+    change (0.8)."""
+    e = {name: _entity(store, name) for name in ["bildy", "bildy v3", "bildy v4"]}
+    _memory(store, "bildy stores its data in SQLite", [e["bildy"].id])
+    _memory(store, "bildy runs on Linux and macOS", [e["bildy"].id])
+    _memory(store, "bildy v3 moved its data to Postgres", [e["bildy v3"].id])
+    _memory(store, "bildy v3 added offline mode", [e["bildy v3"].id])
+    _memory(store, "bildy v4 added a timeline view", [e["bildy v4"].id])
+    _memory(store, "bildy v4 added dark mode", [e["bildy v4"].id])
+    _belongs(store, e["bildy v3"], e["bildy"])
+    _belongs(store, e["bildy v4"], e["bildy"])
+    if builds_on:
+        _belongs(store, e["bildy v4"], e["bildy v3"])
+    _linked(store)
+    store.config.retrieval.relational_relevance = "jev"
+    store.decider = _CallJudge(specific=1.0, several=0.0,
+                               scores={"SQLite": 0.9, "Postgres": 0.8})
+
+
+def test_a_version_takes_the_change_of_the_version_it_builds_on(store):
+    """bildy v4 is a version of bildy v3 (depth 1, one judged link) and of
+    bildy. Both answers are reached by a step up at 0.72, and v3's change
+    overrides bildy's default for v4 as it does for v3 itself: bildy's answer
+    counts as far as v3's does not (0.9 x 0.2), and v3's as far as none of
+    v4's own memories answers."""
+    _versions_of_the_database(store, builds_on=True)
+    top = store.search("Where does bildy v4 store its data?", user_id="ada", limit=3)
+    assert top[0].memory.content == "bildy v3 moved its data to Postgres"
+    assert top[0].signals["about"] == pytest.approx(0.72)
+    assert top[0].signals["overridden"] == pytest.approx(0.02)  # v4's own say nothing
+    thing = next(r for r in top if r.memory.content == "bildy stores its data in SQLite")
+    assert thing.signals["overridden"] == pytest.approx(0.8)
+    assert thing.signals["judged"] == pytest.approx(0.9 * 0.2)
+
+
+def test_a_version_linked_only_to_its_thing_takes_the_things_answer(store):
+    """Without the link to v3, v3 is a sibling two links away: at depth 1 the
+    search does not reach it, its change is about something else (0.3) and
+    does not override bildy's default, which answers v4's question."""
+    _versions_of_the_database(store, builds_on=False)
+    top = store.search("Where does bildy v4 store its data?", user_id="ada", limit=3)
+    assert top[0].memory.content == "bildy stores its data in SQLite"
+    assert top[0].signals["overridden"] == pytest.approx(0.02)
+    sibling = next(r for r in top if r.memory.content == "bildy v3 moved its data to Postgres")
+    assert sibling.signals["about"] == pytest.approx(0.3)
+    assert "overridden" not in sibling.signals
+
+
+def test_a_false_yes_on_the_versions_own_memory_leaves_the_inherited_answer_first(store):
+    """The provider says yes (0.3) to one of v4's own memories that does not
+    answer. That takes 30% off the right answer v4 inherits from bildy, which
+    still ranks first: 0.8 x 0.77 x 0.7 = 0.43 against 0.3 x 1.0."""
+    bildy, v4 = _entity(store, "bildy"), _entity(store, "bildy v4")
+    _memory(store, "bildy runs on Linux and macOS", [bildy.id])
+    _memory(store, "bildy stores its data in SQLite", [bildy.id])
+    _memory(store, "bildy v4 added a timeline view", [v4.id])
+    _memory(store, "bildy v4 added dark mode", [v4.id])
+    _belongs(store, v4, bildy, p=0.77 / 0.8)
+    _linked(store)
+    store.config.retrieval.relational_relevance = "jev"
+    store.decider = _CallJudge(specific=1.0, several=0.0,
+                               scores={"runs on": 0.8, "timeline": 0.3})
+    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
+    assert [r.memory.content for r in top[:2]] == ["bildy runs on Linux and macOS",
+                                                   "bildy v4 added a timeline view"]
+    answer, false_yes = top[0].signals, top[1].signals
+    assert (answer["about"], answer["overridden"]) == (pytest.approx(0.77), pytest.approx(0.3))
+    assert answer["judged"] * answer["about"] == pytest.approx(0.8 * 0.77 * 0.7)
+    assert false_yes["judged"] * false_yes["about"] == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize("specific, first", [
+    (0.54, "bildy runs on Linux and macOS"),
+    (0.1, "bildy v4"),
+])
+def test_how_far_a_property_question_read_as_about_everything_keeps_its_answer(
+        store, family, specific, first):
+    """Relevance and the override count to the power of P(the question asks
+    for one property). "What does Ada Reid like?", the lowest of the property
+    questions measured, scored 0.54: there the answer v4 inherits still ranks
+    above v4's own non-answers, (0.8 x 0.95) ** 0.54 x 0.72 = 0.62 against
+    0.05 ** 0.54 = 0.20. Read as a question about everything (0.1), a
+    property question would lose it to them: 0.70 against 0.74, the limit the
+    weighting accepts."""
+    _linked(store)
+    store.config.retrieval.relational_relevance = "jev"
+    store.decider = _CallJudge(specific=specific, several=0.0,
+                               scores={"runs on": 0.8, "": 0.05})
+    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
+    assert top[0].memory.content.startswith(first)
+    answer = next(r for r in top if r.memory.content == "bildy runs on Linux and macOS")
+    assert answer.signals["judged"] * answer.signals["about"] == pytest.approx(
+        (0.8 * 0.95) ** specific * 0.72, abs=1e-3)
+
+
+class _Recording(_CallJudge):
+    """``_CallJudge`` that keeps how many memories each call judged."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.sizes: list[int] = []
+
+    def decide(self, state, questions):
+        self.sizes.append(sum(key.startswith("m") for key in questions))
+        return super().decide(state, questions)
+
+
+def _planner(store):
+    """Kaven planner's five facts and 16 of Kaven planner v2's own, with v2 a
+    version of the planner: more than the 20 the provider reads."""
+    planner, v2 = _entity(store, "Kaven planner"), _entity(store, "Kaven planner v2")
+    for fact in ("runs on Windows only", "is written in Go", "stores its data in SQLite",
+                 "is led by Mara Ruiz", "is released under the MIT license"):
+        _memory(store, f"Kaven planner {fact}", [planner.id])
+    for i in range(16):
+        _memory(store, f"Kaven planner v2 added feature {i} to the timeline", [v2.id])
+    _belongs(store, v2, planner)
+    _linked(store)
+    store.config.retrieval.relational_relevance = "jev"
+
+
+def test_a_lone_answer_judged_low_still_ranks_first_among_non_answers(store):
+    """Jev scored the one right answer "It runs on Windows only" 0.16 to 0.32
+    across wordings. At 0.16, with the other 19 memories of the call judged
+    near zero (0.02), it still ranks first: through the linked search, where
+    the planner's answer counts 0.16 x 0.98 x 0.72 against 0.02 x 1.0 for
+    v2's own, and through the re-rank blend of a question naming no hub,
+    where 0.16 clears the floor (``decision.rerank_floor`` 0.15) that pushes
+    the rest back."""
+    _planner(store)
+    store.decider = judge = _Recording(specific=1.0, several=0.0,
+                                       scores={"Windows only": 0.16})
+    top = store.search("Which platforms does Kaven planner v2 run on?", user_id="ada", limit=5)
+    assert judge.sizes == [20]
+    assert top[0].memory.content == "Kaven planner runs on Windows only"
+    assert top[0].signals["judged"] * top[0].signals["about"] == pytest.approx(
+        0.16 * 0.98 * 0.72)
+    store.decider = judge = _Recording(specific=1.0, several=0.0,
+                                       scores={"Windows only": 0.16})
+    top = store.search("Which platforms does the planner run on?", user_id="ada", limit=5)
+    assert judge.sizes == [20] and "about" not in top[0].signals  # no hub named
+    assert top[0].memory.content == "Kaven planner runs on Windows only"
+
+
+def test_a_non_answer_judged_above_a_lone_answer_comes_first(store):
+    """The limit of judging each memory once: where Jev reads a non-answer
+    higher than the answer ("It is written in Go" 0.34 against "It runs on
+    Windows only" 0.16), the non-answer comes first and the answer second.
+    Nothing combines the judgement with the vector to steady it."""
+    _planner(store)
+    store.decider = _CallJudge(specific=1.0, several=0.0,
+                               scores={"Windows only": 0.16, "written in Go": 0.34})
+    top = store.search("Which platforms does Kaven planner v2 run on?", user_id="ada", limit=5)
+    assert [r.memory.content for r in top[:2]] == ["Kaven planner is written in Go",
+                                                   "Kaven planner runs on Windows only"]
+
+
+# ---------------------------- what only the words of a memory tell the search
+class _TopicEmbedder(Embedder):
+    """Vectors by what a text is about in a few words ("paid", "decided",
+    "pricing"): an identifier ("invoice 2024-117"), a name and "settled"
+    move nothing, so an invoice that was settled is near no question about
+    paying."""
+
+    name, _model, dimensions = "topic", "v1", 4
+    TOPICS = [{"pay", "paid"}, {"decide", "decided"}, {"pricing", "prices"}]
+
+    def embed(self, texts):
+        import re
+
+        out = []
+        for text in texts:
+            words = set(re.findall(r"[a-z]+", text.lower()))
+            out.append([float(len(words & topic)) for topic in self.TOPICS] + [0.01])
+        return out
+
+
+def _remember(store, text, entities=()):
+    memory = store.backend.insert_memory(
+        Memory(content=text, user_id="ada", embedding_model=store.embedder.model_id),
+        embedding=store.embedder.embed([text])[0])
+    for entity in entities:
+        store.backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
+                                                surface=entity.name))
+    return memory
+
+
+@pytest.mark.parametrize("relevance", ["vector", "jev"])
+def test_an_identifier_only_the_words_match_reaches_what_the_provider_reads(store, relevance):
+    """"Did Harlow pay invoice 2024-117?" is answered by a memory linked to
+    nothing that the vectors do not bring near the question ("settled", and an
+    identifier they cannot see); only the keyword search matches it. Harlow's
+    30 memories about paying are each nearer and about Harlow (1.0 against
+    0.3), and would fill the first 20 by themselves. The keyword search's best
+    match keeps a place among the first ``decision.rerank_pool``: with the
+    property similarity alone it is in the first 20, and judged it comes
+    first (0.9 x 0.3 against 0.05 x 1.0 for Harlow's non-answers)."""
+    store.embedder = _TopicEmbedder()
+    store.config.retrieval.relational_relevance = relevance
+    harlow = _entity(store, "Harlow")
+    for i in range(30):
+        _remember(store, f"Harlow paid the rent for flat {i} in cash", [harlow])
+    invoice = _remember(store, "Invoice 2024-117 was settled by bank transfer on 3 March")
+    for i in range(10):
+        _remember(store, f"Invoice 2024-{200 + i} was settled late")
+    question, scope = "Did Harlow pay invoice 2024-117?", Scope(user_id="ada")
+    assert store.backend.keyword_search(question, scope, 5)[0][0].id == invoice.id
+    nearest = store.backend.vector_search(store.embedder.embed([question])[0],
+                                          store.embedder.model_id, scope, limit=30)
+    assert invoice.id not in {memory.id for memory, _ in nearest}
+    if relevance == "jev":
+        store.decider = _CallJudge(specific=1.0, several=0.0,
+                                   scores={"2024-117": 0.9, "": 0.05})
+    results = store.search(question, user_id="ada", limit=20)
+    ids = [r.memory.id for r in results]
+    assert "about" in results[0].signals  # the linked search ran
+    assert invoice.id in ids[:store.config.decision.rerank_pool]
+    if relevance == "jev":
+        assert ids[0] == invoice.id
+        assert results[0].signals["about"] == pytest.approx(0.3)
+
+
+def test_a_first_person_answer_about_something_else_outranks_the_owners_non_answers(store):
+    """"What did I decide about the pricing?" starts at the store's owner,
+    whose 30 memories about deciding are as near the question as "The team
+    raised Pro pricing" and about the owner (1.0), while the answer is not
+    (0.3). Judged, the answer counts 0.8 x 0.3 = 0.24 against 0.05 x 1.0 for
+    each of the owner's non-answers, and comes first. It shares "pricing"
+    with the question: as the keyword search's best match it is among the 20
+    the provider reads, which the owner's memories would fill otherwise."""
+    store.embedder = _TopicEmbedder()
+    store.config.retrieval.relational_relevance = "jev"
+    owner = _entity(store, "Ilva Marsh")
+    for i in range(30):
+        _remember(store, f"Ilva Marsh decided to repaint room {i} and decided on blue", [owner])
+    answer = _remember(store, "The team raised Pro pricing")
+    store._upkeep_set("owner_entity", "ada", owner.id)
+    store.decider = judge = _Reading(specific=1.0, several=0.0,
+                                     scores={"pricing": 0.8, "": 0.05})
+    results = store.search("What did I decide about the pricing?", user_id="ada", limit=5)
+    assert judge.states == ["QUESTION: What did it decide about the pricing?"]
+    assert results[0].memory.id == answer.id
+    assert results[0].signals["judged"] * results[0].signals["about"] == pytest.approx(0.8 * 0.3)
+    assert all(r.signals["about"] == 1.0 and r.signals["judged"] == pytest.approx(0.05)
+               for r in results[1:])

@@ -43,6 +43,12 @@ sharpened 1, 2 or 3 times or judged by the decision provider. The "typed",
 "undirected", "rescue", "weighted", "inherit" and "gated" modes were removed
 from Memry (``REMOVED_MODES``).
 
+The linked search compares the question with each memory's property vector
+(its text with the names it is about read "it"). ``--vectors ordinary``
+stores none, so it reads the ordinary vectors, names as written: why property
+vectors exist. ``--property-dimensions N`` keeps the first N numbers of every
+vector it compares: at what size.
+
 Run:
     OPENAI_API_KEY=... python evals/relative_retrieval_benchmark.py      # real embeddings
     python evals/relative_retrieval_benchmark.py --sizes 1500             # hash, offline
@@ -1212,13 +1218,22 @@ def tag_world(world: dict, seed: int = 21) -> None:
 
 def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed: int = 3,
                 decider=None, property_dimensions: int | None = None,
-                says: dict[str, str] | None = None):
+                says: dict[str, str] | None = None, vectors: str = "property"):
     """The world in a fresh store, with compared pairs as ``links`` says.
     ``decider`` is the decision provider searches ask when given (Jev in
     production).
     ``says`` (memory index as a string: the statement with its subject taken
     out, as an LLM writes it) gives the property vectors in place of the
-    masked texts (``store_says``)."""
+    masked texts (``store_says``). With ``vectors`` "ordinary" the store
+    holds no property vectors, so the linked search compares the question
+    with each memory's ordinary vector, names as written (as it does for a
+    memory saved before property vectors existed). ``property_dimensions``
+    is ``retrieval.property_dimensions``: the leading numbers the comparison
+    keeps of every vector it reads."""
+    if vectors not in ("property", "ordinary"):
+        raise ValueError(f"vectors must be 'property' or 'ordinary', not {vectors!r}")
+    if vectors == "ordinary" and says is not None:
+        raise ValueError("says gives property vectors: it cannot go with ordinary vectors")
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=embedder,
                         decider=decider)
     store.config.retrieval.property_dimensions = property_dimensions
@@ -1233,9 +1248,9 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
             user_id=USER, created_at=stamp, updated_at=stamp)).id
     if OWNER in ids:  # as Memry records it from the account settings
         store._upkeep_set("owner_entity", USER, ids[OWNER])
-    vectors = embedder.embed([m["text"] for m in world["memories"]])
+    embeddings = embedder.embed([m["text"] for m in world["memories"]])
     memory_ids = []
-    for n, (m, vector) in enumerate(zip(world["memories"], vectors)):
+    for n, (m, vector) in enumerate(zip(world["memories"], embeddings)):
         memory = store.backend.insert_memory(
             Memory(id=f"m{n:05d}", content=m["text"], user_id=USER, created_at=stamp,
                    updated_at=stamp, embedding_model=embedder.model_id,
@@ -1266,12 +1281,12 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
             id=f"p{n:05d}", entity_a=ids[child], entity_b=ids[parent], user_id=USER,
             confidence=same, different=different, belongs=belongs, compared_step=1,
             created_at=stamp))
-    if says is None:
+    if says is not None:
+        store_says(store, memory_ids, [m["text"] for m in world["memories"]], says)
+    elif vectors == "property":
         # as Memry computes them: each memory's entities and what those belong
         # to (at the links just stored) read "it"
         store.refresh_property_vectors(user_id=USER)
-    else:
-        store_says(store, memory_ids, [m["text"] for m in world["memories"]], says)
     return store, memory_ids
 
 
@@ -1491,7 +1506,16 @@ def main() -> None:
     parser.add_argument("--families", nargs="*", default=None,
                         help="only the questions of these families (all by default); "
                              "the world, its memories and links stay the same")
+    parser.add_argument("--vectors", choices=["property", "ordinary"], default="property",
+                        help="what the linked search compares the question with: each "
+                             "memory's property vector (the names it is about read \"it\"), "
+                             "or its ordinary vector, names as written")
+    parser.add_argument("--property-dimensions", type=int, default=None,
+                        help="keep this many leading numbers of every vector the linked "
+                             "search compares (retrieval.property_dimensions; all by default)")
     args = parser.parse_args()
+    if args.says and args.vectors == "ordinary":
+        parser.error("--says gives property vectors: it cannot go with --vectors ordinary")
     decider = None
     try:
         modes = select_modes(args.modes)
@@ -1562,13 +1586,15 @@ def main() -> None:
                 parser.error(f"unknown family {', '.join(map(repr, unknown))}; "
                              f"the families are {', '.join(world['queries'])}")
             world["queries"] = {f: q for f, q in world["queries"].items() if f in args.families}
-        print(f"\n===== {len(world['memories'])} memories, embedder {embedder.model_id} =====",
+        print(f"\n===== {len(world['memories'])} memories, embedder {embedder.model_id}, "
+              f"{args.vectors} vectors, dimensions {args.property_dimensions or 'all'} =====",
               flush=True)
         for links in args.links:
             if args.jev:
                 decider = jev_judge()
             store, memory_ids = build_store(world, embedder, links, answers, decider=decider,
-                                            says=says)
+                                            says=says, vectors=args.vectors,
+                                            property_dimensions=args.property_dimensions)
             for mode in modes:
                 if (links == "none") != (mode[0] == "hybrid"):
                     continue  # hybrid reads no links; the linked modes need compared pairs

@@ -285,6 +285,10 @@ SET_SCAN = 500
 #: places are left and this many more are scored to break the tie; the rest
 #: are cut first by the share and the newest (``store._set_pool``).
 SET_TIE_MARGIN = 20
+#: Where the topics leave places in the second call, the memories nearest the
+#: members found fill them: half by memory vector, half by property vector
+#: among this many nearest by memory vector (``store._nearest_unjudged``).
+SET_NEAREST = 200
 
 
 def set_members(judged: dict[str, float]) -> set[str]:

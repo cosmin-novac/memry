@@ -63,6 +63,7 @@ from .intelligence.graph_retrieval import (
     FAMILY_SCAN,
     FAMILY_TOP,
     SET_BAR,
+    SET_NEAREST,
     SET_RESULT_CAP,
     SET_SCAN,
     SET_SHARED,
@@ -407,6 +408,15 @@ def _similarity(asked: np.ndarray, vector: np.ndarray | None) -> float:
         return 0.0
     vector = vector[: asked.shape[0]]  # an ordinary vector is cut like the question
     return max(float(vector @ asked) / (float(np.linalg.norm(vector)) or 1.0), 0.0)
+
+
+def _centre(vectors: list[np.ndarray]) -> np.ndarray | None:
+    """The mean direction of vectors of one length, of length one; None for
+    none, or for vectors of different lengths."""
+    if not vectors or len({v.shape for v in vectors}) != 1:
+        return None
+    centre = np.mean([v / (float(np.linalg.norm(v)) or 1.0) for v in vectors], axis=0)
+    return centre / (float(np.linalg.norm(centre)) or 1.0)
 
 
 def _across_runs(scope: Scope) -> Scope:
@@ -1577,7 +1587,9 @@ class MemoryStore:
         candidates, as a tag is never a seed. A query naming no hub keeps the
         text ranking; with "jev" it is judged, and one with one answer or
         about everything is ordered by the re-rank blend of the judgement and
-        that ranking (``_judge_ranking``).
+        that ranking (``_judge_ranking``). The keyword search's best match
+        keeps a place among the first ``decision.rerank_pool``, whatever its
+        score: an identifier the question names is seen by the words alone.
 
         With ``relational_relevance = "jev"`` (or "auto" with a provider that
         re-ranks, ``relevance_mode``) the decision provider then judges
@@ -1585,9 +1597,10 @@ class MemoryStore:
         question, and that replaces the similarity for them
         (``_judge_ranking``). An answer from a thing the query's entity
         belongs to then counts only as far as none of the entity's own
-        memories answers (a version's own change wins). Both count to the
-        power of P(the question asks for one property): on "Show everything
-        about it" aboutness alone orders the list."""
+        memories answers, nor one of a thing between them (a version's own
+        change wins, and so does the change of the version it builds on).
+        Both count to the power of P(the question asks for one property): on
+        "Show everything about it" aboutness alone orders the list."""
         cfg = self.config.retrieval
         seeds = [e for e in detect_query_entities(self.backend, scope, query, longest=True)
                  if self._is_hub(e)]
@@ -1633,6 +1646,21 @@ class MemoryStore:
         # a tie in both scores by memory id, not by the order the pool was filled in
         scored.sort(key=lambda item: (-item[0], -item[1], item[2].memory.id))
         ranked = [result for _, _, result in scored]
+        # Only the keyword search sees an identifier ("invoice 2024-117") the
+        # question shares with a memory linked to nothing: the vectors, and so
+        # the property similarity, cannot tell 2024-117 from 2024-118, and
+        # aboutness counts the memory as about something else (0.3). So the
+        # best keyword match keeps a place among the first
+        # ``decision.rerank_pool``, which the decision provider reads; judged,
+        # an answer about something else (0.8 x 0.3) ranks above the entity's
+        # non-answers (0.05 x 1.0).
+        size = max(self.config.decision.rerank_pool, 2)
+        worded = [r for r in results if "keyword" in r.signals]
+        if worded:
+            best = max(worded, key=lambda r: r.signals["keyword"]).memory.id
+            place = next(i for i, r in enumerate(ranked) if r.memory.id == best)
+            if place >= size:
+                ranked.insert(size - 1, ranked.pop(place))
         if not judges:
             return ranked
         return self._judge_ranking(question if len(seeds) == 1 else query, ranked, scope,
@@ -1771,18 +1799,35 @@ class MemoryStore:
                 judged.update(got)
             members = set_members(judged)
         # What is true of the thing a seed belongs to holds for the seed only
-        # where the seed says nothing else: an answer reached by a step up
-        # counts as far as none of the seed's own memories answers. Both
-        # relevance and that override are per property, so they count as far
-        # as the question asks for one ("Show everything about it" does not).
-        overridden = max((value for mid, value in judged.items()
-                          if seeds and any(e.id in seeds for e in ents(mid))), default=0.0)
+        # where nothing nearer says otherwise: an answer reached by a step up
+        # counts as far as none of the seed's own memories answers, nor one of
+        # a thing between them. bildy v4, a version of bildy v3 and of bildy,
+        # takes v3's change over bildy's default, as v3 does. A thing is
+        # between when the seed more likely than not belongs to it and it to
+        # the thing the answer is about (``homes_of``); a sibling reached
+        # through the thing is not. Both relevance and that override are per
+        # property, so they count as far as the question asks for one ("Show
+        # everything about it" does not).
+        own = max((value for mid, value in judged.items()
+                   if seeds and any(e.id in seeds for e in ents(mid))), default=0.0)
+        best: dict[str | None, float] = defaultdict(float)  # the best answer about each entity
+        if link:
+            homes.update(homes_of(self.backend, sorted(seeds - homes.keys())))
+            for mid, value in judged.items():
+                best[subject(mid)] = max(best[subject(mid)], value)
+
+        def overridden(thing: str) -> float:
+            between = {x for seed in seeds for x in homes[seed]
+                       if x != thing and thing in homes.get(x, ())}
+            return max([own] + [best[x] for x in between])
+
         order = []
         for mid, value in judged.items():
             result = found[mid]
             if link and subject(mid) in above:
-                value *= 1.0 - overridden
-                result.signals = {**result.signals, "overridden": round(overridden, 4)}
+                discount = overridden(subject(mid))
+                value *= 1.0 - discount
+                result.signals = {**result.signals, "overridden": round(discount, 4)}
             about = 1.0
             if link:
                 about = result.signals.get("about") or aboutness([act.get(e.id) for e in ents(mid)])
@@ -1848,9 +1893,10 @@ class MemoryStore:
         Where the topics give fewer than the budget (the first share none: an
         untagged store, memories saved with ``infer=False`` or imported
         verbatim), the rest are the unjudged memories nearest the ``members``
-        found in the first call (``_nearest_unjudged``). Measured on four sets
-        (R-84), the 40 nearest the members by memory vector held 41 to 100% of
-        the rest of a set, the next 40 of the ranking 29 to 36%.
+        found in the first call (``_nearest_unjudged``, half by memory vector
+        and half by property vector). Measured on four sets, the 40 nearest
+        the members held 41 to 100% of the rest of a set by memory vector and
+        76 to 100% by property vector, the next 40 of the ranking 29 to 36%.
         Only with no member to start from is the ranking past the first taken.
         Either way the batch is ordered as the linked search orders (the
         property similarity to ``asked``, to the power
@@ -1924,24 +1970,35 @@ class MemoryStore:
         count: int,
     ) -> list[Memory]:
         """The ``count`` memories of the scope searched nearest the members of
-        a set found so far, none of ``taken``: the store's vector search from
-        the centroid of the members' vectors. Members of a set are the same
-        kind of fact ("It costs 21,000 euros"), so they sit closer to each
-        other than to the question. Empty with no member, or none with a
-        vector of the embedder in use."""
+        a set found so far, none of ``taken``: half by memory vector (the
+        store's vector search from the centroid of the members' vectors), half
+        by property vector (the rest of the ``SET_NEAREST`` nearest, ordered by
+        their property similarity to the centroid of the members'). Members of
+        a set are the same kind of fact ("It costs 21,000 euros"), so they sit
+        closer to each other than to the question. A memory vector also
+        follows the names in the text, and where the names weigh most the
+        nearest to one car's price are that car's insurance and test drive;
+        with the names read "it" the property vector keeps the kind of fact.
+        Empty with no member, or none with a vector of the embedder in use."""
         if count <= 0 or not members:
             return []
         model = self.embedder.model_id
-        vectors = list(self.backend.vectors_of(sorted(members), model).values())
-        if not vectors or len({v.shape for v in vectors}) != 1:
+        centre = _centre(list(self.backend.vectors_of(sorted(members), model).values()))
+        if centre is None:
             return []
-        unit = [v / (float(np.linalg.norm(v)) or 1.0) for v in vectors]
-        centre = np.mean(unit, axis=0)
-        centre /= float(np.linalg.norm(centre)) or 1.0
         hits = self.backend.vector_search(centre.tolist(), model, scope,
-                                          limit=count + len(taken),
+                                          limit=max(count, SET_NEAREST) + len(taken),
                                           include_invalid=include_invalid)
-        return [memory for memory, _ in hits if memory.id not in taken][:count]
+        near = [memory for memory, _ in hits if memory.id not in taken]
+        picked, rest = near[: count // 2], near[count // 2:]
+        keep = self.config.retrieval.property_dimensions
+        alike = _centre([v[: keep or len(v)]
+                         for v in self._property_vectors(sorted(members)).values()])
+        if alike is not None:
+            vectors = self._property_vectors([m.id for m in rest])
+            # a tie keeps the order of the memory vectors
+            rest.sort(key=lambda m: -_similarity(alike, vectors.get(m.id)))
+        return picked + rest[: count - len(picked)]
 
     def _judged_relevance(
         self, asked: str, memories: list[tuple[str, str]], meta: bool = True,

@@ -412,7 +412,10 @@ For a normal text query:
    linked strongly enough (read within the user, agent and run searched before the newest
    500 are taken, as the set pool's topic scan is), and orders every candidate by how well
    it states the property asked (its property vector, entity names read as "it") times how
-   strongly it is about the entity named. This is the only link mode; the earlier "typed"
+   strongly it is about the entity named. The keyword search's best match keeps a place
+   among the first 20 (`decision.rerank_pool`) whatever its score: an identifier the
+   question names ("invoice 2024-117") is seen by the words alone. This is the only link
+   mode; the earlier "typed"
    and "undirected" walks and the "rescue", "weighted", "inherit" and "gated" fusions were
    removed, and a config naming one is refused.
 6. With `relational_relevance = "jev"` (the default "auto" is "jev" where the decision
@@ -425,8 +428,10 @@ For a normal text query:
    (tags) the first 20 share, a small topic most of them carry counting most (its size
    counted in the scope searched; of a tie at the cut, the newest are scored, as many as
    places are left and 20 more), and, where those are fewer (an untagged store, or
-   they share none), the memories nearest by vector to the members the first call found.
-   Only with no member to start from is it the order past the first 20. The set's
+   they share none), the memories nearest to the members the first call found, half by
+   memory vector and half by property vector (with the names read "it", one car's price
+   is nearest other prices, not that car's other facts). Only with no member to start
+   from is it the order past the first 20. The set's
    members from both calls come first and are returned past the limit, up to 100. In
    this mode a question naming no hub is judged the same way, the text ranking's first
    20 in one call whose two meta questions decide the set path: a set question is
@@ -434,7 +439,9 @@ For a normal text query:
    the 0.35 blend of the judged score with the text ranking's position (a judged score
    under 0.15 pushed back), not by the judged score alone, which measured worse there
    (R-117: recall@3 0.844 against 0.933 on distractors_v1). A question naming a hub is
-   ordered by the judged score times aboutness. The same blend, with a call of its own,
+   ordered by the judged score times aboutness; an answer from a thing the named entity
+   belongs to counts as far as none of the entity's own memories answers, nor one of a
+   thing between them (the version it builds on). The same blend, with a call of its own,
    re-ranks a search that was neither ordered by the linked search nor judged (a tag or
    entity filter, or `relational=False`).
 7. Context reconstruction may prepend a bounded, lazily refreshed entity description and
