@@ -1777,7 +1777,8 @@ class MemoryStore:
     ) -> list[SearchResult]:
         """Score each candidate by how well it states the property asked
         (similarity of the question and the memory with the names of the
-        entities the links reach replaced by "it") to the power
+        entities the links reach replaced by "it"; a question naming several
+        hubs is compared as written, with each memory's names kept) to the power
         ``relational_sharpness``, times how strongly it is about the entity the
         query names (``aboutness``), a tie by memory id. The
         links are followed directed and weighted, ``relational_depth`` deep
@@ -1819,7 +1820,15 @@ class MemoryStore:
             return results
         act, above = activation_paths(self.backend, seeds, depth=cfg.relational_depth)
         names = [n for seed in seeds for n in self.backend.entity_aliases(seed)]
-        question = mask_names(query, names)
+        # With several hubs named, "it" could stand for any of them: masked,
+        # "Why do Tim and John find LeBron inspiring?" reads "Why do it and it
+        # find it inspiring?", which says nothing about which of their
+        # memories answers. So the names stay, as the judge reads them
+        # (``_judge_ranking``), and every memory is compared by its ordinary
+        # vector, names kept: those naming more of the things asked about
+        # come first.
+        several = len(seeds) > 1
+        question = query if several else mask_names(query, names)
         if first_person:
             question = mask_first_person(question)
         asked = self._asked_vector(question)
@@ -1832,13 +1841,14 @@ class MemoryStore:
             # searched, kept to in SQL before the newest FAMILY_SCAN are taken
             members = self.backend.entity_memories(
                 entity_id, limit=FAMILY_SCAN, include_invalid=include_invalid, scope=scope)
-            vectors = self._property_vectors([m.id for m in members])
+            vectors = (self.backend.vectors_of([m.id for m in members], self.embedder.model_id)
+                       if several else self._property_vectors([m.id for m in members]))
             # a tie keeps the order read: the newest first, then by memory id
             for memory in sorted(members,
                                  key=lambda m: -_similarity(asked, vectors.get(m.id)))[:FAMILY_TOP]:
                 pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
         entities: dict[str, list[Entity]] = {}
-        scores = self._linked_scores(asked, list(pool), act, entities)
+        scores = self._linked_scores(asked, list(pool), act, entities, names_kept=several)
         scored = []
         for mid, result in pool.items():
             relevance, about = scores[mid]
@@ -1881,19 +1891,22 @@ class MemoryStore:
 
     def _linked_scores(
         self, asked: np.ndarray, memory_ids: list[str], act: dict[str, float],
-        entities: dict[str, list[Entity]],
+        entities: dict[str, list[Entity]], names_kept: bool = False,
     ) -> dict[str, tuple[float, float]]:
         """(property similarity to ``asked``, aboutness) of each memory, as the
         linked search scores it. Only the names the links account for are
         masked: a memory naming an entity they reach is compared by its
         property vector, any other by its ordinary one, names kept ("Lena Blum
         works on Project Ekmibo" would otherwise read "It works on it", as
-        empty as "What do I know about it?"). ``entities`` caches each memory's
+        empty as "What do I know about it?"). With ``names_kept`` (a question
+        naming several hubs, asked as written) every memory is compared by its
+        ordinary vector. ``entities`` caches each memory's
         entities and is filled in, those not cached yet read at once."""
         missing = [mid for mid in dict.fromkeys(memory_ids) if mid not in entities]
         if missing:
             entities.update(self.backend.entities_of_memories(missing))
-        reached = [mid for mid in memory_ids if any(e.id in act for e in entities[mid])]
+        reached = [] if names_kept else [
+            mid for mid in memory_ids if any(e.id in act for e in entities[mid])]
         vectors = self._property_vectors(reached)
         vectors.update(self.backend.vectors_of([mid for mid in memory_ids if mid not in vectors],
                                                self.embedder.model_id))
@@ -1990,7 +2003,8 @@ class MemoryStore:
                 asked = None
             batch = self._set_pool(ranked, size, judged, scope, include_invalid,
                                    asked=asked, act=act, entities=entities,
-                                   members=set_members(judged))
+                                   members=set_members(judged),
+                                   names_kept=bool(link) and not masking)
             if batch:
                 for result in batch:
                     if result.memory.id not in found:
@@ -2075,7 +2089,7 @@ class MemoryStore:
     def _set_pool(
         self, ranked: list[SearchResult], size: int, judged: dict[str, float], scope: Scope,
         include_invalid: bool, *, asked: np.ndarray | None, act: dict[str, float],
-        entities: dict[str, list[Entity]], members: set[str],
+        entities: dict[str, list[Entity]], members: set[str], names_kept: bool = False,
     ) -> list[SearchResult]:
         """What the second call of a question needing several memories judges:
         at most ``retrieval.set_pool`` memories not judged yet.
@@ -2111,7 +2125,8 @@ class MemoryStore:
         def linked_order(memory_ids: list[str]) -> dict[str, float]:
             if asked is None or not memory_ids:
                 return dict.fromkeys(memory_ids, 0.0)
-            scores = self._linked_scores(asked, memory_ids, act, entities)
+            scores = self._linked_scores(asked, memory_ids, act, entities,
+                                         names_kept=names_kept)
             return {mid: relevance ** sharpness * about
                     for mid, (relevance, about) in scores.items()}
 

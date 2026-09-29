@@ -756,6 +756,54 @@ def test_a_question_naming_several_things_keeps_their_names(store):
     assert "it liked the food at Olive Kitchen" in judge.read
 
 
+class _NamedConceptEmbedder(Embedder):
+    """Words to concepts, names among them: finding something inspiring,
+    admiring someone's heart, and each of three people. Masked, a memory
+    loses the concepts of the names it holds."""
+
+    name, _model, dimensions = "named-concept", "v1", 6
+    CONCEPTS = [{"find", "finds", "inspiring"}, {"admire", "heart", "determination"},
+                {"tim"}, {"john"}, {"lebron"}]
+
+    def embed(self, texts):
+        import re
+
+        out = []
+        for text in texts:
+            words = set(re.findall(r"[a-z]+", text.lower()))
+            out.append([float(bool(words & c)) for c in self.CONCEPTS] + [0.1])
+        return out
+
+
+def test_a_question_naming_several_hubs_is_ordered_with_their_names_kept(store):
+    """"Why do Tim and John find LeBron inspiring?" names three hubs. Masked,
+    it reads "Why do it and it find it inspiring?", and the dozens of
+    memories about what one of them finds inspiring filled the first places
+    of the linked order, the one a judge reads: the memories about LeBron
+    fell below them. With several hubs named, the question is compared as
+    written with each memory's own words, names kept, as the judge reads it:
+    the memories naming the things asked about come first."""
+    store.embedder = _NamedConceptEmbedder()
+    tim, john, lebron = (_entity(store, name) for name in ("Tim", "John", "LeBron"))
+    for i, thing in enumerate(("his coach", "the ocean", "old films", "his sister",
+                               "a novel", "the city", "his teammates", "a podcast",
+                               "the mountains", "his mentor", "a painting", "the stars")):
+        _remember(store, f"John finds {thing} inspiring", [john])
+        _remember(store, f"Tim finds {thing} inspiring too, since week {i}", [tim])
+    admire = _remember(store, "Tim and John find LeBron's determination inspiring and "
+                              "admire his heart", [tim, john, lebron])
+    block = _remember(store, "Tim and John find LeBron's block in the finals inspiring, "
+                             "a show of heart", [tim, john, lebron])
+    store.refresh_property_vectors(user_id="ada")
+    assert all(store._is_hub(e.id) for e in (tim, john, lebron))
+    top = [r.memory.id for r in store.search("Why do Tim and John find LeBron inspiring?",
+                                             user_id="ada", limit=5)]
+    assert set(top[:2]) == {admire.id, block.id}
+    # one hub named: its name reads "it", as before
+    one = store.search("What does John find inspiring?", user_id="ada", limit=5)
+    assert all(r.memory.content.startswith("John finds") for r in one[:3])
+
+
 def test_only_a_hub_starts_the_linked_search(store, monkeypatch):
     """A common word stored as an entity with one memory ("budget") is no hub:
     a question containing the word does not start the linked search there. A

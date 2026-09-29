@@ -182,9 +182,9 @@ def test_the_second_call_orders_each_candidate_once(store, monkeypatch):
     scored: list[str] = []
     linked_scores = store._linked_scores
 
-    def counted(asked, memory_ids, act, entities):
+    def counted(asked, memory_ids, act, entities, **kwargs):
         scored.extend(memory_ids)
-        return linked_scores(asked, memory_ids, act, entities)
+        return linked_scores(asked, memory_ids, act, entities, **kwargs)
 
     monkeypatch.setattr(store, "_linked_scores", counted)
     store.search(QUESTION, user_id="ada", limit=5)
@@ -206,9 +206,9 @@ def test_a_large_tie_is_cut_before_it_is_scored(store, monkeypatch):
     scored: list[str] = []
     linked_scores = store._linked_scores
 
-    def counted(asked, memory_ids, act, entities):
+    def counted(asked, memory_ids, act, entities, **kwargs):
         scored.extend(memory_ids)
-        return linked_scores(asked, memory_ids, act, entities)
+        return linked_scores(asked, memory_ids, act, entities, **kwargs)
 
     monkeypatch.setattr(store, "_linked_scores", counted)
     store.search(QUESTION, user_id="ada", limit=5)
