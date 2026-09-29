@@ -58,6 +58,34 @@ A question whose right answer is that the conversation does not say
 (LoCoMo's adversarial ones, LongMemEval's "_abs") scores 1 on f1, em and
 contains when the answer abstains ("No information available").
 
+--answer-model answers through that OpenAI chat model at temperature 0 in
+place of the configured LLM, and --answer-prompt module:function writes the
+answering call's messages from the question and the top k memories.
+``evals/mem0_judge.py`` holds Mem0's answer prompt and LLM judge:
+
+    ... --answer-model gpt-4o-mini --answer-prompt evals.mem0_judge:answer_messages \\
+        --judge evals.mem0_judge:judge
+
+--search-decider says what decides at question time, once the conversation
+is loaded: "store" (the default) the store's own decision provider, "none"
+no provider (the text and linked ranking without a judgement), "jev" Jev
+(``TYPESAFE_API_KEY``), so that the linked search is judged. Given more than
+once, every question is asked once per value on the same store; each row
+names its pass ("search_decider") and ``passes`` holds each pass's tables.
+
+--jobs N runs the conversations in N processes, one store each, and
+--results-dir DIR keeps one results file per conversation there
+(<conversation>.json): a conversation whose file is complete is not run
+again, so an interrupted run resumes where it stopped.
+
+--usage-db FILE counts, times and records every model call in a SQLite
+ledger the processes share (``evals/api_usage.py``): the tokens each
+response reports, per stage (extraction, reconcile, audit, search, answer,
+judge, ...) and conversation. --max-calls GROUP=N stops the run before a
+call that would pass N calls of that group (chat, embeddings, jev). The
+harness tries a failed call again (a timeout, a rate limit, a server
+error), up to four calls in all; every try is counted.
+
 Run (the data directory holds locomo10.json and longmemeval_s.json):
 
     MEMRY_BENCH_DATA=/data .venv/bin/python -m evals.external_benchmarks --dataset locomo
@@ -84,6 +112,7 @@ import re
 import sqlite3
 import statistics
 import string
+import subprocess
 import sys
 import tempfile
 import time
@@ -93,13 +122,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import httpx
 import numpy as np
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
+sys.path.insert(0, str(HERE.parent))
 
-from memry.config import Config, EmbeddingConfig  # noqa: E402
-from memry.models import Memory  # noqa: E402
+from evals import api_usage  # noqa: E402
+from memry.config import Config, DecisionConfig, EmbeddingConfig  # noqa: E402
+from memry.intelligence.graph_retrieval import detect_query_entities  # noqa: E402
+from memry.models import Memory, Scope  # noqa: E402
+from memry.providers.decisions import Decider, JevDecider, NoneDecider  # noqa: E402
 from memry.providers.embeddings import Embedder, HashEmbedder, OpenAIEmbedder  # noqa: E402
 from memry.providers.llm import LLM, NoneLLM, build_llm  # noqa: E402
 from memry.store import MemoryStore  # noqa: E402
@@ -133,6 +167,12 @@ ABSTAIN_ANSWER = "Not mentioned in the conversation"
 INGEST_MODES = ("verbatim", "extract")
 EXTRACT_UNITS = ("session", "turn")
 WHEN_POLICIES = ("never", "always")
+#: What decides at question time (--search-decider; see the module docstring).
+SEARCH_DECIDERS = ("store", "none", "jev")
+#: A provider call is tried again after these replies, and after a timeout
+#: or a dropped connection, up to ``ATTEMPTS`` calls in all.
+RETRY_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
+ATTEMPTS = 4
 
 
 class FormatError(ValueError):
@@ -181,6 +221,7 @@ class Conversation:
     sessions: list[Session]
     questions: list[Question]
     warnings: list[str] = field(default_factory=list)
+    speakers: list[str] = field(default_factory=list)  # LoCoMo: the two people talking
 
     @property
     def turns(self) -> list[Turn]:
@@ -361,7 +402,7 @@ def _locomo_sample(sample: Any, index: int) -> Conversation:
     speakers = [str(conv.get(k) or "").strip() for k in ("speaker_a", "speaker_b")]
     label = " and ".join(s for s in speakers if s)
     return Conversation(sample_id, f"conversation between {label}" if label else "conversation",
-                        sessions, questions, warnings)
+                        sessions, questions, warnings, [s for s in speakers if s])
 
 
 def load_longmemeval(path: str | os.PathLike[str]) -> list[Conversation]:
@@ -478,6 +519,7 @@ class Ingested:
     turns_of_memory: dict[str, set[str]] = field(default_factory=dict)
     seconds: float = 0.0
     warnings: list[str] = field(default_factory=list)
+    actions: Counter = field(default_factory=Counter)  # the saves' actions (ADD, UPDATE, ...)
 
     def turns_of(self, memory: Memory) -> set[str]:
         """The turns a memory came from: the saves that landed on it, and the
@@ -492,13 +534,58 @@ class Ingested:
         return turns if level == "turn" else {self.session_of_turn[t] for t in turns}
 
 
+def transient(exc: BaseException) -> bool:
+    """A provider error worth another try: a timeout, a dropped connection,
+    or a reply in ``RETRY_STATUSES``."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in RETRY_STATUSES
+
+
+def retried(call: Callable[[], Any], attempts: int = ATTEMPTS) -> Any:
+    """``call()``, tried again after a ``transient`` error, waiting 1, 2, 4 s."""
+    for attempt in range(attempts):
+        try:
+            return call()
+        except Exception as exc:
+            if attempt + 1 >= attempts or not transient(exc):
+                raise
+            time.sleep(2 ** attempt)
+    raise AssertionError("the loop returns or raises")
+
+
+class RetryingLLM(LLM):
+    """A text model whose calls are tried again after a ``transient`` error.
+    A long run meets such errors, and the store would otherwise store a
+    session verbatim (a failed extraction) or lose the save (a failed
+    reconcile). The model's name and settings read through, so the store
+    decides exactly as with the model itself."""
+
+    def __init__(self, base: LLM, attempts: int = ATTEMPTS) -> None:
+        self.base = base
+        self.name, self.available = base.name, base.available
+        self.model = getattr(base, "model", None)
+        self.effort = getattr(base, "effort", None)
+        self.attempts = attempts
+
+    def complete(self, system: str, user: str, *, json_schema: dict[str, Any] | None = None) -> str:
+        return retried(lambda: self.base.complete(system, user, json_schema=json_schema),
+                       self.attempts)
+
+    def close(self) -> None:
+        self.base.close()
+
+
 def make_store(mode: str, embedder: Embedder, *, llm: LLM | None = None) -> MemoryStore:
     """Verbatim: a store with no model at all, default settings. Extract: the
     configured Memry (``Config.load``: LLM, decision model, retrieval
-    settings), in memory, with the benchmark's embedder."""
+    settings), in memory, with the benchmark's embedder; its text model's
+    failed calls are tried again (``RetryingLLM``)."""
     if mode == "verbatim":
         return MemoryStore(Config(db_path=":memory:"), llm=llm or NoneLLM(), embedder=embedder)
-    return MemoryStore(Config.load(db_path=":memory:"), llm=llm, embedder=embedder)
+    config = Config.load(db_path=":memory:")
+    llm = llm or build_llm(config.llm)
+    return MemoryStore(config, llm=RetryingLLM(llm) if llm.available else llm, embedder=embedder)
 
 
 def ingest(store: MemoryStore, conversation: Conversation, *, mode: str = "verbatim",
@@ -548,6 +635,7 @@ def ingest(store: MemoryStore, conversation: Conversation, *, mode: str = "verba
                     f"{len(result.episode_ids)} episodes; turns traced by save only")
             else:
                 ingested.turn_of_episode.update(zip(result.episode_ids, keys))
+            ingested.actions.update(action.event for action in result.actions)
             for action in result.actions:
                 if action.memory_id:  # a NONE too: the memory it landed on (DEDUP_NOTE)
                     ingested.turns_of_memory.setdefault(action.memory_id, set()).update(keys)
@@ -673,7 +761,9 @@ def score_answer(prediction: str, question: Question,
                  judge: Judge = containment_judge) -> dict[str, Any]:
     """f1, em, contains and the judge's verdict for one answer. The judge is
     handed the gold the other scores read (an open-domain question's first
-    ";" alternative)."""
+    ";" alternative), or the file's whole answer when it has a true
+    ``reads_full_answer`` attribute. A judge that fails leaves its verdict
+    None ("judge_error" says why), which the means leave out."""
     gold = question.answer
     if question.abstain:
         right = float(is_abstention(prediction))
@@ -684,8 +774,13 @@ def score_answer(prediction: str, question: Question,
         f1 = parts_f1(prediction, gold) if question.category_name == "multi-hop" \
             else token_f1(prediction, gold)
         em, contains = float(exact_match(prediction, gold)), float(answer_contained(prediction, gold))
-    verdict = bool(judge(question.question, gold, prediction))
-    return {"f1": round(f1, 4), "em": em, "contains": contains, "judge": verdict}
+    scores: dict[str, Any] = {"f1": round(f1, 4), "em": em, "contains": contains}
+    judged_gold = question.answer if getattr(judge, "reads_full_answer", False) else gold
+    try:
+        scores["judge"] = bool(judge(question.question, judged_gold, prediction))
+    except Exception as exc:  # one failed judgement must not end a long run
+        scores["judge"], scores["judge_error"] = None, str(exc)[:300]
+    return scores
 
 
 ANSWER_SYSTEM = """You answer a question about past conversations from memories \
@@ -711,12 +806,47 @@ def answer_question(llm: LLM, question: Question, context: str) -> str:
     return " ".join(str(raw or "").split())
 
 
+#: --answer-prompt: (question, the top k memories) -> the answering call's
+#: messages ([{"role", "content"}, ...]).
+AnswerPrompt = Callable[[str, list[Memory]], list[dict[str, str]]]
+
+
+def chat(llm: LLM, messages: list[dict[str, str]]) -> str:
+    """One answering call with ``messages``: through the model's own ``chat``
+    where it has one, else as ``complete(system, user)``."""
+    if hasattr(llm, "chat"):
+        return llm.chat(messages)
+    system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+    user = "\n\n".join(m["content"] for m in messages if m["role"] != "system")
+    return llm.complete(system, user)
+
+
+def search_signals(store: MemoryStore, question: str, results: list[Any]) -> dict[str, Any]:
+    """How the search went for one question: the names of the entities it
+    names (``named``; ``named_entities`` counts the entities, several can
+    share a name), whether the linked search ran from them (``linked``: a
+    result carries its "about" signal), how many calls judged the ranking
+    (``judge_calls``: 0 unjudged, 1, or 2 for a question needing several
+    memories) and how many results were found to be members of such a set."""
+    ids = detect_query_entities(store.backend, Scope(user_id=BENCH_USER), question, longest=True)
+    names = {entity.name for entity in map(store.backend.get_entity, ids) if entity is not None}
+    signals = [r.signals or {} for r in results]
+    return {"named": sorted(names), "named_entities": len(ids),
+            "linked": any("about" in s for s in signals),
+            "judge_calls": max((int(s.get("calls") or 0) for s in signals), default=0),
+            "set_members": sum(1 for s in signals if s.get("member"))}
+
+
 def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM | None = None,
-        judge: Judge = containment_judge, use_context: bool = False) -> dict[str, Any]:
-    """Search for one question, score what came back, answer when asked."""
+        judge: Judge = containment_judge, use_context: bool = False,
+        answer_prompt: AnswerPrompt | None = None, search_stage: str = "search",
+        ) -> dict[str, Any]:
+    """Search for one question, score what came back, answer when asked. The
+    model calls are counted under ``search_stage``, "answer" and "judge"."""
     store = ingested.store
     started = time.perf_counter()
-    results = store.search(question.question, user_id=BENCH_USER, limit=max(DEPTH, k))
+    with api_usage.stage(search_stage):
+        results = store.search(question.question, user_id=BENCH_USER, limit=max(DEPTH, k))
     ms = (time.perf_counter() - started) * 1000
     results = results[:max(DEPTH, k)]
     units = [ingested.units_of(r.memory, question.level) for r in results]
@@ -734,23 +864,34 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
     for depth in KS:
         row[f"recall@{depth}"] = evidence_recall(units, question.evidence, depth)
     row["mrr"] = reciprocal_rank(units, question.evidence)
+    row.update(search_signals(store, question.question, results))
     if answer_llm is None:
         return row
+    top = [r.memory for r in results[:k]]
     if use_context:
-        context = store.reconstruct_context(question.question, user_id=BENCH_USER, limit=k,
-                                            token_budget=CONTEXT_TOKENS)
+        with api_usage.stage(search_stage):
+            context = store.reconstruct_context(question.question, user_id=BENCH_USER, limit=k,
+                                                token_budget=CONTEXT_TOKENS)
         text = context.text or "Memories: (none found)"
         in_context = [store.get(mid) for mid in context.memory_ids]
         row["context_recall"] = evidence_recall(
             [ingested.units_of(m, question.level) for m in in_context if m],
             question.evidence, len(in_context))
     else:
-        text = memories_text([r.memory for r in results[:k]])
+        text = memories_text(top)
+        row["answer_k"] = len(top)
     try:
-        row["prediction"] = answer_question(answer_llm, question, text)
+        with api_usage.stage("answer"):
+            if answer_prompt is not None and not use_context:
+                # kept as the model wrote it, as Mem0's evaluation keeps it
+                row["prediction"] = str(chat(answer_llm, answer_prompt(question.question, top))
+                                        or "").strip()
+            else:
+                row["prediction"] = answer_question(answer_llm, question, text)
     except Exception as exc:  # one failed call must not end a long run
         row["prediction"], row["answer_error"] = "", str(exc)[:300]
-    row.update(score_answer(row["prediction"], question, judge))
+    with api_usage.stage("judge"):
+        row.update(score_answer(row["prediction"], question, judge))
     return row
 
 
@@ -806,15 +947,17 @@ def markdown_table(tables: dict[str, Any]) -> str:
 class SqliteEmbeddingCache(Embedder):
     """One vector per distinct text, kept in a SQLite file, fetched in batches
     of 256: a re-run, and the many LongMemEval haystacks that share sessions,
-    embed each text once. ``close`` keeps it open, because every store of a
-    run closes its embedder; ``release`` closes it."""
+    embed each text once. The processes of a parallel run share the file. A
+    failed batch is tried again (``retried``). ``close`` keeps it open,
+    because every store of a run closes its embedder; ``release`` closes it."""
 
     def __init__(self, base: Embedder, path: str | os.PathLike[str]) -> None:
         self.base = base
         self.name, self._model, self.dimensions = base.name, base._model, base.dimensions
         self.path = pathlib.Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(self.path))
+        self.db = sqlite3.connect(str(self.path), timeout=120)
+        self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("CREATE TABLE IF NOT EXISTS vectors (key TEXT PRIMARY KEY, "
                         "vector BLOB NOT NULL)")
         self.base_calls = 0
@@ -839,7 +982,7 @@ class SqliteEmbeddingCache(Embedder):
         missing = [(key, text) for key, text in keys.items() if key not in found]
         for i in range(0, len(missing), 256):
             batch = missing[i:i + 256]
-            vectors = self.base.embed([text for _, text in batch])
+            vectors = retried(lambda: self.base.embed([text for _, text in batch]))
             self.base_calls += 1
             self.db.executemany("INSERT OR REPLACE INTO vectors VALUES (?, ?)", [
                 (key, np.asarray(v, dtype=np.float32).tobytes())
@@ -886,48 +1029,161 @@ def build_embedder(kind: str, data_dir: str | os.PathLike[str] | None) -> Embedd
 # a run
 
 
+#: A question pass's decision provider; None keeps the store's own.
+DeciderFactory = Callable[[], Decider | None]
+
+
+def retrying_decider(decider: Decider, attempts: int = ATTEMPTS) -> Decider:
+    """``decider``, asking again when a call came back with no answer at all:
+    a provider that fails answers nothing, and search then keeps the order it
+    had without saying so. ``decider.failures`` counts the calls that still
+    answered nothing."""
+    ask_once = decider.decide
+    decider.failures = 0  # type: ignore[attr-defined]
+
+    def decide(state: str, questions: dict[str, Any]) -> Any:
+        for attempt in range(attempts):
+            answers = ask_once(state, questions)
+            if not questions or any(answers[key].available for key in questions):
+                return answers
+            if attempt + 1 < attempts:
+                time.sleep(2 ** attempt)
+        decider.failures += 1  # type: ignore[attr-defined]
+        return answers
+
+    decider.decide = decide  # type: ignore[method-assign]
+    return decider
+
+
+def search_decider(name: str) -> DeciderFactory:
+    """What --search-decider ``name`` asks with (``SEARCH_DECIDERS``): the
+    store's own provider, none, or Jev (``TYPESAFE_API_KEY``), whose calls
+    are tried again (``retrying_decider``)."""
+    if name == "store":
+        return lambda: None
+    if name == "none":
+        return NoneDecider
+    if name == "jev":
+        key = os.environ.get("TYPESAFE_API_KEY", "").strip()
+        if not key:
+            raise SystemExit("--search-decider jev needs TYPESAFE_API_KEY")
+        return lambda: retrying_decider(JevDecider(DecisionConfig(provider="jev", api_key=key)))
+    raise ValueError(f"search decider {name!r}: one of {', '.join(SEARCH_DECIDERS)}")
+
+
+def store_stats(store: MemoryStore, conversation: Conversation) -> dict[str, Any]:
+    """The loaded store's named entities: how many, how many share their
+    name with another (``same_name_entities``, in ``same_name_groups``
+    names), the open merge proposals, and for each speaker how many memories
+    each entity of that name holds, most first."""
+    scope = Scope(user_id=BENCH_USER)
+    entities = store.backend.list_entities(scope, limit=1_000_000)
+
+    def name_of(entity: Any) -> str:
+        return entity.normalized or entity.name.strip().lower()
+
+    names = Counter(name_of(e) for e in entities)
+    shared = {name: n for name, n in names.items() if n > 1}
+    speakers = {speaker: sorted((store.backend.count_entity_memories(e.id) for e in entities
+                                 if name_of(e) == speaker.strip().lower()), reverse=True)
+                for speaker in conversation.speakers}
+    return {"entities": len(entities), "same_name_entities": sum(shared.values()),
+            "same_name_groups": len(shared),
+            "open_proposals": len(store.backend.list_proposals(scope, limit=1_000_000)),
+            "speaker_entities": speakers}
+
+
+def _qualname(function: Any) -> str | None:
+    if function is None:
+        return None
+    return f"{getattr(function, '__module__', '?')}:{getattr(function, '__qualname__', function)}"
+
+
+def pass_tables(rows: list[dict[str, Any]], names: list[str]) -> list[dict[str, Any]]:
+    """Each question pass's tables, from its rows."""
+    return [{"search_decider": name,
+             "tables": aggregate([r for r in rows if r.get("search_decider", name) == name])}
+            for name in names]
+
+
 def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str = "verbatim",
                   unit: str = "session", embedder: Embedder | None = None, k: int = 10,
                   questions: int | None = None, answer_llm: LLM | None = None,
                   judge: Judge = containment_judge, use_context: bool = False,
                   when: str = "never",
                   store_factory: Callable[[], MemoryStore] | None = None,
-                  log: Callable[[str], None] | None = None) -> dict[str, Any]:
-    """Ingest each conversation into a fresh store, ask its questions, and
-    return {config, stores, rows, tables, warnings, notes}."""
+                  log: Callable[[str], None] | None = None,
+                  search_deciders: dict[str, DeciderFactory] | None = None,
+                  answer_prompt: AnswerPrompt | None = None) -> dict[str, Any]:
+    """Ingest each conversation into a fresh store and ask its questions once
+    per pass of ``search_deciders`` (name -> the decision provider the store
+    asks with, given it once the conversation is loaded; default: the store's
+    own, as "store"). Returns {config, stores, passes, tables (the first
+    pass's), rows, warnings, notes, complete}. A call refused at a cap
+    (``api_usage.CapReached``) ends the run where it is: what was done is
+    kept, "complete" is false and "stopped" says where."""
     embedder = embedder or HashEmbedder(256)
     log = log or (lambda text: print(text, file=sys.stderr, flush=True))
+    passes = search_deciders or {"store": search_decider("store")}
     rows: list[dict[str, Any]] = []
     stores: list[dict[str, Any]] = []
     warnings: list[str] = []
     notes: list[str] = []
+    stopped: str | None = None
     for conv in conversations:
         warnings.extend(conv.warnings)
         asked = conv.questions[:questions] if questions else conv.questions
         if mode == "verbatim" and hasattr(embedder, "warm"):
             embedder.warm([t.text for t in conv.turns] + [q.question for q in asked])
         store = store_factory() if store_factory else make_store(mode, embedder)
+        entry: dict[str, Any] = {"conversation": conv.conv_id, "sessions": len(conv.sessions),
+                                 "turns": len(conv.turns), "questions": len(asked)}
+        stores.append(entry)
         try:
-            if mode == "extract" and not store.llm.available:
-                raise SystemExit("--ingest extract needs a configured LLM "
-                                 "(OPENAI_API_KEY, ANTHROPIC_API_KEY or MEMRY_LLM_PROVIDER)")
-            ingested = ingest(store, conv, mode=mode, unit=unit, when=when, dataset=dataset)
-            memories = len(store.get_all(user_id=BENCH_USER, limit=1_000_000))
-            stores.append({"conversation": conv.conv_id, "sessions": len(conv.sessions),
-                           "turns": len(conv.turns), "memories": memories,
-                           "questions": len(asked), "ingest_seconds": round(ingested.seconds, 2)})
-            warnings.extend(ingested.warnings)
-            for question in asked:
-                rows.append(ask(ingested, question, k=k, answer_llm=answer_llm, judge=judge,
-                                use_context=use_context))
+            with api_usage.labelled(conv.conv_id):
+                if mode == "extract" and not store.llm.available:
+                    raise SystemExit("--ingest extract needs a configured LLM "
+                                     "(OPENAI_API_KEY, ANTHROPIC_API_KEY or MEMRY_LLM_PROVIDER)")
+                with api_usage.stage("ingest"):
+                    ingested = ingest(store, conv, mode=mode, unit=unit, when=when,
+                                      dataset=dataset)
+                entry.update(memories=len(store.get_all(user_id=BENCH_USER, limit=1_000_000)),
+                             ingest_seconds=round(ingested.seconds, 2),
+                             actions=dict(ingested.actions), **store_stats(store, conv))
+                warnings.extend(ingested.warnings)
+                for name, factory in passes.items():
+                    decider, kept = factory(), store.decider
+                    if decider is not None:
+                        store.decider = decider
+                    started = time.perf_counter()
+                    try:
+                        for question in asked:
+                            rows.append({"search_decider": name, **ask(
+                                ingested, question, k=k, answer_llm=answer_llm, judge=judge,
+                                use_context=use_context, answer_prompt=answer_prompt,
+                                search_stage=f"search:{name}")})
+                    finally:
+                        entry[f"seconds_{name}"] = round(time.perf_counter() - started, 2)
+                        if decider is not None:
+                            store.decider = kept
+                            entry[f"decider_failures_{name}"] = getattr(decider, "failures", 0)
+                            decider.close()
+        except api_usage.CapReached as exc:
+            stopped = f"{conv.conv_id}: {exc}"
+            entry["stopped"] = str(exc)
         finally:
             store.close()
-        log(f"  {conv.conv_id}: {len(conv.turns)} turns -> {memories} memories in "
-            f"{ingested.seconds:.1f}s, {len(asked)} questions")
+        log(f"  {conv.conv_id}: {len(conv.turns)} turns -> {entry.get('memories', '?')} memories "
+            f"in {entry.get('ingest_seconds', '?')}s, {len(asked)} questions"
+            + (f"; stopped: {stopped}" if stopped else ""))
+        if stopped:
+            break
     notes.append(DEDUP_NOTE)
     if mode == "extract" and unit == "session":
         notes.append("extract by session: a memory counts for every turn of the session it "
                      "came from, so turn-level recall is session-level recall")
+    names = list(passes)
+    tables = pass_tables(rows, names)
     return {
         "dataset": dataset,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -935,14 +1191,45 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                    "embedder": embedder.model_id, "k": k, "depth": max(DEPTH, k),
                    "conversations": len(conversations), "questions_per_conversation": questions,
                    "answer_llm": getattr(answer_llm, "name", None) if answer_llm else None,
+                   "answer_model": getattr(answer_llm, "model", None) if answer_llm else None,
+                   "answer_prompt": _qualname(answer_prompt),
                    "judge": getattr(judge, "__qualname__", repr(judge)),
+                   "judge_function": _qualname(judge),
+                   "search_deciders": names,
                    "context": use_context, "when": when,
                    "locomo_categories": LOCOMO_CATEGORIES if dataset == "locomo" else None},
         "stores": stores,
-        "tables": aggregate(rows),
+        "passes": tables,
+        "tables": tables[0]["tables"],
         "rows": rows,
         "warnings": warnings,
         "notes": notes,
+        "complete": stopped is None,
+        "stopped": stopped,
+    }
+
+
+def merge_results(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    """One result from per-conversation results of the same run: their rows,
+    stores, warnings and notes together, the tables computed again."""
+    if not parts:
+        raise ValueError("no results to merge")
+    rows = [row for part in parts for row in part["rows"]]
+    names = parts[0]["config"].get("search_deciders") or ["store"]
+    tables = pass_tables(rows, names)
+    stopped = [part["stopped"] for part in parts if part.get("stopped")]
+    return {
+        **{key: parts[0][key] for key in ("dataset", "file") if key in parts[0]},
+        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "config": {**parts[0]["config"], "conversations": len(parts)},
+        "stores": [store for part in parts for store in part["stores"]],
+        "passes": tables,
+        "tables": tables[0]["tables"],
+        "rows": rows,
+        "warnings": [w for part in parts for w in part["warnings"]],
+        "notes": list(dict.fromkeys(n for part in parts for n in part["notes"])),
+        "complete": all(part.get("complete", True) for part in parts),
+        "stopped": "; ".join(stopped) or None,
     }
 
 
@@ -970,26 +1257,184 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="memories given to the answering model (default 10)")
     parser.add_argument("--limit", type=int, default=None,
                         help="first N conversations (LoCoMo samples, LongMemEval questions)")
+    parser.add_argument("--conversation", action="append", default=None, metavar="ID",
+                        help="only this conversation (a LoCoMo sample_id, a LongMemEval "
+                             "question_id); may be given several times")
     parser.add_argument("--questions", type=int, default=None,
                         help="first N questions of each conversation")
     parser.add_argument("--seed", type=int, default=None,
                         help="shuffle the conversations with this seed before --limit")
     parser.add_argument("--answer", action="store_true",
                         help="answer with the configured LLM and score F1, EM, contains, judge")
+    parser.add_argument("--answer-model", default=None, metavar="MODEL",
+                        help="answer with this OpenAI chat model at temperature 0 "
+                             "(OPENAI_API_KEY); implies --answer")
+    parser.add_argument("--answer-prompt", default=None, metavar="MODULE:FUNCTION",
+                        help="function(question, memories) -> the answering call's messages "
+                             "(default: the harness's own prompt)")
     parser.add_argument("--context", action="store_true",
                         help="with --answer: answer from reconstruct_context, not the top k")
     parser.add_argument("--judge", default=None,
                         help="module:function(question, gold, prediction) -> bool "
                              "(default: containment)")
+    parser.add_argument("--search-decider", action="append", choices=SEARCH_DECIDERS,
+                        default=None,
+                        help="what decides at question time: the store's provider (store, "
+                             "the default), none, or Jev (TYPESAFE_API_KEY); given several "
+                             "times, every question is asked once per value")
     parser.add_argument("--when", choices=WHEN_POLICIES, default="never",
                         help="write metadata['when'] = session date on every new memory "
                              "without one of its own (always), or not (never, the default)")
+    parser.add_argument("--jobs", type=int, default=1,
+                        help="conversations run at once, each in its own process "
+                             "(needs --results-dir)")
+    parser.add_argument("--results-dir", default=None,
+                        help="one results file per conversation here; a complete one is "
+                             "not run again")
+    parser.add_argument("--usage-db", default=None,
+                        help="SQLite ledger of every model call (tokens, seconds, stage)")
+    parser.add_argument("--max-calls", action="append", default=None, metavar="GROUP=N",
+                        help="stop before the call that would pass N calls of GROUP "
+                             "(chat, embeddings, jev, other) in the ledger; needs --usage-db")
+    parser.add_argument("--worker", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--out", default=None,
                         help=f"results file (default ${DATA_ENV}/results/<dataset>_<time>.json)")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.jobs > 1 and not args.results_dir:
+        parser.error("--jobs needs --results-dir")
+    if args.max_calls and not args.usage_db:
+        parser.error("--max-calls needs --usage-db")
+    try:
+        args.caps = parse_caps(args.max_calls)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
+
+
+def parse_caps(specs: list[str] | None) -> dict[str, int]:
+    """["chat=15000", "jev=2000"] -> {"chat": 15000, "jev": 2000}."""
+    caps: dict[str, int] = {}
+    for spec in specs or []:
+        group, _, number = spec.partition("=")
+        if group not in ("chat", "embeddings", "jev", "other") or not number.isdigit():
+            raise ValueError(f"--max-calls wants GROUP=N (chat, embeddings, jev, other), "
+                             f"got {spec!r}")
+        caps[group] = int(number)
+    return caps
+
+
+def load_function(spec: str, option: str) -> Callable[..., Any]:
+    """``module:function`` -> that function."""
+    module_name, _, name = spec.partition(":")
+    if not module_name or not name:
+        raise ValueError(f"{option} wants module:function, got {spec!r}")
+    function = getattr(importlib.import_module(module_name), name)
+    if not callable(function):
+        raise ValueError(f"{spec} is not callable")
+    return function
+
+
+#: Said in the prompt of an extraction that a save makes (the harness gives
+#: every save its context); the extraction an UPDATE makes to read the
+#: rewritten memory's names has none.
+SHARED_CONTEXT = "Shared context for these related inputs"
+
+
+def _memry_prompts() -> list[tuple[str, str]]:
+    from memry.intelligence import entities, extraction, reconcile, when
+
+    prompts = [(extraction.EXTRACTION_SYSTEM, "extraction"), (extraction.COVERAGE_SYSTEM, "audit"),
+               (extraction.RELATION_SYSTEM, "relations"), (reconcile.RECONCILE_SYSTEM, "reconcile"),
+               (entities.IDENTITY_SYSTEM, "identity"),
+               (entities.DESCRIPTION_SYSTEM, "entity_description"), (when.WHEN_SYSTEM, "when")]
+    return [(text.split("{", 1)[0][:60], name) for text, name in prompts]
+
+
+def memry_stage(stage: str, group: str, body: Any) -> str | None:
+    """A chat call made while a conversation is loaded, counted by the memry
+    prompt it carries: "ingest:extraction", "ingest:extraction_on_update",
+    "ingest:reconcile", "ingest:reconcile_merge" (writing an UPDATE's text),
+    "ingest:identity", "ingest:audit", ... or "ingest:other"."""
+    if group != "chat" or not stage.startswith("ingest") or not isinstance(body, dict):
+        return None
+    messages = [m for m in body.get("messages") or [] if isinstance(m, dict)]
+    system = next((str(m.get("content") or "") for m in messages if m.get("role") == "system"), "")
+    user = next((str(m.get("content") or "") for m in messages if m.get("role") == "user"), "")
+    from memry.intelligence.reconcile import MERGE_REQUEST
+
+    for prefix, name in _memry_prompts():
+        if system.startswith(prefix):
+            if name == "extraction" and SHARED_CONTEXT not in user:
+                name = "extraction_on_update"
+            elif name == "reconcile" and MERGE_REQUEST in user:
+                name = "reconcile_merge"
+            return f"{stage}:{name}"
+    return f"{stage}:other"
+
+
+def _read_json_file(path: pathlib.Path) -> dict[str, Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _write_json(path: pathlib.Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text(json.dumps(data, indent=1, default=str), encoding="utf-8")
+    partial.replace(path)
+
+
+#: Options that do not change a conversation's results: a per-conversation
+#: file written under other values of these is still reused.
+_RUN_ONLY = ("jobs", "results_dir", "out", "worker", "usage_db", "max_calls", "caps",
+             "conversation", "limit", "seed")
+
+
+def run_options(args: argparse.Namespace) -> dict[str, Any]:
+    """The options a per-conversation results file must match to be reused."""
+    return {key: value for key, value in sorted(vars(args).items()) if key not in _RUN_ONLY}
+
+
+def reusable(path: pathlib.Path, options: dict[str, Any]) -> bool:
+    """A complete per-conversation results file written with these options."""
+    part = _read_json_file(path)
+    return bool(part and part.get("complete") and part.get("config", {}).get("options") == options)
+
+
+def run_workers(argv: list[str], conversation_ids: list[str], results_dir: pathlib.Path,
+                jobs: int, log: Callable[[str], None]) -> None:
+    """Run each conversation in a process of its own (this module with
+    ``--worker``), ``jobs`` at a time, each logging to <conversation>.log
+    beside its results file. Once one stops unfinished (a cap), no more are
+    started."""
+    queue = list(conversation_ids)
+    running: dict[str, tuple[subprocess.Popen, Any]] = {}
+    while queue or running:
+        while queue and len(running) < jobs:
+            conv_id = queue.pop(0)
+            handle = open(results_dir / f"{conv_id}.log", "a", encoding="utf-8")
+            command = [sys.executable, "-m", "evals.external_benchmarks", *argv,
+                       "--worker", conv_id]
+            running[conv_id] = (subprocess.Popen(command, cwd=str(HERE.parent), stdout=handle,
+                                                 stderr=subprocess.STDOUT), handle)
+            log(f"  {conv_id}: started")
+        time.sleep(1)
+        for conv_id, (process, handle) in list(running.items()):
+            if process.poll() is None:
+                continue
+            handle.close()
+            del running[conv_id]
+            part = _read_json_file(results_dir / f"{conv_id}.json") or {}
+            log(f"  {conv_id}: exit {process.returncode}, "
+                f"{'complete' if part.get('complete') else 'not complete'}")
+            if not part.get("complete"):
+                queue.clear()
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
     data_dir = os.environ.get(DATA_ENV, "").strip() or None
     path = find_dataset(args.dataset, data_dir, variant=args.variant, file=args.file)
@@ -999,47 +1444,129 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no {args.dataset} data ({where}): expected {wanted}", file=sys.stderr)
         return 2
     conversations = load(args.dataset, path)
-    if args.seed is not None:
-        random.Random(args.seed).shuffle(conversations)
-    if args.limit:
-        conversations = conversations[:args.limit]
+    if args.worker:
+        conversations = [c for c in conversations if c.conv_id == args.worker]
+    else:
+        if args.seed is not None:
+            random.Random(args.seed).shuffle(conversations)
+        if args.limit:
+            conversations = conversations[:args.limit]
+        if args.conversation:
+            known = {c.conv_id for c in conversations}
+            unknown = [c for c in args.conversation if c not in known]
+            if unknown:
+                print(f"--conversation: no {', '.join(unknown)} in {path}", file=sys.stderr)
+                return 2
+            conversations = [c for c in conversations if c.conv_id in set(args.conversation)]
     judge = load_judge(args.judge)
-    answer_llm, notes = None, []
-    if args.answer:
-        llm = build_llm(Config.load().llm)
-        if llm.available:
-            answer_llm = llm
-        else:
-            notes.append("--answer skipped: no LLM configured (OPENAI_API_KEY, "
-                         "ANTHROPIC_API_KEY or MEMRY_LLM_PROVIDER)")
-            print(notes[-1], file=sys.stderr)
-    embedder = build_embedder(args.embedder, data_dir)
-    print(f"{args.dataset}: {path} ({len(conversations)} conversations), ingest {args.ingest}, "
-          f"embedder {embedder.model_id}", file=sys.stderr, flush=True)
+    answer_prompt = load_function(args.answer_prompt, "--answer-prompt") \
+        if args.answer_prompt else None
+    deciders = {name: search_decider(name)
+                for name in dict.fromkeys(args.search_decider or ["store"])}
+    options = run_options(args)
+
+    def log(text: str) -> None:
+        print(text, file=sys.stderr, flush=True)
+
+    results_dir = pathlib.Path(args.results_dir) if args.results_dir else None
+    notes: list[str] = []
+    if results_dir is not None:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        todo = [c for c in conversations
+                if not reusable(results_dir / f"{c.conv_id}.json", options)]
+        log(f"{args.dataset}: {len(conversations)} conversations, {len(todo)} to run "
+            f"in {results_dir}")
+        if args.jobs > 1 and len(todo) > 1 and not args.worker:
+            run_workers(argv, [c.conv_id for c in todo], results_dir, args.jobs, log)
+            todo = []
+    else:
+        todo = conversations
+    meter = api_usage.UsageMeter(args.usage_db, label=args.worker or "", caps=args.caps,
+                                 refine=memry_stage).install() if args.usage_db and todo else None
+    answer_llm = embedder = None
     try:
-        result = run_benchmark(
-            conversations, dataset=args.dataset, mode=args.ingest, unit=args.extract_unit,
-            embedder=embedder, k=args.k, questions=args.questions, answer_llm=answer_llm,
-            judge=judge, use_context=args.context, when=args.when)
+        if todo:
+            if args.answer or args.answer_model:
+                if args.answer_model:
+                    from evals.mem0_judge import OpenAIChat
+
+                    llm: LLM = OpenAIChat(args.answer_model)
+                else:
+                    llm = build_llm(Config.load().llm)
+                if llm.available:
+                    answer_llm = llm
+                else:
+                    notes.append("--answer skipped: no LLM configured (OPENAI_API_KEY, "
+                                 "ANTHROPIC_API_KEY or MEMRY_LLM_PROVIDER)")
+                    print(notes[-1], file=sys.stderr)
+            embedder = build_embedder(args.embedder, data_dir)
+            log(f"{args.dataset}: {path} ({len(todo)} conversations), ingest {args.ingest}, "
+                f"embedder {embedder.model_id}")
+        settings = dict(dataset=args.dataset, mode=args.ingest, unit=args.extract_unit,
+                        embedder=embedder, k=args.k, questions=args.questions,
+                        answer_llm=answer_llm, judge=judge, use_context=args.context,
+                        when=args.when, search_deciders=deciders, answer_prompt=answer_prompt)
+
+        def finish(part: dict[str, Any]) -> dict[str, Any]:
+            part["file"] = str(path)
+            part["config"].update(limit=args.limit, seed=args.seed, options=options,
+                                  variant=args.variant if args.dataset == "longmemeval" else None)
+            part["notes"] = notes + part["notes"]
+            return part
+
+        if results_dir is None:
+            result = finish(run_benchmark(conversations, **settings))
+        else:
+            for conv in todo:
+                part = finish(run_benchmark([conv], **settings))
+                _write_json(results_dir / f"{conv.conv_id}.json", part)
+                if not part["complete"]:
+                    break
+            if args.worker:
+                return 0
+            parts = [part for c in conversations
+                     if (part := _read_json_file(results_dir / f"{c.conv_id}.json"))]
+            if not parts:
+                print(f"no results in {results_dir}", file=sys.stderr)
+                return 1
+            result = merge_results(parts)
+            missing = sorted({c.conv_id for c in conversations}
+                             - {s["conversation"] for s in result["stores"]})
+            if missing:
+                result["complete"] = False
+                result["notes"].append(f"no results for {', '.join(missing)}")
     finally:
         if isinstance(embedder, SqliteEmbeddingCache):
             embedder.release()
         if answer_llm is not None:
             answer_llm.close()
-    result["file"] = str(path)
-    result["config"].update(limit=args.limit, seed=args.seed, variant=args.variant
-                            if args.dataset == "longmemeval" else None)
-    result["notes"] = notes + result["notes"]
+        if meter is not None:
+            meter.close()
+    if args.usage_db and pathlib.Path(args.usage_db).exists():
+        result["usage"] = {
+            "ledger": str(args.usage_db),
+            "by_stage": api_usage.summarize(args.usage_db, ("grp", "model", "stage")),
+            "by_conversation": api_usage.summarize(args.usage_db,
+                                                   ("label", "grp", "model", "stage")),
+        }
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     base = pathlib.Path(data_dir) if data_dir else path.parent
     out = pathlib.Path(args.out) if args.out else base / "results" / f"{args.dataset}_{stamp}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(result, indent=1, default=str), encoding="utf-8")
-    print(f"\n## {args.dataset}: {len(result['rows'])} questions, "
-          f"{sum(s['memories'] for s in result['stores'])} memories\n")
-    print(markdown_table(result["tables"]))
+    _write_json(out, result)
+    print(f"\n## {args.dataset}: {len(result['rows'])} rows, "
+          f"{sum(s.get('memories', 0) for s in result['stores'])} memories")
+    for part in result["passes"]:
+        if len(result["passes"]) > 1:
+            print(f"\n### questions asked with search decider {part['search_decider']}")
+        print("\n" + markdown_table(part["tables"]))
+    for row in (result.get("usage") or {}).get("by_stage", []):
+        print(f"\nusage: {row['grp']} {row['model']} {row['stage']}: {row['calls']} calls, "
+              f"{row['input_tokens']} in, {row['output_tokens']} out, {row['seconds']:.0f} s",
+              end="")
     for note in result["notes"]:
         print(f"\nnote: {note}")
+    if result.get("stopped"):
+        print(f"\nstopped: {result['stopped']}")
     if result["warnings"]:
         print(f"\n{len(result['warnings'])} warnings (in the results file); first: "
               f"{result['warnings'][0]}")

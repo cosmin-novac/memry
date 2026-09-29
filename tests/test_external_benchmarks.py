@@ -10,6 +10,7 @@ import shutil
 import sys
 from pathlib import Path
 
+import httpx
 import numpy as np
 import pytest
 
@@ -614,3 +615,454 @@ def test_real_data_smoke_run(dataset, tmp_path, no_models):
     result = json.loads(out.read_text())
     assert result["rows"] and result["stores"][0]["memories"] > 0
     assert result["tables"]["overall"]["n"] == len(result["rows"])
+
+
+# --------------------------------------------------------------------------
+# the decision provider at question time
+
+
+from memry.providers.decisions import Answer, Answers, Decider, NoneDecider  # noqa: E402
+
+
+class StubDecider(Decider):
+    """Judges a memory relevant when it holds ``word``; every question asks
+    for one property with one answer. Keeps the states it was asked about."""
+
+    name = "stub"
+    available = True
+    may_rerank = True
+    reranks_by_default = True
+
+    def __init__(self, word: str) -> None:
+        self.word = word
+        self.states: list[str] = []
+        self.closed = False
+
+    def decide(self, state, questions):
+        self.states.append(state)
+        answers = {}
+        for key, question in questions.items():
+            if key == "property":
+                value = 0.9
+            elif key == "several":
+                value = 0.1
+            else:
+                value = 0.95 if self.word in question.instructions.lower() else 0.05
+            answers[key] = Answer(value=value, confidence=abs(value - 0.5) * 2, available=True)
+        return Answers(answers)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class NamingLLM(RuleLLM):
+    """RuleLLM whose facts name the people they mention as entities."""
+
+    PEOPLE = ("Maya", "Theo", "Pepper")
+
+    def complete(self, system: str, user: str, *, json_schema=None) -> str:
+        if system.startswith("You are the long-term memory extraction system"):
+            transcript = user.split("Conversation:\n", 1)[1].split("\n\n", 1)[0]
+            return json.dumps({"facts": [
+                {"content": line, "type": "episodic", "importance": 0.5, "categories": [],
+                 "entities": [{"name": p, "type": "person"} for p in self.PEOPLE if p in line],
+                 "relations": [], "when": None}
+                for line in transcript.splitlines() if line.strip()]})
+        return super().complete(system, user, json_schema=json_schema)
+
+
+def test_each_question_is_asked_once_per_search_decider_on_the_same_store():
+    conv = xb.load_locomo(LOCOMO)[0]
+    stubs, stores = [], []
+
+    def stub():
+        stubs.append(StubDecider("pepper"))
+        return stubs[-1]
+
+    def factory():
+        stores.append(MemoryStore(Config(db_path=":memory:"), llm=NamingLLM(),
+                                  embedder=HashEmbedder(128)))
+        return stores[-1]
+
+    result = xb.run_benchmark([conv], dataset="locomo", mode="extract", questions=2,
+                              store_factory=factory, log=lambda _: None,
+                              search_deciders={"none": NoneDecider, "stub": stub})
+    assert len(stores) == 1  # one store, loaded once, asked twice
+    rows = result["rows"]
+    assert [(r["search_decider"], r["qid"]) for r in rows] == [
+        ("none", "conv-mini-1/q0"), ("none", "conv-mini-1/q1"),
+        ("stub", "conv-mini-1/q0"), ("stub", "conv-mini-1/q1")]
+    # the question names Maya, a person the store holds: the linked search ran both times
+    for row in (rows[0], rows[2]):
+        assert row["named"] == ["Maya"] and row["named_entities"] >= 1 and row["linked"]
+    # only the stub pass was judged, one call a question, the question as the state
+    assert [r["judge_calls"] for r in rows] == [0, 0, 1, 1]
+    (used,) = stubs
+    assert [state.split(" ", 1)[0] for state in used.states] == ["QUESTION:", "QUESTION:"]
+    assert used.states[0].endswith("adopted last weekend?") and used.closed
+    # the store got its own provider back
+    assert isinstance(stores[0].decider, NoneDecider)
+    assert [p["search_decider"] for p in result["passes"]] == ["none", "stub"]
+    assert result["tables"] == result["passes"][0]["tables"]
+    assert result["passes"][1]["tables"]["overall"]["n"] == 2
+    assert result["config"]["search_deciders"] == ["none", "stub"]
+    store = result["stores"][0]
+    assert store["decider_failures_stub"] == 0 and store["seconds_stub"] >= 0
+    assert store["actions"]["ADD"] >= 1 and store["speaker_entities"]["Maya"]
+    assert {"entities", "same_name_entities", "open_proposals"} <= set(store)
+    assert result["complete"] and result["stopped"] is None
+
+
+def test_the_judgement_moves_the_evidence_up():
+    turns = [xb.Turn(key=f"D1:{i + 1}", role="Priya", raw=text, text=f"Priya: {text}")
+             for i, text in enumerate(
+                 [f"The kayak club met by the lake for meeting number {n}." for n in range(10)]
+                 + ["Bright orange, with black stripes."])]
+    session = xb.Session("session_1", xb.parse_bench_date("8 May 2023"), "8 May 2023", turns)
+    question = xb.Question("q", "What colour is the kayak Priya bought?", "orange", 4,
+                           "single-hop", ["D1:11"], "turn")
+    conv = xb.Conversation("synthetic", "conversation", [session], [question])
+    result = xb.run_benchmark([conv], dataset="locomo", store_factory=verbatim_store,
+                              log=lambda _: None,
+                              search_deciders={"none": NoneDecider,
+                                               "stub": lambda: StubDecider("orange")})
+    none, judged = result["rows"]
+    assert none["mrr"] < 1.0 and none["judge_calls"] == 0 and not none["linked"]
+    assert judged["mrr"] == 1.0 and judged["judge_calls"] == 1
+
+
+def test_search_decider_factories(monkeypatch):
+    assert xb.search_decider("store")() is None
+    assert isinstance(xb.search_decider("none")(), NoneDecider)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    with pytest.raises(SystemExit, match="TYPESAFE_API_KEY"):
+        xb.search_decider("jev")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "not-a-key")
+    jev = xb.search_decider("jev")()
+    assert jev.name == "jev" and jev.may_rerank and jev.failures == 0
+    jev.close()
+    with pytest.raises(ValueError):
+        xb.search_decider("gpt")
+
+
+def test_a_decider_that_answers_nothing_is_asked_again(monkeypatch):
+    monkeypatch.setattr(xb.time, "sleep", lambda seconds: None)
+
+    class Flaky(StubDecider):
+        def __init__(self, fails: int) -> None:
+            super().__init__("x")
+            self.fails = fails
+
+        def decide(self, state, questions):
+            if self.fails:
+                self.fails -= 1
+                self.states.append(state)
+                return Answers({key: Answer() for key in questions})
+            return super().decide(state, questions)
+
+    from memry.providers.decisions import Noul
+
+    question = {"m0": Noul(instructions="x")}
+    flaky = xb.retrying_decider(Flaky(fails=2))
+    assert flaky.decide("s", question)["m0"].available and flaky.failures == 0
+    assert len(flaky.states) == 3
+    down = xb.retrying_decider(Flaky(fails=10))
+    assert not down.decide("s", question)["m0"].available and down.failures == 1
+    assert len(down.states) == xb.ATTEMPTS
+
+
+def test_the_store_model_is_tried_again_after_a_transient_error(monkeypatch):
+    monkeypatch.setattr(xb.time, "sleep", lambda seconds: None)
+    request = httpx.Request("POST", "https://api.example/v1/chat/completions")
+
+    class Failing(LLM):
+        name = "openai"
+        model = "some-model"
+
+        def __init__(self, errors):
+            self.errors = list(errors)
+            self.calls = 0
+
+        def complete(self, system, user, *, json_schema=None):
+            self.calls += 1
+            if self.errors:
+                status = self.errors.pop(0)
+                raise httpx.HTTPStatusError("failed", request=request,
+                                            response=httpx.Response(status, request=request))
+            return "ok"
+
+    base = Failing([429, 503])
+    llm = xb.RetryingLLM(base)
+    assert llm.model == "some-model" and llm.name == "openai"
+    assert llm.complete("s", "u") == "ok" and base.calls == 3
+    with pytest.raises(httpx.HTTPStatusError):
+        xb.RetryingLLM(Failing([400])).complete("s", "u")  # not worth another try
+    with pytest.raises(httpx.HTTPStatusError):
+        xb.RetryingLLM(Failing([500] * 9)).complete("s", "u")
+
+
+# --------------------------------------------------------------------------
+# Mem0's answer prompt and judge
+
+
+from evals import mem0_judge  # noqa: E402
+
+
+class ScriptedChat(LLM):
+    """A chat model that replies from a script and keeps what it was sent."""
+
+    name = "openai"
+    model = "scripted-chat"
+    available = True
+
+    def __init__(self, reply) -> None:
+        self.reply = reply
+        self.sent: list[tuple[list, bool]] = []
+
+    def chat(self, messages, *, json_object=False):
+        self.sent.append((messages, json_object))
+        return self.reply(messages) if callable(self.reply) else self.reply
+
+    def complete(self, system, user, *, json_schema=None):
+        return self.chat([{"role": "system", "content": system},
+                          {"role": "user", "content": user}])
+
+
+def test_mem0_prompts_are_mem0s_own():
+    import hashlib
+
+    # evaluation/prompts.py ANSWER_PROMPT_ZEP and evaluation/metrics/llm_judge.py
+    # ACCURACY_PROMPT at mem0ai/mem0 b3ede5b7c0ac0e847b03786a603c107ac943b3ee
+    assert hashlib.sha256(mem0_judge.ANSWER_PROMPT.encode()).hexdigest() == (
+        "95b8170c30bb86f0e6819cd4846e6e3cd24c9a82030f90dbe36c880b522b92fc")
+    assert hashlib.sha256(mem0_judge.ACCURACY_PROMPT.encode()).hexdigest() == (
+        "62395dd312a631dfd9355026a0b69cc936018274c3198b6365b5c2a5c9bca9e0")
+
+
+def test_mem0_answer_messages_hold_dated_memories_and_the_question():
+    from memry.models import Memory
+
+    assert mem0_judge.locomo_time("2023-05-08T13:56:00+00:00") == "1:56 pm on 8 May, 2023"
+    assert mem0_judge.locomo_time("2023-05-08T00:05:00+00:00") == "12:05 am on 8 May, 2023"
+    assert mem0_judge.locomo_time("2023-05-08T12:00:00+00:00") == "12:00 pm on 8 May, 2023"
+    memories = [Memory(content='Maya adopted "Pepper".', created_at="2023-05-08T13:56:00+00:00"),
+                Memory(content="Maya ran a 5k.", created_at="2023-05-25T19:30:02+00:00")]
+    (message,) = mem0_judge.answer_messages("Who is Pepper?", memories)
+    assert message["role"] == "system"
+    text = message["content"]
+    assert "{{" not in text and "Question: Who is Pepper?\n    Answer:" in text
+    listed = json.dumps(['1:56 pm on 8 May, 2023: Maya adopted "Pepper".',
+                         "7:30 pm on 25 May, 2023: Maya ran a 5k."], indent=4)
+    assert f"Memories:\n\n    {listed}\n\n    Question:" in text
+
+
+def test_mem0_judge_reads_the_label(monkeypatch):
+    chat = ScriptedChat('{"label": "CORRECT"}')
+    assert mem0_judge.judge_with(chat, "When?", "7 May 2023", "On May 7th")
+    (messages, json_object), = chat.sent
+    assert json_object and [m["role"] for m in messages] == ["user"]
+    assert messages[0]["content"] == mem0_judge.ACCURACY_PROMPT.format(
+        question="When?", gold_answer="7 May 2023", generated_answer="On May 7th")
+    assert not mem0_judge.judge_with(ScriptedChat('```json\n{"label": "WRONG"}\n```'), "q", "g", "p")
+    assert mem0_judge.judge_with(ScriptedChat('Reason. {"label": "CORRECT"}'), "q", "g", "p")
+    with pytest.raises(ValueError, match="no label"):
+        mem0_judge.judge_with(ScriptedChat("CORRECT"), "q", "g", "p")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(mem0_judge, "_judge_model", None)
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        mem0_judge.judge("q", "g", "p")
+
+
+def test_a_judge_may_read_the_full_answer_and_a_failing_one_is_recorded():
+    question = {x.qid: x for c in xb.load_locomo(LOCOMO) for x in c.questions}["conv-mini-2/q2"]
+    golds = []
+
+    def full(q, gold, prediction):
+        golds.append(gold)
+        return True
+
+    full.reads_full_answer = True
+    xb.score_answer("likely yes", question, full)
+    assert golds == ["Likely yes; he works in solar energy"]
+    assert mem0_judge.judge.reads_full_answer
+
+    def broken(q, gold, prediction):
+        raise ValueError("no label in the judge's reply")
+
+    scores = xb.score_answer("likely yes", question, broken)
+    assert scores["judge"] is None and "no label" in scores["judge_error"]
+    assert scores["f1"] == 1.0
+    assert xb.aggregate([{"category": 3, "category_name": "open-domain", "judge": None},
+                         {"category": 3, "category_name": "open-domain",
+                          "judge": True}])["overall"]["judge"] == 1.0
+
+
+def test_answering_with_mem0s_prompt_through_the_runner():
+    conv = xb.load_locomo(LOCOMO)[0]
+    chat = ScriptedChat("Pepper")
+    verdicts = []
+
+    def judge(q, gold, prediction):
+        verdicts.append((q, gold, prediction))
+        return prediction == gold
+
+    result = xb.run_benchmark([conv], dataset="locomo", answer_llm=chat, judge=judge, k=3,
+                              questions=1, embedder=HashEmbedder(128), log=lambda _: None,
+                              answer_prompt=mem0_judge.answer_messages)
+    (row,) = result["rows"]
+    assert row["prediction"] == "Pepper" and row["judge"] and row["answer_k"] == 3
+    ((messages, _),) = chat.sent
+    assert messages[0]["role"] == "system" and "Question: What name did Maya" in messages[0]["content"]
+    assert messages[0]["content"].count("on 8 May, 2023: Maya: ") >= 1
+    assert result["config"]["answer_prompt"] == "evals.mem0_judge:answer_messages"
+    assert result["config"]["answer_model"] == "scripted-chat"
+
+
+# --------------------------------------------------------------------------
+# counting, timing and capping the calls
+
+
+from evals import api_usage  # noqa: E402
+
+
+def _mock_api(request: httpx.Request) -> httpx.Response:
+    if request.url.path.endswith("/chat/completions"):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "{}"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3,
+                      "prompt_tokens_details": {"cached_tokens": 4},
+                      "completion_tokens_details": {"reasoning_tokens": 2}}})
+    if request.url.path.endswith("/embeddings"):
+        return httpx.Response(200, json={"data": [], "usage": {"prompt_tokens": 7,
+                                                               "total_tokens": 7}})
+    return httpx.Response(200, json={"answers": {}})  # no usage, as a provider may send
+
+
+def test_the_meter_records_every_call_and_stops_at_a_cap(tmp_path):
+    from memry.intelligence.extraction import EXTRACTION_SYSTEM
+
+    ledger = tmp_path / "usage.sqlite"
+    client = httpx.Client(transport=httpx.MockTransport(_mock_api))
+    extraction = {"model": "text-model", "messages": [
+        {"role": "system", "content": EXTRACTION_SYSTEM.format(today="2023-05-08")},
+        {"role": "user", "content": f"Conversation:\nMaya: hi\n\n{xb.SHARED_CONTEXT}:\nx"}]}
+    on_update = {"model": "text-model", "messages": [
+        {"role": "system", "content": EXTRACTION_SYSTEM.format(today="2023-05-08")},
+        {"role": "user", "content": "Conversation:\nuser: Maya has a dog."}]}
+    send = httpx.Client.send
+    with api_usage.UsageMeter(str(ledger), caps={"chat": 2}, refine=xb.memry_stage) as meter:
+        with api_usage.labelled("conv-1"), api_usage.stage("ingest"):
+            client.post("https://api.openai.com/v1/chat/completions", json=extraction)
+            client.post("https://api.openai.com/v1/embeddings",
+                        json={"model": "emb", "input": ["a", "b"]})
+            client.post("https://api.openai.com/v1/chat/completions", json=on_update)
+        with api_usage.stage("search:jev"):
+            client.post("https://api.typesafe.ai/v1/systemone", json={"state": "QUESTION: x"})
+        try:
+            client.post("https://api.openai.com/v1/chat/completions", json=extraction)
+        except Exception:  # what a store does after a failed call
+            pytest.fail("a refused call must not be an ordinary exception")
+        except api_usage.CapReached:
+            pass
+        else:
+            pytest.fail("the third chat call was sent")
+        assert meter.capped == "chat" and meter.calls("chat") == 2 and meter.calls() == 4
+    assert httpx.Client.send is send  # uninstalled
+    rows = {row["stage"]: row for row in api_usage.summarize(str(ledger), ("stage",))}
+    assert set(rows) == {"ingest", "ingest:extraction", "ingest:extraction_on_update",
+                         "search:jev"}
+    first = rows["ingest:extraction"]
+    assert (first["calls"], first["input_tokens"], first["output_tokens"],
+            first["cached_tokens"], first["reasoning_tokens"]) == (1, 10, 3, 4, 2)
+    assert rows["ingest"]["input_tokens"] == 7 and rows["ingest"]["items"] == 2
+    jev = rows["search:jev"]
+    assert jev["without_usage"] == 1 and jev["request_chars"] > 0 and jev["response_chars"] > 0
+    assert jev["median_seconds"] is not None
+    by_label = api_usage.summarize(str(ledger), ("label", "grp"))
+    assert {(r["label"], r["grp"], r["calls"]) for r in by_label} == {
+        ("conv-1", "chat", 2), ("conv-1", "embeddings", 1), ("", "jev", 1)}
+    client.close()
+
+
+def test_memry_stage_names_the_prompt():
+    from memry.intelligence.entities import IDENTITY_SYSTEM
+    from memry.intelligence.extraction import COVERAGE_SYSTEM
+    from memry.intelligence.reconcile import MERGE_REQUEST, RECONCILE_SYSTEM
+
+    def body(system, user="x"):
+        return {"messages": [{"role": "system", "content": system},
+                             {"role": "user", "content": user}]}
+
+    assert xb.memry_stage("ingest", "chat", body(RECONCILE_SYSTEM)) == "ingest:reconcile"
+    assert xb.memry_stage("ingest", "chat", body(RECONCILE_SYSTEM, MERGE_REQUEST)) == \
+        "ingest:reconcile_merge"
+    assert xb.memry_stage("ingest", "chat", body(IDENTITY_SYSTEM)) == "ingest:identity"
+    assert xb.memry_stage("ingest", "chat", body(COVERAGE_SYSTEM)) == "ingest:audit"
+    assert xb.memry_stage("ingest", "chat", body("Something else")) == "ingest:other"
+    assert xb.memry_stage("answer", "chat", body(RECONCILE_SYSTEM)) is None
+    assert xb.memry_stage("ingest", "embeddings", {"input": ["a"]}) is None
+
+
+def test_a_run_stops_cleanly_at_a_cap():
+    convs = xb.load_locomo(LOCOMO)
+    asked = []
+
+    def judge(q, gold, prediction):
+        asked.append(q)
+        if len(asked) == 2:
+            raise api_usage.CapReached("chat: 2 calls, cap 2")
+        return True
+
+    result = xb.run_benchmark(convs, dataset="locomo", answer_llm=ScriptedChat("x"), judge=judge,
+                              embedder=HashEmbedder(128), log=lambda _: None)
+    assert not result["complete"] and result["stopped"].startswith("conv-mini-1: chat")
+    assert [r["qid"] for r in result["rows"]] == ["conv-mini-1/q0"]
+    assert [s["conversation"] for s in result["stores"]] == ["conv-mini-1"]
+    assert result["stores"][0]["stopped"] == "chat: 2 calls, cap 2"
+    assert xb.parse_caps(["chat=15000", "jev=2000"]) == {"chat": 15000, "jev": 2000}
+    with pytest.raises(ValueError):
+        xb.parse_caps(["tokens=5"])
+
+
+# --------------------------------------------------------------------------
+# parallel, resumable runs
+
+
+def test_cli_runs_conversations_in_processes_and_resumes(monkeypatch, tmp_path, no_models):
+    monkeypatch.setenv(xb.DATA_ENV, str(FIXTURES))
+    parts = tmp_path / "parts"
+    out = tmp_path / "all.json"
+    ledger = tmp_path / "usage.sqlite"
+    argv = ["--dataset", "locomo", "--file", "locomo_mini.json", "--search-decider", "none",
+            "--search-decider", "store", "--results-dir", str(parts), "--out", str(out),
+            "--usage-db", str(ledger), "--max-calls", "chat=10"]
+    assert xb.main([*argv, "--jobs", "2"]) == 0
+    result = json.loads(out.read_text())
+    assert result["complete"] and len(result["rows"]) == 14
+    assert [p["search_decider"] for p in result["passes"]] == ["none", "store"]
+    assert result["passes"][0]["tables"]["overall"]["n"] == 7
+    assert sorted(s["conversation"] for s in result["stores"]) == ["conv-mini-1", "conv-mini-2"]
+    assert (parts / "conv-mini-1.log").exists()
+    assert result["usage"]["by_stage"] == []  # no model was called
+    first = json.loads((parts / "conv-mini-1.json").read_text())
+    assert first["complete"] and first["config"]["options"]["search_decider"] == ["none", "store"]
+    # a run again reuses what is complete and runs what is missing
+    (parts / "conv-mini-2.json").unlink()
+    assert xb.main([*argv, "--jobs", "1"]) == 0
+    assert json.loads((parts / "conv-mini-1.json").read_text())["created"] == first["created"]
+    assert json.loads((parts / "conv-mini-2.json").read_text())["complete"]
+    assert len(json.loads(out.read_text())["rows"]) == 14
+    # other options: nothing is reused
+    assert xb.main([*argv, "--k", "5", "--conversation", "conv-mini-1"]) == 0
+    again = json.loads((parts / "conv-mini-1.json").read_text())
+    assert again["config"]["k"] == 5 and again["complete"]
+    assert len(json.loads(out.read_text())["rows"]) == 8
+
+
+def test_cli_rejects_jobs_without_a_results_dir(monkeypatch, capsys):
+    with pytest.raises(SystemExit):
+        xb.parse_args(["--dataset", "locomo", "--jobs", "2"])
+    with pytest.raises(SystemExit):
+        xb.parse_args(["--dataset", "locomo", "--max-calls", "chat=5"])
+    assert xb.parse_args(["--dataset", "locomo", "--usage-db", "u", "--max-calls",
+                          "jev=3"]).caps == {"jev": 3}
