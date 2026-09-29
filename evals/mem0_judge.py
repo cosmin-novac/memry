@@ -24,6 +24,18 @@ when the label is CORRECT.
 
     ... --answer-model gpt-4o-mini --answer-prompt evals.mem0_judge:answer_messages \\
         --judge evals.mem0_judge:judge
+
+Mem0's full-context baseline is ``make run-full-context``: src/rag.py answers
+from the whole conversation with its own short-answer prompt
+(``FULL_CONTEXT_SYSTEM``, ``FULL_CONTEXT_PROMPT``, rendered as jinja2 renders
+them), the conversation written a turn a line as "<session time> | <speaker>:
+<text>" with no photo captions, as Mem0's ``locomo10_rag.json`` has it:
+
+    ... --full-context --answer-model gpt-4o-mini \\
+        --answer-prompt evals.mem0_judge:full_context_messages --judge evals.mem0_judge:judge
+
+``export_results`` writes a results file of the harness in the form Mem0's
+``evals.py`` and ``generate_scores.py`` read.
 """
 
 from __future__ import annotations
@@ -33,6 +45,7 @@ import os
 import pathlib
 import re
 import sys
+import threading
 import time
 from datetime import datetime
 from typing import Any
@@ -115,14 +128,37 @@ Do NOT include both CORRECT and WRONG in your response, or it will break the eva
 Just return the label CORRECT or WRONG in a json format with the key as "label".
 """
 
-_FIELD = re.compile(r"\{\{(memories|question)\}\}")
+#: Mem0's full-context baseline (``make run-full-context``: evaluation/src/rag.py
+#: with ``--chunk_size -1``) answers from the whole conversation with its own
+#: short-answer prompt, not ``ANSWER_PROMPT``: this system message (the
+#: source's string literals joined as Python joins them) and this user prompt.
+FULL_CONTEXT_SYSTEM = (
+    "You are a helpful assistant that can answer "
+    "questions based on the provided context."
+    "If the question involves timing, use the conversation date for reference."
+    "Provide the shortest possible answer."
+    "Use words directly from the conversation when possible."
+    "Avoid using subjects in your answer."
+)
+FULL_CONTEXT_PROMPT = "\n# Question: \n{{QUESTION}}\n\n# Context: \n{{CONTEXT}}\n\n# Short answer:\n"
+
+_FIELD = re.compile(r"\{\{(memories|question|QUESTION|CONTEXT)\}\}")
+
+
+def _render(template: str, values: dict[str, str]) -> str:
+    """``template`` as jinja2's ``Template(template).render(**values)`` writes
+    it, for these templates: each field replaced, and one newline at the very
+    end dropped (jinja2's ``keep_trailing_newline`` is off)."""
+    text = _FIELD.sub(lambda match: values[match.group(1)], template)
+    return text[:-1] if template.endswith("\n") else text
 
 
 class OpenAIChat(LLM):
     """An OpenAI chat model called as Mem0's evaluation calls one: the
     messages as given, at temperature 0 (``OPENAI_API_KEY``). A timeout, a
     dropped connection, a rate limit or a server error is tried again, up to
-    ``attempts`` calls in all."""
+    ``attempts`` calls in all. ``last_usage()`` is the ``usage`` of the reply
+    to this thread's last call."""
 
     name = "openai"
 
@@ -135,15 +171,20 @@ class OpenAIChat(LLM):
         self.temperature = temperature
         self.attempts = max(attempts, 1)
         self._client = httpx.Client(timeout=timeout)
+        self._local = threading.local()
 
     def close(self) -> None:
         self._client.close()
+
+    def last_usage(self) -> dict[str, Any] | None:
+        return getattr(self._local, "usage", None)
 
     def chat(self, messages: list[dict[str, str]], *, json_object: bool = False) -> str:
         body: dict[str, Any] = {"model": self.model, "messages": messages,
                                 "temperature": self.temperature}
         if json_object:
             body["response_format"] = {"type": "json_object"}
+        self._local.usage = None
         for attempt in range(self.attempts):
             last = attempt + 1 == self.attempts
             try:
@@ -159,7 +200,9 @@ class OpenAIChat(LLM):
                 time.sleep(2 ** attempt)
                 continue
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"] or ""
+            payload = resp.json()
+            self._local.usage = payload.get("usage")
+            return payload["choices"][0]["message"]["content"] or ""
         raise AssertionError("the loop returns or raises")
 
     def complete(self, system: str, user: str, *, json_schema: dict[str, Any] | None = None) -> str:
@@ -178,17 +221,40 @@ def locomo_time(stamp: Any) -> str:
             f"{moment:%B}, {moment.year}")
 
 
+def memories_json(memories: list[Any]) -> str:
+    """The memories as ``ANSWER_PROMPT`` shows them: a JSON list of
+    "<timestamp>: <memory>" strings, each timestamped with its ``created_at``."""
+    return json.dumps([f"{locomo_time(m.created_at)}: {m.content}" for m in memories], indent=4)
+
+
 def answer_messages(question: str, memories: list[Any]) -> list[dict[str, str]]:
     """The answering call's messages: ``ANSWER_PROMPT`` holding the memories
-    (each timestamped with its ``created_at``) and the question, as the system
-    message."""
-    values = {
-        "memories": json.dumps([f"{locomo_time(m.created_at)}: {m.content}" for m in memories],
-                               indent=4),
-        "question": question,
-    }
-    return [{"role": "system",
-             "content": _FIELD.sub(lambda match: values[match.group(1)], ANSWER_PROMPT)}]
+    (``memories_json``) and the question, as the system message."""
+    return [{"role": "system", "content": _render(
+        ANSWER_PROMPT, {"memories": memories_json(memories), "question": question})}]
+
+
+answer_messages.context_of = memories_json  # type: ignore[attr-defined]
+
+
+def transcript(memories: list[Any]) -> str:
+    """Turns as Mem0's full-context baseline writes the conversation
+    (``RAGManager.clean_chat_history``): "<timestamp> | <speaker>: <text>" a
+    line, each line ending in a newline; a turn is a memory whose content is
+    "<speaker>: <text>" (``external_benchmarks.full_context_memories``)."""
+    return "".join(f"{locomo_time(m.created_at)} | {m.content}\n" for m in memories)
+
+
+def full_context_messages(question: str, memories: list[Any]) -> list[dict[str, str]]:
+    """Mem0's full-context answering call: ``FULL_CONTEXT_SYSTEM``, and
+    ``FULL_CONTEXT_PROMPT`` holding the question and the whole conversation
+    (``transcript``) as the user message."""
+    return [{"role": "system", "content": FULL_CONTEXT_SYSTEM},
+            {"role": "user", "content": _render(
+                FULL_CONTEXT_PROMPT, {"QUESTION": question, "CONTEXT": transcript(memories)})}]
+
+
+full_context_messages.context_of = transcript  # type: ignore[attr-defined]
 
 
 def parse_label(raw: str) -> str:
@@ -216,18 +282,70 @@ def judge_with(model: LLM, question: str, gold: str, prediction: str) -> bool:
 
 
 _judge_model: OpenAIChat | None = None
+_judge_lock = threading.Lock()
 
 
 def judge(question: str, gold: str, prediction: str) -> bool:
     """Mem0's LLM judge with ``JUDGE_MODEL``: the prediction is right."""
     global _judge_model
-    if _judge_model is None:
-        _judge_model = OpenAIChat(JUDGE_MODEL)
-        if not _judge_model.available:
-            raise RuntimeError("the judge needs OPENAI_API_KEY")
+    with _judge_lock:
+        if _judge_model is None:
+            model = OpenAIChat(JUDGE_MODEL)
+            if not model.available:
+                raise RuntimeError("the judge needs OPENAI_API_KEY")
+            _judge_model = model
     return judge_with(_judge_model, question, gold, prediction)
 
 
 #: Mem0's judge reads the file's whole answer, an open-domain one's reason
-#: after the ";" included (``external_benchmarks.score_answer``).
+#: after the ";" included (``external_benchmarks.judged_gold``).
 judge.reads_full_answer = True  # type: ignore[attr-defined]
+
+
+def export_results(result: dict[str, Any], dataset_path: str | os.PathLike[str],
+                   k: int | None = None, search_decider: str | None = None) -> dict[str, list]:
+    """One question pass of an ``external_benchmarks`` results file as Mem0's
+    per-question results file (evaluation/src/memzero/search.py), which
+    Mem0's ``evals.py`` and ``generate_scores.py`` read unchanged: keyed by the
+    conversation's position in the dataset file ("0" to "9"), a list per
+    conversation in file order, each question with the dataset's own
+    ``question``, ``answer``, ``category``, ``evidence`` and
+    ``adversarial_answer``, our answer at ``k`` as ``response`` (default: the
+    headline answer), the memories it was given as ``speaker_1_memories``
+    ({memory, timestamp, score}; one store holds both speakers, so
+    ``speaker_2_memories`` is empty), the search's seconds as
+    ``speaker_1_memory_time`` and the answer call's as ``response_time``.
+    ``search_decider`` picks the pass (default: the first)."""
+    with open(dataset_path, encoding="utf-8") as handle:
+        samples = json.load(handle)
+    index = {str(s.get("sample_id") or f"sample-{i}"): i for i, s in enumerate(samples)}
+    passes = [p["search_decider"] for p in result.get("passes") or []] or [None]
+    wanted = search_decider or passes[0]
+    out: dict[str, list] = {}
+    for row in result["rows"]:
+        if wanted is not None and row.get("search_decider", wanted) != wanted:
+            continue
+        answer = row["answers"][str(k)] if k is not None else row
+        position = index[row["conversation"]]
+        item = samples[position]["qa"][int(row["qid"].rsplit("/q", 1)[1])]
+        shown = (row.get("memories") or [])[:answer.get("k", row.get("answer_k", 0))]
+        out.setdefault(str(position), []).append({
+            "question": item["question"],
+            "answer": item.get("answer", ""),
+            "category": item["category"],
+            "evidence": item.get("evidence", []),
+            "response": answer.get("prediction", ""),
+            "adversarial_answer": item.get("adversarial_answer", ""),
+            "speaker_1_memories": [{"memory": m["memory"], "timestamp": locomo_time(m["created_at"]),
+                                    "score": round(float(m.get("score") or 0.0), 2)}
+                                   for m in shown],
+            "speaker_2_memories": [],
+            "num_speaker_1_memories": len(shown),
+            "num_speaker_2_memories": 0,
+            "speaker_1_memory_time": round((row.get("search_ms") or 0.0) / 1000, 4),
+            "speaker_2_memory_time": 0.0,
+            "speaker_1_graph_memories": None,
+            "speaker_2_graph_memories": None,
+            "response_time": answer.get("answer_seconds"),
+        })
+    return {key: out[key] for key in sorted(out, key=int)}

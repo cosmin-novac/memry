@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 from evals import external_benchmarks as xb  # noqa: E402
 from memry.config import Config  # noqa: E402
+from memry.models import Memory  # noqa: E402
 from memry.providers.embeddings import HashEmbedder  # noqa: E402
 from memry.providers.llm import LLM, NoneLLM  # noqa: E402
 from memry.store import MemoryStore  # noqa: E402
@@ -299,6 +300,11 @@ def test_normalization_and_token_f1():
     assert not xb.answer_contained("anything", "")
 
 
+def core(scores):
+    """The scores by LoCoMo's rules and the judge's verdict."""
+    return {key: scores[key] for key in ("f1", "em", "contains", "judge")}
+
+
 def test_locomo_rules_for_multi_hop_open_domain_and_adversarial():
     assert xb.parts_f1("Kyoto", "Kyoto, Japan") == pytest.approx(0.5)
     assert xb.parts_f1("Japan, Kyoto", "Kyoto, Japan") == 1.0
@@ -312,7 +318,7 @@ def test_locomo_rules_for_multi_hop_open_domain_and_adversarial():
     assert multi["f1"] == 0.5 and multi["em"] == 0.0 and not multi["judge"]
     open_domain = xb.score_answer("likely yes", q["conv-mini-2/q2"])
     assert open_domain["f1"] == 1.0 and open_domain["em"] == 1.0  # the first alternative
-    assert xb.score_answer("No information available", q["conv-mini-1/q3"]) == {
+    assert core(xb.score_answer("No information available", q["conv-mini-1/q3"])) == {
         "f1": 1.0, "em": 1.0, "contains": 1.0, "judge": True}
     assert xb.score_answer("the saxophone", q["conv-mini-1/q3"])["f1"] == 0.0
 
@@ -349,7 +355,7 @@ def test_the_judge_reads_the_gold_the_scores_read():
 
     xb.score_answer("likely yes", question, judge)
     assert golds == ["Likely yes"]
-    assert xb.score_answer("likely yes", question) == {
+    assert core(xb.score_answer("likely yes", question)) == {
         "f1": 1.0, "em": 1.0, "contains": 1.0, "judge": True}
 
 
@@ -422,15 +428,15 @@ def test_aggregate_groups_by_category():
     assert by[2]["name"] == "temporal" and by[2]["n"] == 2
     assert by[2]["recall@5"] == 0.5 and by[2]["mrr"] == 0.75 and by[2]["search_ms"] == 3.0
     assert by[5]["recall@5"] is None and by[5]["with_evidence"] == 0
-    overall = tables["overall"]
-    assert overall["n"] == 4 and overall["with_evidence"] == 3
+    overall = tables["overall"]  # without the adversarial category
+    assert overall["n"] == 3 and overall["with_evidence"] == 3
     assert overall["recall@5"] == 0.5 and overall["mrr"] == pytest.approx(0.5833, abs=1e-4)
     assert "f1" not in overall  # nothing was answered
     table = xb.markdown_table(tables)
     assert table.splitlines()[0] == ("| category | name | n | recall@5 | recall@10 | recall@20 "
                                      "| mrr | search ms |")
     assert "| 5 | adversarial | 1 | - | - | - | - | 3.0 |" in table
-    assert "| all | overall | 4 | 0.500 |" in table
+    assert "| all | overall | 3 | 0.500 |" in table
     lme = xb.aggregate([row("multi-session", "multi-session", ["s1"], 1.0, 1.0, 1.0),
                         row("knowledge-update", "knowledge-update", ["s2"], 0.0, 0.0, 1.0)])
     assert [r["category"] for r in lme["by_category"]] == ["knowledge-update", "multi-session"]
@@ -1040,7 +1046,7 @@ def test_cli_runs_conversations_in_processes_and_resumes(monkeypatch, tmp_path, 
     result = json.loads(out.read_text())
     assert result["complete"] and len(result["rows"]) == 14
     assert [p["search_decider"] for p in result["passes"]] == ["none", "store"]
-    assert result["passes"][0]["tables"]["overall"]["n"] == 7
+    assert result["passes"][0]["tables"]["overall"]["n"] == 6  # no adversarial question
     assert sorted(s["conversation"] for s in result["stores"]) == ["conv-mini-1", "conv-mini-2"]
     assert (parts / "conv-mini-1.log").exists()
     assert result["usage"]["by_stage"] == []  # no model was called
@@ -1066,3 +1072,266 @@ def test_cli_rejects_jobs_without_a_results_dir(monkeypatch, capsys):
         xb.parse_args(["--dataset", "locomo", "--max-calls", "chat=5"])
     assert xb.parse_args(["--dataset", "locomo", "--usage-db", "u", "--max-calls",
                           "jev=3"]).caps == {"jev": 3}
+
+
+# --------------------------------------------------------------------------
+# the published protocol: categories, several k, judge runs, Mem0's scores
+
+
+class CountingChat(ScriptedChat):
+    """Answers with how many memories it was shown; reports usage like OpenAI."""
+
+    def __init__(self) -> None:
+        super().__init__(None)
+        self._usage = None
+
+    def chat(self, messages, *, json_object=False):
+        self.sent.append((messages, json_object))
+        shown = messages[0]["content"].count('",\n') + 1 if '"' in messages[0]["content"] else 0
+        self._usage = {"prompt_tokens": 100 + shown, "completion_tokens": 3}
+        return f"shown {shown}"
+
+    def last_usage(self):
+        return self._usage
+
+
+def test_one_search_answered_at_several_k_and_judged_three_times():
+    conv = xb.load_locomo(LOCOMO)[0]
+    searches = []
+
+    def factory():
+        store = verbatim_store()
+        search = store.search
+
+        def counted(*args, **kwargs):
+            searches.append(args[0])
+            return search(*args, **kwargs)
+
+        store.search = counted
+        return store
+
+    runs = []
+
+    def judge(q, gold, prediction):
+        runs.append(prediction)
+        return len(runs) % 3 != 0  # every third verdict is wrong
+
+    chat = CountingChat()
+    result = xb.run_benchmark([conv], dataset="locomo", store_factory=factory, answer_llm=chat,
+                              judge=judge, k=5, ks=[3, 5], judge_runs=3,
+                              categories={"1", "2", "3", "4"}, log=lambda _: None,
+                              answer_prompt=mem0_judge.answer_messages)
+    rows = result["rows"]
+    assert [r["qid"] for r in rows] == ["conv-mini-1/q0", "conv-mini-1/q1", "conv-mini-1/q2"]
+    assert len(searches) == 3  # one search a question, whatever the number of k
+    assert len(chat.sent) == 6 and len(runs) == 18  # two answers, three verdicts each
+    row = rows[0]
+    assert set(row["answers"]) == {"3", "5"} and row["answer_k"] == 5
+    assert row["answers"]["3"]["prediction"] == "shown 3" and row["prediction"] == "shown 5"
+    assert len(row["judges"]) == 3 and row["judge"] == pytest.approx(2 / 3, abs=1e-4)
+    assert row["answers"]["5"]["input_tokens"] == 105
+    assert row["answer_seconds"] >= 0 and row["answers"]["3"]["k"] == 3
+    # the tables: the headline k at the top, each k apart, the runs and their spread
+    overall = result["tables"]["overall"]
+    assert overall["n"] == 3 and len(overall["judge_runs"]) == 3 and overall["judge_std"] >= 0
+    by_k = result["passes"][0]["tables_by_k"]
+    assert set(by_k) == {"3", "5"} and by_k["5"]["overall"]["judge"] == overall["judge"]
+    assert result["config"]["ks"] == [3, 5] and result["config"]["judge_runs"] == 3
+    assert result["config"]["categories"] == ["1", "2", "3", "4"]
+
+
+def test_rows_keep_the_memories_shown_and_the_reference_date():
+    conv = xb.load_locomo(LOCOMO)[0]
+    result = xb.run_benchmark([conv], dataset="locomo", store_factory=verbatim_store,
+                              answer_llm=CountingChat(), k=3, questions=1, log=lambda _: None,
+                              answer_prompt=mem0_judge.answer_messages)
+    (row,) = result["rows"]
+    assert row["reference_date"] == "2023-05-25T19:30:00+00:00"  # the last session
+    first = row["memories"][0]
+    assert first["memory"].startswith("Maya: Hey Theo!") and first["turns"] == ["D1:1"]
+    assert first["created_at"] == "2023-05-08T13:56:00+00:00" and "score" in first
+    assert len(row["memories"]) == len(conv.turns)  # all of them, up to the search depth
+    tokens = xb.count_tokens(mem0_judge.memories_json(
+        [Memory(content=m["memory"], created_at=m["created_at"]) for m in row["memories"][:3]]))
+    assert row["context_tokens"] == tokens
+
+
+def test_mem0_f1_and_bleu1_are_mem0s():
+    # Mem0's calculate_metrics: token sets after simple_tokenize, the whole gold
+    assert xb.mem0_f1("The Red car.", "red car") == pytest.approx(0.8)
+    assert xb.mem0_f1("red red car", "red car") == 1.0  # sets, not counts
+    assert xb.mem0_f1("", "red car") == 0.0 and xb.mem0_f1("x", "") == 0.0
+    assert xb.mem0_f1("Kyoto", "Kyoto, Japan") == pytest.approx(2 / 3)
+    nltk = pytest.importorskip("nltk")
+    from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+
+    try:
+        nltk.word_tokenize("a")
+    except LookupError:
+        pytest.skip("NLTK's punkt_tab data is not installed")
+    expected = sentence_bleu([nltk.word_tokenize("on 7 may 2023")],
+                             nltk.word_tokenize("she went on 7 may, 2023."),
+                             weights=(1, 0, 0, 0), smoothing_function=SmoothingFunction().method1)
+    assert xb.bleu1("She went on 7 May, 2023.", "On 7 May 2023") == pytest.approx(expected)
+    assert xb.bleu1("", "red car") == 0.0
+
+
+def test_full_context_answers_from_the_whole_conversation_as_mem0():
+    import hashlib
+
+    assert hashlib.sha256(mem0_judge.FULL_CONTEXT_PROMPT.encode()).hexdigest() == (
+        "744495b77f2955d437017fd33a0b7156ef41426b7ae8277e5efb92382f234b78")
+    assert hashlib.sha256(mem0_judge.FULL_CONTEXT_SYSTEM.encode()).hexdigest() == (
+        "0c6b92630ba4c22fd29e718d095abb2d6ffba10c04d00962e94bca4a65b23249")
+    # as jinja2 3.1.6 renders the template: one newline at the very end dropped
+    turns = [Memory(content="b: c", created_at="2023-05-08T13:56:00+00:00")]
+    (system, user) = mem0_judge.full_context_messages("Q?", turns)
+    assert system == {"role": "system", "content": mem0_judge.FULL_CONTEXT_SYSTEM}
+    assert user["content"] == ("\n# Question: \nQ?\n\n# Context: \n1:56 pm on 8 May, 2023 | b: c"
+                               "\n\n\n# Short answer:")
+    conv = xb.load_locomo(LOCOMO)[0]
+    chat = ScriptedChat("Pepper")
+
+    def no_store():
+        raise AssertionError("full context needs no store")
+
+    result = xb.run_benchmark([conv], dataset="locomo", full_context=True, answer_llm=chat,
+                              judge=lambda q, g, p: True, store_factory=no_store,
+                              categories={"4"}, log=lambda _: None,
+                              answer_prompt=mem0_judge.full_context_messages)
+    (row,) = result["rows"]
+    assert row["search_decider"] == "full-context" and row["prediction"] == "Pepper"
+    assert "memories" not in row and row["answer_k"] == len(conv.turns)
+    ((messages, _),) = chat.sent
+    text = messages[1]["content"]
+    # every turn, its session's time, the file's text without the photo's caption
+    assert "1:56 pm on 8 May, 2023 | Maya: She is shy but she loves the soft blanket by the " \
+           "window.\n" in text and "shares a photo" not in text
+    assert text.count(" | ") == len(conv.turns) and text.endswith("# Short answer:")
+    assert result["config"]["full_context"] and result["config"]["embedder"] is None
+
+
+def test_corrected_answers_are_judged_too(tmp_path):
+    errors = [
+        {"question_id": "locomo_0_qa0", "error_type": "HALLUCINATION", "category": 4,
+         "golden_answer": "Pepper", "correct_answer": "Pepper the greyhound"},
+        {"question_id": "locomo_1_qa0", "error_type": "WRONG_CITATION", "category": 2,
+         "golden_answer": "2019", "correct_answer": "2019"},
+    ]
+    path = tmp_path / "errors.json"
+    path.write_text(json.dumps(errors))
+    corrections = xb.load_corrections(path, LOCOMO)
+    assert set(corrections) == {"conv-mini-1/q0"}  # a wrong citation changes no score
+    conv = xb.load_locomo(LOCOMO)[0]
+
+    def judge(q, gold, prediction):
+        return gold == prediction
+
+    result = xb.run_benchmark([conv], dataset="locomo", store_factory=verbatim_store,
+                              answer_llm=ScriptedChat("Pepper the greyhound"), judge=judge,
+                              questions=2, corrections=corrections, log=lambda _: None,
+                              answer_prompt=mem0_judge.answer_messages)
+    audited, other = result["rows"]
+    assert audited["audit"] == {"error_type": "HALLUCINATION",
+                                "correct_answer": "Pepper the greyhound"}
+    assert audited["judge"] is False and audited["judge_corrected"] is True
+    assert audited.get("judge_clean") is None
+    assert "audit" not in other and other["judge_corrected"] == other["judge_clean"] is False
+    overall = result["tables"]["overall"]
+    assert overall["judge"] == 0.0 and overall["judge_corrected"] == 0.5
+    assert overall["judge_clean"] == 0.0
+    with pytest.raises(xb.FormatError):
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([{"question_id": "locomo_9_qa0", "error_type": "AMBIGUOUS",
+                                    "correct_answer": "x"}]))
+        xb.load_corrections(bad, LOCOMO)
+
+
+def test_the_mem0_export_has_mem0s_shape():
+    convs = xb.load_locomo(LOCOMO)
+    result = xb.run_benchmark(convs, dataset="locomo", store_factory=verbatim_store,
+                              answer_llm=ScriptedChat("Pepper"), judge=lambda q, g, p: True,
+                              k=2, ks=[2, 4], categories={"1", "2", "3", "4"},
+                              log=lambda _: None, answer_prompt=mem0_judge.answer_messages)
+    exported = mem0_judge.export_results(result, LOCOMO)
+    assert list(exported) == ["0", "1"]
+    raw = json.loads(LOCOMO.read_text())
+    first = exported["0"][0]
+    assert set(first) == {
+        "question", "answer", "category", "evidence", "response", "adversarial_answer",
+        "speaker_1_memories", "speaker_2_memories", "num_speaker_1_memories",
+        "num_speaker_2_memories", "speaker_1_memory_time", "speaker_2_memory_time",
+        "speaker_1_graph_memories", "speaker_2_graph_memories", "response_time"}
+    assert first["question"] == raw[0]["qa"][0]["question"] and first["response"] == "Pepper"
+    assert first["answer"] == raw[0]["qa"][0]["answer"] and first["category"] == 4
+    assert first["num_speaker_1_memories"] == 2 and first["speaker_2_memories"] == []
+    assert first["speaker_1_memories"][0]["timestamp"] == "1:56 pm on 8 May, 2023"
+    assert exported["1"][0]["answer"] == 2019  # the dataset's own value, a number here
+    assert [len(v) for v in exported.values()] == [3, 3]  # no adversarial question asked
+    at_four = mem0_judge.export_results(result, LOCOMO, k=4)
+    assert at_four["0"][0]["num_speaker_1_memories"] == 4
+
+
+def test_the_store_gets_the_decider_asked_for(monkeypatch, tmp_path, no_models):
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-key")  # a text model; nothing is called
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    with pytest.raises(SystemExit, match="TYPESAFE_API_KEY"):
+        xb.make_store("extract", HashEmbedder(64), decider="jev")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "not-a-key")
+    store = xb.make_store("extract", HashEmbedder(64), decider="jev",
+                          db_path=xb.fresh_db(tmp_path / "s" / "conv.sqlite"))
+    assert store.decider.name == "jev" and store.decider.failures == 0
+    assert store.config.decision.provider == "jev" and store.relevance_mode() == "jev"
+    assert isinstance(store.llm, xb.RetryingLLM) and store.llm.model == "gpt-6-luna"
+    store.close()
+    assert (tmp_path / "s" / "conv.sqlite").exists()
+    none = xb.make_store("extract", HashEmbedder(64), decider="none")
+    assert none.decider.name == "none" and none.relevance_mode() == "vector"
+    none.close()
+    (tmp_path / "s" / "conv.sqlite-wal").write_text("left over")
+    xb.fresh_db(tmp_path / "s" / "conv.sqlite")
+    assert list((tmp_path / "s").iterdir()) == []
+
+
+def test_jev_calls_at_the_save_are_named_by_their_question():
+    def body(state, *keys):
+        return {"state": state, "questions": dict.fromkeys(keys, {})}
+
+    assert xb.memry_stage("ingest", "jev", body("EXISTING", "action", "target")) == \
+        "ingest:jev:reconcile"
+    assert xb.memry_stage("ingest", "jev", body("Two entries", "pair", "belongs")) == \
+        "ingest:jev:identity_pair"
+    assert xb.memry_stage("ingest", "jev", body("A memory from a personal long-term memory "
+                                                "store: x", "s0", "s1")) == "ingest:jev:name_screen"
+    assert xb.memry_stage("ingest", "jev", body("A memory from a personal long-term memory "
+                                                "store: x", "k")) == "ingest:jev:when"
+    assert xb.memry_stage("ingest", "jev", body("A name from one person's long-term memory "
+                                                "store: x", "n0")) == "ingest:jev:name_check"
+    assert xb.memry_stage("search:store", "jev", body("QUESTION: x", "m0")) is None
+
+
+def test_a_stage_reaches_calls_made_from_a_store_s_own_threads(tmp_path):
+    import threading
+
+    client = httpx.Client(transport=httpx.MockTransport(_mock_api))
+    with api_usage.UsageMeter(str(tmp_path / "u.sqlite")):
+        with api_usage.labelled("conv-9"), api_usage.stage("ingest"):
+            worker = threading.Thread(target=lambda: client.post(
+                "https://api.typesafe.ai/v1/systemone", json={"state": "x"}))
+            worker.start()
+            worker.join()
+    (row,) = api_usage.summarize(str(tmp_path / "u.sqlite"), ("label", "stage"))
+    assert (row["label"], row["stage"]) == ("conv-9", "ingest")
+    client.close()
+
+
+def test_cli_asks_only_the_categories_given(monkeypatch, tmp_path, no_models):
+    monkeypatch.setenv(xb.DATA_ENV, str(FIXTURES))
+    out = tmp_path / "r.json"
+    assert xb.main(["--dataset", "locomo", "--file", "locomo_mini.json", "--categories",
+                    "1,2,3,4", "--ks", "5,10", "--k", "10", "--out", str(out)]) == 0
+    result = json.loads(out.read_text())
+    assert {r["category"] for r in result["rows"]} == {1, 2, 3, 4}
+    assert result["config"]["ks"] == [5, 10] and result["config"]["options"]["categories"]
+    with pytest.raises(SystemExit):
+        xb.parse_args(["--dataset", "locomo", "--ks", "0,5"])

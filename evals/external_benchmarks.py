@@ -54,9 +54,34 @@ answer is scored against the gold one:
             (``containment_judge``) is "contains", or both abstaining.
             LongMemEval's LLM judge plugs in here: --judge module:function
 
+  f1_mem0   Mem0's token F1 (its evaluation/metrics/utils.py): sets of
+            lower-case tokens split on white space and . , ! ?, the gold whole
+  bleu1     Mem0's BLEU-1: NLTK's sentence_bleu of lower-cased word_tokenize
+            tokens, weights (1, 0, 0, 0), smoothing method 1 (memry[eval])
+
 A question whose right answer is that the conversation does not say
 (LoCoMo's adversarial ones, LongMemEval's "_abs") scores 1 on f1, em and
-contains when the answer abstains ("No information available").
+contains when the answer abstains ("No information available"). The overall
+row leaves LoCoMo's adversarial category out, as the published results do;
+--categories 1,2,3,4 does not ask it at all.
+
+--ks 10,20,30 answers each question from the top 10, 20 and 30 of the one
+search it made; --k names the headline k of the tables, and every answer is
+kept under the row's "answers" with its seconds and the cl100k_base tokens
+of the memories it was shown (tiktoken, memry[eval]). --judge-runs 3 judges
+each answer three times: the tables give each run's share right
+("judge_runs") and their standard deviation. A row keeps the text, times
+and score of every memory the search returned and the question's reference
+date. --audit errors.json (dial481/locomo-audit's corrected answer key)
+judges the questions it corrects against the corrected answer as well:
+"judge_corrected" is the score with the corrections, "judge_clean" the score
+on the questions it leaves alone. --full-context answers from the whole
+conversation, with no store and no search (Mem0's full-context baseline with
+evals.mem0_judge:full_context_messages). --decider jev makes Jev the store's
+decision provider at the save and at the question (TYPESAFE_API_KEY);
+--store-dir keeps each store in a file. --workers N makes a question's answer
+and judge calls N at a time. --export-mem0 writes the headline answers as
+Mem0's per-question results file.
 
 --answer-model answers through that OpenAI chat model at temperature 0 in
 place of the configured LLM, and --answer-prompt module:function writes the
@@ -102,6 +127,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import contextvars
 import hashlib
 import importlib
 import json
@@ -118,6 +144,7 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -133,7 +160,12 @@ from evals import api_usage  # noqa: E402
 from memry.config import Config, DecisionConfig, EmbeddingConfig  # noqa: E402
 from memry.intelligence.graph_retrieval import detect_query_entities  # noqa: E402
 from memry.models import Memory, Scope  # noqa: E402
-from memry.providers.decisions import Decider, JevDecider, NoneDecider  # noqa: E402
+from memry.providers.decisions import (  # noqa: E402
+    Decider,
+    JevDecider,
+    NoneDecider,
+    build_decider,
+)
 from memry.providers.embeddings import Embedder, HashEmbedder, OpenAIEmbedder  # noqa: E402
 from memry.providers.llm import LLM, NoneLLM, build_llm  # noqa: E402
 from memry.store import MemoryStore  # noqa: E402
@@ -190,6 +222,12 @@ class Turn:
     raw: str      # what was said (LoCoMo: with a shared photo's caption)
     text: str     # the memory it becomes verbatim ("Maya: ...", "assistant: ...")
     has_answer: bool = False
+    plain: str | None = None  # LoCoMo: the text as the file has it, no photo caption
+
+    @property
+    def said(self) -> str:
+        """What was said, as the file has it, without a shared photo's caption."""
+        return self.raw if self.plain is None else self.plain
 
 
 @dataclass
@@ -212,6 +250,9 @@ class Question:
     question_date: datetime | None = None
     abstain: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
+    #: the date the question is asked at (LoCoMo: the last session's, as
+    #: memory-benchmarks takes it; LongMemEval: the question's), ISO 8601
+    reference_date: str | None = None
 
 
 @dataclass
@@ -359,8 +400,11 @@ def _locomo_sample(sample: Any, index: int) -> Conversation:
                 warnings.append(f"{sample_id} {dia_id}: empty turn left out")
                 continue
             turns.append(Turn(key=dia_id, role=speaker or "user", raw=said,
-                              text=f"{speaker}: {said}" if speaker else said))
+                              text=f"{speaker}: {said}" if speaker else said,
+                              plain=str(raw.get("text") or "")))
         sessions.append(Session(sid, date, date_text, turns))
+    dated = [s.date for s in sessions if s.date is not None]
+    reference = max(dated).isoformat() if dated else None
     qa = sample.get("qa", [])
     if not isinstance(qa, list):
         raise FormatError(f"{sample_id}: 'qa' is not a list")
@@ -398,7 +442,7 @@ def _locomo_sample(sample: Any, index: int) -> Conversation:
         questions.append(Question(
             qid=f"{sample_id}/q{j}", question=_text(item["question"]), answer=gold,
             category=category, category_name=name, evidence=list(dict.fromkeys(evidence)),
-            level="turn", abstain=abstain, extra=extra))
+            level="turn", abstain=abstain, extra=extra, reference_date=reference))
     speakers = [str(conv.get(k) or "").strip() for k in ("speaker_a", "speaker_b")]
     label = " and ".join(s for s in speakers if s)
     return Conversation(sample_id, f"conversation between {label}" if label else "conversation",
@@ -460,11 +504,13 @@ def _longmemeval_item(item: Any, index: int) -> Conversation:
     if unknown:
         warnings.append(f"{qid}: answer sessions {unknown} are not in the haystack, left out")
     qtype = str(item.get("question_type") or "unknown")
+    asked_on = parse_bench_date(item.get("question_date"))
     question = Question(
         qid=qid, question=_text(item["question"]), answer=_text(item["answer"]),
         category=qtype, category_name=qtype, evidence=list(dict.fromkeys(evidence)),
-        level="session", question_date=parse_bench_date(item.get("question_date")),
-        abstain=qid.endswith("_abs"))
+        level="session", question_date=asked_on,
+        abstain=qid.endswith("_abs"),
+        reference_date=asked_on.isoformat() if asked_on else None)
     if not question.question:
         raise FormatError(f"{qid}: empty question")
     return Conversation(qid, "chat between the user and an assistant", sessions, [question],
@@ -576,16 +622,49 @@ class RetryingLLM(LLM):
         self.base.close()
 
 
-def make_store(mode: str, embedder: Embedder, *, llm: LLM | None = None) -> MemoryStore:
+#: The store's decision provider (--decider): the configured one
+#: (``Config.load``, none unless MEMRY_DECISION_PROVIDER says), none, or Jev
+#: (``TYPESAFE_API_KEY``) at the save and at the question alike.
+STORE_DECIDERS = ("config", "none", "jev")
+
+
+def fresh_db(path: str | os.PathLike[str]) -> str:
+    """A database path with nothing at it: an earlier store there, and its
+    write-ahead log and side files, are removed."""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for old in path.parent.glob(f"{path.name}*"):
+        if old.is_file():
+            old.unlink()
+    return str(path)
+
+
+def make_store(mode: str, embedder: Embedder, *, llm: LLM | None = None,
+               decider: str = "config", db_path: str = ":memory:") -> MemoryStore:
     """Verbatim: a store with no model at all, default settings. Extract: the
     configured Memry (``Config.load``: LLM, decision model, retrieval
-    settings), in memory, with the benchmark's embedder; its text model's
-    failed calls are tried again (``RetryingLLM``)."""
+    settings) with the benchmark's embedder and the decision provider
+    ``decider`` (``STORE_DECIDERS``), in memory or at ``db_path``. The text
+    model's failed calls are tried again (``RetryingLLM``), and so are the
+    decision provider's calls that answered nothing (``retrying_decider``)."""
     if mode == "verbatim":
-        return MemoryStore(Config(db_path=":memory:"), llm=llm or NoneLLM(), embedder=embedder)
-    config = Config.load(db_path=":memory:")
+        return MemoryStore(Config(db_path=db_path), llm=llm or NoneLLM(), embedder=embedder)
+    overrides: dict[str, Any] = {}
+    if decider == "jev":
+        key = os.environ.get("TYPESAFE_API_KEY", "").strip()
+        if not key:
+            raise SystemExit("--decider jev needs TYPESAFE_API_KEY")
+        overrides["decision"] = {"provider": "jev", "api_key": key}
+    elif decider == "none":
+        overrides["decision"] = {"provider": "none"}
+    elif decider != "config":
+        raise ValueError(f"decider {decider!r}: one of {', '.join(STORE_DECIDERS)}")
+    config = Config.load(db_path=db_path, **overrides)
     llm = llm or build_llm(config.llm)
-    return MemoryStore(config, llm=RetryingLLM(llm) if llm.available else llm, embedder=embedder)
+    llm = RetryingLLM(llm) if llm.available else llm
+    judge = build_decider(config.decision, llm)
+    return MemoryStore(config, llm=llm, embedder=embedder,
+                       decider=retrying_decider(judge) if judge.available else judge)
 
 
 def ingest(store: MemoryStore, conversation: Conversation, *, mode: str = "verbatim",
@@ -757,13 +836,53 @@ def load_judge(spec: str | None) -> Judge:
     return judge
 
 
-def score_answer(prediction: str, question: Question,
-                 judge: Judge = containment_judge) -> dict[str, Any]:
-    """f1, em, contains and the judge's verdict for one answer. The judge is
-    handed the gold the other scores read (an open-domain question's first
-    ";" alternative), or the file's whole answer when it has a true
-    ``reads_full_answer`` attribute. A judge that fails leaves its verdict
-    None ("judge_error" says why), which the means leave out."""
+def mem0_tokens(text: Any) -> set[str]:
+    """Mem0's ``simple_tokenize`` (evaluation/metrics/utils.py): lower case,
+    ".", ",", "!" and "?" read as spaces, split on white space; as a set."""
+    text = str(text).lower()
+    for mark in ".,!?":
+        text = text.replace(mark, " ")
+    return set(text.split())
+
+
+def mem0_f1(prediction: Any, gold: Any) -> float:
+    """Mem0's F1 (``calculate_metrics``): 0 when either string is empty, else
+    the F1 of the two token sets, the gold always whole."""
+    prediction, gold = str(prediction).strip(), str(gold).strip()
+    if not prediction or not gold:
+        return 0.0
+    pred, true = mem0_tokens(prediction), mem0_tokens(gold)
+    if not pred or not true:
+        return 0.0
+    common = pred & true
+    precision, recall = len(common) / len(pred), len(common) / len(true)
+    return 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+
+
+def bleu1(prediction: Any, gold: Any) -> float | None:
+    """BLEU-1 as Mem0's ``calculate_bleu_scores`` computes it: NLTK's
+    ``sentence_bleu`` of the lower-cased ``word_tokenize`` tokens, weights
+    (1, 0, 0, 0), smoothing method 1, 0 where NLTK fails. None without NLTK
+    or its "punkt_tab" data (``pip install memry[eval]``)."""
+    try:
+        import nltk
+        from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+
+        pred = nltk.word_tokenize(str(prediction).lower())
+        true = [nltk.word_tokenize(str(gold).lower())]
+    except (ImportError, LookupError):
+        return None
+    try:
+        return float(sentence_bleu(true, pred, weights=(1, 0, 0, 0),
+                                   smoothing_function=SmoothingFunction().method1))
+    except Exception:
+        return 0.0
+
+
+def lexical_scores(prediction: str, question: Question) -> dict[str, Any]:
+    """The scores that need no model: f1, em and contains by LoCoMo's rules
+    (the gold an open-domain question's first ";" alternative, a multi-hop
+    one's comma-separated parts), and Mem0's f1 and BLEU-1 on the whole gold."""
     gold = question.answer
     if question.abstain:
         right = float(is_abstention(prediction))
@@ -774,12 +893,67 @@ def score_answer(prediction: str, question: Question,
         f1 = parts_f1(prediction, gold) if question.category_name == "multi-hop" \
             else token_f1(prediction, gold)
         em, contains = float(exact_match(prediction, gold)), float(answer_contained(prediction, gold))
-    scores: dict[str, Any] = {"f1": round(f1, 4), "em": em, "contains": contains}
-    judged_gold = question.answer if getattr(judge, "reads_full_answer", False) else gold
-    try:
-        scores["judge"] = bool(judge(question.question, judged_gold, prediction))
-    except Exception as exc:  # one failed judgement must not end a long run
-        scores["judge"], scores["judge_error"] = None, str(exc)[:300]
+    scores: dict[str, Any] = {"f1": round(f1, 4), "em": em, "contains": contains,
+                              "f1_mem0": round(mem0_f1(prediction, question.answer), 4)}
+    blue = bleu1(prediction, question.answer)
+    if blue is not None:
+        scores["bleu1"] = round(blue, 4)
+    return scores
+
+
+def judged_gold(question: Question, judge: Judge) -> str:
+    """The gold a judge reads: the one the lexical scores read (an
+    open-domain question's first ";" alternative), or the file's whole answer
+    for a judge with a true ``reads_full_answer`` attribute."""
+    if getattr(judge, "reads_full_answer", False) or question.abstain:
+        return question.answer
+    if question.category_name == "open-domain":
+        return question.answer.split(";")[0].strip()
+    return question.answer
+
+
+def verdicts(judge: Judge, question: str, gold: str, prediction: str, runs: int = 1,
+             pool: Any = None) -> tuple[list[bool | None], str | None]:
+    """``runs`` verdicts of ``judge`` on one answer (in ``pool``, a thread
+    pool, when given) and the first error: a failed run is None."""
+    def once() -> tuple[bool | None, str | None]:
+        try:
+            return bool(judge(question, gold, prediction)), None
+        except Exception as exc:  # one failed judgement must not end a long run
+            return None, str(exc)[:300]
+
+    if pool is not None and runs > 1:
+        results = [f.result() for f in [pool.submit(contextvars.copy_context().run, once)
+                                        for _ in range(runs)]]
+    else:
+        results = [once() for _ in range(runs)]
+    return [v for v, _ in results], next((e for _, e in results if e), None)
+
+
+def judge_fields(found: list[bool | None], error: str | None) -> dict[str, Any]:
+    """A row's judge fields: one run gives ``judge`` (True, False or None);
+    several give ``judges`` and ``judge``, the mean of those that answered."""
+    fields: dict[str, Any] = {}
+    if len(found) == 1:
+        fields["judge"] = found[0]
+    else:
+        answered = [float(v) for v in found if v is not None]
+        fields["judges"] = found
+        fields["judge"] = round(statistics.mean(answered), 4) if answered else None
+    if error:
+        fields["judge_error"] = error
+    return fields
+
+
+def score_answer(prediction: str, question: Question, judge: Judge = containment_judge,
+                 runs: int = 1, pool: Any = None) -> dict[str, Any]:
+    """f1, em, contains, Mem0's f1 and BLEU-1 (``lexical_scores``) and the
+    judge's verdict for one answer, ``runs`` times (``judge_fields``). The
+    judge reads ``judged_gold``. A judge that fails leaves its verdict None
+    ("judge_error" says why), which the means leave out."""
+    scores = lexical_scores(prediction, question)
+    scores.update(judge_fields(*verdicts(judge, question.question, judged_gold(question, judge),
+                                         prediction, runs, pool)))
     return scores
 
 
@@ -837,18 +1011,132 @@ def search_signals(store: MemoryStore, question: str, results: list[Any]) -> dic
             "set_members": sum(1 for s in signals if s.get("member"))}
 
 
+_ENCODING: list[Any] = []
+
+
+def count_tokens(text: str) -> int | None:
+    """The ``cl100k_base`` tokens of ``text`` (tiktoken), as the Mem0 paper
+    counts memory tokens; None without tiktoken (``pip install memry[eval]``)."""
+    if not _ENCODING:
+        try:
+            import tiktoken
+
+            _ENCODING.append(tiktoken.get_encoding("cl100k_base"))
+        except Exception:
+            _ENCODING.append(None)
+    encoding = _ENCODING[0]
+    return len(encoding.encode(text, disallowed_special=())) if encoding is not None else None
+
+
+def context_text(answer_prompt: AnswerPrompt | None, memories: list[Memory]) -> str:
+    """The memories as the answering call shows them: the prompt function's
+    ``context_of`` where it has one, else the harness's own list."""
+    shown = getattr(answer_prompt, "context_of", None)
+    return shown(memories) if shown else memories_text(memories)
+
+
+def memory_record(result: Any, ingested: Ingested) -> dict[str, Any]:
+    """One retrieved memory as a row keeps it: its text, times, score and turns."""
+    memory = result.memory
+    return {"id": memory.id, "memory": memory.content, "created_at": memory.created_at,
+            "updated_at": memory.updated_at, "score": round(float(result.score), 6),
+            "turns": sorted(ingested.turns_of(memory))}
+
+
+def answer_with(answer_llm: LLM, question: Question, memories: list[Memory],
+                answer_prompt: AnswerPrompt | None) -> dict[str, Any]:
+    """One answering call from ``memories``: the prediction, the call's
+    seconds, the ``cl100k_base`` tokens of the memories shown
+    (``context_tokens``) and the input tokens the reply reports, if any.
+    With ``answer_prompt`` the prediction is kept as the model wrote it, as
+    Mem0's evaluation keeps it."""
+    record: dict[str, Any] = {"k": len(memories)}
+    started = time.perf_counter()
+    try:
+        if answer_prompt is not None:
+            prediction = str(chat(answer_llm, answer_prompt(question.question, memories))
+                             or "").strip()
+        else:
+            prediction = answer_question(answer_llm, question, memories_text(memories))
+    except Exception as exc:  # one failed call must not end a long run
+        prediction, record["answer_error"] = "", str(exc)[:300]
+    record["answer_seconds"] = round(time.perf_counter() - started, 3)
+    record["prediction"] = prediction
+    usage = getattr(answer_llm, "last_usage", lambda: None)()
+    if isinstance(usage, dict) and usage.get("prompt_tokens") is not None:
+        record["input_tokens"] = usage["prompt_tokens"]
+    record["context_tokens"] = count_tokens(context_text(answer_prompt, memories))
+    return record
+
+
+#: The fields of the headline answer a row carries at its top level.
+ANSWER_FIELDS = ("prediction", "answer_error", "answer_seconds", "context_tokens",
+                 "input_tokens", "f1", "em", "contains", "f1_mem0", "bleu1", "judge", "judges",
+                 "judge_error", "judge_corrected", "judges_corrected", "judge_clean")
+
+
+def judge_answers(answers: dict[int, dict[str, Any]], question: Question, judge: Judge,
+                  runs: int, pool: Any, correction: dict[str, Any] | None) -> None:
+    """Score each answer (``lexical_scores``) and judge it ``runs`` times,
+    every call in ``pool`` at once when given. With ``correction`` (an
+    audited question's corrected answer) each answer is judged against it
+    too: ``judge_corrected`` is that verdict; without, ``judge_corrected``
+    is the verdict against the file's answer and ``judge_clean`` the same
+    (the mean over the questions the audit left alone)."""
+    gold = judged_gold(question, judge)
+    golds = [("", gold)] + ([("_corrected", correction["correct_answer"])] if correction else [])
+
+    def once(truth: str, prediction: str) -> tuple[bool | None, str | None]:
+        try:
+            return bool(judge(question.question, truth, prediction)), None
+        except Exception as exc:  # one failed judgement must not end a long run
+            return None, str(exc)[:300]
+
+    pending = {}
+    for k, record in answers.items():
+        record.update(lexical_scores(record["prediction"], question))
+        for suffix, truth in golds:
+            for run in range(runs):
+                args = (truth, record["prediction"])
+                pending[(k, suffix, run)] = (pool.submit(contextvars.copy_context().run, once, *args)
+                                             if pool is not None else None, args)
+    for (k, suffix, run), (future, args) in pending.items():
+        pending[(k, suffix, run)] = future.result() if future is not None else once(*args)
+    for k, record in answers.items():
+        for suffix, _ in golds:
+            found = [pending[(k, suffix, run)][0] for run in range(runs)]
+            error = next((pending[(k, suffix, run)][1] for run in range(runs)
+                          if pending[(k, suffix, run)][1]), None)
+            fields = judge_fields(found, error if not suffix else None)
+            record.update({f"{key}{suffix}" if key != "judge_error" else key: value
+                           for key, value in fields.items()})
+        if correction is None:
+            record["judge_corrected"] = record.get("judge")
+            if "judges" in record:
+                record["judges_corrected"] = record["judges"]
+            record["judge_clean"] = record.get("judge")
+
+
 def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM | None = None,
         judge: Judge = containment_judge, use_context: bool = False,
         answer_prompt: AnswerPrompt | None = None, search_stage: str = "search",
-        ) -> dict[str, Any]:
-    """Search for one question, score what came back, answer when asked. The
-    model calls are counted under ``search_stage``, "answer" and "judge"."""
+        ks: list[int] | None = None, judge_runs: int = 1, pool: Any = None,
+        correction: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Search for one question once, score what came back, and answer when
+    asked: from the top k of that search for each k of ``ks`` (default
+    ``[k]``), each answer judged ``judge_runs`` times (``judge_answers``).
+    The row carries the answer at ``k`` at its top level and every answer
+    under "answers". The model calls are counted under ``search_stage``,
+    "answer" and "judge"; with ``pool`` (a thread pool) a question's answer
+    calls, and then its judge calls, run at once."""
+    ks = sorted(set(ks or [k]) | {k})
+    depth = max(DEPTH, *ks)
     store = ingested.store
     started = time.perf_counter()
     with api_usage.stage(search_stage):
-        results = store.search(question.question, user_id=BENCH_USER, limit=max(DEPTH, k))
+        results = store.search(question.question, user_id=BENCH_USER, limit=depth)
     ms = (time.perf_counter() - started) * 1000
-    results = results[:max(DEPTH, k)]
+    results = results[:depth]
     units = [ingested.units_of(r.memory, question.level) for r in results]
     row: dict[str, Any] = {
         "conversation": ingested.conversation.conv_id, "qid": question.qid,
@@ -856,52 +1144,80 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
         "question": question.question, "answer": question.answer, "level": question.level,
         "evidence": question.evidence, "abstain": question.abstain,
         **question.extra,
+        "reference_date": question.reference_date,
         "search_ms": round(ms, 3),
         "evidence_ranks": [rank for rank, got in enumerate(units, start=1)
                            if got & set(question.evidence)],
         "retrieved": [sorted(ingested.turns_of(r.memory)) for r in results[:k]],
+        "memories": [memory_record(r, ingested) for r in results],
     }
-    for depth in KS:
-        row[f"recall@{depth}"] = evidence_recall(units, question.evidence, depth)
+    for at in KS:
+        row[f"recall@{at}"] = evidence_recall(units, question.evidence, at)
     row["mrr"] = reciprocal_rank(units, question.evidence)
     row.update(search_signals(store, question.question, results))
     if answer_llm is None:
         return row
-    top = [r.memory for r in results[:k]]
+    if correction is not None:
+        row["audit"] = {key: correction.get(key) for key in ("error_type", "correct_answer")}
+    answers: dict[int, dict[str, Any]] = {}
     if use_context:
         with api_usage.stage(search_stage):
             context = store.reconstruct_context(question.question, user_id=BENCH_USER, limit=k,
                                                 token_budget=CONTEXT_TOKENS)
-        text = context.text or "Memories: (none found)"
         in_context = [store.get(mid) for mid in context.memory_ids]
         row["context_recall"] = evidence_recall(
             [ingested.units_of(m, question.level) for m in in_context if m],
             question.evidence, len(in_context))
-    else:
-        text = memories_text(top)
-        row["answer_k"] = len(top)
-    try:
         with api_usage.stage("answer"):
-            if answer_prompt is not None and not use_context:
-                # kept as the model wrote it, as Mem0's evaluation keeps it
-                row["prediction"] = str(chat(answer_llm, answer_prompt(question.question, top))
-                                        or "").strip()
+            started = time.perf_counter()
+            record: dict[str, Any] = {"k": k}
+            try:
+                record["prediction"] = answer_question(
+                    answer_llm, question, context.text or "Memories: (none found)")
+            except Exception as exc:  # one failed call must not end a long run
+                record["prediction"], record["answer_error"] = "", str(exc)[:300]
+            record["answer_seconds"] = round(time.perf_counter() - started, 3)
+            answers[k] = record
+    else:
+        top = [r.memory for r in results]
+        with api_usage.stage("answer"):
+            if pool is not None and len(ks) > 1:
+                futures = {at: pool.submit(contextvars.copy_context().run, answer_with,
+                                           answer_llm, question, top[:at], answer_prompt)
+                           for at in ks}
+                answers = {at: future.result() for at, future in futures.items()}
             else:
-                row["prediction"] = answer_question(answer_llm, question, text)
-    except Exception as exc:  # one failed call must not end a long run
-        row["prediction"], row["answer_error"] = "", str(exc)[:300]
+                answers = {at: answer_with(answer_llm, question, top[:at], answer_prompt)
+                           for at in ks}
     with api_usage.stage("judge"):
-        row.update(score_answer(row["prediction"], question, judge))
+        judge_answers(answers, question, judge, judge_runs, pool, correction)
+    row["answer_k"] = answers[k]["k"]
+    row.update({key: answers[k][key] for key in ANSWER_FIELDS if key in answers[k]})
+    row["answers"] = {str(at): answer for at, answer in answers.items()}
     return row
 
 
 METRICS = ("recall@5", "recall@10", "recall@20", "mrr", "context_recall",
-           "f1", "em", "contains", "judge")
+           "f1", "f1_mem0", "bleu1", "em", "contains", "judge", "judge_corrected", "judge_clean",
+           "context_tokens")
 
 
 def _mean(values: Any) -> float | None:
     kept = [float(v) for v in values if v is not None]
     return round(statistics.mean(kept), 4) if kept else None
+
+
+def judge_runs(rows: list[dict[str, Any]]) -> list[float]:
+    """The share judged right in each judge run (``judges``, one verdict per
+    run), over the rows that have that run's verdict."""
+    runs = max((len(r.get("judges") or []) for r in rows), default=0)
+    out = []
+    for i in range(runs):
+        verdicts = [r["judges"][i] for r in rows
+                    if len(r.get("judges") or []) > i and r["judges"][i] is not None]
+        if verdicts:
+            out.append(round(statistics.mean(float(v) for v in verdicts), 4))
+    return out
 
 
 def _summary(category: Any, name: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -910,21 +1226,34 @@ def _summary(category: Any, name: str, rows: list[dict[str, Any]]) -> dict[str, 
     for metric in METRICS:
         if any(metric in r for r in rows):
             out[metric] = _mean(r.get(metric) for r in rows)
+    runs = judge_runs(rows)
+    if len(runs) > 1:
+        out["judge_runs"] = runs
+        out["judge_std"] = round(statistics.stdev(runs), 4)
     times = [r["search_ms"] for r in rows if r.get("search_ms") is not None]
     out["search_ms"] = round(statistics.median(times), 3) if times else None
+    answered = [r["answer_seconds"] for r in rows if r.get("answer_seconds") is not None]
+    if answered:
+        out["answer_seconds"] = round(statistics.median(answered), 3)
     return out
 
 
 def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """The metrics' means per category (number and name) and overall, and the
-    median search time. A metric a row does not have (null) is left out of
-    its mean."""
+    median search and answer times. A metric a row does not have (null) is
+    left out of its mean. The overall leaves out the questions whose right
+    answer is that the conversation does not say (LoCoMo's adversarial
+    category 5, ``ABSTAIN_CATEGORIES``), as the published LoCoMo results do.
+    With several judge runs a row's ``judge`` is its mean verdict, and
+    ``judge_runs`` holds each run's share right with ``judge_std`` their
+    sample standard deviation."""
     groups: dict[tuple[Any, str], list[dict[str, Any]]] = {}
     for row in rows:
         groups.setdefault((row["category"], row["category_name"]), []).append(row)
     order = sorted(groups, key=lambda key: (not isinstance(key[0], int), str(key[0]).zfill(6)))
+    scored = [r for r in rows if r.get("category_name") not in ABSTAIN_CATEGORIES]
     return {"by_category": [_summary(c, n, groups[(c, n)]) for c, n in order],
-            "overall": _summary("all", "overall", rows)}
+            "overall": _summary("all", "overall", scored)}
 
 
 def markdown_table(tables: dict[str, Any]) -> str:
@@ -934,7 +1263,8 @@ def markdown_table(tables: dict[str, Any]) -> str:
     lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
     for row in rows:
         cells = [str(row["category"]), row["name"], str(row["n"])]
-        cells += ["-" if row.get(m) is None else f"{row[m]:.3f}" for m in metrics]
+        cells += ["-" if row.get(m) is None else f"{row[m]:.1f}" if m == "context_tokens"
+                  else f"{row[m]:.3f}" for m in metrics]
         cells.append("-" if row.get("search_ms") is None else f"{row['search_ms']:.1f}")
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
@@ -1100,10 +1430,53 @@ def _qualname(function: Any) -> str | None:
 
 
 def pass_tables(rows: list[dict[str, Any]], names: list[str]) -> list[dict[str, Any]]:
-    """Each question pass's tables, from its rows."""
-    return [{"search_decider": name,
-             "tables": aggregate([r for r in rows if r.get("search_decider", name) == name])}
-            for name in names]
+    """Each question pass's tables, from its rows; with answers at several k,
+    ``tables_by_k`` holds the tables of the answers at each k."""
+    out = []
+    for name in names:
+        mine = [r for r in rows if r.get("search_decider", name) == name]
+        entry: dict[str, Any] = {"search_decider": name, "tables": aggregate(mine)}
+        ks = sorted({int(at) for r in mine for at in r.get("answers") or {}})
+        if len(ks) > 1:
+            entry["tables_by_k"] = {
+                str(at): aggregate([{**r, **r["answers"][str(at)]} for r in mine
+                                    if str(at) in (r.get("answers") or {})])
+                for at in ks}
+        out.append(entry)
+    return out
+
+
+def full_context_memories(conversation: Conversation) -> list[Memory]:
+    """The whole conversation as full-context answering reads it: one item a
+    turn, "<speaker>: <text>" as the file writes the text (no photo caption,
+    as Mem0's ``locomo10_rag.json``), dated with its session's time."""
+    return [Memory(content=f"{turn.role}: {turn.said}",
+                   created_at=session.date.isoformat() if session.date else session.date_text)
+            for session in conversation.sessions for turn in session.turns]
+
+
+def answer_in_full(conversation: Conversation, question: Question, context: list[Memory], *,
+                   answer_llm: LLM, judge: Judge, answer_prompt: AnswerPrompt | None,
+                   judge_runs: int, pool: Any, correction: dict[str, Any] | None,
+                   ) -> dict[str, Any]:
+    """One question answered from the whole conversation (``context``, from
+    ``full_context_memories``), judged ``judge_runs`` times, with no store and
+    no search."""
+    row: dict[str, Any] = {
+        "conversation": conversation.conv_id, "qid": question.qid,
+        "category": question.category, "category_name": question.category_name,
+        "question": question.question, "answer": question.answer, "level": question.level,
+        "evidence": question.evidence, "abstain": question.abstain, **question.extra,
+        "reference_date": question.reference_date}
+    if correction is not None:
+        row["audit"] = {key: correction.get(key) for key in ("error_type", "correct_answer")}
+    with api_usage.stage("answer"):
+        record = answer_with(answer_llm, question, context, answer_prompt)
+    with api_usage.stage("judge"):
+        judge_answers({0: record}, question, judge, judge_runs, pool, correction)
+    row["answer_k"] = record["k"]
+    row.update({key: record[key] for key in ANSWER_FIELDS if key in record})
+    return row
 
 
 def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str = "verbatim",
@@ -1114,17 +1487,36 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                   store_factory: Callable[[], MemoryStore] | None = None,
                   log: Callable[[str], None] | None = None,
                   search_deciders: dict[str, DeciderFactory] | None = None,
-                  answer_prompt: AnswerPrompt | None = None) -> dict[str, Any]:
+                  answer_prompt: AnswerPrompt | None = None,
+                  ks: list[int] | None = None, judge_runs: int = 1,
+                  categories: set[str] | None = None, workers: int = 1,
+                  corrections: dict[str, dict[str, Any]] | None = None,
+                  decider: str = "config", store_dir: str | os.PathLike[str] | None = None,
+                  full_context: bool = False) -> dict[str, Any]:
     """Ingest each conversation into a fresh store and ask its questions once
     per pass of ``search_deciders`` (name -> the decision provider the store
     asks with, given it once the conversation is loaded; default: the store's
-    own, as "store"). Returns {config, stores, passes, tables (the first
+    own, as "store"). Only questions of ``categories`` (their numbers or
+    names as text) are asked, then the first ``questions`` of those. Each
+    question is searched once and answered from the top k for each k of
+    ``ks`` (default ``[k]``; ``k`` is the headline), each answer judged
+    ``judge_runs`` times, a question's calls ``workers`` at a time.
+    ``corrections`` (qid -> an audit's corrected answer) has those questions
+    judged against the correction too. ``decider`` and ``store_dir`` go to
+    ``make_store`` (a store in memory, or <store_dir>/<conversation>.sqlite).
+    ``full_context`` answers from the whole conversation instead, with no
+    store and no search. Returns {config, stores, passes, tables (the first
     pass's), rows, warnings, notes, complete}. A call refused at a cap
     (``api_usage.CapReached``) ends the run where it is: what was done is
     kept, "complete" is false and "stopped" says where."""
     embedder = embedder or HashEmbedder(256)
     log = log or (lambda text: print(text, file=sys.stderr, flush=True))
     passes = search_deciders or {"store": search_decider("store")}
+    if full_context:
+        passes = {"full-context": search_decider("store")}
+    ks = sorted(set(ks or [k]) | {k})
+    corrections = corrections or {}
+    pool = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
     rows: list[dict[str, Any]] = []
     stores: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -1132,13 +1524,40 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
     stopped: str | None = None
     for conv in conversations:
         warnings.extend(conv.warnings)
-        asked = conv.questions[:questions] if questions else conv.questions
-        if mode == "verbatim" and hasattr(embedder, "warm"):
-            embedder.warm([t.text for t in conv.turns] + [q.question for q in asked])
-        store = store_factory() if store_factory else make_store(mode, embedder)
+        asked = [q for q in conv.questions
+                 if not categories or {str(q.category), q.category_name} & categories]
+        asked = asked[:questions] if questions else asked
         entry: dict[str, Any] = {"conversation": conv.conv_id, "sessions": len(conv.sessions),
                                  "turns": len(conv.turns), "questions": len(asked)}
         stores.append(entry)
+        if full_context:
+            context = full_context_memories(conv)
+            started = time.perf_counter()
+            try:
+                with api_usage.labelled(conv.conv_id):
+                    for question in asked:
+                        rows.append({"search_decider": "full-context", **answer_in_full(
+                            conv, question, context, answer_llm=answer_llm, judge=judge,
+                            answer_prompt=answer_prompt, judge_runs=judge_runs, pool=pool,
+                            correction=corrections.get(question.qid))})
+            except api_usage.CapReached as exc:
+                stopped = f"{conv.conv_id}: {exc}"
+                entry["stopped"] = str(exc)
+            entry["seconds_full-context"] = round(time.perf_counter() - started, 2)
+            log(f"  {conv.conv_id}: {len(asked)} questions from the whole conversation"
+                + (f"; stopped: {stopped}" if stopped else ""))
+            if stopped:
+                break
+            continue
+        if mode == "verbatim" and hasattr(embedder, "warm"):
+            embedder.warm([t.text for t in conv.turns] + [q.question for q in asked])
+        if store_factory:
+            store = store_factory()
+        else:
+            db_path = fresh_db(pathlib.Path(store_dir) / f"{conv.conv_id}.sqlite") \
+                if store_dir else ":memory:"
+            store = make_store(mode, embedder, decider=decider, db_path=db_path)
+        entry["decider"] = store.decider.name
         try:
             with api_usage.labelled(conv.conv_id):
                 if mode == "extract" and not store.llm.available:
@@ -1161,7 +1580,8 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                             rows.append({"search_decider": name, **ask(
                                 ingested, question, k=k, answer_llm=answer_llm, judge=judge,
                                 use_context=use_context, answer_prompt=answer_prompt,
-                                search_stage=f"search:{name}")})
+                                search_stage=f"search:{name}", ks=ks, judge_runs=judge_runs,
+                                pool=pool, correction=corrections.get(question.qid))})
                     finally:
                         entry[f"seconds_{name}"] = round(time.perf_counter() - started, 2)
                         if decider is not None:
@@ -1178,8 +1598,11 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
             + (f"; stopped: {stopped}" if stopped else ""))
         if stopped:
             break
-    notes.append(DEDUP_NOTE)
-    if mode == "extract" and unit == "session":
+    if pool is not None:
+        pool.shutdown()
+    if not full_context:
+        notes.append(DEDUP_NOTE)
+    if mode == "extract" and unit == "session" and not full_context:
         notes.append("extract by session: a memory counts for every turn of the session it "
                      "came from, so turn-level recall is session-level recall")
     names = list(passes)
@@ -1187,8 +1610,13 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
     return {
         "dataset": dataset,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "config": {"ingest": mode, "extract_unit": unit if mode == "extract" else None,
-                   "embedder": embedder.model_id, "k": k, "depth": max(DEPTH, k),
+        "config": {"ingest": "none (full context)" if full_context else mode,
+                   "extract_unit": unit if mode == "extract" and not full_context else None,
+                   "embedder": None if full_context else embedder.model_id, "k": k, "ks": ks,
+                   "depth": max(DEPTH, *ks), "judge_runs": judge_runs,
+                   "categories": sorted(categories) if categories else None,
+                   "decider": decider, "full_context": full_context,
+                   "audited_questions": len(corrections),
                    "conversations": len(conversations), "questions_per_conversation": questions,
                    "answer_llm": getattr(answer_llm, "name", None) if answer_llm else None,
                    "answer_model": getattr(answer_llm, "model", None) if answer_llm else None,
@@ -1233,6 +1661,34 @@ def merge_results(parts: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+#: Audit error types that leave the gold answer right (only the evidence
+#: cited is wrong): a score does not change.
+AUDIT_KEEPS = frozenset({"WRONG_CITATION"})
+
+
+def load_corrections(path: str | os.PathLike[str],
+                     dataset_path: str | os.PathLike[str]) -> dict[str, dict[str, Any]]:
+    """A corrected LoCoMo answer key in dial481/locomo-audit's ``errors.json``
+    form (``question_id`` "locomo_<conversation index>_qa<question index>",
+    ``error_type``, ``correct_answer``, ...), as {qid: entry} for the entries
+    whose error changes a score (every type but ``AUDIT_KEEPS``). The
+    conversation index is the position in ``dataset_path``."""
+    entries = _read_json(path)
+    if not isinstance(entries, list):
+        raise FormatError(f"{path}: expected a JSON list of audit entries")
+    samples = _items(_read_json(dataset_path), "qa")
+    ids = [str(s.get("sample_id") or f"sample-{i}") for i, s in enumerate(samples)]
+    out: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if entry.get("error_type") in AUDIT_KEEPS or not entry.get("correct_answer"):
+            continue
+        found = re.fullmatch(r"locomo_(\d+)_qa(\d+)", str(entry.get("question_id")))
+        if not found or int(found.group(1)) >= len(ids):
+            raise FormatError(f"{path}: question_id {entry.get('question_id')!r} names no question")
+        out[f"{ids[int(found.group(1))]}/q{int(found.group(2))}"] = entry
+    return out
+
+
 def load(dataset: str, path: str | os.PathLike[str]) -> list[Conversation]:
     if dataset not in LOADERS:
         raise ValueError(f"dataset {dataset!r}: one of {', '.join(DATASETS)}")
@@ -1254,7 +1710,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="with --ingest extract: one save a session (default) or a turn")
     parser.add_argument("--embedder", choices=["hash", "openai"], default="hash")
     parser.add_argument("--k", type=int, default=10,
-                        help="memories given to the answering model (default 10)")
+                        help="memories given to the answering model (default 10); with "
+                             "--ks, the headline k of the tables")
+    parser.add_argument("--ks", default=None, metavar="K,K,...",
+                        help="answer from the top k of the same search for each of these "
+                             "(e.g. 10,20,30); every answer is scored")
+    parser.add_argument("--judge-runs", type=int, default=1,
+                        help="judge each answer this many times (default 1)")
+    parser.add_argument("--categories", default=None, metavar="C,C,...",
+                        help="ask only questions of these categories (numbers or names), "
+                             "e.g. 1,2,3,4")
+    parser.add_argument("--decider", choices=STORE_DECIDERS, default="config",
+                        help="the store's decision provider at the save and the question: "
+                             "the configured one (default), none, or Jev (TYPESAFE_API_KEY)")
+    parser.add_argument("--store-dir", default=None,
+                        help="keep each conversation's store in <dir>/<conversation>.sqlite "
+                             "(default: in memory)")
+    parser.add_argument("--full-context", action="store_true",
+                        help="answer from the whole conversation: no store, no search")
+    parser.add_argument("--audit", default=None, metavar="ERRORS_JSON",
+                        help="a corrected answer key (dial481/locomo-audit errors.json): "
+                             "its questions are judged against the correction too")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="a question's answer and judge calls made at once (default 1)")
+    parser.add_argument("--export-mem0", default=None, metavar="PATH",
+                        help="also write the headline answers as Mem0's per-question "
+                             "results file (evals/mem0_judge.export_results)")
     parser.add_argument("--limit", type=int, default=None,
                         help="first N conversations (LoCoMo samples, LongMemEval questions)")
     parser.add_argument("--conversation", action="append", default=None, metavar="ID",
@@ -1306,8 +1787,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--max-calls needs --usage-db")
     try:
         args.caps = parse_caps(args.max_calls)
+        args.k_list = sorted({int(x) for x in args.ks.split(",") if x.strip()} | {args.k}) \
+            if args.ks else [args.k]
     except ValueError as exc:
         parser.error(str(exc))
+    if min(args.k_list) < 1 or args.judge_runs < 1 or args.workers < 1:
+        parser.error("--k, --ks, --judge-runs and --workers want numbers from 1")
+    args.category_set = {c.strip() for c in args.categories.split(",") if c.strip()} \
+        if args.categories else None
     return args
 
 
@@ -1350,12 +1837,46 @@ def _memry_prompts() -> list[tuple[str, str]]:
     return [(text.split("{", 1)[0][:60], name) for text, name in prompts]
 
 
+def jev_stage(body: dict[str, Any]) -> str:
+    """Which memry question a decision call asks, by its question keys and
+    state: "reconcile" (the action), "identity_pair" (the pair and belongs
+    questions), "identity", "name_screen", "name_check", "entity_types",
+    "when" (event or record), "tag", "durability", "relevance" or "other"."""
+    keys = set(body.get("questions") or {})
+    state = str(body.get("state") or "")
+    if "action" in keys:
+        return "reconcile"
+    if "pair" in keys:
+        return "identity_pair"
+    for key, name in (("identity", "identity"), ("tag", "tag"), ("k", "when")):
+        if key in keys:
+            return name
+    if state.startswith("A name from"):
+        return "name_check"
+    if state.startswith("Entity names extracted"):
+        return "entity_types"
+    prefixes = {key[:1] for key in keys}
+    if "s" in prefixes and state.startswith("A memory"):
+        return "name_screen"
+    if "d" in prefixes:
+        return "durability"
+    if "m" in prefixes:
+        return "relevance"
+    return "other"
+
+
 def memry_stage(stage: str, group: str, body: Any) -> str | None:
-    """A chat call made while a conversation is loaded, counted by the memry
-    prompt it carries: "ingest:extraction", "ingest:extraction_on_update",
-    "ingest:reconcile", "ingest:reconcile_merge" (writing an UPDATE's text),
-    "ingest:identity", "ingest:audit", ... or "ingest:other"."""
-    if group != "chat" or not stage.startswith("ingest") or not isinstance(body, dict):
+    """A call made while a conversation is loaded, counted by what it asks: a
+    chat call by the memry prompt it carries ("ingest:extraction",
+    "ingest:extraction_on_update", "ingest:reconcile", "ingest:reconcile_merge"
+    (writing an UPDATE's text), "ingest:identity", "ingest:audit", ... or
+    "ingest:other"), a decision call by its question (``jev_stage``:
+    "ingest:jev:reconcile", ...)."""
+    if not stage.startswith("ingest") or not isinstance(body, dict):
+        return None
+    if group == "jev":
+        return f"{stage}:jev:{jev_stage(body)}"
+    if group != "chat":
         return None
     messages = [m for m in body.get("messages") or [] if isinstance(m, dict)]
     system = next((str(m.get("content") or "") for m in messages if m.get("role") == "system"), "")
@@ -1389,7 +1910,8 @@ def _write_json(path: pathlib.Path, data: Any) -> None:
 #: Options that do not change a conversation's results: a per-conversation
 #: file written under other values of these is still reused.
 _RUN_ONLY = ("jobs", "results_dir", "out", "worker", "usage_db", "max_calls", "caps",
-             "conversation", "limit", "seed")
+             "conversation", "limit", "seed", "workers", "store_dir", "export_mem0",
+             "k_list", "category_set")
 
 
 def run_options(args: argparse.Namespace) -> dict[str, Any]:
@@ -1461,6 +1983,7 @@ def main(argv: list[str] | None = None) -> int:
     judge = load_judge(args.judge)
     answer_prompt = load_function(args.answer_prompt, "--answer-prompt") \
         if args.answer_prompt else None
+    corrections = load_corrections(args.audit, path) if args.audit else None
     deciders = {name: search_decider(name)
                 for name in dict.fromkeys(args.search_decider or ["store"])}
     options = run_options(args)
@@ -1499,13 +2022,23 @@ def main(argv: list[str] | None = None) -> int:
                     notes.append("--answer skipped: no LLM configured (OPENAI_API_KEY, "
                                  "ANTHROPIC_API_KEY or MEMRY_LLM_PROVIDER)")
                     print(notes[-1], file=sys.stderr)
-            embedder = build_embedder(args.embedder, data_dir)
-            log(f"{args.dataset}: {path} ({len(todo)} conversations), ingest {args.ingest}, "
-                f"embedder {embedder.model_id}")
+            if answer_llm is not None and (bleu1("a", "a") is None or count_tokens("a") is None):
+                notes.append("BLEU-1 or context tokens not computed: install memry[eval] "
+                             "(nltk with its punkt_tab data, tiktoken)")
+                print(notes[-1], file=sys.stderr)
+            if not args.full_context:
+                embedder = build_embedder(args.embedder, data_dir)
+            log(f"{args.dataset}: {path} ({len(todo)} conversations), ingest "
+                f"{'none (full context)' if args.full_context else args.ingest}, embedder "
+                f"{embedder.model_id if embedder else None}")
         settings = dict(dataset=args.dataset, mode=args.ingest, unit=args.extract_unit,
                         embedder=embedder, k=args.k, questions=args.questions,
                         answer_llm=answer_llm, judge=judge, use_context=args.context,
-                        when=args.when, search_deciders=deciders, answer_prompt=answer_prompt)
+                        when=args.when, search_deciders=deciders, answer_prompt=answer_prompt,
+                        ks=args.k_list, judge_runs=args.judge_runs,
+                        categories=set(args.category_set) if args.category_set else None,
+                        workers=args.workers, corrections=corrections, decider=args.decider,
+                        store_dir=args.store_dir, full_context=args.full_context)
 
         def finish(part: dict[str, Any]) -> dict[str, Any]:
             part["file"] = str(path)
@@ -1553,12 +2086,19 @@ def main(argv: list[str] | None = None) -> int:
     base = pathlib.Path(data_dir) if data_dir else path.parent
     out = pathlib.Path(args.out) if args.out else base / "results" / f"{args.dataset}_{stamp}.json"
     _write_json(out, result)
+    if args.export_mem0:
+        from evals.mem0_judge import export_results
+
+        _write_json(pathlib.Path(args.export_mem0), export_results(result, path))
+        print(f"Mem0's results file: {args.export_mem0}")
     print(f"\n## {args.dataset}: {len(result['rows'])} rows, "
           f"{sum(s.get('memories', 0) for s in result['stores'])} memories")
     for part in result["passes"]:
         if len(result["passes"]) > 1:
             print(f"\n### questions asked with search decider {part['search_decider']}")
         print("\n" + markdown_table(part["tables"]))
+        for at, tables in (part.get("tables_by_k") or {}).items():
+            print(f"\n#### answered from the top {at}\n\n" + markdown_table(tables))
     for row in (result.get("usage") or {}).get("by_stage", []):
         print(f"\nusage: {row['grp']} {row['model']} {row['stage']}: {row['calls']} calls, "
               f"{row['input_tokens']} in, {row['output_tokens']} out, {row['seconds']:.0f} s",

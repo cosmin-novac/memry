@@ -34,18 +34,32 @@ from typing import Any
 import httpx
 
 #: The stage a call is counted under, set by the caller with ``stage``, and
-#: the part of the run (a conversation), set with ``labelled``.
+#: the part of the run (a conversation), set with ``labelled``. A thread a
+#: store starts for its own calls (a pool of judge calls) does not inherit
+#: them, so the latest value set in the process stands in (``_LATEST``).
 _STAGE: contextvars.ContextVar[str] = contextvars.ContextVar("api_usage_stage", default="")
 _LABEL: contextvars.ContextVar[str] = contextvars.ContextVar("api_usage_label", default="")
+_LATEST: dict[str, list[str]] = {"api_usage_stage": [], "api_usage_label": []}
 
 
 @contextlib.contextmanager
 def _setting(var: contextvars.ContextVar[str], value: str) -> Iterator[None]:
     token = var.set(value)
+    latest = _LATEST[var.name]
+    latest.append(value)
     try:
         yield
     finally:
         var.reset(token)
+        if latest and latest[-1] == value:
+            latest.pop()
+        elif value in latest:
+            latest.remove(value)
+
+
+def _current(var: contextvars.ContextVar[str]) -> str:
+    latest = _LATEST[var.name]
+    return var.get() or (latest[-1] if latest else "")
 
 
 def stage(name: str) -> contextlib.AbstractContextManager[None]:
@@ -59,7 +73,7 @@ def labelled(name: str) -> contextlib.AbstractContextManager[None]:
 
 
 def current_stage() -> str:
-    return _STAGE.get()
+    return _current(_STAGE)
 
 
 class CapReached(BaseException):
@@ -220,7 +234,7 @@ class UsageMeter:
             name = self.refine(name, grp, body) or name
         items = body.get("input") if isinstance(body, dict) else None
         row_id = self._reserve({
-            "label": _LABEL.get() or self.label, "grp": grp, "host": request.url.host,
+            "label": _current(_LABEL) or self.label, "grp": grp, "host": request.url.host,
             "path": request.url.path, "stage": name,
             "model": body.get("model") if isinstance(body, dict) else None,
             "started": time.time(), "items": len(items) if isinstance(items, list) else None,
