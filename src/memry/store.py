@@ -962,9 +962,12 @@ class MemoryStore:
         """Return the complete entity fields for edited memory text.
 
         With an LLM, extraction and identity resolution finish before the
-        caller replaces the stored text and mentions. Without one, Memry can
-        still retain or remove existing links by matching their known aliases;
-        zero-key mode cannot discover a brand-new entity name.
+        caller replaces the stored text and mentions: a name the memory
+        already names an entity by keeps that entity, with nothing compared,
+        and only a name new to the memory is resolved (``resolve_mentions``).
+        Without one, Memry can still retain or remove existing links by
+        matching their known aliases; zero-key mode cannot discover a
+        brand-new entity name.
         """
         if not self.llm.available:
             surfaces: list[str] = []

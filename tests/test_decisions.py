@@ -15,7 +15,7 @@ import pytest
 
 from conftest import FakeLLM
 from memry.config import Config, DecisionConfig
-from memry.intelligence.entities import IDENTITY_QUESTION
+from memry.intelligence.entities import IDENTITY_QUESTION, IDENTITY_SYSTEM
 from memry.providers.decisions import (
     MEASURED_MERGE_GATES,
     NEVER_AUTO_MERGE,
@@ -217,32 +217,41 @@ def test_store_defaults_to_no_decision_provider():
     store.close()
 
 
-def test_store_uses_a_configured_decider_for_entity_identity():
-    """A confident "different" from the decider keeps two same-named entities
-    apart, and the text model is never asked to judge identity."""
+def test_a_decider_that_is_not_calibrated_is_not_asked_about_identity_at_save():
+    """Without a calibrated judge a save asks no identity question, of the
+    decider or of the text model: a confident "different" from a decider
+    whose answers carry no computed probabilities could not be used, and a
+    name the store already has joins its entity by rule."""
     from conftest import fact, facts_response
 
     class AlwaysDifferent(NoneDecider):
         name = "stub"
         available = True
 
+        def __init__(self) -> None:
+            self.asked: list[str] = []
+
         def decide(self, state, questions):
             from memry.providers.decisions import Answers
 
+            self.asked.extend(questions)
             return Answers({k: Answer("different", {"different": 0.96}, 0.96, True)
                             for k in questions})
 
     llm = FakeLLM()
+    decider = AlwaysDifferent()
     store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64),
-                        decider=AlwaysDifferent())
+                        decider=decider)
     llm.queue(facts_response(fact("Jonas cooks Thai food", entities=["Jonas"])))
     store.add("my partner Jonas cooks Thai", user_id="ada")
     llm.queue(facts_response(fact("Jonas reviewed the design doc", entities=["Jonas"])),
               json.dumps({"action": "ADD", "target": None, "content": None, "reason": "new"}))
     store.add("a colleague named Jonas reviewed the doc", user_id="ada")
 
-    assert len(store.entities(user_id="ada")) == 2
-    assert llm.responses == []  # every queued response was consumed by extraction
+    [jonas] = store.entities(user_id="ada")
+    assert store.backend.count_entity_memories(jonas.id) == 2
+    assert "identity" not in decider.asked and "pair" not in decider.asked
+    assert all(system != IDENTITY_SYSTEM for system, _ in llm.calls)
     store.close()
 
 
@@ -1137,15 +1146,35 @@ def _jonas_store(decider, name: str = "Jonas", entity_type: str | None = None):
     return store, save
 
 
+def _open_pair(store) -> None:
+    """Two "Jonas" entities of one memory each and the open pair between them.
+    Without a calibrated judge a save joins a name the store has by rule, so
+    it no longer raises such a pair itself."""
+    from memry.models import Entity, EntityMention, Memory, MergeProposal
+
+    backend = store.backend
+    ids = []
+    for text in ("Jonas cooks Thai food", "Jonas reviewed the design doc"):
+        entity = backend.insert_entity(Entity(name="Jonas", normalized="jonas", user_id="ada"))
+        memory = backend.insert_memory(
+            Memory(content=text, user_id="ada", embedding_model=store.embedder.model_id),
+            embedding=store.embedder.embed([text])[0])
+        backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
+                                          surface="Jonas"))
+        ids.append(entity.id)
+    backend.add_proposal(MergeProposal(entity_a=ids[0], entity_b=ids[1], user_id="ada",
+                                       confidence=0.5, reason="not yet compared"))
+
+
 def test_a_same_below_the_gate_waits_and_merges_once_new_evidence_clears_it():
     decider = _Identity(0.5)
     store, save = _jonas_store(decider)
-    save("Jonas cooks Thai food")
-    save("Jonas reviewed the design doc")
+    _open_pair(store)
+    save("Jonas booked a table for Friday")
     [proposal] = store.merge_proposals(user_id="ada")
     assert (proposal.confidence, proposal.reason) == (0.5, "stub: same")
     assert len(store.entities(user_id="ada")) == 2
-    assert decider.identity_calls == 1, "a pair raised by this save is not asked about again"
+    assert decider.identity_calls == 1, "only the open pair; the name joined by rule"
 
     decider.confidence = 0.9
     save("Jonas booked the Thai restaurant for Friday")
@@ -1155,24 +1184,21 @@ def test_a_same_below_the_gate_waits_and_merges_once_new_evidence_clears_it():
 
 
 def test_a_slow_provider_leaves_open_pairs_for_the_weekly_pass():
-    decider = _Identity(0.5, rejudges=False)
+    decider = _Identity(0.9, rejudges=False)
     store, save = _jonas_store(decider)
-    save("Jonas cooks Thai food")
-    save("Jonas reviewed the design doc")
-    decider.confidence = 0.9
+    _open_pair(store)
     save("Jonas booked the Thai restaurant for Friday")
     assert len(store.entities(user_id="ada")) == 2
     [proposal] = store.merge_proposals(user_id="ada")
     assert proposal.confidence == 0.5
+    assert decider.identity_calls == 0
     store.close()
 
 
 def test_a_pair_that_stays_open_keeps_the_latest_answer():
-    decider = _Identity(0.5)
-    store, save = _jonas_store(decider)
-    save("Jonas cooks Thai food")
-    save("Jonas reviewed the design doc")
-    decider.confidence = 0.62
+    decider = _Identity(0.62)
+    store, _ = _jonas_store(decider)
+    _open_pair(store)
     store.resolve_entities(user_id="ada")
     [proposal] = store.merge_proposals(user_id="ada")
     assert (proposal.confidence, proposal.reason) == (0.62, "stub: same")

@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
-from conftest import fact, facts_response, decision
+from conftest import FakeLLM, decision, fact, facts_response
+from memry.config import Config
+from memry.intelligence.entities import IDENTITY_SYSTEM
+from memry.intelligence.extraction import COVERAGE_SYSTEM
+from memry.intelligence.reconcile import RECONCILE_SYSTEM
+from memry.providers.decisions import Answer, Answers, NoneDecider
+from memry.providers.embeddings import HashEmbedder
+from memry.store import MemoryStore
 
 
 def identity(verdict: str, confidence: float, reason: str = "test") -> str:
@@ -30,55 +38,39 @@ def test_first_mention_creates_entity(store, fake_llm):
     assert detail["memories"][0].content == "User's partner Jonas loves Thai food"
 
 
-def test_unsure_same_name_stays_separate_with_proposal(store, fake_llm):
+def test_a_known_name_joins_its_entity_and_the_text_model_is_not_asked(store, fake_llm):
+    """Without a calibrated judge a save asks no identity question, even of a
+    text model whose gate was measured (the fixture pins gpt-5-mini's): a name
+    the store already has joins its entity by rule. Two people of one name are
+    told apart by a person, or by a type the extractor gives each."""
     add_fact_with_entity(store, fake_llm, "User's partner Jonas loves Thai food", "Jonas")
     add_fact_with_entity(
-        store, fake_llm, "A colleague named Jonas reviewed the phoenix design", "Jonas",
-        identity("unsure", 0.5, "same name, unclear identity"),
-    )
-    entities = store.entities(user_id="ada")
-    assert len(entities) == 2  # two Jonases, deliberately
-
-    proposals = store.merge_proposals(user_id="ada")
-    assert len(proposals) == 1
-    assert proposals[0].status == "proposed"
-
-
-def test_three_jonases_stay_three(store, fake_llm):
-    add_fact_with_entity(store, fake_llm, "User's partner Jonas loves Thai food", "Jonas")
-    add_fact_with_entity(
-        store, fake_llm, "Colleague Jonas reviewed the phoenix design", "Jonas",
-        identity("unsure", 0.5),
-    )
-    add_fact_with_entity(
-        store, fake_llm, "Neighbor Jonas borrowed the ladder", "Jonas",
-        identity("different", 0.95), identity("unsure", 0.4),
-    )
-    assert len(store.entities(user_id="ada")) == 3
-    # different -> no proposal; unsure -> proposal
-    assert len(store.merge_proposals(user_id="ada")) == 2
-
-
-def test_confident_same_attaches_to_existing(store, fake_llm):
-    add_fact_with_entity(store, fake_llm, "User's partner Jonas loves Thai food", "Jonas")
-    add_fact_with_entity(
-        store, fake_llm, "User's partner Jonas is allergic to shellfish", "Jonas",
-        identity("same", 0.97, "both describe the user's partner"),
-    )
-    entities = store.entities(user_id="ada")
-    assert len(entities) == 1
-    detail = store.entity(entities[0].id)
-    assert len(detail["memories"]) == 2
+        store, fake_llm, "User's partner Jonas is allergic to shellfish", "Jonas")
+    [jonas] = store.entities(user_id="ada")
+    assert len(store.entity(jonas.id)["memories"]) == 2
     assert store.merge_proposals(user_id="ada") == []
+    assert fake_llm.responses == []
+    assert all(system != IDENTITY_SYSTEM for system, _ in fake_llm.calls)
 
 
-def test_user_confirms_merge(store, fake_llm):
-    add_fact_with_entity(store, fake_llm, "Jonas plays guitar", "Jonas")
-    add_fact_with_entity(
-        store, fake_llm, "Jonas started guitar lessons in Berlin", "Jonas",
-        identity("unsure", 0.6),
-    )
-    proposal = store.merge_proposals(user_id="ada")[0]
+def _two_jonases(store, first: str, second: str):
+    """Two "Jonas" entities, one memory each, and the open pair between them."""
+    from memry.models import Entity, EntityMention, Memory, MergeProposal
+
+    backend = store.backend
+    ids = []
+    for text in (first, second):
+        entity = backend.insert_entity(Entity(name="Jonas", normalized="jonas", user_id="ada"))
+        memory = backend.insert_memory(Memory(content=text, user_id="ada"))
+        backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
+                                          surface="Jonas"))
+        ids.append(entity.id)
+    return backend.add_proposal(MergeProposal(entity_a=ids[0], entity_b=ids[1],
+                                              user_id="ada", confidence=0.6))
+
+
+def test_user_confirms_merge(store):
+    proposal = _two_jonases(store, "Jonas plays guitar", "Jonas started guitar lessons in Berlin")
     assert store.confirm_merge(proposal.id)
 
     active = store.entities(user_id="ada")
@@ -94,13 +86,8 @@ def test_user_confirms_merge(store, fake_llm):
     assert not store.confirm_merge(proposal.id)  # can't decide twice
 
 
-def test_user_rejects_merge(store, fake_llm):
-    add_fact_with_entity(store, fake_llm, "Jonas the partner cooks", "Jonas")
-    add_fact_with_entity(
-        store, fake_llm, "Jonas from accounting emailed", "Jonas",
-        identity("unsure", 0.5),
-    )
-    proposal = store.merge_proposals(user_id="ada")[0]
+def test_user_rejects_merge(store):
+    proposal = _two_jonases(store, "Jonas the partner cooks", "Jonas from accounting emailed")
     assert store.reject_merge(proposal.id)
     assert len(store.entities(user_id="ada")) == 2
     rejected = store.merge_proposals(user_id="ada", status="rejected")
@@ -108,11 +95,8 @@ def test_user_rejects_merge(store, fake_llm):
 
 
 def test_resolve_auto_confirms_only_clear_matches(store, fake_llm):
-    add_fact_with_entity(store, fake_llm, "Jonas is the user's partner and a chef", "Jonas")
-    add_fact_with_entity(
-        store, fake_llm, "Jonas the chef cooked dinner with the user", "Jonas",
-        identity("unsure", 0.6),
-    )
+    _two_jonases(store, "Jonas is the user's partner and a chef",
+                 "Jonas the chef cooked dinner with the user")
     add_fact_with_entity(
         store, fake_llm, "A different Priya joined the team", "Priya",
     )
@@ -123,9 +107,10 @@ def test_resolve_auto_confirms_only_clear_matches(store, fake_llm):
     assert len(store.entities(user_id="ada")) == 2  # merged Jonas + Priya
 
 
-def test_no_llm_keeps_separate_and_proposes(verbatim_store):
+def test_no_llm_joins_a_known_name_by_rule(verbatim_store):
     """Zero-LLM path: resolve_mentions is only reachable via explicit entities,
-    but the policy must still be safe if invoked."""
+    and a name the store already has joins its entity by rule, as it does with
+    a text model and no calibrated judge."""
     from memry.intelligence.entities import resolve_mentions
     from memry.models import Scope
 
@@ -142,8 +127,10 @@ def test_no_llm_keeps_separate_and_proposes(verbatim_store):
         backend=backend, llm=verbatim_store.llm, scope=Scope(user_id="ada"),
         memory_id=memory_2.id, memory_content=memory_2.content, surfaces=["Jonas"],
     )
-    assert len(backend.list_entities(Scope(user_id="ada"))) == 2
-    assert len(backend.list_proposals(Scope(user_id="ada"))) == 1
+    [jonas] = backend.list_entities(Scope(user_id="ada"))
+    assert [m.decided for m in backend.entity_mentions(jonas.id)] == [
+        None, {"reason": "the one entity of this name"}]
+    assert backend.list_proposals(Scope(user_id="ada")) == []
 
 
 def test_entity_scoping_isolated(store, fake_llm):
@@ -276,31 +263,6 @@ def test_entity_description_is_in_reconstructed_context(verbatim_store):
     assert "Marcus is a good student" in context.text
     assert memory.id in context.memory_ids
 
-def test_same_full_name_without_shared_context_stays_separate(verbatim_store):
-    from memry.intelligence.entities import resolve_mentions
-    from memry.models import Memory, Scope
-
-    backend = verbatim_store.backend
-    scope = Scope(user_id="ada")
-    for content in (
-        "Marcus Vandenberg performs electronic music on stage.",
-        "Marcus Vandenberg sold a Dacia car in Germany.",
-    ):
-        memory = backend.insert_memory(Memory(content=content, user_id="ada"))
-        resolve_mentions(
-            backend=backend,
-            llm=verbatim_store.llm,
-            scope=scope,
-            memory_id=memory.id,
-            memory_content=memory.content,
-            surfaces=["Marcus Vandenberg"],
-            types={"marcus vandenberg": "person"},
-        )
-
-    assert len(verbatim_store.entities(user_id="ada")) == 2
-    assert len(verbatim_store.merge_proposals(user_id="ada")) == 1
-
-
 def test_confirm_merge_follows_already_merged_endpoint(verbatim_store):
     from memry.models import Entity, MergeProposal
 
@@ -391,7 +353,8 @@ def test_same_name_with_no_evidence_reuses_instead_of_forking(verbatim_store):
 
 
 def test_a_record_with_evidence_is_still_judged_not_blindly_reused(verbatim_store):
-    """The protection only applies to empty records; evidence still decides."""
+    """The protection only applies to empty records; with a calibrated judge,
+    evidence still decides."""
     backend = verbatim_store.backend
     known = backend.insert_entity(
         Entity(name="Jonas", normalized="jonas", user_id="ada")
@@ -406,7 +369,8 @@ def test_a_record_with_evidence_is_still_judged_not_blindly_reused(verbatim_stor
         Memory(content="Jonas is my nephew, born 2019.", user_id="ada")
     )
     resolve_mentions(
-        backend=backend, llm=NoneLLM(), scope=Scope(user_id="ada"),
+        backend=backend, llm=NoneLLM(), decider=_Judge(same=0.05, different=0.9),
+        scope=Scope(user_id="ada"),
         memory_id=second.id, memory_content=second.content, surfaces=["Jonas"],
     )
     # single common name + real conflicting evidence -> kept separate
@@ -626,8 +590,9 @@ def test_two_things_that_share_a_name_stay_two_entities_through_a_save(store, fa
                        {"name": LEXNOVA, "type": "document"}]),
         fact(f"{LEXNOVA} was 1,200 euros.", entities=[{"name": LEXNOVA, "type": "document"}]),
     ))
-    # the second fact's name is one the store now has: it is judged the same
-    fake_llm.queue(identity("same", 0.97, "the same invoice"))
+    # the second fact's name is one the store now has: it joins that entity by
+    # rule, and the text model is asked only for the coverage audit
+    fake_llm.queue(json.dumps({"missing": []}))
     store.add("Paid both invoices numbered 2024-117 in March, Noord Legal's and "
               "LexNova's; LexNova's was 1,200 euros.", user_id="ada")
 
@@ -642,3 +607,203 @@ def test_two_things_that_share_a_name_stay_two_entities_through_a_save(store, fa
                   f"{LEXNOVA} was 1,200 euros."},
     }
     assert fake_llm.responses == []
+
+
+# ------------------------------------------ names a save already knows
+class _TextModel(FakeLLM):
+    """A text model that answers by what it is asked: the scripted facts for
+    an extraction; for a reconcile, an UPDATE of the memory holding a key of
+    ``rewrite`` (its value is the merged text) and an ADD otherwise; "same"
+    at 0.9 to an identity question, which it counts; nothing missing to the
+    coverage audit."""
+
+    def __init__(self, rewrite: dict[str, str] | None = None) -> None:
+        super().__init__()
+        self.rewrite = rewrite or {}
+        self.identity_calls = 0
+
+    def complete(self, system, user, *, json_schema=None):
+        if system == RECONCILE_SYSTEM:
+            for key, merged in self.rewrite.items():
+                found = re.search(rf"\[(\d+)\] [^\n]*{re.escape(key)}", user)
+                if found:
+                    return decision("UPDATE", target=int(found.group(1)), content=merged)
+            return decision("ADD")
+        if system == IDENTITY_SYSTEM:
+            self.identity_calls += 1
+            return identity("same", 0.9)
+        if system == COVERAGE_SYSTEM:
+            return json.dumps({"missing": []})
+        return super().complete(system, user, json_schema=json_schema)
+
+
+class _Judge(NoneDecider):
+    """A calibrated judge. Asked what a save does, it rewrites the memory
+    about mugs; asked about a pair, it keeps what it was shown and answers
+    ``same`` and ``different`` (one thing, unless told otherwise)."""
+
+    name = "stub"
+    available = True
+    calibrated = True
+    pair_merge_probability = 0.95
+
+    def __init__(self, same: float = 0.99, different: float = 0.0) -> None:
+        self.same, self.different = same, different
+        self.pairs: list[str] = []
+
+    def decide(self, state, questions):
+        answers = {}
+        if "action" in questions:
+            answers["action"] = Answer("UPDATE", {}, 0.95, True)
+            found = re.search(r"\[(\d+)\] [^\n]*mugs", state)
+            if found:
+                answers["target"] = Answer(found.group(1), {}, 0.95, True)
+        if "pair" in questions:
+            self.pairs.append(state)
+            probabilities = {"same": self.same, "different": self.different,
+                             "unsure": max(0.0, 1 - self.same - self.different)}
+            answers["pair"] = Answer(max(probabilities, key=probabilities.get),
+                                     probabilities, 0.9, True)
+        return Answers(answers)
+
+
+SHOP = "The user sells ceramic mugs on Kettlebay"
+ADDED = "The user now also sells teapots, glazed by Glazeworks"
+REWRITTEN = "The user sells ceramic mugs and teapots on Kettlebay, glazed by Glazeworks"
+
+
+def _shop(judge):
+    """A store where "Kettlebay" is on two memories, one of them about mugs,
+    and "Glazeworks" on one."""
+    llm = _TextModel({"mugs": REWRITTEN})
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64),
+                        decider=judge)
+    backend = store.backend
+
+    def named(name):
+        return backend.insert_entity(Entity(name=name, normalized=name.lower(),
+                                            entity_type="organization", user_id="ada"))
+
+    def memory(content, entity):
+        saved = backend.insert_memory(
+            Memory(content=content, user_id="ada", embedding_model=store.embedder.model_id),
+            embedding=store.embedder.embed([content])[0])
+        backend.add_mention(EntityMention(entity_id=entity.id, memory_id=saved.id,
+                                          surface=entity.name))
+        return saved
+
+    kettlebay, glazeworks = named("Kettlebay"), named("Glazeworks")
+    shop = memory(SHOP, kettlebay)
+    memory("Kettlebay charges a listing fee for every item", kettlebay)
+    memory("Glazeworks glazes and ships on demand", glazeworks)
+    return store, llm, kettlebay, glazeworks, shop
+
+
+@pytest.mark.parametrize("judged", [True, False], ids=["calibrated judge", "text model only"])
+@pytest.mark.parametrize("path", ["reconcile update", "manual edit", "distillation"])
+def test_a_rewritten_memory_keeps_the_names_it_had(path, judged):
+    """A memory naming "Kettlebay" is rewritten and still names it: it stays
+    on the one "Kettlebay", and nobody is asked about "Kettlebay" and itself.
+    Before, the rewritten memory was compared with the entity it already
+    belonged to; a memory both sides share is left out of a comparison, so
+    nothing was left to compare, and a second "Kettlebay" was made. A name
+    new to the memory is still resolved, and on the rewritten text."""
+    judge = _Judge() if judged else None
+    store, llm, kettlebay, glazeworks, shop = _shop(judge)
+    extracted = facts_response(fact(REWRITTEN, entities=["Kettlebay", "Glazeworks"]))
+    if path == "reconcile update":
+        llm.queue(extracted)
+        action = store.add(ADDED, user_id="ada", infer=False).actions[0]
+        assert (action.event, action.memory_id) == ("UPDATE", shop.id)
+    elif path == "manual edit":
+        llm.queue(extracted)
+        store.update(shop.id, content=REWRITTEN)
+    else:
+        pending = store.add_deferred(ADDED, user_id="ada").actions[0].memory_id
+        llm.queue(facts_response(fact(ADDED, entities=["Glazeworks"])), extracted)
+        store.distill(pending)
+
+    assert store.get(shop.id).content == REWRITTEN
+    kettlebays = [e.id for e in store.entities(user_id="ada") if e.normalized == "kettlebay"]
+    assert kettlebays == [kettlebay.id]
+    linked = {e.id for e in store.backend.entities_of_memory(shop.id)}
+    assert linked == {kettlebay.id, glazeworks.id}
+    assert store.merge_proposals(user_id="ada") == []
+    assert llm.identity_calls == 0
+    if judge is not None:
+        # asked about "Glazeworks" only, once in each order, on the rewritten text
+        assert len(judge.pairs) == 2
+        assert all('"Glazeworks"' in state and '"Kettlebay"' not in state
+                   and REWRITTEN in state for state in judge.pairs)
+    assert llm.responses == []
+    store.close()
+
+
+def test_without_a_judge_a_known_name_joins_its_entity_and_asks_nothing():
+    """Without a calibrated judge a text model's own confidence merges nothing
+    (no gate was measured for it), so asking it whether a mention is a known
+    entity bought nothing: every fact naming a known person made one more
+    entity and an open pair. A name the store has joins its one entity by
+    rule, the rule is kept on the mention, and no identity question is asked."""
+    llm = _TextModel()
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64))
+    doings = ["booked the venue", "sent the invitations", "chose the menu",
+              "hired a photographer", "asked about parking"]
+    for session in ("s1", "s2", "s3"):
+        llm.queue(facts_response(*(
+            fact(f"Livia {doing} for the {session} meeting",
+                 entities=[{"name": "Livia", "type": "person"}])
+            for doing in doings)))
+        store.add(f"Livia's news from {session}", user_id="ada", run_id=session)
+
+    [livia] = store.entities(user_id="ada")
+    assert store.backend.count_entity_memories(livia.id) == 3 * len(doings)
+    assert llm.identity_calls == 0
+    assert store.merge_proposals(user_id="ada") == []
+    decided = [m.decided for m in store.backend.entity_mentions(livia.id)]
+    assert decided[0] is None  # the mention that made it
+    assert decided[1:] == [{"reason": "the one entity of this name"}] * (len(decided) - 1)
+    assert llm.responses == []
+    store.close()
+
+
+def test_without_a_judge_namesakes_are_chosen_by_rule():
+    """Of two entities that share a name (two people a person kept apart), a
+    mention joins the one its conversation already names, and otherwise the
+    one with the most memories; a known type conflict still makes its own
+    entity. No identity question is asked and no new pair is raised."""
+    llm = _TextModel()
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64))
+    backend = store.backend
+    partner, colleague = (
+        backend.insert_entity(Entity(name="Jonas", normalized="jonas", entity_type="person",
+                                     user_id="ada"))
+        for _ in range(2))
+    for entity, run, texts in (
+        (partner, "home", ["Jonas cooks Thai food", "Jonas grows tomatoes",
+                           "Jonas is allergic to shellfish"]),
+        (colleague, "work", ["Jonas reviewed the phoenix design"]),
+    ):
+        for text in texts:
+            memory = backend.insert_memory(Memory(content=text, user_id="ada", run_id=run))
+            backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
+                                              surface="Jonas"))
+    backend.add_proposal(MergeProposal(entity_a=partner.id, entity_b=colleague.id,
+                                       user_id="ada", status="rejected"))
+
+    def save(text, run, kind="person"):
+        llm.queue(facts_response(fact(text, entities=[{"name": "Jonas", "type": kind}])))
+        memory_id = store.add(text, user_id="ada", run_id=run).actions[0].memory_id
+        [entity] = backend.entities_of_memory(memory_id)
+        [mention] = [m for m in backend.entity_mentions(entity.id) if m.memory_id == memory_id]
+        return entity.id, mention.decided
+
+    assert save("Jonas moved the design review to Monday", "work") == (
+        colleague.id, {"reason": "of 2 entities of this name, the one this conversation names"})
+    assert save("Jonas booked a table for Friday", "weekend") == (
+        partner.id, {"reason": "of 2 entities of this name, the one with the most memories"})
+    app, decided = save("Jonas is also a note-taking app", "weekend", kind="product")
+    assert app not in (partner.id, colleague.id) and decided is None
+    assert llm.identity_calls == 0
+    assert store.merge_proposals(user_id="ada") == []
+    store.close()

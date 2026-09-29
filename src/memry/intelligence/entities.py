@@ -1,18 +1,17 @@
 """Entity resolution with evidence-based disambiguation.
 
-A shared short name is never enough to merge. An exact multi-part name plus
-meaningful contextual overlap is treated as the same identity unless known types
-conflict or the model finds a concrete contradiction. Otherwise an identity
-judgment runs per candidate:
+At save (``resolve_mentions``) a name the memory already names an entity by
+keeps that entity, and the store owner's name attaches to the owner. With a
+calibrated judge every other candidate is compared (``identity.compare``): a
+name the store already has joins the likeliest entity of that name unless the
+judge says "different", and any other name merges at the judge's bar or makes a
+new entity, its pairs recorded. Without one, a save asks no identity question:
+a name the store has joins its entity by rule, and any other name makes one.
 
-- ``same`` (confident)  -> the mention attaches to the existing entity
-- ``unsure``            -> a new entity is created and a merge proposal is
-                           recorded for later automatic or human resolution
-- ``different``         -> a new entity, no proposal
-
-Without an LLM, deterministic full-name-and-context matches still collapse; less
-certain matches stay separate and recoverable. ``resolve_open_proposals`` follows
-prior merge chains and auto-confirms only deterministic or high-confidence matches.
+A shared name never merges two entities on its own. ``resolve_open_proposals``
+follows prior merge chains and auto-confirms only deterministic or
+high-confidence matches; without a calibrated judge it asks the text model,
+whose "same" merges only at a gate measured for that model.
 """
 
 from __future__ import annotations
@@ -38,6 +37,7 @@ from .identity import (
     CONTEXT_STEP,
     NAME_CHECKS_PER_PASS,
     PAIR_STEPS,
+    SESSION_HOURS,
     Mention,
     NameIndex,
     Verdict,
@@ -613,14 +613,19 @@ def resolve_mentions(
     ``owner`` is the store owner's entity. The extractor was told to list the
     owner under that entity's name, so that name attaches to it directly.
 
+    A name the memory already names an entity by keeps that entity, and
+    nothing is compared: an edited memory that still names it, or a name
+    this save linked a moment ago by another of its names.
+
     With a calibrated judge (``identity.judges_pairs``) each candidate is
     decided by ``identity.compare``: merge, keep apart, or wait for evidence.
     Both kept-apart and waiting pairs are recorded with the funnel step they
     were compared at, so neither is compared again on the same evidence;
     nobody is asked. A name the store already has is the exception: the
     mention joins the likeliest entity of that name unless the judge says
-    "different" at the apart bar. Without one, a "same" at the provider's gate merges and
-    anything short of "different" is recorded for a person."""
+    "different" at the apart bar. Without one, no identity question is
+    asked: a name the store already has joins its entity by rule
+    (``_join_by_rule``), and any other name makes one."""
     types = types or {}
     resolved: dict[str, Entity] = {}
     # Names are looked up across the person's whole namespace, as the weekly
@@ -644,7 +649,13 @@ def resolve_mentions(
     # ("Fundation" and "Fundation GmbH"); without one, only exact names meet.
     judge = decider if judges_pairs(decider) else None
     index: NameIndex | None = None
-    saved = backend.get_memory(memory_id) if judge is not None else None
+    saved = backend.get_memory(memory_id)
+    # An edited memory is resolved before its new text is stored, and is
+    # judged on the new text.
+    memory = (saved.model_copy(update={"content": memory_content}) if saved is not None
+              else Memory(id=memory_id, content=memory_content))
+    # The entities the memory names as stored: an edited memory's.
+    linked = {e.id for e in backend.entities_of_memory(memory_id)}
     for surface in cleaned:
         normalized = surface.lower()
         if not normalized or normalized in resolved:
@@ -661,93 +672,32 @@ def resolve_mentions(
 
         candidates = backend.find_entity_candidates(normalized, lookup)
         same_name = {c.id for c in candidates}
-        if judge is not None:
-            if index is None:
-                index = NameIndex(backend.list_entities(lookup, limit=100_000))
-            candidates += index.candidates(surface, exclude={c.id for c in candidates})
         target: Entity | None = None
         # what joined the mention to an entity the store has, kept on it
         decided: dict[str, Any] | None = None
         proposals: list[MergeProposal] = []
-        mention = Mention(surface, types.get(normalized),
-                          saved or Memory(id=memory_id, content=memory_content))
-        # A name the store already has: the mention belongs to the likeliest
-        # entity of that name unless the evidence says it is something else.
-        # Attaching one memory can be undone; merging entities cannot. Holding
-        # it to the merge bar instead left 88 of 431 mentions of a known name
-        # as new one-memory entities in a replayed store, which never gained
-        # the evidence to be compared again.
-        likely: list[tuple[float, Entity, dict[str, Any]]] = []
-        # The memory may already belong to an entity of this name through
-        # another of its names ("Google" merged into "Google LLC" a moment
-        # ago, then "Google LLC" itself): nothing is left to compare, and a
-        # second "Google LLC" was made.
-        holding = {e.id for e in resolved.values()} & same_name
+        # The memory already names an entity of this name: through another of
+        # its names in this save ("Google" merged into "Google LLC" a moment
+        # ago, then "Google LLC" itself), or as stored (an edited memory that
+        # still names it). It keeps it. Compared with it, the memory was on
+        # both sides and left out of both (``identity.compare``), so nothing
+        # was left to compare, and a second entity of the name was made.
+        named_here = {e.id for e in resolved.values()} & same_name
+        holding = named_here or (linked & same_name)
         if holding:
-            candidates = [c for c in candidates if c.id in holding][:1]
-        for candidate in candidates:
-            if holding:
-                target = candidate
-                decided = {"reason": "the memory names it by another of its names"}
-                break
-            if likely and candidate.id not in same_name:
-                break  # a known name found its entity; no need to try others
-            facts = [m.content for m in backend.entity_memories(candidate.id, limit=5)]
-            # An identically-named record with no evidence at all cannot be a
-            # different thing. Reuse it before spending an LLM call on a
-            # question that has nothing to answer with.
-            if _same_name_and_no_evidence(
-                candidate, facts, surface, types.get(normalized)
-            ):
-                target = candidate
-                decided = {"reason": "one name, and the entity has no memories"}
-                break
-            if judge is not None:
-                verdict = compare(judge, backend, candidate, mention)
-                probabilities = verdict.probabilities
-                if candidate.id in same_name and not belongs_blocks(
-                    verdict.belongs, candidate.entity_type, types.get(normalized)
-                ) and (
-                    verdict.action == "merge"
-                    or (probabilities is not None
-                        and probabilities["different"] < judge.pair_apart_probability)
-                ):
-                    likely.append((probabilities["same"] if probabilities else 1.0, candidate, {
-                        "reason": "a name the store has: the likeliest of its entities, "
-                                  "not said to be different", **_answer(verdict)}))
-                    continue
-                if verdict.action == "merge":
-                    target = candidate
-                    decided = {"reason": pair_reason(judge, probabilities), **_answer(verdict)}
-                    break
-                proposals.append(MergeProposal(
-                    entity_a=candidate.id, entity_b="", user_id=scope.user_id,
-                    confidence=probabilities["same"] if probabilities else 0.5,
-                    reason=pair_reason(judge, probabilities) if probabilities else None,
-                    status="rejected" if verdict.action == "apart" else "proposed",
-                    decided_at=utcnow() if verdict.action == "apart" else None,
-                    compared_step=verdict.step,
-                    different=probabilities["different"] if probabilities else None,
-                    belongs=verdict.belongs,
-                ))
-                continue
-            judgment = _judge(
-                llm, candidate, facts, memory_content, surface, decider
-            )
-            if _merges_on_gate(judgment):
-                target = candidate
-                decided = {"reason": judgment.get("reason") or judgment["verdict"],
-                           "confidence": judgment["confidence"]}
-                break
-            if judgment["verdict"] in ("same", "unsure"):
-                proposals.append(MergeProposal(
-                    entity_a=candidate.id, entity_b="", user_id=scope.user_id,
-                    confidence=judgment["confidence"], reason=judgment.get("reason"),
-                ))
+            target = next(c for c in candidates if c.id in holding)
+            decided = {"reason": "the memory names it by another of its names" if named_here
+                       else "the memory already names it"}
+        elif judge is None:
+            target, decided = _join_by_rule(backend, memory, candidates, types.get(normalized))
+        else:
+            if index is None:
+                index = NameIndex(backend.list_entities(lookup, limit=100_000))
+            candidates += index.candidates(surface, exclude={c.id for c in candidates})
+            target, decided, proposals = _judged_join(
+                backend, judge, scope, candidates, same_name,
+                Mention(surface, types.get(normalized), memory))
 
-        if target is None and likely:
-            _, target, decided = max(likely, key=lambda option: option[0])
-            proposals = []
         if target is None:
             # The screen's verdict is kept on the new entity, as the weekly
             # screen keeps its own: that pass asks only about names without one.
@@ -774,6 +724,102 @@ def resolve_mentions(
                 entity_id=target.id, memory_id=memory_id, surface=surface, decided=decided))
         resolved[normalized] = target
     return resolved
+
+
+def _judged_join(
+    backend: MemoryBackend,
+    judge: Decider,
+    scope: Scope,
+    candidates: list[Entity],
+    same_name: set[str],
+    mention: Mention,
+) -> tuple[Entity | None, dict[str, Any] | None, list[MergeProposal]]:
+    """With a calibrated judge: the entity a mention joins and what joined it,
+    or, when it joins none, the pairs to record against the entity it makes
+    (``resolve_mentions``). ``same_name`` holds the candidates carrying the
+    mention's name; the others came from the name index."""
+    surface, kind = mention.name, mention.entity_type
+    # A name the store already has: the mention belongs to the likeliest
+    # entity of that name unless the evidence says it is something else.
+    # Attaching one memory can be undone; merging entities cannot. Held to
+    # the merge bar instead, mentions of a known name became new one-memory
+    # entities, which never gained the evidence to be compared again.
+    likely: list[tuple[float, Entity, dict[str, Any]]] = []
+    proposals: list[MergeProposal] = []
+    for candidate in candidates:
+        if likely and candidate.id not in same_name:
+            break  # a known name found its entity; no need to try others
+        facts = [m.content for m in backend.entity_memories(candidate.id, limit=5)]
+        # An identically-named record with no evidence at all cannot be a
+        # different thing. Reuse it before spending an LLM call on a
+        # question that has nothing to answer with.
+        if _same_name_and_no_evidence(candidate, facts, surface, kind):
+            return candidate, {"reason": "one name, and the entity has no memories"}, []
+        verdict = compare(judge, backend, candidate, mention)
+        probabilities = verdict.probabilities
+        if candidate.id in same_name and not belongs_blocks(
+            verdict.belongs, candidate.entity_type, kind
+        ) and (
+            verdict.action == "merge"
+            or (probabilities is not None
+                and probabilities["different"] < judge.pair_apart_probability)
+        ):
+            likely.append((probabilities["same"] if probabilities else 1.0, candidate, {
+                "reason": "a name the store has: the likeliest of its entities, "
+                          "not said to be different", **_answer(verdict)}))
+            continue
+        if verdict.action == "merge":
+            return candidate, {"reason": pair_reason(judge, probabilities),
+                               **_answer(verdict)}, []
+        proposals.append(MergeProposal(
+            entity_a=candidate.id, entity_b="", user_id=scope.user_id,
+            confidence=probabilities["same"] if probabilities else 0.5,
+            reason=pair_reason(judge, probabilities) if probabilities else None,
+            status="rejected" if verdict.action == "apart" else "proposed",
+            decided_at=utcnow() if verdict.action == "apart" else None,
+            compared_step=verdict.step,
+            different=probabilities["different"] if probabilities else None,
+            belongs=verdict.belongs,
+        ))
+    if likely:
+        _, target, decided = max(likely, key=lambda option: option[0])
+        return target, decided, []
+    return None, None, proposals
+
+
+def _join_by_rule(
+    backend: MemoryBackend, memory: Memory, candidates: list[Entity], kind: str | None
+) -> tuple[Entity | None, dict[str, Any] | None]:
+    """Without a calibrated judge: the entity a name the store already has
+    joins, and the rule that chose it; (None, None) when no entity of the
+    name has a type the mention's allows (a known type conflict joins
+    nothing).
+
+    No model is asked. A text model's own confidence merges nothing unless a
+    gate was measured for that model (``MEASURED_MERGE_GATES``), so its answer
+    could neither join the mention nor keep it apart: every memory naming a
+    known person made one more entity and one more open pair. The one entity
+    of the name is joined. Of several (namesakes kept apart by a person, or
+    by type), the mention joins the one its conversation already names
+    (``MemoryBackend.session_memories``, as ``identity.CONTEXT_STEP`` reads
+    it), otherwise the one with the most memories, the oldest on a tie."""
+    options = [c for c in candidates
+               if not (c.entity_type and kind and c.entity_type != kind)]
+    if not options:
+        return None, None
+    if len(options) == 1:
+        return options[0], {"reason": "the one entity of this name"}
+    ids = {c.id for c in options}
+    around = backend.session_memories(memory, hours=SESSION_HOURS)
+    named = {e.id for entities in backend.entities_of_memories([m.id for m in around]).values()
+             for e in entities} & ids
+    counts = backend.entity_memory_counts(sorted(ids))
+    pool = [c for c in options if c.id in named] or options
+    chosen = min(pool, key=lambda c: (-counts.get(c.id, 0), c.created_at, c.id))
+    why = ("the one this conversation names" if len(named) == 1
+           else "the one with the most memories" + (
+               " of those this conversation names" if named else ""))
+    return chosen, {"reason": f"of {len(options)} entities of this name, {why}"}
 
 
 def _homes_answered(backend: MemoryBackend, entity_ids: list[str]) -> None:

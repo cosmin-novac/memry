@@ -808,7 +808,11 @@ def compare(
     # A memory that names both entries says nothing about whether they are one
     # thing: the extractor listed two names for it. Shown on both sides it
     # read as the same fact twice, and "Michaela Neumann" merged with
-    # "Dr. Neumann", named in one note, at P(same) 1.0. It is left out.
+    # "Dr. Neumann", named in one note, at P(same) 1.0. It is left out. A side
+    # left with no memory is not asked about and keeps its step: no answer,
+    # which says neither "same" nor "different". A mention whose memory an
+    # entity of its name already holds is that entity's; ``resolve_mentions``
+    # keeps it without a comparison, since this one would have nothing to ask.
     shared = {m.id for m in pool_a} & {m.id for m in pool_b}
     if shared:
         pool_a = [m for m in pool_a if m.id not in shared]

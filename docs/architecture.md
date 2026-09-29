@@ -221,7 +221,11 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    one-word name is also paired with the names that carry that word when at most five
    do ("Sofia" with "Sofia Marin" and "Sofia Petrescu"): in a store of under 150 names
    three such names already make the word too common to count as rare. The owner's name attaches to the owner
-   entity without a comparison. Every other candidate is compared with the new memory.
+   entity without a comparison, and so does a name the memory already names an entity by
+   (a memory rewritten by an UPDATE or an edit that still names it keeps that entity;
+   compared with it, the memory sat on both sides and was left out of both, so nothing
+   was left to compare and a second entity of the name was made). Every other candidate
+   is compared with the new memory.
    A name the store already has joins the entity of that name with the highest P(same),
    unless the judge says "different" at 0.5 or more; the merge bar does not apply. (Held
    to it, 88 of 431 mentions of a known name became one-memory entities in a replayed
@@ -301,8 +305,15 @@ merged one had; that mention goes back, with the relations its memory stated sin
 undo is refused while the kept entity is itself merged into another (undo that first), and
 two tags merged into one are not undone (their memories' tags were rewritten).
 
-Without a calibrated judge (a text model only), only identical names are compared and
-nothing merges on the model's own confidence.
+Without a calibrated judge (a text model only), a save asks no identity question: a text
+model's own confidence merges nothing unless a gate was measured for that model, so its
+answer could neither join a name nor keep it apart, and each memory naming a known person
+made one more entity and one more open pair. A name the store already has (name or alias,
+no known type conflict) joins its entity by rule, and the rule is kept on the mention: the
+one entity of that name, or of several, the one the memory's conversation already names,
+else the one with the most memories. Any other name makes a new entity. The weekly pass
+compares only identical names, and nothing merges on the model's own confidence unless its
+gate was measured.
 
 Tags follow the same pattern (`judged_tag_merges`): candidate pairs from the name index
 (no shared-word signal for tags), judged in both orders with the 10 most recent memories
