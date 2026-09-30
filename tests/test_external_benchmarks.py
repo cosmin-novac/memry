@@ -1253,6 +1253,50 @@ def test_no_descriptions_leaves_the_entities_out_of_the_memory_list():
     assert row["described"] == [] and row["descriptions built"] == 0
 
 
+def test_a_compared_answer_model_answers_from_the_same_memory_list():
+    """--compare-answer-model has a second model answer each k from the one
+    search made and the same memory list, turns and descriptions included,
+    judged as the others under stages of their own."""
+    judged: list[tuple[str, str]] = []
+
+    def judge(question, gold, prediction):
+        judged.append((api_usage.current_stage(), prediction))
+        return prediction == "Pepper"
+
+    conv = xb.load_locomo(LOCOMO)[0]
+    first, second = ScriptedChat("Unknown"), ScriptedChat("Pepper")
+    second.model = "second-chat"
+    store = MemoryStore(Config(db_path=":memory:"), llm=RuleLLM(), embedder=HashEmbedder(128))
+    searches = []
+    try:
+        ingested = xb.ingest(store, conv, mode="extract", unit="session", dataset="locomo")
+        search = store.search
+
+        def counted(*args, **kwargs):
+            searches.append(args)
+            return search(*args, **kwargs)
+
+        store.search = counted
+        row = xb.ask(ingested, conv.questions[0], k=3, ks=[3, 5], answer_llm=first,
+                     judge=judge, answer_prompt=mem0_judge.answer_messages, judge_runs=2,
+                     compare_answer_llm=second)
+    finally:
+        store.close()
+    assert len(searches) == 1
+    # the same messages, each k once, to each model
+    assert [m for m, _ in first.sent] == [m for m, _ in second.sent] and len(first.sent) == 2
+    assert set(row["answers"]) == set(row["answers_compared"]) == {"3", "5"}
+    for at in ("3", "5"):
+        assert row["answers"][at]["prediction"] == "Unknown"
+        assert row["answers_compared"][at]["prediction"] == "Pepper"
+        assert row["answers_compared"][at]["evidence"] == row["answers"][at]["evidence"]
+    assert sum(stage == "judge:compared" for stage, _ in judged) == 4
+    assert sum(stage == "judge" for stage, _ in judged) == 4
+    tables = xb.pass_tables([row], ["store"])[0]
+    assert tables["compared_by_k"]["3"]["overall"]["judge"] == 1.0
+    assert tables["tables_by_k"]["3"]["overall"]["judge"] == 0.0
+
+
 def test_compared_evidence_answers_come_from_the_same_search():
     """--compare-evidence-tokens 0 answers each k again from the memories of
     the one search made, without their turns, and judges those answers as

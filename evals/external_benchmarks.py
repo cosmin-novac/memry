@@ -54,7 +54,10 @@ question (``MemoryStore.evidence``, within the store's
 each question a second time from the same search, its turns chosen within N
 tokens (0: the memories alone), with no further search: those answers are
 scored and judged as the others, kept under the row's "answers_compared" and
-counted under the stages "answer:compared" and "judge:compared":
+counted under the stages "answer:compared" and "judge:compared".
+--compare-answer-model MODEL has MODEL write that second answer, from the
+same memory list (the turns within N tokens where both are given), the way
+published LoCoMo rows compare answer models over one memory:
 
   f1        token F1 after SQuAD normalisation (lower case, punctuation and
             the articles a/an/the removed); by LoCoMo's rules, a multi-hop
@@ -1163,6 +1166,7 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
         ks: list[int] | None = None, judge_runs: int = 1, pool: Any = None,
         correction: dict[str, Any] | None = None,
         compare_evidence_tokens: int | None = None,
+        compare_answer_llm: LLM | None = None,
         descriptions: bool = True) -> dict[str, Any]:
     """Search for one question once, score what came back, and answer when
     asked: from the top k of that search for each k of ``ks`` (default
@@ -1177,7 +1181,9 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
     ``compare_evidence_tokens`` each k is answered a second time from the
     same memories, their turns chosen within that many tokens (0: none),
     kept under "answers_compared" and counted under "answer:compared" and
-    "judge:compared"."""
+    "judge:compared"; ``compare_answer_llm`` writes that second answer (the
+    turns within the store's own budget unless ``compare_evidence_tokens``
+    is given too)."""
     ks = sorted(set(ks or [k]) | {k})
     depth = max(DEPTH, *ks)
     store = ingested.store
@@ -1239,21 +1245,26 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
         row["described"] = [entity.name for entity in described]
         # each variant's evidence budget (None: the store's own), as its answer stage names it
         budgets = {"answer": None}
-        if compare_evidence_tokens is not None:
+        if compare_evidence_tokens is not None or compare_answer_llm is not None:
             budgets["answer:compared"] = compare_evidence_tokens
-        # the source turns of each k's memories, as a search of that depth chooses them
+        # each variant's model: the compared answer's own where one is given
+        writers = {"answer": answer_llm, "answer:compared": compare_answer_llm or answer_llm}
+        # the source turns of each k's memories, as a search of that depth chooses them,
+        # chosen once for each budget
         with api_usage.stage(search_stage):
-            turns = {(name, at): store.evidence(question.question, results[:at],
-                                                user_id=BENCH_USER, token_budget=budget)
-                     for name, budget in budgets.items() for at in ks}
+            chosen = {(budget, at): store.evidence(question.question, results[:at],
+                                                   user_id=BENCH_USER, token_budget=budget)
+                      for budget in dict.fromkeys(budgets.values()) for at in ks}
+        turns = {(name, at): chosen[(budget, at)] for name, budget in budgets.items()
+                 for at in ks}
         if pool is not None and len(turns) > 1:
             futures = {key: pool.submit(contextvars.copy_context().run, staged, key[0],
-                                        answer_with, answer_llm, question, top[:key[1]],
+                                        answer_with, writers[key[0]], question, top[:key[1]],
                                         answer_prompt, shown, described)
                        for key, shown in turns.items()}
             done = {key: future.result() for key, future in futures.items()}
         else:
-            done = {key: staged(key[0], answer_with, answer_llm, question, top[:key[1]],
+            done = {key: staged(key[0], answer_with, writers[key[0]], question, top[:key[1]],
                                 answer_prompt, shown, described)
                     for key, shown in turns.items()}
         for key, record in done.items():
@@ -1587,6 +1598,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                   full_context: bool = False,
                   evidence_tokens: int | None = None,
                   compare_evidence_tokens: int | None = None,
+                  compare_answer_llm: LLM | None = None,
                   descriptions: bool = True) -> dict[str, Any]:
     """Ingest each conversation into a fresh store and ask its questions once
     per pass of ``search_deciders`` (name -> the decision provider the store
@@ -1603,7 +1615,8 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
     store and no search. ``evidence_tokens`` sets each store's
     ``retrieval.evidence_tokens`` (None keeps its own);
     ``compare_evidence_tokens`` answers each k again from the same search
-    with the turns chosen within that many tokens (``ask``); ``descriptions``
+    with the turns chosen within that many tokens, and ``compare_answer_llm``
+    with that model (``ask``); ``descriptions``
     false leaves out the descriptions of the entities a question names, for
     an ablation. Returns {config, stores, passes, tables (the first
     pass's), rows, warnings, notes, complete}. A call refused at a cap
@@ -1686,6 +1699,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                                 search_stage=f"search:{name}", ks=ks, judge_runs=judge_runs,
                                 pool=pool, correction=corrections.get(question.qid),
                                 compare_evidence_tokens=compare_evidence_tokens,
+                                compare_answer_llm=compare_answer_llm,
                                 descriptions=descriptions)})
                     finally:
                         entry[f"seconds_{name}"] = round(time.perf_counter() - started, 2)
@@ -1731,6 +1745,8 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                    "search_deciders": names,
                    "context": use_context, "when": when, "evidence_tokens": evidence_tokens,
                    "compare_evidence_tokens": compare_evidence_tokens,
+                   "compare_answer_model": (getattr(compare_answer_llm, "model", None)
+                                            if compare_answer_llm else None),
                    "descriptions": descriptions,
                    "locomo_categories": LOCOMO_CATEGORIES if dataset == "locomo" else None},
         "stores": stores,
@@ -1870,6 +1886,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="answer each question again from the same search with the "
                              "source turns within N tokens (0: the memories alone), "
                              "kept under the row's answers_compared; no further search")
+    parser.add_argument("--compare-answer-model", default=None, metavar="MODEL",
+                        help="answer each question again from the same memory list with "
+                             "this OpenAI chat model, kept under the row's answers_compared; "
+                             "no further search")
     parser.add_argument("--no-descriptions", action="store_true",
                         help="leave out the descriptions of the entities a question names "
                              "from the memory list (an ablation; default: shown, as an "
@@ -2125,7 +2145,7 @@ def main(argv: list[str] | None = None) -> int:
         todo = conversations
     meter = api_usage.UsageMeter(args.usage_db, label=args.worker or "", caps=args.caps,
                                  refine=memry_stage).install() if args.usage_db and todo else None
-    answer_llm = embedder = None
+    answer_llm = compare_answer_llm = embedder = None
     try:
         if todo:
             if args.answer or args.answer_model:
@@ -2141,6 +2161,10 @@ def main(argv: list[str] | None = None) -> int:
                     notes.append("--answer skipped: no LLM configured (OPENAI_API_KEY, "
                                  "ANTHROPIC_API_KEY or MEMRY_LLM_PROVIDER)")
                     print(notes[-1], file=sys.stderr)
+            if args.compare_answer_model and answer_llm is not None:
+                from evals.mem0_judge import OpenAIChat
+
+                compare_answer_llm = OpenAIChat(args.compare_answer_model)
             if answer_llm is not None and (bleu1("a", "a") is None or count_tokens("a") is None):
                 notes.append("BLEU-1 or context tokens not computed: install memry[eval] "
                              "(nltk with its punkt_tab data, tiktoken)")
@@ -2160,6 +2184,7 @@ def main(argv: list[str] | None = None) -> int:
                         store_dir=args.store_dir, full_context=args.full_context,
                         evidence_tokens=args.evidence_tokens,
                         compare_evidence_tokens=args.compare_evidence_tokens,
+                        compare_answer_llm=compare_answer_llm,
                         descriptions=not args.no_descriptions)
 
         def finish(part: dict[str, Any]) -> dict[str, Any]:
@@ -2221,9 +2246,14 @@ def main(argv: list[str] | None = None) -> int:
         print("\n" + markdown_table(part["tables"]))
         for at, tables in (part.get("tables_by_k") or {}).items():
             print(f"\n#### answered from the top {at}\n\n" + markdown_table(tables))
+        config = result["config"]
+        compared_as = ", ".join(
+            [f"the turns within {config['compare_evidence_tokens']} tokens"]
+            * (config.get("compare_evidence_tokens") is not None)
+            + [f"answered by {config['compare_answer_model']}"]
+            * bool(config.get("compare_answer_model")))
         for at, tables in (part.get("compared_by_k") or {}).items():
-            print(f"\n#### answered from the top {at}, the turns within "
-                  f"{result['config'].get('compare_evidence_tokens')} tokens\n\n"
+            print(f"\n#### answered from the top {at}, {compared_as}\n\n"
                   + markdown_table(tables))
     for row in (result.get("usage") or {}).get("by_stage", []):
         print(f"\nusage: {row['grp']} {row['model']} {row['stage']}: {row['calls']} calls, "
