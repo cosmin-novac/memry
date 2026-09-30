@@ -38,6 +38,15 @@ in ``evals/identity_resolution_benchmark.py``, five runs:
   comparisons per pair. Each side is shown 10 memories (50 at the last step),
   chosen as the most recent few and the rest most similar to the other side's.
 
+One comparison is asked in one order: the known-name check at save. A mention
+of a name an entity already carries joins the likeliest entity of that name
+unless the judge says "different" (``entities._judged_join``). That check reads
+no merge bar, only P(different) against 0.5, which candidate has the higher
+P(same), and ``BELONGS_BAR``, so it is asked with the entity first only: one
+call a candidate instead of two, and most of a save's pair calls. In two runs
+it decided as well as both orders (PhD notes, O-35). Every other comparison
+keeps both orders: it reads a merge bar, and one order moves the merge bars.
+
 Every fact carries its date (when it became true where that is known, else
 when it was recorded). Without dates, "lives in Munich" against "moved to
 Amsterdam last month" read as two people (P(same) 0.54), and a promotion as
@@ -699,11 +708,13 @@ def pair_state(a: Profile, b: Profile) -> str:
 
 
 def judge_pair_and_belongs(
-    decider: Decider, a: Profile, b: Profile
+    decider: Decider, a: Profile, b: Profile, *, one_order: bool = False
 ) -> tuple[dict[str, float] | None, dict[str, float] | None]:
     """The pair question and ``BELONGS_QUESTION`` in one call per order, both
-    averaged over the two orders, the belongs answer keyed from A's side. The
-    pair answer is None when the judge did not answer it in both orders; the
+    averaged over the two orders, the belongs answer keyed from A's side. With
+    ``one_order`` only A first is asked, in one call, and its answers are
+    returned as they are (the known-name check, ``compare``). The pair answer
+    is None when the judge did not answer it in every order asked; the
     belongs answer is None when it did not answer that one, which leaves the
     pair answer as it is."""
     questions = {"pair": PAIR_QUESTION, "belongs": BELONGS_QUESTION}
@@ -712,18 +723,24 @@ def judge_pair_and_belongs(
         answers = decider.decide(state, questions)
         return answers["pair"], answers["belongs"]
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        (pair_ab, belongs_ab), (pair_ba, belongs_ba) = pool.map(
-            ask, (pair_state(a, b), pair_state(b, a)))
-    if not all(x.available and x.probabilities for x in (pair_ab, pair_ba)):
+    if one_order:
+        asked = [ask(pair_state(a, b))]
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            asked = list(pool.map(ask, (pair_state(a, b), pair_state(b, a))))
+    pairs = [pair for pair, _ in asked]
+    if not all(x.available and x.probabilities for x in pairs):
         return None, None
-    pair = {option: (pair_ab.probabilities.get(option, 0.0)
-                     + pair_ba.probabilities.get(option, 0.0)) / 2
+    pair = {option: sum(x.probabilities.get(option, 0.0) for x in pairs) / len(pairs)
             for option in PAIR_QUESTION.criteria}
-    if not all(x.available and x.probabilities for x in (belongs_ab, belongs_ba)):
+    belongs_answers = [belongs for _, belongs in asked]
+    if not all(x.available and x.probabilities for x in belongs_answers):
         return pair, None
-    turned = {BELONGS_SWAP[k]: v for k, v in belongs_ba.probabilities.items() if k in BELONGS_SWAP}
-    belongs = {option: (belongs_ab.probabilities.get(option, 0.0) + turned.get(option, 0.0)) / 2
+    # the answer asked with B first, keyed from A's side
+    keyed = [belongs_answers[0].probabilities] + [
+        {BELONGS_SWAP[k]: v for k, v in x.probabilities.items() if k in BELONGS_SWAP}
+        for x in belongs_answers[1:]]
+    belongs = {option: sum(x.get(option, 0.0) for x in keyed) / len(keyed)
                for option in BELONGS_QUESTION.criteria}
     return pair, belongs
 
@@ -776,7 +793,7 @@ class Verdict:
 
 def compare(
     decider: Decider, backend: MemoryBackend, a: Entity, b: Entity | Mention,
-    compared: int = 0, *, recheck: bool = False,
+    compared: int = 0, *, recheck: bool = False, one_order: bool = False,
 ) -> Verdict:
     """Decide a pair at the funnel steps it has reached since it was last
     compared at step ``compared`` (0: never). Nothing is asked when it has
@@ -796,6 +813,13 @@ def compare(
     a version or a part of the other at ``BELONGS_BAR`` is not merged: it
     waits, and the answer is kept on the verdict. ``recheck`` asks once at
     the step already reached, for a pair compared before a question was added.
+
+    ``one_order`` asks every comparison with A first only, one call instead
+    of two: the known-name check at save, where A is an entity that carries
+    the mention's name and B the mention (``entities._judged_join``). It
+    reads no merge bar, only P(different) against the apart bar, which
+    candidate is likelier, and ``BELONGS_BAR``: measured in the module
+    docstring.
     """
     count_b = 1 if isinstance(b, Mention) else backend.count_entity_memories(b.id)
     smaller = min(backend.count_entity_memories(a.id), count_b)
@@ -829,6 +853,7 @@ def compare(
             decider,
             profile_from(a, choose(pool_a, shown, vectors, ids_b)),
             profile_from(b, choose(pool_b, shown, vectors, ids_a)),
+            one_order=one_order,
         )
         if probabilities is None:
             break
@@ -841,7 +866,8 @@ def compare(
         if verdict.action != "wait":
             break
     if verdict.action == "wait" and verdict.step == PAIR_STEPS[0]:
-        return _in_context(decider, backend, a, b, pool_a, pool_b, vectors, verdict)
+        return _in_context(decider, backend, a, b, pool_a, pool_b, vectors, verdict,
+                           one_order=one_order)
     return verdict
 
 
@@ -870,11 +896,12 @@ def _recorded(memory: Memory) -> datetime | None:
 def _in_context(
     decider: Decider, backend: MemoryBackend, a: Entity, b: Entity | Mention,
     pool_a: list[Memory], pool_b: list[Memory], vectors: dict[str, np.ndarray],
-    verdict: Verdict,
+    verdict: Verdict, *, one_order: bool = False,
 ) -> Verdict:
     """The ``CONTEXT_STEP`` comparison of a pair ``verdict`` left waiting at
     the first step. Nothing is asked while a conversation may still be adding
-    memories; when there is nothing to add, the step counts as done."""
+    memories; when there is nothing to add, the step counts as done.
+    ``one_order`` as in ``compare``."""
     thin = [pool if len(pool) < PAIR_STEPS[1] else [] for pool in (pool_a, pool_b)]
     quiet = datetime.now(timezone.utc) - timedelta(hours=CONTEXT_QUIET_HOURS)
     for memory in thin[0] + thin[1]:
@@ -906,6 +933,7 @@ def _in_context(
         decider,
         profile_from(a, choose(pool_a, shown, vectors, ids_b), context[0]),
         profile_from(b, choose(pool_b, shown, vectors, ids_a), context[1]),
+        one_order=one_order,
     )
     if probabilities is None:
         return verdict

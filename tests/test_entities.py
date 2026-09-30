@@ -745,10 +745,12 @@ def test_a_rewritten_memory_keeps_the_names_it_had(path, judged):
     assert store.merge_proposals(user_id="ada") == []
     assert llm.identity_calls == 0
     if judge is not None:
-        # asked about "Glazeworks" only, once in each order, on the rewritten text
-        assert len(judge.pairs) == 2
-        assert all('"Glazeworks"' in state and '"Kettlebay"' not in state
-                   and REWRITTEN in state for state in judge.pairs)
+        # asked about "Glazeworks" only, a name the store has: once, the
+        # entity first, on the rewritten text
+        [state] = judge.pairs
+        assert '"Glazeworks"' in state and '"Kettlebay"' not in state
+        entity, mention = state.split("ENTITY B")
+        assert "Glazeworks glazes and ships on demand" in entity and REWRITTEN in mention
     assert llm.responses == []
     store.close()
 

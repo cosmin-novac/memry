@@ -263,8 +263,12 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    proposal (a kept-apart pair is recorded too). When the judge cannot answer (an
    outage), the pair waits at step 0 and the weekly pass compares it again.
 3. **The comparison (`compare`).** The judge (Jev) gets both entries side by side, in
-   both orders, and the answers are averaged. Each side shows its name, type,
-   description (if one has been built), whether it is the store owner, and up to 10
+   both orders, and the answers are averaged: asked in one order, the merge bars moved
+   between runs. The check of a name the store already has is the exception: it is asked
+   once, with the entity first and the new memory second, because it reads no merge bar,
+   only P(different) at 0.5, which candidate is likelier, and the belongs bar. That halves
+   the calls of most saves, and in two runs it decided as well as both orders. Each side
+   shows its name, type, description (if one has been built), whether it is the store owner, and up to 10
    memories (50 at the last step): the most recent 30% and the rest closest in embedding
    to the other side's. A memory naming both entries is left out of both sides. Every
    memory carries when it was recorded, when it became true if known, the saved text and

@@ -403,7 +403,8 @@ class MergeProposal(BaseModel):
     #: memories is settled among several entities.
     different: float | None = None
     #: The latest answer to whether one entity is a version or a part of the
-    #: other, averaged over both orders and keyed from A's side
+    #: other, averaged over both orders (or asked with the entity first only,
+    #: for a pair a save's check of a known name left) and keyed from A's side
     #: (``identity.BELONGS_QUESTION``): "a_kind_of_b", "a_part_of_b",
     #: "b_kind_of_a", "b_part_of_a", "neither". None before one was asked.
     belongs: dict[str, float] | None = None

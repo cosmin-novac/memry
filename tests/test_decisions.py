@@ -1343,6 +1343,44 @@ def test_a_pair_merges_on_the_average_of_both_orders():
     store.close()
 
 
+def test_a_known_name_is_asked_with_the_entity_first_only():
+    """A mention of a name the store has is compared with the entity of that
+    name in one call, the entity as A. Here the judge says "another" with the
+    entity first (0.6) and "one thing" with the mention first: averaged
+    (0.3), the mention would have joined. The check reads no merge bar, and
+    one order did no worse on the namesakes it must keep apart (O-35)."""
+    def answer(state):
+        first = state.index("ENTITY A")
+        entity_first = "Finanzamt" in state[first:state.index("ENTITY B")]
+        return (0.3, 0.6) if entity_first else (0.9, 0.0)
+
+    store, save, judge = _judged_store(answer)
+    save("Fundation GmbH's Finanzamt file number is 218/5713")
+    save("Fundation GmbH has 150,000 euros in cash after taxes")
+    assert len(judge.states) == 1
+    assert len(store.entities(user_id="ada")) == 2
+    [proposal] = store.merge_proposals(user_id="ada")
+    assert (proposal.confidence, proposal.different) == (pytest.approx(0.3), pytest.approx(0.6))
+    store.close()
+
+
+def test_one_order_keeps_the_answer_as_the_judge_gave_it():
+    """``judge_pair_and_belongs(one_order=True)`` asks once, A first, and
+    returns that answer unaveraged, the belongs answer keyed as it came."""
+    from memry.intelligence.identity import Profile, judge_pair_and_belongs
+
+    judge = _BelongsJudge(lambda state: (0.7, 0.2), _version_of(0.9))
+    a = Profile("Kestrel planner", "product", ["Kestrel planner runs on Linux"])
+    b = Profile("Kestrel planner v2", "product", ["Kestrel planner v2 added offline mode"])
+    pair, belongs = judge_pair_and_belongs(judge, a, b, one_order=True)
+    assert [_names(state) for state in judge.states] == [("Kestrel planner", "Kestrel planner v2")]
+    assert pair == pytest.approx({"same": 0.7, "different": 0.2, "unsure": 0.1})
+    assert (belongs["b_kind_of_a"], belongs["a_kind_of_b"]) == (0.9, 0.0)
+    pair, belongs = judge_pair_and_belongs(judge, a, b)
+    assert len(judge.states) == 3  # both orders
+    assert (belongs["b_kind_of_a"], belongs["a_kind_of_b"]) == (pytest.approx(0.9), 0.0)
+
+
 @pytest.mark.parametrize("same, different, entities, proposals", [
     (0.97, 0.0, 1, 0),   # merge
     (0.30, 0.60, 2, 1),  # "apart" on one memory waits: APART_STEP

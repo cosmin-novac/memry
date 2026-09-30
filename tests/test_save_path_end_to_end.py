@@ -1520,10 +1520,11 @@ class Checker:
           the store, and 1 more screen per MORE;
         * identity: none without a calibrated judge. With one, per name
           compared, at most 6 questions per candidate (2 orders, at a step
-          of 10 memories and one of 50, and once in context), the candidates
-          being the entities of that name and ``CANDIDATES_PER_NAME`` more,
-          and the same 6 for each open pair of those entities the save
-          compares again.
+          of 10 memories and one of 50, and once in context; an entity of
+          the name itself is asked in 1 order), the candidates being the
+          entities of that name and ``CANDIDATES_PER_NAME`` more, and the
+          same 6 for each open pair of those entities the save compares
+          again.
         """
         budget = self.calls.budget
         text = {k: counts[k] for k in ("extract", "coverage", "reconcile_text", "merge_text")}

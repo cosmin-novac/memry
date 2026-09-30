@@ -744,7 +744,10 @@ def _judged_join(
         # question that has nothing to answer with.
         if _same_name_and_no_evidence(candidate, facts, surface, kind):
             return candidate, {"reason": "one name, and the entity has no memories"}, []
-        verdict = compare(judge, backend, candidate, mention)
+        # A candidate of the mention's name is asked with the entity first
+        # only: this check reads no merge bar (``identity.compare``).
+        verdict = compare(judge, backend, candidate, mention,
+                          one_order=candidate.id in same_name)
         probabilities = verdict.probabilities
         if candidate.id in same_name and not belongs_blocks(
             verdict.belongs, candidate.entity_type, kind
