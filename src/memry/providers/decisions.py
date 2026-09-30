@@ -394,7 +394,11 @@ class JevDecider(Decider):
     # plan with its outcome or two accounts of one event, which the merged
     # text holds whole. No CHANGED and no WRONG was wrong in either set, so
     # the data sets no bar for them: they act from the middle of the scale,
-    # and one Jev is less sure of still waits for a person.
+    # and one Jev is less sure of still waits for a person. Measured again
+    # with the worked examples in CHANGED (``reconcile.ACTION_QUESTION``), two
+    # runs: the wrong SAMEs at 0.83 and below, the same three MOREs above 0.8
+    # (a plan with its outcome, two accounts of one event), and one CHANGED
+    # outside the labels, at 0.31 and 0.33, under its bar. The bars stand.
     reconcile_bars = {"SAME": 0.85, "MORE": 0.8, "CHANGED": 0.5, "WRONG": 0.5}
 
     def __init__(self, cfg: DecisionConfig) -> None:

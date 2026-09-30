@@ -123,6 +123,20 @@ def _normalize(text: str) -> str:
     return _WS_RE.sub(" ", text.lower()).strip()
 
 
+#: CHANGED carries two worked examples, a plan that then happened and a status
+#: that moved on. Without them Jev read a plan followed by its outcome ("is
+#: planning to run the marathon in April", then "ran the marathon") as MORE
+#: at 0.34 to 0.80, mostly under MORE's bar, so the plan stayed in use beside
+#: what happened. With them (``evals/reconcile_benchmark.py``, the questions
+#: of two cases runs asked again, two runs each) those answers were CHANGED at
+#: 0.54 to 0.81, and a renovation started, then finished, CHANGED at 0.75 to
+#: 0.98; the plan cases ended right in 3 of 4 in both layouts in two runs.
+#: Recurring events stayed NEW, added details MORE and corrections WRONG, and
+#: the measured bars (``JevDecider.reconcile_bars``) still fit the labelled
+#: answers. The cost: a plan followed by a later stage ("plans to apply", then
+#: "was accepted, starting in the fall", then "started"), which MORE merged at
+#: 0.46 to 0.90, is MORE at 0.24 to 0.69 and stays beside the plan. An example
+#: in MORE as well lowered MORE on real added details, so MORE has none.
 ACTION_QUESTION = Choice(
     instructions=("Each EXISTING memory was said on the date shown; the NEW fact was just "
                   "said, on its date. What is the NEW fact, compared with the existing "
@@ -137,7 +151,9 @@ ACTION_QUESTION = Choice(
                  "stands."),
         "CHANGED": ("One existing memory was true when it was said, but the new fact says it "
                     "is no longer true now: a place, job, price, amount, plan, status or "
-                    "preference has changed since."),
+                    "preference has changed since. For example: \"plans to visit Oslo in "
+                    "May\", then \"visited Oslo last week\" (the plan happened); \"is building "
+                    "a shed\", then \"finished the shed\" (the status moved on)."),
         "WRONG": "It corrects one existing memory: that memory was never true.",
     },
 )

@@ -458,7 +458,9 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
      the old one as an update.
    - CHANGED: the memory was true and is no longer. The new memory is added and the old
      one's validity ends at its date (`invalid_at`, `superseded_by`), superseded as an
-     update.
+     update. The decision provider's question gives two examples of it, a plan that then
+     happened and a status that moved on: without them Jev read "is planning to run the
+     marathon", then "ran the marathon" as MORE under its bar, and the plan stayed in use.
    - WRONG: the memory was never true (a correction). It is superseded as a contradiction.
    SAME, MORE, CHANGED and WRONG act only at or above the decision provider's bar for that
    answer (`Decider.reconcile_bars`, measured for Jev with `evals/reconcile_benchmark.py`;

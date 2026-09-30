@@ -365,9 +365,36 @@ def test_the_question_offers_the_five_answers_and_shows_dates():
                      "this week\n\nNEW fact (said 13 April 2026):\nMaria is in Rome this week")
 
 
+def test_changed_carries_the_measured_worked_examples_and_more_none():
+    """The wording measured with Jev (``ACTION_QUESTION``'s comment): CHANGED
+    shows a plan that then happened and a status that moved on, so a plan
+    followed by its outcome is not read as a detail added to the plan. MORE
+    shows no example; one there lowered MORE on real added details."""
+    changed = ACTION_QUESTION.criteria["CHANGED"]
+    assert changed.endswith(
+        'For example: "plans to visit Oslo in May", then "visited Oslo last week" (the plan '
+        'happened); "is building a shed", then "finished the shed" (the status moved on).')
+    assert ACTION_QUESTION.criteria["MORE"] == (
+        "It adds detail to one existing memory, and that memory is still true as it stands.")
+    for option in ("NEW", "SAME", "MORE", "WRONG"):
+        assert "For example" not in ACTION_QUESTION.criteria[option]
+
+
 def test_jev_has_a_measured_bar_for_every_answer_that_acts():
     assert set(JevDecider.reconcile_bars) == {"SAME", "MORE", "CHANGED", "WRONG"}
     assert NoneDecider.reconcile_bars is None  # unmeasured: SupersedeConfig.confidence
+
+
+def test_jevs_reconcile_bars_are_the_measured_values():
+    """Jev's bars are the values measured on its recorded answers to the
+    reconcile question, in both wordings: ``evals/reconcile_benchmark.py
+    bars`` recomputes them from the recorded answers and labels kept in the
+    PhD repository's ``data/reconcile`` folder. A bar moved without a new
+    measurement fails here, and the stub these tests act through
+    (``BARS``) holds the same values, so what they test is what Jev does."""
+    measured = {"SAME": 0.85, "MORE": 0.8, "CHANGED": 0.5, "WRONG": 0.5}
+    assert JevDecider.reconcile_bars == measured
+    assert BARS == measured
 
 
 # ---------------------------------------------------------- the benchmark
