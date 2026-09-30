@@ -1215,6 +1215,72 @@ def test_the_runners_memory_list_is_memrys_rendering_with_the_evidence():
         ingested.turn_of_episode[t.episode_id] for t in turns]
 
 
+def test_compared_evidence_answers_come_from_the_same_search():
+    """--compare-evidence-tokens 0 answers each k again from the memories of
+    the one search made, without their turns, and judges those answers as
+    the others, counting their calls under stages of their own."""
+    class SummaryLLM(RuleLLM):
+        def complete(self, system, user, *, json_schema=None):
+            raw = super().complete(system, user, json_schema=json_schema)
+            if not system.startswith("You are the long-term memory extraction system"):
+                return raw
+            facts = json.loads(raw)["facts"]
+            for fact in facts:
+                fact["content"] = " ".join(fact["content"].split()[:5])
+            return json.dumps({"facts": facts})
+
+    judged: list[tuple[str, str]] = []
+
+    def judge(question, gold, prediction):
+        judged.append((api_usage.current_stage(), prediction))
+        return prediction == "Pepper"
+
+    conv = xb.load_locomo(LOCOMO)[0]
+    # the reply says whether the memory list held a turn ("8 May 2023: Maya: ...")
+    chat = ScriptedChat(lambda messages: "Pepper" if re.search(
+        r'"\d{1,2} [A-Z][a-z]+ \d{4}: ', messages[0]["content"]) else "Unknown")
+    store = MemoryStore(Config(db_path=":memory:"), llm=SummaryLLM(),
+                        embedder=HashEmbedder(128))
+    searches = []
+    try:
+        ingested = xb.ingest(store, conv, mode="extract", unit="session", dataset="locomo")
+        search = store.search
+
+        def counted(*args, **kwargs):
+            searches.append(args)
+            return search(*args, **kwargs)
+
+        store.search = counted
+        question = conv.questions[0]
+        row = xb.ask(ingested, question, k=3, ks=[3, 5], answer_llm=chat, judge=judge,
+                     answer_prompt=mem0_judge.answer_messages, judge_runs=2,
+                     compare_evidence_tokens=0)
+        results = search(question.question, user_id=xb.BENCH_USER, limit=xb.DEPTH,
+                         evidence=False)
+    finally:
+        store.close()
+    assert len(searches) == 1
+    assert set(row["answers"]) == set(row["answers_compared"]) == {"3", "5"}
+    sent = [messages for messages, _ in chat.sent]
+    for at in (3, 5):
+        facts_only = mem0_judge.answer_messages(
+            question.question, memory_lines([r.memory for r in results[:at]]))
+        assert facts_only in sent
+        compared = row["answers_compared"][str(at)]
+        assert compared["evidence"] == [] and compared["k"] == at
+        assert len(compared["judges"]) == 2 and "f1_mem0" in compared
+    # the headline answers were shown their turns, the compared ones none
+    assert row["answers"]["3"]["evidence"] and row["answers"]["3"]["prediction"] == "Pepper"
+    assert row["answers_compared"]["3"]["prediction"] == "Unknown"
+    assert len(sent) == 4 and len(judged) == 8
+    assert sorted({stage for stage, _ in judged}) == ["judge", "judge:compared"]
+    assert sum(stage == "judge:compared" for stage, _ in judged) == 4
+    tables = xb.pass_tables([row], ["store"])[0]
+    assert set(tables["compared_by_k"]) == {"3", "5"}
+    assert tables["compared_by_k"]["3"]["overall"]["judge"] == 0.0
+    assert tables["tables_by_k"]["3"]["overall"]["judge"] == 1.0
+
+
 def test_mem0_f1_and_bleu1_are_mem0s():
     # Mem0's calculate_metrics: token sets after simple_tokenize, the whole gold
     assert xb.mem0_f1("The Red car.", "red car") == pytest.approx(0.8)

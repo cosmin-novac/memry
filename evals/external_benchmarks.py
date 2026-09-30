@@ -46,7 +46,11 @@ context builder renders them for a model (``intelligence.context.
 memory_lines``): each with the date its event happened, where known, and the
 date it was said, then their source turns that best match the question
 (``MemoryStore.evidence``, within the store's ``retrieval.evidence_tokens``;
---evidence-tokens sets it, 0 shows none):
+--evidence-tokens sets it, 0 shows none). --compare-evidence-tokens N answers
+each question a second time from the same search, its turns chosen within N
+tokens (0: the memories alone), with no further search: those answers are
+scored and judged as the others, kept under the row's "answers_compared" and
+counted under the stages "answer:compared" and "judge:compared":
 
   f1        token F1 after SQuAD normalisation (lower case, punctuation and
             the articles a/an/the removed); by LoCoMo's rules, a multi-hop
@@ -1097,19 +1101,26 @@ ANSWER_FIELDS = ("prediction", "answer_error", "answer_seconds", "context_tokens
                  "judge_error", "judge_corrected", "judges_corrected", "judge_clean")
 
 
-def judge_answers(answers: dict[int, dict[str, Any]], question: Question, judge: Judge,
-                  runs: int, pool: Any, correction: dict[str, Any] | None) -> None:
+def judge_answers(answers: dict[Any, dict[str, Any]], question: Question, judge: Judge,
+                  runs: int, pool: Any, correction: dict[str, Any] | None,
+                  stages: dict[Any, str] | None = None) -> None:
     """Score each answer (``lexical_scores``) and judge it ``runs`` times,
     every call in ``pool`` at once when given. With ``correction`` (an
     audited question's corrected answer) each answer is judged against it
     too: ``judge_corrected`` is that verdict; without, ``judge_corrected``
     is the verdict against the file's answer and ``judge_clean`` the same
-    (the mean over the questions the audit left alone)."""
+    (the mean over the questions the audit left alone). ``stages`` (key of
+    ``answers`` -> stage) counts an answer's judge calls under a stage of
+    their own (``api_usage.stage``; default: the caller's)."""
     gold = judged_gold(question, judge)
     golds = [("", gold)] + ([("_corrected", correction["correct_answer"])] if correction else [])
+    stages = stages or {}
 
-    def once(truth: str, prediction: str) -> tuple[bool | None, str | None]:
+    def once(stage: str | None, truth: str, prediction: str) -> tuple[bool | None, str | None]:
         try:
+            if stage:
+                with api_usage.stage(stage):
+                    return bool(judge(question.question, truth, prediction)), None
             return bool(judge(question.question, truth, prediction)), None
         except Exception as exc:  # one failed judgement must not end a long run
             return None, str(exc)[:300]
@@ -1119,7 +1130,7 @@ def judge_answers(answers: dict[int, dict[str, Any]], question: Question, judge:
         record.update(lexical_scores(record["prediction"], question))
         for suffix, truth in golds:
             for run in range(runs):
-                args = (truth, record["prediction"])
+                args = (stages.get(k), truth, record["prediction"])
                 pending[(k, suffix, run)] = (pool.submit(contextvars.copy_context().run, once, *args)
                                              if pool is not None else None, args)
     for (k, suffix, run), (future, args) in pending.items():
@@ -1143,14 +1154,19 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
         judge: Judge = containment_judge, use_context: bool = False,
         answer_prompt: AnswerPrompt | None = None, search_stage: str = "search",
         ks: list[int] | None = None, judge_runs: int = 1, pool: Any = None,
-        correction: dict[str, Any] | None = None) -> dict[str, Any]:
+        correction: dict[str, Any] | None = None,
+        compare_evidence_tokens: int | None = None) -> dict[str, Any]:
     """Search for one question once, score what came back, and answer when
     asked: from the top k of that search for each k of ``ks`` (default
     ``[k]``), each answer judged ``judge_runs`` times (``judge_answers``).
     The row carries the answer at ``k`` at its top level and every answer
     under "answers". The model calls are counted under ``search_stage``,
     "answer" and "judge"; with ``pool`` (a thread pool) a question's answer
-    calls, and then its judge calls, run at once."""
+    calls, and then its judge calls, run at once. With
+    ``compare_evidence_tokens`` each k is answered a second time from the
+    same memories, their turns chosen within that many tokens (0: none),
+    kept under "answers_compared" and counted under "answer:compared" and
+    "judge:compared"."""
     ks = sorted(set(ks or [k]) | {k})
     depth = max(DEPTH, *ks)
     store = ingested.store
@@ -1183,6 +1199,7 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
     if correction is not None:
         row["audit"] = {key: correction.get(key) for key in ("error_type", "correct_answer")}
     answers: dict[int, dict[str, Any]] = {}
+    compared: dict[int, dict[str, Any]] = {}
     if use_context:
         with api_usage.stage(search_stage):
             context = store.reconstruct_context(question.question, user_id=BENCH_USER, limit=k,
@@ -1203,30 +1220,48 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
             answers[k] = record
     else:
         top = [r.memory for r in results]
+        # each variant's evidence budget (None: the store's own), as its answer stage names it
+        budgets = {"answer": None}
+        if compare_evidence_tokens is not None:
+            budgets["answer:compared"] = compare_evidence_tokens
         # the source turns of each k's memories, as a search of that depth chooses them
         with api_usage.stage(search_stage):
-            turns = {at: store.evidence(question.question, results[:at], user_id=BENCH_USER)
-                     for at in ks}
-        with api_usage.stage("answer"):
-            if pool is not None and len(ks) > 1:
-                futures = {at: pool.submit(contextvars.copy_context().run, answer_with,
-                                           answer_llm, question, top[:at], answer_prompt,
-                                           turns[at])
-                           for at in ks}
-                answers = {at: future.result() for at, future in futures.items()}
-            else:
-                answers = {at: answer_with(answer_llm, question, top[:at], answer_prompt,
-                                           turns[at])
-                           for at in ks}
-        for at, record in answers.items():
+            turns = {(name, at): store.evidence(question.question, results[:at],
+                                                user_id=BENCH_USER, token_budget=budget)
+                     for name, budget in budgets.items() for at in ks}
+        if pool is not None and len(turns) > 1:
+            futures = {key: pool.submit(contextvars.copy_context().run, staged, key[0],
+                                        answer_with, answer_llm, question, top[:key[1]],
+                                        answer_prompt, shown)
+                       for key, shown in turns.items()}
+            done = {key: future.result() for key, future in futures.items()}
+        else:
+            done = {key: staged(key[0], answer_with, answer_llm, question, top[:key[1]],
+                                answer_prompt, shown)
+                    for key, shown in turns.items()}
+        for key, record in done.items():
             record["evidence"] = [ingested.turn_of_episode.get(t.episode_id, t.episode_id)
-                                  for t in turns[at]]
+                                  for t in turns[key]]
+        answers = {at: done[("answer", at)] for at in ks}
+        compared = {at: done[("answer:compared", at)] for at in ks
+                    if ("answer:compared", at) in done}
+    everything: dict[Any, dict[str, Any]] = {**answers}
+    everything.update({("compared", at): record for at, record in compared.items()})
     with api_usage.stage("judge"):
-        judge_answers(answers, question, judge, judge_runs, pool, correction)
+        judge_answers(everything, question, judge, judge_runs, pool, correction,
+                      stages={("compared", at): "judge:compared" for at in compared})
     row["answer_k"] = answers[k]["k"]
     row.update({key: answers[k][key] for key in ANSWER_FIELDS if key in answers[k]})
     row["answers"] = {str(at): answer for at, answer in answers.items()}
+    if compared:
+        row["answers_compared"] = {str(at): answer for at, answer in compared.items()}
     return row
+
+
+def staged(stage: str, function: Callable[..., Any], *args: Any) -> Any:
+    """``function(*args)`` with its calls counted under ``stage``."""
+    with api_usage.stage(stage):
+        return function(*args)
 
 
 METRICS = ("recall@5", "recall@10", "recall@20", "mrr", "context_recall",
@@ -1463,7 +1498,9 @@ def _qualname(function: Any) -> str | None:
 
 def pass_tables(rows: list[dict[str, Any]], names: list[str]) -> list[dict[str, Any]]:
     """Each question pass's tables, from its rows; with answers at several k,
-    ``tables_by_k`` holds the tables of the answers at each k."""
+    ``tables_by_k`` holds the tables of the answers at each k, and with
+    answers under another evidence budget (``answers_compared``),
+    ``compared_by_k`` holds theirs."""
     out = []
     for name in names:
         mine = [r for r in rows if r.get("search_decider", name) == name]
@@ -1474,6 +1511,12 @@ def pass_tables(rows: list[dict[str, Any]], names: list[str]) -> list[dict[str, 
                 str(at): aggregate([{**r, **r["answers"][str(at)]} for r in mine
                                     if str(at) in (r.get("answers") or {})])
                 for at in ks}
+        compared = sorted({int(at) for r in mine for at in r.get("answers_compared") or {}})
+        if compared:
+            entry["compared_by_k"] = {
+                str(at): aggregate([{**r, **r["answers_compared"][str(at)]} for r in mine
+                                    if str(at) in (r.get("answers_compared") or {})])
+                for at in compared}
         out.append(entry)
     return out
 
@@ -1525,7 +1568,8 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                   corrections: dict[str, dict[str, Any]] | None = None,
                   decider: str = "config", store_dir: str | os.PathLike[str] | None = None,
                   full_context: bool = False,
-                  evidence_tokens: int | None = None) -> dict[str, Any]:
+                  evidence_tokens: int | None = None,
+                  compare_evidence_tokens: int | None = None) -> dict[str, Any]:
     """Ingest each conversation into a fresh store and ask its questions once
     per pass of ``search_deciders`` (name -> the decision provider the store
     asks with, given it once the conversation is loaded; default: the store's
@@ -1539,7 +1583,9 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
     ``make_store`` (a store in memory, or <store_dir>/<conversation>.sqlite).
     ``full_context`` answers from the whole conversation instead, with no
     store and no search. ``evidence_tokens`` sets each store's
-    ``retrieval.evidence_tokens`` (None keeps its own). Returns {config, stores, passes, tables (the first
+    ``retrieval.evidence_tokens`` (None keeps its own);
+    ``compare_evidence_tokens`` answers each k again from the same search
+    with the turns chosen within that many tokens (``ask``). Returns {config, stores, passes, tables (the first
     pass's), rows, warnings, notes, complete}. A call refused at a cap
     (``api_usage.CapReached``) ends the run where it is: what was done is
     kept, "complete" is false and "stopped" says where."""
@@ -1618,7 +1664,8 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                                 ingested, question, k=k, answer_llm=answer_llm, judge=judge,
                                 use_context=use_context, answer_prompt=answer_prompt,
                                 search_stage=f"search:{name}", ks=ks, judge_runs=judge_runs,
-                                pool=pool, correction=corrections.get(question.qid))})
+                                pool=pool, correction=corrections.get(question.qid),
+                                compare_evidence_tokens=compare_evidence_tokens)})
                     finally:
                         entry[f"seconds_{name}"] = round(time.perf_counter() - started, 2)
                         if decider is not None:
@@ -1662,6 +1709,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                    "judge_function": _qualname(judge),
                    "search_deciders": names,
                    "context": use_context, "when": when, "evidence_tokens": evidence_tokens,
+                   "compare_evidence_tokens": compare_evidence_tokens,
                    "locomo_categories": LOCOMO_CATEGORIES if dataset == "locomo" else None},
         "stores": stores,
         "passes": tables,
@@ -1796,6 +1844,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="the source turns shown with the memories, at most N tokens "
                              "(retrieval.evidence_tokens; 0 shows none; default: the "
                              "store's own)")
+    parser.add_argument("--compare-evidence-tokens", type=int, default=None, metavar="N",
+                        help="answer each question again from the same search with the "
+                             "source turns within N tokens (0: the memories alone), "
+                             "kept under the row's answers_compared; no further search")
     parser.add_argument("--judge", default=None,
                         help="module:function(question, gold, prediction) -> bool "
                              "(default: containment)")
@@ -2080,7 +2132,8 @@ def main(argv: list[str] | None = None) -> int:
                         categories=set(args.category_set) if args.category_set else None,
                         workers=args.workers, corrections=corrections, decider=args.decider,
                         store_dir=args.store_dir, full_context=args.full_context,
-                        evidence_tokens=args.evidence_tokens)
+                        evidence_tokens=args.evidence_tokens,
+                        compare_evidence_tokens=args.compare_evidence_tokens)
 
         def finish(part: dict[str, Any]) -> dict[str, Any]:
             part["file"] = str(path)
@@ -2141,6 +2194,10 @@ def main(argv: list[str] | None = None) -> int:
         print("\n" + markdown_table(part["tables"]))
         for at, tables in (part.get("tables_by_k") or {}).items():
             print(f"\n#### answered from the top {at}\n\n" + markdown_table(tables))
+        for at, tables in (part.get("compared_by_k") or {}).items():
+            print(f"\n#### answered from the top {at}, the turns within "
+                  f"{result['config'].get('compare_evidence_tokens')} tokens\n\n"
+                  + markdown_table(tables))
     for row in (result.get("usage") or {}).get("by_stage", []):
         print(f"\nusage: {row['grp']} {row['model']} {row['stage']}: {row['calls']} calls, "
               f"{row['input_tokens']} in, {row['output_tokens']} out, {row['seconds']:.0f} s",
