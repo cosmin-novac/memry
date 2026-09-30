@@ -1000,3 +1000,496 @@ def test_without_turns_a_word_weighs_as_bm25_weighs_it(stores):
         "SELECT m.id FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid "
         "WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts), m.id LIMIT 40", (match,))
     assert ranked == [row["id"] for row in rows]
+
+
+# ================================================ rows the benchmark measured
+# The relative retrieval benchmark (``evals/relative_retrieval_benchmark.py``)
+# measures these families with real vectors and Jev. The rules they rest on
+# are stubs' business: how the links weigh a version, an occurrence and a
+# sibling, the sharpness of the property comparison, the judge's shortlist,
+# and a set question starting at the owner. Each is tested in a store of
+# around a hundred memories or more, where the rule decides, and each has a
+# companion that takes the rule away.
+class _ReleaseEmbedder(_SenseEmbedder):
+    """``_SenseEmbedder`` with the senses of releases, events and purchases."""
+
+    SENSES = {**_SenseEmbedder.SENSES,
+              "storage": "store stores stored data database keeps",
+              "add": "add adds added introduced",
+              "venue": "take takes took place held hosted",
+              "attend": "attendees attended attendance",
+              "car": "car cars",
+              "cheap": "cheapest cheap costs cost quoted price euros",
+              "drive": "drive drove driven",
+              "dine": "restaurants restaurant food dinner lunch"}
+
+
+def _belongs(store, child, parent, p=0.9, kind="kind"):
+    """A compared pair: ``child`` is a version or an occurrence ("kind") or a
+    part of ``parent``, and not the same thing."""
+    from memry.models import MergeProposal
+
+    belongs = {"a_kind_of_b": 0.0, "a_part_of_b": 0.0, "b_kind_of_a": 0.0,
+               "b_part_of_a": 0.0, "neither": round(1.0 - p, 6)}
+    belongs[f"a_{kind}_of_b"] = p
+    store.backend.add_proposal(MergeProposal(
+        entity_a=child.id, entity_b=parent.id, user_id=USER, confidence=0.1,
+        different=0.9, belongs=belongs))
+
+
+def _links_weigh_nothing(monkeypatch, store):
+    """The rule taken away: the links reach every entity of the store as the
+    one the question names (1.0, none by a step up), so what a memory is
+    tagged with no longer tells it from another's: each is read with its
+    names as "it", counts 1.0, and no answer yields to a nearer one."""
+    everyone = {e.id: 1.0 for e in store.backend.list_entities(Scope(user_id=USER), limit=1000)}
+    monkeypatch.setattr(store_module, "activation_paths",
+                        lambda backend, seeds, depth=1: (dict(everyone), set()))
+
+
+# -------------------------------------------- the sharpness of the property
+# The linked order is property similarity to the power
+# ``relational_sharpness``, times aboutness (``_linked_order``). At 1.0 a
+# version's own answer comes before its thing's where it states the property
+# at least 0.72 as well as the thing's does (UP_KIND x 0.9); at 2.0 or 3.0
+# the worded overrides of the benchmark fell to 0.06 and 0.00.
+OVERRIDE = "With its third release, bildy moved its data to CouchDB"
+
+
+def _a_worded_override(stores):
+    """bildy, a product with 25 memories, "bildy stores its data in SQLite"
+    among them; its versions v1 to v3, 11 memories each, and v3's worded
+    override; 30 notes: 89 memories, searched by vectors alone."""
+    store = stores(_ReleaseEmbedder(names=["bildy", "bildy v1", "bildy v2", "bildy v3"]))
+    bildy = _entity(store, "bildy", "product")
+    thing = _remember(store, "bildy stores its data in SQLite", [bildy])
+    for i in range(24):
+        _remember(store, f"bildy had its sprint review number {i} on {STREETS[i % 20]} day",
+                  [bildy])
+    versions = {}
+    for n in (1, 2, 3):
+        version = versions[n] = _entity(store, f"bildy v{n}", "product")
+        _belongs(store, version, bildy)
+        for i in range(11):
+            _remember(store, f"bildy v{n} fixed bug number {100 * n + i}", [version])
+    answer = _remember(store, OVERRIDE, [versions[3]])
+    for i in range(30):
+        _remember(store, f"Note {i}: renew the parking permit before the month ends")
+    store.refresh_property_vectors(user_id=USER)
+    store.config.retrieval.relational_relevance = "vector"
+    return store, answer, thing
+
+
+def test_a_versions_worded_override_comes_first_at_the_default_sharpness(stores):
+    """"Where does bildy v3 store its data?" reads "Where does it
+    store its data?". v3's own answer ("With its third release, it moved
+    its data to CouchDB") states it at 0.8 of bildy's ("it stores its data
+    in SQLite"), whose memories count 0.72: at the default sharpness of 1.0
+    v3's answer comes first."""
+    assert Config().retrieval.relational_sharpness == 1.0
+    store, answer, thing = _a_worded_override(stores)
+    results = store.search("Where does bildy v3 store its data?", user_id=USER, limit=5)
+    assert "about" in results[0].signals
+    assert _ids(results)[:2] == [answer.id, thing.id]
+
+
+def test_a_versions_worded_override_comes_first_at_the_default_sharpness_fails_without_the_rule(
+        stores):
+    """At a sharpness of 2.0 the similarities are squared, 0.8 becomes 0.64,
+    under 0.72, and bildy's default comes before v3's own answer."""
+    store, answer, thing = _a_worded_override(stores)
+    store.config.retrieval.relational_sharpness = 2.0
+    results = store.search("Where does bildy v3 store its data?", user_id=USER, limit=5)
+    assert _ids(results)[:2] == [thing.id, answer.id]
+
+
+# ------------------------------------------------------ versions in words
+# Worded versions: "The first release of bildy added ..." says no "v1", so
+# the text cannot tell the releases apart; the entity each memory is tagged
+# with does (aboutness: the version asked 1.0, another release, which the
+# links do not reach, ``LOW``).
+FEATURES = ["a timeline view", "dark mode", "CSV export", "two-factor login", "a plugin API",
+            "shared folders", "voice notes", "calendar sync", "an audit log", "bulk editing",
+            "keyboard shortcuts", "a public API", "tagging", "comments", "a mobile widget",
+            "PDF export", "search filters", "offline maps", "a web clipper", "emoji reactions",
+            "a kanban board", "spell check", "read receipts", "a dark icon"]
+ORDINALS = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
+            "ninth"]
+FIRST_RELEASE = ("The first release of bildy added a timeline view, which the team had "
+                 "promised for a year")
+
+
+def _worded_releases(stores):
+    """bildy (20 memories) and nine releases, each a version of bildy, each
+    tagged on its own memories. The first release: the answer, worded as
+    people write it, and five more. The other eight: three features each,
+    "The second release of bildy added dark mode", shorter than the
+    answer. 30 notes: 80 memories."""
+    names = ["bildy", *[f"bildy v{n}" for n in range(1, 10)]]
+    store = stores(_ReleaseEmbedder(names=names))
+    bildy = _entity(store, "bildy", "product")
+    for i in range(20):
+        _remember(store, f"bildy had its sprint review number {i} on {STREETS[i % 20]} day",
+                  [bildy])
+    releases = {}
+    for n in range(1, 10):
+        releases[n] = _entity(store, f"bildy v{n}", "product")
+        _belongs(store, releases[n], bildy)
+    answer = _remember(store, FIRST_RELEASE, [releases[1]], days_ago=400)
+    for i in range(5):
+        _remember(store, f"The first release of bildy fixed bug number {i}", [releases[1]],
+                  days_ago=400)
+    for n in range(2, 10):
+        for k in range(3):
+            _remember(store, f"The {ORDINALS[n - 1]} release of bildy added "
+                             f"{FEATURES[(3 * n + k) % len(FEATURES)]}", [releases[n]],
+                      days_ago=10 - n)
+    for i in range(30):
+        _remember(store, f"Note {i}: renew the parking permit before the month ends")
+    store.refresh_property_vectors(user_id=USER)
+    return store, answer
+
+
+def _what_v1_added(store):
+    store.decider = judge = _Judge(scores={"added": 0.9}, rest=0.05)
+    return judge, store.search("What did bildy v1 add?", user_id=USER, limit=5)
+
+
+def test_only_the_entity_tells_worded_releases_apart_at_scale(stores):
+    """"What did bildy v1 add?" reads "What did it add?". The answer says
+    no "v1" ("The first release of bildy added a timeline view, ..."), and
+    the 24 features of the eight other releases say as much ("The second
+    release of bildy added dark mode"). What tells them apart is the entity
+    each is tagged with: bildy v1, the one asked (1.0, its names and
+    bildy's read "it"), or a release the links do not reach (0.3, read as
+    written). Judged alike, the answer comes first."""
+    store, answer = _worded_releases(stores)
+    judge, results = _what_v1_added(store)
+    assert judge.states == ["QUESTION: What did it add?"]
+    assert answer.content.replace("bildy", "it") in judge.read
+    assert results[0].memory.id == answer.id and results[0].signals["about"] == 1.0
+
+
+def test_only_the_entity_tells_worded_releases_apart_at_scale_fails_without_the_rule(
+        stores, monkeypatch):
+    """Where the links reach every release alike, each is read as the one
+    asked ("The second release of it added dark mode", shorter than the
+    answer and nearer "What did it add?") and counts 1.0: the 24 features
+    of the other releases fill the 20 the judge reads, and the first
+    release's answer is lost."""
+    store, answer = _worded_releases(stores)
+    _links_weigh_nothing(monkeypatch, store)
+    judge, results = _what_v1_added(store)
+    assert answer.content.replace("bildy", "it") not in judge.read
+    assert answer.id not in _ids(results)
+
+
+# ---------------------------------------------- an event and its editions
+# An occurrence of an event series takes what is true of the series where it
+# says nothing itself (the series 0.72, UP_KIND x 0.9), its own memory over
+# the series' (1.0, and the series' answer yields to it), and its own over a
+# sibling occurrence's (``LOW``: the links do not reach a sibling at depth 1).
+SERIES_CITY = "Tovel Forum takes place in Lyon each year"
+MOVED = "Tovel Forum 2025 was held in Graz for one year while the Lyon hall was rebuilt"
+ATTENDED = ("Tovel Forum 2023 was attended by 356 people, fewer than planned because of "
+            "the rail strike")
+TOPICS = ["open data", "edge computing", "soil health", "typography", "accessibility",
+          "robotics", "urban farming", "privacy", "energy", "maps"]
+
+
+def _an_event_series(stores):
+    """Tovel Forum (21 memories) and its editions 2019 to 2025 (10 memories
+    each), each an occurrence of the series. 2025 moved to Graz; the other
+    editions say where their parts took place ("The Tovel Forum 2023
+    opening took place in Turin", shorter than the series' city); every
+    edition but 2023 says "had N attendees", and 2023 says it in more
+    words. 30 notes: 121 memories."""
+    names = ["Tovel Forum", *[f"Tovel Forum {year}" for year in range(2019, 2026)]]
+    store = stores(_ReleaseEmbedder(names=names))
+    series = _entity(store, "Tovel Forum", "event")
+    found = {"city": _remember(store, SERIES_CITY, [series])}
+    for i in range(20):
+        _remember(store, f"Tovel Forum has a track on {TOPICS[i % 10]} number {i}", [series])
+    cities = ["Turin", "Porto", "Graz", "Riga", "Brno", "Ghent"]
+    for year in range(2019, 2026):
+        edition = _entity(store, f"Tovel Forum {year}", "event")
+        _belongs(store, edition, series)
+        o = f"Tovel Forum {year}"
+        if year == 2023:
+            found["attended"] = _remember(store, ATTENDED, [edition])
+        else:
+            _remember(store, f"{o} had {300 + year % 100} attendees", [edition])
+        if year == 2025:
+            found["moved"] = _remember(store, MOVED, [edition])
+        elif year != 2024:
+            for part in ("opening", "party", "workshop day"):
+                _remember(store, f"The {o} {part} took place in {cities[year % 6]}", [edition])
+        while store.backend.count_entity_memories(edition.id) < 10:
+            k = store.backend.count_entity_memories(edition.id)
+            _remember(store, f"The keynote at {o} was about {TOPICS[(year + k) % 10]}",
+                      [edition])
+    for i in range(30):
+        _remember(store, f"Note {i}: renew the parking permit before the month ends")
+    store.refresh_property_vectors(user_id=USER)
+    return store, found
+
+
+def _asked(store, question, scores):
+    store.decider = judge = _Judge(scores=scores, rest=0.03)
+    return judge, store.search(question, user_id=USER, limit=5)
+
+
+WHERE = {"place": 0.9, "Graz": 0.9}
+HOW_MANY = {"attend": 0.9}
+
+
+def test_an_occurrence_takes_its_series_fact_over_a_siblings_own_at_scale(stores):
+    """"Where did Tovel Forum 2024 take place?": 2024 says nothing of
+    where. The judge scores the series' city and the other editions' "took
+    place" alike; the series counts 0.72 for 2024, an edition the links do
+    not reach 0.3, and the series' city comes first."""
+    store, found = _an_event_series(stores)
+    judge, results = _asked(store, "Where did Tovel Forum 2024 take place?", WHERE)
+    assert "it takes place in Lyon each year" in judge.read
+    assert results[0].memory.id == found["city"].id
+
+
+def test_an_occurrences_own_answer_overrides_its_series_at_scale(stores):
+    """"Where did Tovel Forum 2025 take place?": its own memory says Graz
+    (1.0), the series' says Lyon (0.72, and yielding to the edition's own
+    answer); judged alike, Graz comes first, though the series' city is
+    nearer the question."""
+    store, found = _an_event_series(stores)
+    judge, results = _asked(store, "Where did Tovel Forum 2025 take place?", WHERE)
+    assert found["moved"].content.replace("Tovel Forum 2025", "it") in judge.read
+    assert results[0].memory.id == found["moved"].id
+
+
+def test_an_occurrences_own_fact_comes_before_its_siblings_at_scale(stores):
+    """"How many attendees did Tovel Forum 2023 have?": six other
+    editions say "had N attendees", in fewer words than 2023's own answer;
+    judged alike, 2023's (1.0) comes before theirs (0.3)."""
+    store, found = _an_event_series(stores)
+    judge, results = _asked(store, "How many attendees did Tovel Forum 2023 have?", HOW_MANY)
+    assert found["attended"].content.replace("Tovel Forum 2023", "it") in judge.read
+    assert results[0].memory.id == found["attended"].id
+
+
+@pytest.mark.parametrize("question,scores,answer", [
+    ("Where did Tovel Forum 2024 take place?", WHERE, "city"),
+    ("Where did Tovel Forum 2025 take place?", WHERE, "moved"),
+    ("How many attendees did Tovel Forum 2023 have?", HOW_MANY, "attended"),
+])
+def test_an_occurrence_is_told_from_its_series_and_siblings_fails_without_the_rule(
+        stores, monkeypatch, question, scores, answer):
+    """Where the links reach every edition and the series alike, what the
+    judge scores alike goes by the order it was judged in, the nearer text
+    first: the other editions' "took place" come before the series' city
+    and before 2025's own, their "had N attendees" before 2023's."""
+    store, found = _an_event_series(stores)
+    _links_weigh_nothing(monkeypatch, store)
+    _, results = _asked(store, question, scores)
+    assert results[0].memory.id != found[answer].id
+
+
+# ------------------------------------------- a thing's answer and a version
+# The dense world's "Which platforms does bildy v2 run on?": the answer is
+# bildy's (0.72 for v2), and v2's own memories (1.0), none of which answers,
+# compete. The judge reads the first 20 of the linked order and orders them
+# by its judgement times aboutness: 0.9 x 0.72 for the answer against 0.05 x
+# 1.0 for each of v2's own. By vectors alone v2's own near miss comes first.
+PLATFORMS = "bildy runs on Linux and macOS"
+NEAR_MISS = "bildy v2 runs its Windows installer silently"
+
+
+def _a_version_among_its_own(stores):
+    """bildy (40 memories: the answer, two near misses of the dense world,
+    37 more) and its versions v1 to v3, each with 40 memories of its own;
+    v2's hold a near miss that says "runs" and "Windows". 30 notes: 190
+    memories."""
+    store = stores(_ReleaseEmbedder(names=["bildy", "bildy v1", "bildy v2", "bildy v3"]))
+    bildy = _entity(store, "bildy", "product")
+    answer = _remember(store, PLATFORMS, [bildy], days_ago=300)
+    _remember(store, "the bildy sync backend is deployed on Fly.io", [bildy])
+    _remember(store, "bildy's CI builds run on Ubuntu runners", [bildy])
+    for i in range(37):
+        _remember(store, f"bildy had its sprint review number {i} on {STREETS[i % 20]} day",
+                  [bildy])
+    near = None
+    for n in (1, 2, 3):
+        version = _entity(store, f"bildy v{n}", "product")
+        _belongs(store, version, bildy)
+        if n == 2:
+            near = _remember(store, NEAR_MISS, [version])
+        while store.backend.count_entity_memories(version.id) < 40:
+            k = store.backend.count_entity_memories(version.id)
+            _remember(store, f"bildy v{n} fixed bug number {100 * n + k}", [version])
+    for i in range(30):
+        _remember(store, f"Note {i}: renew the parking permit before the month ends")
+    store.refresh_property_vectors(user_id=USER)
+    return store, answer, near
+
+
+def _which_platforms(store):
+    store.decider = judge = _Judge(scores={"Linux and macOS": 0.9}, rest=0.05)
+    return judge, store.search("Which platforms does bildy v2 run on?", user_id=USER, limit=5)
+
+
+def test_a_things_answer_comes_before_the_versions_own_at_scale(stores):
+    """"Which platforms does bildy v2 run on?" Of 190 memories, the judge
+    reads 20, bildy's answer among them ("it runs on Linux and macOS"), and
+    it comes first past v2's 40 of its own."""
+    store, answer, _ = _a_version_among_its_own(stores)
+    judge, results = _which_platforms(store)
+    assert len(judge.batches[0]) == 20
+    assert "it runs on Linux and macOS" in judge.read
+    assert results[0].memory.id == answer.id
+
+
+def test_a_things_answer_comes_before_the_versions_own_at_scale_fails_without_the_rule(
+        stores):
+    """Without the judge picking from the first 20 (relevance by vectors
+    alone), v2's own near miss ("it runs its Windows installer silently",
+    1.0) comes before bildy's answer (0.72)."""
+    store, answer, near = _a_version_among_its_own(stores)
+    store.config.retrieval.relational_relevance = "vector"
+    _, results = _which_platforms(store)
+    assert results[0].memory.id == near.id
+    assert _ids(results).index(answer.id) > 0
+
+
+# -------------------------------------------------------- sets of the owner
+# A set question in the first person or naming the owner starts at the
+# owner, an entity of hundreds of memories: the judge reads the first 20 of
+# the linked order, the second call the memories nearest the members found
+# (the store has no tags), and every member comes back past the limit.
+# "Which car is the cheapest?" names nobody and takes the text route
+# (``test_a_set_question_returns_every_member_unfiltered``).
+CAR_NAMES = [f"{brand} {model} {trim}" for brand, model in [
+    ("Skoda", "Octavia"), ("Renault", "Zoe"), ("Toyota", "Yaris"), ("Fiat", "Panda"),
+    ("Kia", "Niro"), ("Hyundai", "Kona"), ("Seat", "Leon"), ("Dacia", "Spring"),
+    ("Mazda", "Mizu"), ("Volvo", "Ekko"), ("Opel", "Corsa"), ("Citroen", "Ami"),
+    ("Honda", "Jazz"), ("Nissan", "Leaf"), ("Ford", "Puma"), ("Cupra", "Born"),
+    ("Audi", "Sella"), ("Mini", "Aceman"), ("Lancia", "Ypsilon"), ("Smart", "Hashtag")]
+    for trim in ("Base", "Sport")]
+LIKED = ["Olive Kitchen", "Harbour Bistro", "Linden Trattoria", "Copper Kitchen",
+         "Saffron Bistro", "Juniper Kitchen", "Maple Trattoria", "Fig Bistro", "Cedar Kitchen",
+         "Pepper Trattoria", "Clover Bistro", "Amber Kitchen"]
+DISLIKED = ["Sage Bistro", "Quince Kitchen", "Ember Trattoria", "Birch Bistro", "Hazel Kitchen",
+            "Plum Trattoria", "Rowan Bistro", "Thyme Kitchen"]
+LUNCH = ["Willow Bistro", "Fennel Kitchen", "Basil Trattoria", "Nutmeg Bistro", "Laurel Kitchen"]
+MONTHS = ["January", "March", "May", "July", "September", "November"]
+
+
+def _the_owners_store(stores):
+    """Ilva Marsh, the store's owner: 120 everyday memories; 40 cars, a
+    price each (half quoted to her, half about the car alone), 21 test
+    drives, 19 ranges and 20 insurance quotes; 40 grocery purchases among 40
+    other expenses and refunds and "wants to spend less on groceries"; 12
+    restaurants she liked, her favourite, 8 she did not like and 9 lunches
+    (5 elsewhere, 4 at places she liked). 331 memories."""
+    names = ["Ilva Marsh", *CAR_NAMES, *LIKED, *DISLIKED, *LUNCH, *FRIENDS]
+    store = stores(_ReleaseEmbedder(names=names))
+    owner = _entity(store, "Ilva Marsh", "person")
+    store._upkeep_set("owner_entity", USER, owner.id)
+    gold: dict[str, list] = {}
+    everyday = ["ran {n} km along the coast", "met {f} at the gym", "fixed the tap at home {n}",
+                "watched a film with {f}", "called {f} about the trip", "read {n} pages"]
+    for i in range(120):
+        _remember(store, f"Ilva Marsh {everyday[i % 6].format(n=i + 2, f=FRIENDS[i % 10])}",
+                  [owner], days_ago=i % 50)
+    cars = [_entity(store, name, "product") for name in CAR_NAMES]
+    gold["prices"], gold["drives"] = [], []
+    for i, car in enumerate(cars):
+        price = f"{14_000 + 1_100 * i:,}"
+        if i % 2:
+            gold["prices"].append(_remember(store, f"The {car.name} costs {price} euros", [car]))
+        else:
+            gold["prices"].append(_remember(
+                store, f"Ilva Marsh was quoted {price} euros for the {car.name}", [car, owner]))
+        if i <= 20:
+            gold["drives"].append(_remember(
+                store, f"Ilva Marsh test drove the {car.name} in {MONTHS[i % 6]}", [car, owner]))
+        else:
+            _remember(store, f"The {car.name} has a range of {250 + 10 * i} km", [car])
+        if i % 2 == 0:
+            _remember(store, f"Insurance for the {car.name} would be {300 + 20 * i} euros a year",
+                      [car])
+    shops = ["Lidl", "Aldi", "Rewe", "Edeka", "the farmers' market"]
+    gold["groceries"] = [_remember(
+        store, f"Ilva Marsh spent {8 + 3 * i} euros on groceries at {shops[i % 5]} on "
+               f"{1 + i % 28} {MONTHS[i % 6]}", [owner]) for i in range(40)]
+    for i in range(40):
+        text = (f"Ilva Marsh spent {5 + 7 * i} euros on fuel on {1 + i % 28} {MONTHS[i % 6]}"
+                if i % 2 else
+                f"Ilva Marsh got a {5 + 7 * i} euro refund from {shops[i % 5]}")
+        _remember(store, text, [owner])
+    _remember(store, "Ilva Marsh wants to spend less on groceries", [owner])
+    places = {name: _entity(store, name, "organization") for name in LIKED + DISLIKED + LUNCH}
+    gold["liked"] = [_remember(
+        store, (f"Ilva Marsh liked the food at {name}" if i % 2 else
+                f"Ilva Marsh loved dinner at {name}"), [owner, places[name]])
+        for i, name in enumerate(LIKED)]
+    gold["liked"].append(_remember(store, "Ilva Marsh's favourite restaurant is Trattoria Sole",
+                                   [owner]))
+    for i, name in enumerate(DISLIKED):
+        _remember(store, (f"Ilva Marsh did not like the food at {name}" if i % 2 else
+                          f"Ilva Marsh found {name} disappointing"), [owner, places[name]])
+    for i, name in enumerate(LUNCH + LIKED[:4]):
+        _remember(store, f"Ilva Marsh had lunch at {name} with {FRIENDS[i]}",
+                  [owner, places[name]])
+    store.refresh_property_vectors(user_id=USER)
+    return store, gold
+
+
+RESTAURANTS = {"did not like": 0.03, "disappointing": 0.03, "liked the food": 0.5,
+               "loved dinner": 0.5, "favourite restaurant": 0.5, "had lunch": 0.2}
+GROCERIES = {"wants to spend less": 0.03, "on groceries": 0.6}
+OWNER_SETS = [
+    ("Which of the cars I looked at is the cheapest?",
+     {"test drove": 0.02, "quoted": 0.12, "costs": 0.12}, "prices"),
+    ("Which cars did I test drive?", {"test drove": 0.6}, "drives"),
+    ("How much did Ilva Marsh spend on groceries?", GROCERIES, "groceries"),
+    ("How much did I spend on groceries?", GROCERIES, "groceries"),
+    ("Which restaurants did Ilva Marsh like?", RESTAURANTS, "liked"),
+    ("Which restaurants did I like?", RESTAURANTS, "liked"),
+]
+
+
+def _the_set(store, question, scores):
+    store.decider = judge = _Judge(scores=scores, rest=0.02, several=0.9)
+    return judge, store.search(question, user_id=USER, limit=5)
+
+
+@pytest.mark.parametrize("question,scores,members", OWNER_SETS)
+def test_a_set_question_about_the_owner_returns_every_member_at_scale(
+        stores, question, scores, members):
+    """Set questions about the owner, named or in the first person. The
+    owner seeds the search, the judge reads 20 of her 331 memories, the
+    second call the rest of the set, and every member comes back, none
+    else: all 40 prices of "the cars I looked at", half of them about a car
+    she is not linked to (and none of her test drives); 21 test drives; 40
+    grocery purchases (not the wish to spend less); 13 restaurants she
+    liked, her favourite with them (not the dislikes, and not the lunches,
+    which score between)."""
+    store, gold = _the_owners_store(stores)
+    judge, results = _the_set(store, question, scores)
+    read = question.replace("Ilva Marsh", "it").replace(" I ", " it ")
+    assert judge.states == [f"QUESTION: {read}"] * 2 and "about" in results[0].signals
+    assert len(judge.batches) == 2 and len(judge.batches[0]) == 20
+    assert {r.memory.id for r in results} == {m.id for m in gold[members]}
+    assert all(r.signals.get("member") for r in results)
+
+
+@pytest.mark.parametrize("question,scores,members", OWNER_SETS)
+def test_a_set_question_about_the_owner_returns_every_member_at_scale_fails_without_the_rule(
+        stores, question, scores, members):
+    """Without the second call (``retrieval.set_pool`` 0) only the members
+    among the 20 judged come back, and the rest of each set is lost: most
+    of the prices (the first 20 hold ten of them), some test drives, half
+    the purchases, a restaurant she liked or more."""
+    store, gold = _the_owners_store(stores)
+    store.config.retrieval.set_pool = 0
+    judge, results = _the_set(store, question, scores)
+    assert len(judge.batches) == 1
+    assert {m.id for m in gold[members]} - {r.memory.id for r in results}

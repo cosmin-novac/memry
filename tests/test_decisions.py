@@ -1383,6 +1383,39 @@ def test_one_memory_naming_an_entity_two_ways_makes_no_second_entity():
     store.close()
 
 
+@pytest.mark.parametrize("name,kind,known,mention,new", [
+    # one full name, facts that share words ("Berlin", "platform") and conflict
+    ("Anna Weber", "person", ["Anna Weber leads the data platform team in Berlin",
+                              "Anna Weber presented the platform roadmap in Berlin"],
+     "Anna Weber", "Anna Weber, the Berlin architect, sent the plans for the platform roof"),
+    # the first name of another's full name
+    ("Jonas Brandt", "person", ["Jonas Brandt is the partner of the user and cooks on Sundays"],
+     "Jonas", "Jonas, the vendor's architect, reviewed the design doc on Sunday"),
+    # a reference without its namespace, in two repositories
+    ("PR #92", "code", ["PR #92 in the Pixlo repository moves video slots between cards"],
+     "PR #92", "PR #92 in the Prompt Party repository gates the next-game vote"),
+])
+@pytest.mark.parametrize("judged,entities", [((0.05, 0.9), 2), ((0.99, 0.0), 1)])
+def test_two_things_of_one_name_are_told_apart_by_the_judge_not_by_the_names(
+        name, kind, known, mention, new, judged, entities):
+    """Two things that share a name ("Anna Weber" the team lead and "Anna
+    Weber" the architect, the partner "Jonas Brandt" and a vendor's "Jonas",
+    "PR #92" in two repositories). Rules on the names merged them before
+    3a2aa13: the same full name and two shared words of context, a first
+    name shared with a full name. The judge decides now: they stay two where
+    it says "different" and are one where it says "same", whatever the
+    names share."""
+    def answer(state):  # the known facts are of one thing
+        return judged if new in state else (0.99, 0.0)
+
+    store, save = _jonas_store(_PairJudge(answer), name, kind)
+    for text in known:
+        save(text)
+    save(new, as_name=mention)
+    assert len(store.entities(user_id="ada")) == entities
+    store.close()
+
+
 def test_a_known_name_joins_the_likeliest_of_its_entities():
     """Two "Fundation GmbH" entities: the mention about Cologne joins the one
     whose memories are about Cologne, and no proposal is left behind."""
@@ -1609,6 +1642,27 @@ def _index(*names, vectors=None):
 
     entities = [Entity(id=f"e{i}", name=n, user_id="ada") for i, n in enumerate(names)]
     return NameIndex(entities, vectors)
+
+
+@pytest.mark.parametrize("known,written", [
+    ("Pixlo", "pixlo.ai"),                   # the brand's domain
+    ("Andrei Dumitru", "Andrei"),            # the first name of a full name
+    ("Priya Raghunathan", "Priya"),
+    ("Tomasz Wierzbicki", "Tomasz"),
+    ("Kestrel GmbH", "Kestrel"),             # the legal form dropped
+    ("Lumen Labs", "Lumen Labs UG"),         # and added
+])
+def test_a_domain_or_a_first_name_is_compared_with_the_name_it_stands_for(known, written):
+    """One thing written two ways ("pixlo.ai" for Pixlo, "Andrei" for Andrei
+    Dumitru, "Kestrel" for Kestrel GmbH) is only merged if the two are
+    compared. Among 90 other names, 40 companies whose "gmbh" is common and
+    50 people, each form finds the name it stands for."""
+    others = ([f"Firma{i} GmbH" for i in range(40)]
+              + [f"{first} {last}" for first in ("Maria", "Tom", "Lena", "Omar", "Sofia")
+                 for last in ("Berg", "Chen", "Diaz", "Haas", "Kraus", "Lund", "Novak",
+                              "Osei", "Popov", "Reid")])
+    index = _index(known, *others)
+    assert known in [e.name for e in index.candidates(written)]
 
 
 def test_names_worth_comparing_come_from_the_store_not_from_lists():
