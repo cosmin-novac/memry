@@ -71,7 +71,7 @@ from typing import Any, Callable, Iterable
 import numpy as np
 
 from ..backends.base import MemoryBackend
-from ..models import Entity, Memory
+from ..models import TOPIC_TYPE, Entity, Memory, Scope
 from ..providers.decisions import Choice, Decider
 
 PAIR_QUESTION = Choice(
@@ -820,7 +820,12 @@ def compare(
     reads no merge bar, only P(different) against the apart bar, which
     candidate is likelier, and ``BELONGS_BAR``: measured in the module
     docstring.
+
+    Two tags (topic entities) are asked the tag question instead
+    (``compare_topics``).
     """
+    if is_topic(a) and is_topic(b):
+        return compare_topics(decider, backend, a, b, compared)
     count_b = 1 if isinstance(b, Mention) else backend.count_entity_memories(b.id)
     smaller = min(backend.count_entity_memories(a.id), count_b)
     owed = _owed(compared, smaller, recheck)
@@ -926,7 +931,7 @@ def _in_context(
             around = [m for m in around if m.id in keep]
         context.append(around)
     if not any(context):
-        return Verdict(verdict.probabilities, verdict.action, CONTEXT_STEP)
+        return Verdict(verdict.probabilities, verdict.action, CONTEXT_STEP, verdict.belongs)
     ids_a, ids_b = [m.id for m in pool_a], [m.id for m in pool_b]
     shown = memories_shown(PAIR_STEPS[0])
     probabilities, belongs = judge_pair_and_belongs(
@@ -948,10 +953,43 @@ def is_owner(entity: Entity | Mention) -> bool:
     return isinstance(entity, Entity) and bool((entity.metadata or {}).get("owner"))
 
 
+def is_topic(entity: Entity | Mention) -> bool:
+    return isinstance(entity, Entity) and entity.entity_type == TOPIC_TYPE
+
+
+def fold_topic(backend: MemoryBackend, keep: Entity, other: Entity) -> bool:
+    """Merge the tag ``other`` into the tag ``keep``, both active topic
+    entities of one user: ``other`` folds into ``keep`` by id, then every
+    column naming ``other`` names ``keep`` (``retag_topics``), under
+    ``keep``'s name as stored. That name is not cleaned again
+    (``clean_tags``): one it would refuse (over ``TAG_MAX_LENGTH``, brackets,
+    commas, as older imports and the migration left them) stays the topic's
+    name, where a cleaned name made the merge a delete of ``other`` or a
+    refile under a fresh topic. Everything is checked before the fold, the
+    first write, and the columns are rewritten only after it, so a merge
+    refused changes nothing."""
+    if (
+        keep.user_id != other.user_id
+        or keep.merged_into is not None or other.merged_into is not None
+        or not keep.normalized.strip() or not other.normalized.strip()
+    ):
+        return False
+    if not backend.merge_entities(keep.id, other.id):
+        return False
+    backend.retag_topics(Scope(user_id=keep.user_id), {other.normalized}, keep.normalized,
+                         exact_user=True)
+    return True
+
+
 def merge_pair(backend: MemoryBackend, a: Entity, b: Entity) -> bool:
     """Fold one entity of a pair the judge merged into the other. The store
     owner is folded into the person it was found to be, who keeps their name
-    and becomes the owner."""
+    and becomes the owner. Of two tags the more used one is kept, the
+    shorter name on a tie (``fold_topic``)."""
+    if is_topic(a) and is_topic(b):
+        keep, drop = sorted((a, b), key=lambda topic: (
+            -backend.count_entity_memories(topic.id), len(topic.normalized), topic.normalized))
+        return fold_topic(backend, keep, drop)
     keep, drop = (b, a) if is_owner(a) else (a, b)
     if not backend.merge_entities(keep.id, drop.id):
         return False
@@ -1052,9 +1090,6 @@ def tag_step(count: int) -> int:
     return max((step for step in TAG_STEPS if count >= step), default=0)
 
 
-def tag_pair_key(a: str, b: str) -> str:
-    return "\n".join(sorted((a, b)))
-
 TAG_QUESTION = Choice(
     instructions=(
         "Two tags that file memories in one person's memory store, each shown with "
@@ -1110,87 +1145,62 @@ def judge_tag_pair(decider: Decider, a: str, b: str, counts: dict[str, int],
     return sum(answer.probabilities.get("same", 0.0) for answer in answers) / 2
 
 
-def judged_tag_merges(
-    decider: Decider,
-    tags: list[dict[str, Any]],
-    known: dict[str, tuple[str, str | None]],
-    memories_of: Callable[[str], list[str]],
-    vectors: dict[str, np.ndarray] | None = None,
-    compared: dict[str, int] | None = None,
-    limit: int = 400,
-    pairs: Iterable[tuple[str, str]] | None = None,
-) -> list[dict[str, Any]]:
-    """Groups of tags the judge puts at ``decider.tag_merge_probability`` or
-    higher, each kept under its most used tag. ``memories_of(tag)`` returns the
-    tag's most recent memories, most recent first.
+def topic_pairs(
+    topics: Iterable[Entity], vectors: dict[str, np.ndarray] | None = None
+) -> list[tuple[Entity, Entity]]:
+    """The pairs of tags (topic entities) worth the tag question: names
+    spelled alike, an acronym, or, with ``vectors``, names close in meaning;
+    never a shared word alone (``NameIndex(rare_words=False)``). On the 417
+    tags of a real store a shared rare word raised 263 of the 379 candidate
+    pairs and was the only signal for none of the 16 duplicates."""
+    index = NameIndex(topics, vectors, rare_words=False)
+    found = {
+        tuple(sorted((topic.id, other.id)))
+        for topic in index.entities.values()
+        for other in index.candidates(topic.name, vector=index.vectors.get(topic.id),
+                                      exclude={topic.id})
+    }
+    return [(index.entities[a], index.entities[b]) for a, b in sorted(found)]
 
-    ``compared`` maps ``tag_pair_key`` to the step of ``TAG_STEPS`` the pair was
-    last compared at, and is updated in place: only pairs that reached a new
-    step are asked about, and pairs of tags that no longer exist are dropped.
 
-    ``pairs``, when given, are asked about in place of the name index's
-    candidates, whatever step they are at, and ``compared`` is neither read nor
-    written: the dashboard's suggest button (``MemoryStore.suggest_tag_merges``)
-    asks this question about every pair of the tags nothing else flagged and
-    suggests the groups instead of merging them. The funnel belongs to the
-    upkeep pass, which merges.
+def compare_topics(
+    decider: Decider, backend: MemoryBackend, a: Entity, b: Entity, compared: int = 0
+) -> Verdict:
+    """Decide a pair of tags by the tag question, at the step of ``TAG_STEPS``
+    its less used tag has reached since it was last compared at ``compared``
+    (0: never): once when found, once more when both tags are on
+    ``TAG_EXAMPLES`` memories, never after. Each tag is shown with how many
+    memories it is on, the named thing of its name where the store has one,
+    and its ``TAG_EXAMPLES`` most recent memories. The pair merges from
+    ``decider.tag_merge_probability``, and otherwise waits: no bar was
+    measured for keeping two tags apart.
 
-    Measured on the 379 candidate pairs of a real 417-tag store, 10 memories per
-    tag, two runs: from 0.55 it merged 7-9 of the 16 pairs I labelled one
+    Measured on the 379 candidate pairs of a real 417-tag store, 10 memories
+    per tag, two runs: from 0.55 it merged 7-9 of the 16 pairs I labelled one
     subject ("fundation" and "fundation gmbh" at 0.86-0.88, "bildy" and
     "bildy.ai", "steuer" and "tax", "cologne" and "colonge") and none of the
     41 borderline or 322 two-subject pairs; the highest two-subject pair was
-    "restart" and "shutdown" at 0.46.
+    "restart" and "shutdown" at 0.46. The entity pair question, asked of the
+    same pairs as the funnel asks it, merged fewer of the one-subject pairs
+    and some of two subjects: tags in one person's store mostly file
+    memories about that person, so no fact contradicts "one thing".
     """
-    counts = {str(t["category"]).strip().casefold(): int(t.get("count") or 0) for t in tags}
-    labels = sorted(counts)
-    if pairs is not None:
-        compared = {}
-        given = {tuple(sorted((str(a).strip().casefold(), str(b).strip().casefold())))
-                 for a, b in pairs}
-        step = {pair: tag_step(min(counts[pair[0]], counts[pair[1]])) for pair in given
-                if pair[0] != pair[1] and pair[0] in counts and pair[1] in counts}
-        pairs = sorted(step)[:limit]
-    else:
-        compared = {} if compared is None else compared
-        nodes = [Entity(id=label, name=label, user_id=None) for label in labels]
-        index = NameIndex(nodes, vectors, rare_words=False)
-        step = {
-            pair: tag_step(min(counts[pair[0]], counts[pair[1]]))
-            for pair in {
-                tuple(sorted((label, other.name)))
-                for label in labels
-                for other in index.candidates(label, vector=(vectors or {}).get(label),
-                                              exclude={label})
-            }
-        }
-        live = {tag_pair_key(*pair) for pair in step}
-        for key in [key for key in compared if key not in live]:
-            del compared[key]
-        pairs = sorted(p for p in step if step[p] > compared.get(tag_pair_key(*p), 0))[:limit]
-    examples = {tag: memories_of(tag) for tag in sorted({t for pair in pairs for t in pair})}
-    scores = parallel(
-        lambda pair: judge_tag_pair(decider, *pair, counts, known, examples), pairs
-    )
-    for pair, score in zip(pairs, scores):
-        if score is not None:
-            compared[tag_pair_key(*pair)] = step[pair]
-    parent = {label: label for label in labels}
-
-    def root(label: str) -> str:
-        while parent[label] != label:
-            parent[label] = parent[parent[label]]
-            label = parent[label]
-        return label
-
-    for (a, b), score in zip(pairs, scores):
-        if score is not None and score >= decider.tag_merge_probability:
-            parent[root(a)] = root(b)
-    groups: dict[str, list[str]] = defaultdict(list)
-    for label in labels:
-        groups[root(label)].append(label)
-    return [
-        {"canonical": max(members, key=lambda t: (counts[t], -len(t))), "variants": sorted(members),
-         "reason": f"{decider.name}: same subject"}
-        for members in groups.values() if len(members) > 1
-    ]
+    counts = {topic.normalized: backend.count_entity_memories(topic.id) for topic in (a, b)}
+    step = tag_step(min(counts.values()))
+    if step <= compared:
+        return Verdict(None, "wait", compared)
+    known: dict[str, tuple[str, str | None]] = {}
+    examples: dict[str, list[str]] = {}
+    for topic in (a, b):
+        examples[topic.normalized] = [
+            m.content for m in backend.entity_memories(topic.id, limit=TAG_EXAMPLES)]
+        for entity in backend.find_entities_by_aliases(
+                [topic.normalized], Scope(user_id=topic.user_id)):
+            if entity.name.strip().casefold() == topic.normalized:
+                known[topic.normalized] = (entity.name, entity.entity_type)
+                break
+    same = judge_tag_pair(decider, a.normalized, b.normalized, counts, known, examples)
+    if same is None:
+        return Verdict(None, "wait", compared)
+    action = "merge" if same >= decider.tag_merge_probability else "wait"
+    return Verdict({"same": same, "different": 1 - same}, action, step)

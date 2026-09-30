@@ -180,7 +180,8 @@ A topic entity is never a hub, is never masked in a property vector, is never fo
 a name lookup, and no link of the linked search reaches it (an open pair of a thing and
 the tag of its name included); a tag and a named thing of the same name are compared by
 the entity identity funnel (without a calibrated judge the tag folds into the thing by
-rule), two tags by the tag question.
+rule). Two tags are an entity pair too, raised, stored and merged as any pair; the funnel
+asks them the tag question instead of the pair question (Entities, below).
 
 The dashboard shows tags where it shows people and things. Upkeep > Entities lists every
 live entity, tags included, with one chip per type and its count (a topic reads "tag" on
@@ -190,28 +191,29 @@ filed under it (`PATCH /api/v1/entities/{id}`) and deleted as the tag endpoint d
 one picked and merges each other entry into it (`POST /api/v1/entities/merge`); with a
 person or thing among them only a person or thing is offered to keep, since a tag combined
 with one goes into it. Two tags merged so file every memory under the tag kept, as the tag
-endpoint's merge does, except that the kept tag keeps its place in a memory's list. Suggest
-merges asks the tag question and covers tags only. The map is the entity map: tags are one
+endpoint's merge does, except that the kept tag keeps its place in a memory's list. Two
+tags that may be one are listed with the other merge proposals. The map is the entity map: tags are one
 of its types, off at first (the choice kept per browser with the other types), drawn as
 the nodes of their topic entities and linked by co-mentions like any node; the planet and
 part rules stay for named things. `GET /api/v1/map?kind=any` reads them, and `kind=named`,
 the default, reads none. On a sample store of 4,000 memories, 399 tags and 800 named things
 the map took a median of 257 ms before this change (with the old tag graph, which is gone),
 191 ms after without tags and 307 ms with them. The memory list has one About filter over
-every entity with a memory, grouped by type: a tag picked goes to `categories`, which
-reaches the tags under a broader one, and anything else to `entity_id`, as the two filters
-did before. Several picks of one kind match any of them, and a tag with a person or thing
-matches the memories that have both.
+every entity with a memory, grouped by type: a tag picked goes to `categories` and anything
+else to `entity_id`, as the two filters did before. Several picks of one kind match any of
+them, and a tag with a person or thing matches the memories that have both. A memory card
+shows what the memory is about in one row of chips: the people and things it mentions,
+then its tags, each with its type as the Entities list names it ("person", "tag"). A
+chip picks its entity in the About filter, and a second click takes it off. The API's
+`entity_links` lists the tags too, as entities of type `topic`, and `categories` stays.
 
 Mechanical separator and singular/plural duplicates are merged deterministically once two
-real stored labels map to the same form. Semantic synonym merges remain reviewable.
-Synthetic umbrella topics are hierarchy edges, for example `health` broader than
-`liver health`. They are a browsing aid, not a retrieval mechanism, and the pass never
-consumes its own output: abstraction reads a direct-tag histogram, so a generated parent
-can never become a member of a broader one and decay the useful level a run at a time.
-The parent label is not copied onto every child memory. Filters expand the
-hierarchy in SQLite at query time, so taxonomy changes do not rewrite the memory corpus.
-Topic hierarchy edges are separate from real-world entity relations.
+real stored labels map to the same form. Any other pair of tags goes through the entity
+pairs (Entities, below).
+There are no parent tags: a tag filter finds the memories filed under that tag and no
+other. A question whose answer is a set reads the topics its first answers share (section
+5). A database from a version that recorded parent tags keeps its `topic_relations` and
+`synthetic_tags` rows; nothing reads them, and a backup no longer carries them.
 
 ### Entities
 
@@ -396,15 +398,22 @@ so too, the tag folding into the thing. Any other open pair waits for a person w
 confidence written on it, and the linked search gives a pair no calibrated judge answered
 no "same" link.
 
-Tags follow the same pattern (`judged_tag_merges`): candidate pairs from the name index
-(no shared-word signal for tags), judged in both orders with the 10 most recent memories
-per tag, merged from P(same subject) 0.55, compared when found and once more when both
-tags are on 10 memories. The Suggest merges button of Upkeep > Entities asks the same
-question through the same function: its last pass, when at most 20 tags are left that
-nothing else flagged, hands `judged_tag_merges` every pair of them and only suggests the
-groups that reach 0.55. It neither reads nor writes the pass's record of compared pairs,
-so a click never keeps the weekly pass from comparing a pair of its own. No tag question is
-asked on the names alone: judged on their names, "memry" read as a typo of "memory" (0.98).
+Two tags go through the same path, with their own candidates and their own question. The
+weekly pass pairs tags on the name index without the shared-word signal
+(`identity.topic_pairs`: tags are short phrases that share words across related subjects),
+and stores each pair as a merge proposal like any. The funnel asks two tags the tag question
+(`identity.compare_topics`), not the pair question: each tag is shown with how many
+memories it is on, the named thing of its name where the store has one, and its 10 most
+recent memories, in both orders. The pair merges from the provider's tag bar (0.55 for Jev)
+into the tag with more memories, whose name every memory filed under the other then
+carries; below the bar it waits. It is asked when found and once more when both tags are on
+10 memories, never after, and no bar keeps two tags apart for good. The pair question does
+worse on tags: tags in one person's store mostly file memories about that person, so no
+fact contradicts "one thing". Without a calibrated judge two tags wait for a person, listed
+under Upkeep with the other pairs; a yes merges them as the judge's merge does. A database
+from before this kept the step of each pair of tags it had compared, and the pairs a person
+had kept apart; the weekly pass turns each into its pair's proposal, so none is asked
+again.
 
 The measurements behind these numbers are in the PhD repository,
 `papers/memry-field-studies/findings/identity-obvious-merges.md` and
@@ -580,8 +589,8 @@ memory it replaces, before anything is written, and its links go to the new memo
 failed LLM analysis leaves the old text and links unchanged. In zero-key mode, existing links are retained or removed by exact known-alias
 matching; discovering a brand-new entity still requires an LLM.
 
-Entity descriptions and synthetic topic hierarchy are not mandatory write-path work. This
-keeps ingestion latency and provider cost bounded.
+Entity descriptions are not mandatory write-path work. This keeps ingestion latency and
+provider cost bounded.
 
 ## 5. Read path
 

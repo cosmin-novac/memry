@@ -35,9 +35,6 @@ from .config import Config
 from .intelligence.clustering import (
     obvious_canonical_merges,
     obvious_variant_prefix,
-    propose_synthetic_tags,
-    semantic_duplicate_tags,
-    suggest_canonical_merges,
 )
 from .intelligence.consolidate import judge_group, representative, similarity_groups
 from .intelligence.context import (
@@ -92,12 +89,12 @@ from .intelligence.graph_retrieval import (
 )
 from .intelligence.identity import (
     BELONGS_BAR,
-    TAG_EXAMPLES,
     NameIndex,
     belonging,
-    judged_tag_merges,
+    fold_topic,
+    is_topic,
     judges_pairs,
-    name_vectors,
+    merge_pair,
 )
 from .intelligence.extraction import (
     OWNER_PLACEHOLDER,
@@ -140,11 +137,8 @@ from .models import (
     Relation,
     Scope,
     SearchResult,
-    SyntheticTag,
     TOPIC_TYPE,
     clean_tags,
-    Topic,
-    TopicRelation,
     later_ts,
     parse_ts,
     same_ts,
@@ -438,11 +432,6 @@ def _is_contradiction(event: MemoryEvent) -> bool:
         or reason.startswith("distilled with its context")
         or _is_update_supersede(event)
     )
-
-
-def _tag_run_key(user_id: str | None) -> str:
-    """Meta key under which the last tag-abstraction run time is stamped."""
-    return f"tag_abstraction:last_run:{user_id or ''}"
 
 
 def _within(created_at: str, since: str | None, until: str | None) -> bool:
@@ -2744,9 +2733,7 @@ class MemoryStore:
         """Category histogram over active memories, largest count first.
 
         Each tag is a topic entity, counted by the active memories that
-        mention it. Counts are direct: a synthetic parent does not roll up the
-        memories of the tags under it, so tag abstraction, which reads this,
-        never sees a parent of its own making as a tag."""
+        mention it."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         indexed = self.backend.topic_mention_counts(scope)
         if indexed is not None:
@@ -3680,7 +3667,11 @@ class MemoryStore:
             for entity_id in (entity_a, entity_b)
         ):
             return False
-        if entity_a != entity_b and not self.backend.merge_entities(entity_a, entity_b):
+        a, b = self.backend.get_entity(entity_a), self.backend.get_entity(entity_b)
+        if entity_a != entity_b and not (
+            merge_pair(self.backend, a, b) if is_topic(a) and is_topic(b)
+            else self.backend.merge_entities(entity_a, entity_b)
+        ):
             return False
         self.backend.set_proposal_status(proposal_id, "confirmed", reason="confirmed by you")
         return True
@@ -3901,8 +3892,8 @@ class MemoryStore:
         """Idempotent direct merge outside of a proposal.
 
         Two tags merge as tags, so the memories of the one folded in are
-        filed under the one kept (``_fold_topic``: by id, whatever the kept
-        topic's stored name). A tag and a named thing fold into the thing
+        filed under the one kept (``identity.fold_topic``: by id, whatever the
+        kept topic's stored name). A tag and a named thing fold into the thing
         (``MemoryBackend.merge_entities``)."""
         keep_root = self.backend.resolve_entity_id(keep_id)
         merge_root = self.backend.resolve_entity_id(merge_id)
@@ -3918,7 +3909,7 @@ class MemoryStore:
             keep is not None and other is not None and keep_root != merge_root
             and keep.entity_type == TOPIC_TYPE and other.entity_type == TOPIC_TYPE
         ):
-            merged = self._fold_topic(keep, other)
+            merged = fold_topic(self.backend, keep, other)
         else:
             merged = self.backend.merge_entities(keep_root, merge_root)
         if merged and keep_root != merge_root:
@@ -3937,30 +3928,6 @@ class MemoryStore:
         self.backend.add_proposal(MergeProposal(
             entity_a=keep_id, entity_b=merge_id, user_id=entity.user_id if entity else None,
             status="confirmed", confidence=1.0, reason="merged by you", decided_at=utcnow()))
-
-    def _fold_topic(self, keep: Entity, other: Entity) -> bool:
-        """Merge the tag ``other`` into the tag ``keep``, both active topic
-        entities: ``other`` folds into ``keep`` by id, then every column
-        naming ``other`` names ``keep`` (``retag_topics``), under ``keep``'s
-        name as stored. That name is not cleaned again (``clean_tags``): one
-        it would refuse (over ``TAG_MAX_LENGTH``, brackets, commas, as older
-        imports and the migration left them) stays the topic's name, where a
-        cleaned name made the merge a delete of ``other`` or a refile under
-        a fresh topic. Everything is checked before the fold, the first
-        write, and the columns are rewritten only after it, so a merge
-        refused changes nothing."""
-        if (
-            keep.user_id != other.user_id
-            or keep.merged_into is not None or other.merged_into is not None
-            or not keep.normalized.strip() or not other.normalized.strip()
-        ):
-            return False
-        if not self.backend.merge_entities(keep.id, other.id):
-            return False
-        scope = Scope(user_id=keep.user_id)
-        self.backend.retag_topics(scope, {other.normalized}, keep.normalized, exact_user=True)
-        self.backend.delete_synthetic_tag(scope, other.normalized)
-        return True
 
     # -- the store owner ----------------------------------------------------
     def set_owner_name(self, user_id: str | None, name: str) -> None:
@@ -4036,6 +4003,7 @@ class MemoryStore:
         accumulate forever: a real store reached 206 such rows out of 519.
         """
         scope = Scope(user_id=user_id)
+        self._carry_tag_decisions(user_id)
         # Surface duplicates first: proposals are otherwise only made at write
         # time, so anything already duplicated has nothing scheduled to look at
         # it again and would sit there for good. Names close in meaning only
@@ -4067,8 +4035,46 @@ class MemoryStore:
         )
         return outcome
 
+    def _carry_tag_decisions(self, user_id: str | None) -> None:
+        """Before tags were entity pairs, the tag question's funnel kept the
+        step each pair of tags was compared at (upkeep ``tag_pairs``), and
+        the Upkeep list of tags that looked like one subject kept the pairs
+        a person kept apart (``tag_split:ignored``). Each becomes the pair's
+        proposal, so no pair is asked again: compared at its step, or kept
+        apart. A pair whose tag is gone is dropped, and so are both lists."""
+        compared = self._upkeep_get("tag_pairs", user_id, None)
+        ignored = self._upkeep_get("tag_split:ignored", user_id, None)
+        if compared is None and ignored is None:
+            return
+        scope = Scope(user_id=user_id)
+        pairs = [(key.split("\n"), int(step)) for key, step in (compared or {}).items()]
+        pairs += [(list(pair), None) for pair in ignored or []]
+        for names, step in pairs:
+            topics = [self.backend.topic_entity(name, scope, create=False) for name in names]
+            if len(topics) != 2 or None in topics or topics[0].id == topics[1].id:
+                continue
+            proposal = self.backend.find_proposal(topics[0].id, topics[1].id)
+            if step is None:
+                if proposal is None:
+                    self.backend.add_proposal(MergeProposal(
+                        entity_a=topics[0].id, entity_b=topics[1].id, user_id=user_id,
+                        status="rejected", reason="kept apart by you", decided_at=utcnow()))
+                elif proposal.status == "proposed":
+                    self.backend.set_proposal_status(proposal.id, "rejected",
+                                                     reason="kept apart by you")
+            elif proposal is None:
+                self.backend.add_proposal(MergeProposal(
+                    entity_a=topics[0].id, entity_b=topics[1].id, user_id=user_id,
+                    compared_step=step, reason="compared by the tag question"))
+            elif proposal.status == "proposed" and proposal.compared_step < step:
+                self.backend.update_proposal_judgement(
+                    proposal.id, confidence=proposal.confidence, reason=proposal.reason,
+                    compared_step=step)
+        for name in ("tag_pairs", "tag_split:ignored", "tag_split:count"):
+            self.backend.set_meta(_upkeep_key(name, user_id), "")
+
     # ------------------------------------------------------------------
-    # tag abstraction
+    # tags
     # ------------------------------------------------------------------
     def tags_to_topics(
         self, *, user_id: str | None = None, all_users: bool = True, dry_run: bool = False
@@ -4079,95 +4085,16 @@ class MemoryStore:
         return self.backend.tags_to_topics(
             user_id=user_id, all_users=all_users, dry_run=dry_run)
 
-    def synthetic_tags(self, *, user_id: str | None = None) -> list[SyntheticTag]:
-        """The higher-level tags the system invented for this namespace."""
-        return self.backend.list_synthetic_tags(Scope(user_id=user_id))
-
-    def abstract_tags(self, *, user_id: str | None = None) -> dict[str, Any]:
-        """Create higher-level topic nodes and hierarchy edges.
-
-        Parent labels are not copied onto memories. Query-time hierarchy
-        expansion makes a parent filter include memories linked to its children.
-        """
-        cfg = self.config.tags
-        summary: dict[str, Any] = {"user_id": user_id, "applied": []}
-        if not self.llm.available:
-            summary["skipped"] = "no LLM configured"
-            return summary
-        histogram = self.categories(user_id=user_id)
-        if len(histogram) < cfg.min_tags:
-            summary["skipped"] = f"only {len(histogram)} tags (< {cfg.min_tags})"
-            self._stamp_tag_run(user_id)
-            return summary
-
-        existing = [t.tag for t in self.synthetic_tags(user_id=user_id)]
-        proposals = propose_synthetic_tags(
-            self.llm, histogram,
-            existing_synthetic=existing,
-            max_new=cfg.max_new_tags,
-            min_cluster=cfg.min_cluster_size,
-        )
-        all_topics = self.backend.list_topics(Scope(user_id=user_id), limit=100_000)
-        for proposal in proposals:
-            tag = proposal["tag"].strip().lower()
-            members = [
-                member.strip().lower()
-                for member in proposal["members"]
-                if member.strip()
-            ]
-            parent = self.backend.upsert_topic(
-                Topic(name=tag, normalized=tag, user_id=user_id, provenance="synthetic")
-            )
-            relations_added = 0
-            for member in members:
-                children = [topic for topic in all_topics if topic.normalized == member]
-                if not children:
-                    children = [
-                        self.backend.upsert_topic(
-                            Topic(
-                                name=member,
-                                normalized=member,
-                                user_id=user_id,
-                                provenance="memory",
-                            )
-                        )
-                    ]
-                    all_topics.extend(children)
-                for child in children:
-                    if child.id == parent.id:
-                        continue
-                    self.backend.add_topic_relation(
-                        TopicRelation(
-                            broader_topic_id=parent.id,
-                            narrower_topic_id=child.id,
-                            user_id=user_id,
-                            provenance="synthetic",
-                        )
-                    )
-                    relations_added += 1
-            self.backend.record_synthetic_tag(
-                SyntheticTag(tag=tag, source_tags=members, user_id=user_id)
-            )
-            all_topics.append(parent)
-            summary["applied"].append(
-                {"tag": tag, "source_tags": members, "relations_added": relations_added}
-            )
-        self._stamp_tag_run(user_id)
-        return summary
-
     def merge_obvious_topics(
         self,
         *,
         user_id: str | None = None,
         agent_id: str | None = None,
         run_id: str | None = None,
-        judge: bool = True,
     ) -> dict[str, Any]:
-        """Collapse formatting and plural duplicates, then, with a calibrated
-        judge and ``judge`` set, the tags it puts at its tag merge threshold
-        (identity.py). Each tag pair's funnel step is stored, so a pair is
-        compared when found and once more at 10 memories a tag, not on every
-        pass.
+        """Collapse formatting and plural duplicates. Any other pair of tags
+        is an entity pair: raised, compared and merged as one
+        (``resolve_entities``), by the tag question where both are tags.
 
         Tags are topic entities of one user, so a merge is theirs whole:
         ``agent_id`` and ``run_id`` narrow which memories are counted, not
@@ -4175,36 +4102,15 @@ class MemoryStore:
         the canonical one and rewrites the ``categories`` column
         (``_merge_topics``)."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-
-        def counted() -> list[dict[str, Any]]:
-            rows = self.backend.topic_mention_counts(scope, exact_user=True)
-            return rows if rows is not None else self.categories(
-                user_id=user_id, agent_id=agent_id, run_id=run_id)
-
-        groups = obvious_canonical_merges(counted())
+        rows = self.backend.topic_mention_counts(scope, exact_user=True)
+        groups = obvious_canonical_merges(rows if rows is not None else self.categories(
+            user_id=user_id, agent_id=agent_id, run_id=run_id))
         changed = 0
         for group in groups:
             remove = set(group["variants"]) - {group["canonical"]}
             changed += self._merge_topics(
                 user_id, remove, group["canonical"], exact_user=True) or 0
-        judged: list[dict[str, Any]] = []
-        if judge and judges_pairs(self.decider):
-            tags = counted()
-            compared = self._upkeep_get("tag_pairs", user_id, {})
-            judged = judged_tag_merges(
-                self.decider, tags, self._entities_named(scope, tags),
-                lambda tag: [m.content for m in self.get_all(
-                    user_id=user_id, agent_id=agent_id, run_id=run_id,
-                    categories=[tag], limit=TAG_EXAMPLES)],
-                self._tag_vectors(tags),
-                compared=compared,
-            )
-            self._upkeep_set("tag_pairs", user_id, compared)
-            for group in judged:
-                remove = set(group["variants"]) - {group["canonical"]}
-                changed += self._merge_topics(
-                    user_id, remove, group["canonical"], exact_user=True) or 0
-        return {"groups_merged": len(groups) + len(judged), "memories_changed": changed}
+        return {"groups_merged": len(groups), "memories_changed": changed}
 
     def _merge_topics(
         self, user_id: str | None, remove: set[str], into: str | None, *,
@@ -4268,28 +4174,6 @@ class MemoryStore:
         if old.description:
             self.backend.set_entity_description(
                 new.id, old.description, old.description_updated_at)
-
-    def _entities_named(
-        self, scope: Scope, tags: list[dict[str, Any]]
-    ) -> dict[str, tuple[str, str | None]]:
-        """For each tag that is also the name of an entity: that entity's name
-        and type, as evidence of what the tag means."""
-        labels = {str(t["category"]).strip().casefold() for t in tags}
-        named: dict[str, tuple[str, str | None]] = {}
-        for entity in self.backend.find_entities_by_aliases(sorted(labels), scope, limit=10_000):
-            label = entity.name.strip().casefold()
-            if label in labels:
-                named[label] = (entity.name, entity.entity_type)
-        return named
-
-    def _tag_vectors(self, tags: list[dict[str, Any]]):
-        if not self.embedder.dimensions or self.embedder.name == "hash":
-            return None
-        labels = [str(t["category"]).strip().casefold() for t in tags]
-        vectors = name_vectors(self.embedder.embed, [
-            Entity(id=label, name=label, user_id=None) for label in labels
-        ])
-        return vectors
 
     def consolidate_memories(
         self,
@@ -4451,131 +4335,6 @@ class MemoryStore:
                 mentioned += bool(self.backend.entities_of_memory(memory.id))
         return {"re_embedded": embedded, "mentions_restored": mentioned}
 
-    def semantic_tag_duplicates(
-        self, *, user_id: str | None = None, threshold: float = 0.93
-    ) -> list[dict[str, Any]]:
-        """Tags that have split one subject, judged by the stored vectors.
-
-        Needs no LLM and no new storage: a tag's centroid is the mean of its
-        members' existing embeddings. This is the drift that matters over a long
-        life - a fragmented tag silently caps recall, because filtering to it
-        excludes memories the question needed.
-        """
-        scope = Scope(user_id=user_id)
-        links = self.backend.topic_mention_links(scope)
-        if not links:
-            return []
-        vectors = dict(self.backend.memory_vectors(scope, limit=1_000_000))
-        if not vectors:
-            return []
-
-        members: dict[str, list[str]] = {}
-        for tag, memory_id in links:
-            if memory_id in vectors:
-                members.setdefault(tag, []).append(memory_id)
-        counts = {tag: len(ids) for tag, ids in members.items()}
-
-        by_memory: dict[str, list[str]] = {}
-        for tag, memory_id in links:
-            by_memory.setdefault(memory_id, []).append(tag)
-        cooccurrence: dict[tuple[str, str], int] = {}
-        for tags in by_memory.values():
-            unique = sorted(set(tags))
-            for i, a in enumerate(unique):
-                for b in unique[i + 1:]:
-                    cooccurrence[(a, b)] = cooccurrence.get((a, b), 0) + 1
-
-        centroids = {
-            tag: np.mean([vectors[m] for m in ids], axis=0)
-            for tag, ids in members.items()
-            if len(ids) >= 2
-        }
-        # Embedding the tag names lets the detector require that the LABELS mean
-        # the same thing, not just that the member memories sit close together.
-        # On a real store, centroid similarity alone either found nothing or
-        # proposed wrong merges; the conjunction found exactly the true split.
-        # Only a semantic embedder can make that judgement - the hash embedder
-        # scores "tech"/"technical" at 0.14, so with it the conjunction would
-        # simply disable the detector. Zero-key mode keeps centroids alone.
-        labels: dict[str, Any] | None = None
-        if self.embedder.dimensions and centroids and self.embedder.name != "hash":
-            names = sorted(centroids)
-            try:
-                labels = dict(zip(names, self.embedder.embed(names)))
-            except Exception:
-                labels = None
-        return semantic_duplicate_tags(
-            centroids, counts, cooccurrence, labels=labels, threshold=threshold
-        )
-
-    def tag_health(self, *, user_id: str | None = None) -> dict[str, Any]:
-        """Cheap, deterministic signals on how well the tag vocabulary is holding.
-
-        Fragmentation is the failure mode that costs recall silently: filtering
-        to a tag that has split its subject drops the memories the question
-        needed, before ranking ever runs. Nothing surfaces that today unless
-        somebody presses "suggest merges", so a store can drift for months.
-
-        No LLM, no writes. Everything here comes from counts already indexed and
-        vectors already stored.
-        """
-        scope = Scope(user_id=user_id)
-        counts = self.backend.topic_mention_counts(scope) or []
-        total = len(self.get_all(user_id=user_id, limit=1_000_000))
-        tagged = len({mid for _, mid in (self.backend.topic_mention_links(scope) or [])})
-        singles = sum(1 for row in counts if row.get("count") == 1)
-        splits = self.semantic_tag_duplicates(user_id=user_id)
-        return {
-            "memories": total,
-            "untagged": max(0, total - tagged),
-            "tags": len(counts),
-            "single_use_tags": singles,
-            "single_use_share": round(singles / len(counts), 3) if counts else 0.0,
-            "suspected_splits": len(splits),
-            "splits": splits[:10],
-            "largest_tags": [
-                {"tag": row["category"], "count": row["count"]} for row in counts[:5]
-            ],
-        }
-
-    def suggest_tag_merges(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
-        """Suggest duplicate tags: spelling variants, then synonyms, then splits.
-
-        Detectors, cheapest first, each catching what the previous cannot:
-        deterministic inflection, an LLM synonym pass, vector-centroid overlap
-        for the near-synonyms that share no words ("liver bloods" beside "liver
-        lab results"), and, with a calibrated judge, the tag question.
-
-        Nothing is merged here; every group waits for the person to apply it.
-        """
-        tags = self.categories(user_id=user_id)
-        proposals = suggest_canonical_merges(self.llm, tags)
-        seen = {v for group in proposals for v in group["variants"]}
-        for pair in self.semantic_tag_duplicates(user_id=user_id):
-            if not seen.intersection(pair["variants"]):
-                proposals.append(pair)
-                seen.update(pair["variants"])
-        # The synonyms the passes above miss, by the question tags merge by
-        # (identity.TAG_QUESTION: each tag shown with its 10 most recent
-        # memories, both orders, at the judge's tag merge bar), asked about
-        # every pair of the tags left, when at most 20 are left. The names
-        # alone read two subjects as one: "memry" as a typo of "memory" (0.98).
-        names = [str(t["category"]).strip().lower() for t in tags]
-        names = [n for n in names if n and n not in seen]
-        candidates = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
-        if candidates and len(candidates) <= 200 and judges_pairs(self.decider):
-            scope = Scope(user_id=user_id)
-            for group in judged_tag_merges(
-                self.decider, tags, self._entities_named(scope, tags),
-                lambda tag: [m.content for m in self.get_all(
-                    user_id=user_id, categories=[tag], limit=TAG_EXAMPLES)],
-                pairs=candidates,
-            ):
-                if not seen.intersection(group["variants"]):
-                    proposals.append(group)
-                    seen.update(group["variants"])
-        return proposals
-
     # -- manual tag curation -----------------------------------------------
     def rename_tag(self, tag: str, to: str, *, user_id: str | None = None) -> int:
         """Rename one tag to another across every memory. Returns the count."""
@@ -4605,9 +4364,6 @@ class MemoryStore:
         admin's edit, ``exact_user`` unset), every namespace that carries one
         of the tags (``MemoryBackend.tag_namespaces``), each in full: its
         entities, mentions, a renamed topic's description, its columns.
-
-        Once a tag is curated by hand its synthetic marker is dropped: the tag
-        is now the user's, not the system's guess.
         """
         remove = {r for r in remove if r}
         if not remove:
@@ -4622,13 +4378,10 @@ class MemoryStore:
             # A new name is a tag like any other, so it is held to the same
             # shape; one that cleans away to nothing is a plain removal. The
             # name of a tag that exists is taken as stored, even one a new
-            # tag could not have (``_fold_topic``).
+            # tag could not have (``identity.fold_topic``).
             add = next(iter(clean_tags(add)), None)
-        scope = Scope(user_id=user_id)
         indexed = self._merge_topics(user_id, remove, add, exact_user=exact_user)
         if indexed is not None:
-            for tag in remove:
-                self.backend.delete_synthetic_tag(scope, tag)
             return indexed
         changed = 0
         for memory in self.get_all(
@@ -4641,9 +4394,6 @@ class MemoryStore:
             if kept != cats:
                 self.backend.update_memory(memory.id, categories=kept, touch=False)
                 changed += 1
-        scope = Scope(user_id=user_id)
-        for tag in remove:
-            self.backend.delete_synthetic_tag(scope, tag)
         return changed
 
     # -- maintenance switches ----------------------------------------------
@@ -4652,7 +4402,7 @@ class MemoryStore:
     # so the dashboard toggle survives restarts; config stays the default when
     # no override was ever set.
     _MAINTENANCE_KEYS = (
-        "dedup_entities", "tag_abstraction", "durability", "consolidation", "structure",
+        "dedup_entities", "durability", "consolidation", "structure",
     )
     #: The passes a config switch gates, with why one is off while its
     #: switch is: a stored toggle cannot turn such a pass on
@@ -4660,9 +4410,6 @@ class MemoryStore:
     #: (``_pass_off_reason``) and the dashboard offers no toggle for it
     #: (``pass_allowed``).
     _CONFIG_GATES: dict[str, tuple[Callable[[Config], bool], str]] = {
-        # synthetic parent tags (MEMRY_TAG_ABSTRACTION)
-        "tag_abstraction": (lambda config: config.tags.enabled,
-                            "tag abstraction is off (MEMRY_TAG_ABSTRACTION)"),
         "durability": (lambda config: config.decay.durability,
                        "decay.durability is off (MEMRY_DURABILITY)"),
     }
@@ -4741,8 +4488,6 @@ class MemoryStore:
             return override == "true"
         if key == "dedup_entities":
             return self.config.dedup_entities
-        if key == "tag_abstraction":
-            return self.llm.available
         if key == "durability":
             return self.decider.available
         if key == "consolidation":
@@ -4758,12 +4503,6 @@ class MemoryStore:
             f"maintenance:{key}:enabled", "true" if enabled else "false"
         )
         return True
-
-    def _stamp_tag_run(self, user_id: str | None) -> None:
-        self.backend.set_meta(_tag_run_key(user_id), utcnow())
-
-    def last_tag_run(self, user_id: str | None) -> str | None:
-        return self.backend.get_meta(_tag_run_key(user_id))
 
     # ------------------------------------------------------------------
     # entity structure: hubs, homes and shared names (intelligence/structure.py)
@@ -5051,8 +4790,6 @@ class MemoryStore:
                 self.backend.set_meta(_dedup_run_key(user_id), stamp)
             elif key == "structure":
                 result = self.run_structure_pass(user_id=user_id)
-            elif key == "tag_abstraction":
-                result = self.abstract_tags(user_id=user_id)
             elif key == "durability":
                 result = self.score_memory_durability(user_id=user_id)
             elif key == "consolidation":
@@ -5084,12 +4821,6 @@ class MemoryStore:
         if self.maintenance_enabled("dedup_entities") and dedup_due:
             ran["dedup_entities"] = self.run_upkeep_pass(
                 "dedup_entities", user_id=user_id, at=now)
-        if (
-            self.maintenance_enabled("tag_abstraction") and self.llm.available
-            and _due(self.last_tag_run(user_id), self.config.tags.interval_days, now)
-        ):
-            ran["tag_abstraction"] = self.run_upkeep_pass(
-                "tag_abstraction", user_id=user_id, at=now)
         if (
             self.maintenance_enabled("consolidation") and self.llm.available
             and _due(self.backend.get_meta(_consolidation_run_key(user_id)), every, now)
@@ -5181,9 +4912,7 @@ class MemoryStore:
         self._upkeep_set("entity_review:pending", user_id, pending)
         return {"reviewed": len(judged), "queued": len(pending)}
 
-    def upkeep_queue(
-        self, *, user_id: str | None = None, tag_health: dict[str, Any] | None = None
-    ) -> list[dict[str, Any]]:
+    def upkeep_queue(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
         """Everything upkeep will not decide on its own, as rows a person can clear.
 
         Each row carries the labels for its two buttons so the dashboard never
@@ -5269,26 +4998,6 @@ class MemoryStore:
                 "title": entity.name, "detail": "",
                 "accept": "remove", "decline": "keep",
             })
-
-        health = tag_health if tag_health is not None else self.tag_health(user_id=user_id)
-        splits_listed = 0
-        ignored = {
-            tuple(sorted(pair)) for pair in self._upkeep_get("tag_split:ignored", user_id, [])
-        }
-        for split in health.get("splits", []):
-            a, b = split["variants"]
-            if tuple(sorted((a, b))) in ignored:
-                continue
-            splits_listed += 1
-            items.append({
-                "kind": "tag_split", "id": _group_id([a, b]),
-                "title": f"#{a} and #{b}",
-                "detail": "Look like one subject split in two, which caps what a "
-                          f"search under either can find (similarity {split['similarity']}).",
-                "accept": f"combine into #{split['canonical']}", "decline": "keep apart",
-            })
-        if self._upkeep_get("tag_split:count", user_id, None) != splits_listed:
-            self._upkeep_set("tag_split:count", user_id, splits_listed)
         return items
 
     def proposals_for_a_person(self, user_id: str | None) -> list[MergeProposal]:
@@ -5300,12 +5009,8 @@ class MemoryStore:
         return self.merge_proposals(user_id=user_id, limit=1000)
 
     def upkeep_count(self, *, user_id: str | None = None) -> int:
-        """How many rows wait under Upkeep, without asking a model anything.
-
-        The dashboard shows this as a badge on every load, so it must not cost
-        what the full queue costs: tag health embeds every tag name. The split
-        count is therefore the one the last full look at the queue found.
-        """
+        """How many rows wait under Upkeep, without asking a model anything:
+        the dashboard shows this as a badge on every load."""
         waiting = {entity.id for entity, _ in self._screen_rows(user_id)}
         waiting |= {p["id"] for p in self._upkeep_get("entity_review:pending", user_id, [])}
         return (
@@ -5313,7 +5018,6 @@ class MemoryStore:
             + len(self._upkeep_get("conflict:pending", user_id, []))
             + len(self._upkeep_get("consolidation:pending", user_id, []))
             + len(waiting)
-            + int(self._upkeep_get("tag_split:count", user_id, 0) or 0)
         )
 
     def decide_upkeep(
@@ -5384,20 +5088,6 @@ class MemoryStore:
                 kept.append(item_id)
             self._upkeep_set("entity_review:kept", user_id, kept)
             return True
-        if kind == "tag_split":
-            for split in self.tag_health(user_id=user_id).get("splits", []):
-                a, b = split["variants"]
-                if _group_id([a, b]) != item_id:
-                    continue
-                if accept:
-                    drop = [v for v in (a, b) if v != split["canonical"]]
-                    self.merge_tags(drop, split["canonical"], user_id=user_id)
-                    return True
-                ignored = self._upkeep_get("tag_split:ignored", user_id, [])
-                ignored.append(sorted((a, b)))
-                self._upkeep_set("tag_split:ignored", user_id, ignored)
-                return True
-            return False
         return False
 
     # ------------------------------------------------------------------

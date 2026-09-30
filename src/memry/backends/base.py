@@ -24,9 +24,7 @@ from ..models import (
     Relation,
     Scope,
     TOPIC_TYPE,
-    SyntheticTag,
     Topic,
-    TopicRelation,
 )
 
 if TYPE_CHECKING:
@@ -315,9 +313,6 @@ class MemoryBackend(ABC):
         return None
 
     # -- topics -----------------------------------------------------------
-    def upsert_topic(self, topic: Topic) -> Topic:
-        return topic
-
     def list_topics(self, scope: Scope, *, limit: int = 1000) -> list[Topic]:
         return []
 
@@ -364,12 +359,9 @@ class MemoryBackend(ABC):
     def tag_namespaces(self, names: Iterable[str]) -> list[str | None] | None:
         """Every namespace (``user_id``, None for the memories without one)
         that carries one of these tags: an active topic entity of that name,
-        a memory filed under it, or a synthetic tag of it. ``None`` when an
-        adapter has no topic store."""
+        or a memory filed under it. ``None`` when an adapter has no topic
+        store."""
         return None
-
-    def add_topic_relation(self, relation: TopicRelation) -> TopicRelation:
-        return relation
 
     # -- tags as topic entities --------------------------------------------
     # A tag is an entity of type ``models.TOPIC_TYPE``, one per user and
@@ -733,20 +725,10 @@ class MemoryBackend(ABC):
         rule, or a person) in place of the answer it held."""
         return None
 
-    # -- synthetic tags + key/value meta ----------------------------------
+    # -- key/value meta ------------------------------------------------------
     # Default no-ops so adapters without their own storage (e.g. Mem0) stay
     # valid; LocalBackend implements persistence. An adapter that does not
-    # persist these simply won't remember synthetic tags or scheduler state -
-    # tag abstraction degrades to "runs but doesn't record", never crashes.
-    def record_synthetic_tag(self, tag: SyntheticTag) -> None:
-        return None
-
-    def list_synthetic_tags(self, scope: Scope) -> list[SyntheticTag]:
-        return []
-
-    def delete_synthetic_tag(self, scope: Scope, tag: str) -> None:
-        return None
-
+    # persist these simply won't remember scheduler state.
     def distinct_user_ids(self) -> list[str | None]:
         """Namespaces present in the store, for the maintenance scheduler."""
         return []

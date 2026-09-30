@@ -12,9 +12,6 @@ from memry.models import (
     EntityMention,
     MergeProposal,
     Relation,
-    Scope,
-    SyntheticTag,
-    TopicRelation,
 )
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
@@ -63,14 +60,6 @@ def populated_store() -> MemoryStore:
     store.backend.add_proposal(MergeProposal(
         entity_a=marcus.id, entity_b=helios.id, user_id="ada",
         status="rejected", reason="different types",
-    ))
-    store.backend.record_synthetic_tag(SyntheticTag(
-        tag="knowledge", source_tags=["research", "projects"], user_id="ada"
-    ))
-    topics = store.backend.list_topics(Scope(user_id="ada"))
-    store.backend.add_topic_relation(TopicRelation(
-        broader_topic_id=topics[0].id, narrower_topic_id=topics[1].id,
-        user_id="ada", provenance="manual",
     ))
     return store
 
@@ -125,6 +114,29 @@ def test_backup_rejects_other_namespace_and_conflicting_identity():
     finally:
         source.close()
         target.close()
+
+def test_a_backup_carries_no_tag_hierarchy_and_one_from_before_restores_without_it():
+    """Synthetic parent tags are gone, and with them the tables that held
+    them: a backup has no ``topic_relations`` or ``synthetic_tags``, and one
+    made before, which has them, restores what it holds besides them."""
+    source = populated_store()
+    target = make_store()
+    try:
+        backup = source.export_backup(user_id="ada")
+        assert not {"topic_relations", "synthetic_tags"} & set(backup["tables"])
+        older = deepcopy(backup)
+        older["tables"]["topic_relations"] = [{
+            "id": "edge", "broader_topic_id": "parent", "narrower_topic_id": "child",
+            "user_id": "ada", "provenance": "synthetic", "created_at": "2026-01-01"}]
+        older["tables"]["synthetic_tags"] = [{
+            "id": "s1", "tag": "knowledge", "user_id": "ada",
+            "source_tags": '["research"]', "created_at": "2026-01-01"}]
+        assert target.import_backup(older, owner_prefix="ada")["inserted"] > 0
+        assert target.export_backup(user_id="ada")["tables"] == backup["tables"]
+    finally:
+        source.close()
+        target.close()
+
 
 def test_a_backup_from_before_a_column_was_added_still_restores():
     """Merge decisions gained ``compared_step``; older backups lack it. The

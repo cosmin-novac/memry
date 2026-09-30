@@ -256,24 +256,6 @@ class AnnConfig(BaseModel):
     overfetch: int = 8
 
 
-class TagAbstractionConfig(BaseModel):
-    """Optional topic abstraction (synthetic parent tags).
-
-    An LLM proposes higher-level topic parents and the store records hierarchy
-    edges to their existing members. Parent labels are not copied onto memories.
-    It is off by default because generic abstraction can hurt retrieval; run it
-    only when the resulting navigation is useful. ``enabled`` is the only way
-    to put it in the upkeep cycle. Tags are topic entities now, which carry no
-    hierarchy: tag counts are direct and do not roll up into parents, whether
-    or not this is on; a filter on a recorded parent still reaches its members.
-    """
-    enabled: bool = False
-    interval_days: float = 7.0
-    max_new_tags: int = 5  # propose at most this many higher-level tags per run
-    min_cluster_size: int = 2  # a new tag must group at least this many existing tags
-    min_tags: int = 6  # skip abstraction below this many distinct tags (nothing to cluster)
-
-
 class TenantConfig(BaseModel):
     """One tenant of a multi-tenant server: its own API key, its own
     transparently-namespaced memory space."""
@@ -306,7 +288,6 @@ class Config(BaseModel):
     decay: DecayConfig = Field(default_factory=DecayConfig)
     supersede: SupersedeConfig = Field(default_factory=SupersedeConfig)
     ann: AnnConfig = Field(default_factory=AnnConfig)
-    tags: TagAbstractionConfig = Field(default_factory=TagAbstractionConfig)
 
     # ------------------------------------------------------------------
     @classmethod
@@ -431,18 +412,7 @@ def _from_env() -> dict[str, Any]:
     put(None, "auth_db_path", e("MEMRY_AUTH_DB_PATH"))
     put(None, "public_url", e("MEMRY_PUBLIC_URL"))
 
-    tag_enabled = e("MEMRY_TAG_ABSTRACTION")  # "off"/"false"/"0" disables
-    if tag_enabled is not None and tag_enabled != "":
-        data.setdefault("tags", {})["enabled"] = tag_enabled.lower() not in (
-            "0", "false", "off", "no",
-        )
     put("decay", "durability", _bool(e("MEMRY_DURABILITY")))
-    tag_interval = e("MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS")
-    if tag_interval:
-        try:
-            data.setdefault("tags", {})["interval_days"] = float(tag_interval)
-        except ValueError:
-            pass
     tenants_json = e("MEMRY_TENANTS")
     if tenants_json:
         try:

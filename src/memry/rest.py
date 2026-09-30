@@ -59,6 +59,7 @@ from .accounts import SESSION_TTL, AccountStore, default_auth_db_path
 from .config import Config, require_models
 from .enrichment import EnrichmentWorker
 from .intelligence.when import next_occurrence, parse_when
+from .models import TOPIC_TYPE
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
 from .oauth import MEMRY_SCOPE, MemryOAuthProvider
 from .principal import ADMIN, Principal
@@ -176,7 +177,7 @@ button.toggle.active{border-color:var(--accent);color:var(--accent)}
 .knowledge-tabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.9rem 0}
 .knowledge-tabs button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
 .kpanel[hidden]{display:none}.entity-link,.entity-chip{border:1px solid var(--line);background:none;color:var(--accent);border-radius:999px;padding:.05rem .45rem;font-size:.78rem}
-.entity-link{border:none;padding:.1rem .2rem}.entity-link:hover,.entity-chip:hover{border-color:var(--accent)}
+.entity-link{border:none;padding:.1rem .2rem}.entity-link:hover,.entity-chip:hover{border-color:var(--accent)}.entity-chip .chip-type{color:var(--dim)}
 .when-chip{border-style:dashed;color:var(--dim)}
 .detail{border:1px solid var(--line);border-radius:9px;padding:.75rem;margin:.7rem 0;background:color-mix(in srgb,var(--bg) 35%,transparent)}
 .detail h3{margin:0 0 .35rem;font-size:1rem}.detail .description{line-height:1.45}.alias-list{display:flex;gap:.35rem;flex-wrap:wrap;margin:.4rem 0}.alias-list span{border:1px solid var(--line);border-radius:999px;padding:.05rem .45rem;font-size:.75rem;color:var(--dim)}
@@ -192,7 +193,6 @@ button.toggle.active{border-color:var(--accent);color:var(--accent)}
 .memory-type.semantic .type-symbol{border-radius:50%}
 .memory-type.episodic .type-symbol{width:0;height:0;background:none;border-left:.28rem solid transparent;border-right:.28rem solid transparent;border-bottom:.5rem solid currentColor}
 .memory-type.working .type-symbol{background:none;border:1px solid currentColor;transform:rotate(45deg)}
-button.tagfilter{background:none;color:inherit;font:inherit;cursor:pointer}
 .about-tabs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.9rem 0}
 .about-tabs button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
 .apanel .step{padding:.7rem 0;border-bottom:1px solid var(--line)}
@@ -204,7 +204,6 @@ button.tagfilter{background:none;color:inherit;font:inherit;cursor:pointer}
 .glossary dt{font-weight:600;padding:.45rem 0 0}
 .glossary dd{margin:0;padding:.45rem 0;color:var(--dim);line-height:1.5;border-bottom:1px solid var(--line)}
 @media(max-width:44rem){.glossary dd{padding-top:.1rem}}
-button.tagfilter:hover{border-color:var(--accent);color:var(--accent)}
 .meta button.distill{border:1px solid var(--warn);border-radius:999px;padding:0 .5rem;background:none;color:var(--warn);font-size:inherit}
 .meta button.distill:hover{background:var(--warn);color:var(--bg)}
 textarea{width:100%;min-height:70px;margin-bottom:.4rem}
@@ -404,7 +403,6 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <div class="entity-main">
       <div class="tagbar">
         <span class="sel" id="entsel">none selected</span>
-        <button onclick="suggestMerges()" title="Look for tags that name one subject twice, and list them below to apply or dismiss. This covers tags only: people and things that may be one are under Merge proposals.">Suggest merges</button>
         <button onclick="combineSelected()" title="Make the checked entries one: pick the one to keep and the rest go into it. With a person or thing checked, only a person or thing can be kept.">Combine selected...</button>
         <button onclick="backfillTypes()" title="Ask the language model for the type of every person or thing that has none yet.">Backfill types</button>
         <input id="entsearch" type="search" placeholder="filter by name..." oninput="renderEntityList()"
@@ -413,7 +411,6 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
       <div class="type-chips" id="enttypes" role="group" aria-label="Filter by type"></div>
       <div class="ent-count" id="entcount"></div>
       <div class="ent-combine" id="entcombine" hidden></div>
-      <div id="tagsuggest"></div>
       <div id="entlist"></div>
       <h2 style="font-size:.95rem;margin-top:1.1rem">Merge proposals</h2><div id="proplist"></div>
     </div>
@@ -546,13 +543,17 @@ function whenChip(m){
   const text=occursText(m);
   return text?`<span class="tag when-chip" title="when this happens, not when it was saved">${esc(text)}</span>`:'';
 }
+// A thing the memory is about, a tag too, with its type as the Entities list
+// names it. A click filters by it through the About filter.
+function entityChip(entity){
+  return `<button class="entity-chip" title="show the memories about ${esc(entity.name)}" onclick='filterByEntity(${jsArg(entity)})'>${esc(entity.name)} <span class="chip-type">${esc(typeLabel(entity.entity_type))}</span></button>`;
+}
 function viewCard(m){
   return `<div class="mem"><button class="del" title="forget" onclick="del('${m.id}')">✕</button>
    <button class="edit" title="edit" onclick="startEdit('${m.id}')">✎</button>
    <div>${esc(m.content)}</div>
    <div class="meta">${memoryTypeBadge(m)}${whenChip(m)}
-   ${(m.categories||[]).map(c=>`<button class="tag tagfilter" title="show everything tagged #${esc(String(c))}" onclick='filterByTag(${jsArg(String(c))})'>#${esc(String(c))}</button>`).join('')}
-   ${(m.entity_links||[]).map(entity=>`<button class="entity-chip" onclick='openEntity(${JSON.stringify(entity.id)})'>${esc(entity.name)}</button>`).join('')}
+   ${(m.entity_links||[]).map(entityChip).join('')}
    <span>@${esc(m.user_id||'(no user)')}</span>
    <span>imp ${(m.importance??0.5).toFixed(2)}</span>
    ${m.score!==undefined?`<span>score ${m.score.toFixed(3)}</span>`:''}
@@ -1292,13 +1293,7 @@ async function applyMapNodeFilter(node){
   if(same){
     activeMapKey=null;clearMapEntityDetail();toggleClear();await search();return;
   }
-  let option=[...select.options].find(candidate=>candidate.value===node.entity_id);
-  if(!option){
-    option=new Option(node.label,node.entity_id);
-    if(node.entity_type===TAG_TYPE)option.dataset.tag=tagKey({name:node.label});
-    select.add(option);
-  }
-  option.selected=true;activeMapKey=node.key;
+  aboutOption(node.entity_id,node.label,node.entity_type).selected=true;activeMapKey=node.key;
   showMapEntityDetail(node.entity_id);
   // Keep the filter panel in its current state; the active dot still shows it.
   toggleClear();await search();galaxyRead();
@@ -1343,13 +1338,12 @@ window.addEventListener('keydown',e=>{if(e.key==='Escape'&&gMaxed)setMaxed(false
 document.addEventListener('fullscreenchange',()=>drawMap());
 window.addEventListener('resize',()=>drawMap());
 const PAGE=100; let offset=0;
-// One click from a memory to everything sharing its tag. This goes through the
-// server-side filter, not a client-side hide, so hierarchy expansion applies and
-// the whole store is searched rather than the page already loaded. Tag filtering
-// is where the measured retrieval gain actually is: the user supplies the tag.
-function filterByTag(tag){
-  const option=aboutTagOption(String(tag).toLowerCase());
-  option.selected=!option.selected;  // clicking an active tag removes it again
+// One click from a memory to everything about one of its things. This goes
+// through the server-side filter, not a client-side hide, so the whole store
+// is searched rather than the page already loaded.
+function filterByEntity(entity){
+  const option=aboutOption(entity.id,entity.name,entity.entity_type);
+  option.selected=!option.selected;  // clicking an active chip removes it again
   // Reveal the panel, so a filter set from a chip is visible and clearable
   // rather than applied behind a collapsed row.
   if(option.selected&&!panels.filters)togglePanel('filters');
@@ -1358,11 +1352,10 @@ function filterByTag(tag){
   search();
 }
 // -- the About filter: one list of people, things and tags -----------------
-// A picked tag goes to the tag filter (``categories``): that filter also finds
-// the memories under the tags a broader one holds, which the entity filter
-// does not. Everything else goes to the entity filter. As the two filters
-// always did, several picks of one kind match any of them, and a tag with a
-// person or thing matches the memories that have both.
+// A picked tag goes to the tag filter (``categories``), everything else to the
+// entity filter. As the two filters always did, several picks of one kind
+// match any of them, and a tag with a person or thing matches the memories
+// that have both.
 function aboutParams(options){
   const categories=[],entities=[];
   for(const option of options){
@@ -1397,14 +1390,15 @@ function aboutOptions(entities,keep){
         +`${keep.has(entity.id)?' selected':''}>${esc(entity.name)} (${entity.memories})</option>`).join('')
       +'</optgroup>').join('');
 }
-// A tag picked from a memory card, found by its name; one the list does not
-// hold yet gets an option of its own.
-function aboutTagOption(tag){
+// The option of an entity picked from a memory card or the map, found by its
+// id; one the list does not hold yet gets an option of its own.
+function aboutOption(id,name,type){
   const select=document.getElementById('filter-about');
-  let option=[...select.options].find(o=>o.dataset.tag===tag);
+  let option=[...select.options].find(o=>o.value===id);
   if(!option){
-    option=new Option(tag,'tag:'+tag);option.dataset.tag=tag;
-    (select.querySelector('optgroup[data-type="'+TAG_TYPE+'"]')||select).appendChild(option);
+    option=new Option(name,id);
+    if(type===TAG_TYPE)option.dataset.tag=tagKey({name});
+    select.add(option);
   }
   return option;
 }
@@ -1412,11 +1406,9 @@ async function loadSearchFilters(){
   const select=document.getElementById('filter-about');
   // multi-select: keep every current choice across a reload, not just one
   const keep=new Set(aboutPicks().map(o=>o.value));
-  const loose=aboutPicks().filter(o=>o.value.startsWith('tag:')).map(o=>o.dataset.tag);
   const entities=await api('/api/v1/entities?limit=100000&kind=any');
   entities.forEach(rememberTag);
   select.innerHTML=aboutOptions(entities,keep);
-  loose.forEach(tag=>{aboutTagOption(tag).selected=true});
   toggleClear();
 }
 async function loadAll(more){
@@ -1641,7 +1633,6 @@ const PASS_WORDS={
   queued:n=>`left ${n} for you`,
   skipped:n=>`could not judge ${n}`,
   removed:n=>`removed ${n}`,
-  assigned:n=>`filed ${n} under a broader tag`,
 };
 function describePass(result){
   if(!result||typeof result!=='object')return 'done';
@@ -1665,8 +1656,6 @@ const QUEUE_SECTIONS=[
    ask:'Two entities that might be the same one. Merging joins them; keeping them separate is remembered for good.'},
   {kind:'consolidation',label:'Duplicate memories',
    ask:'Memories that say the same thing. Merging replaces them with the text shown; the originals stay under Archive.'},
-  {kind:'tag_split',label:'Tags',
-   ask:'Two tags that look like one subject. Combining files everything under the one shown.'},
   {kind:'role',label:'Roles',
    ask:'Words for a role someone holds, such as landlord or customers, that were filed as if they were things. Ticked names are removed, the rest are kept and not asked about again. The memories keep saying who holds the role, and a removed name can be restored under Archive.'},
   {kind:'entity_review',label:'Not an entity?',
@@ -1806,9 +1795,7 @@ function renderUpkeepPasses(info){
   const gate=info.merge_gate>1
     ? ' Entities never merge on an answer from a model here, because no calibrated decision provider answers: two of one name are joined by rule, and every other proposed merge is queued above.'
     : ` Entities merge on their own above ${esc(String(info.merge_gate))} confidence; anything less sure is queued above.`;
-  const h=info.tag_health||{};
-  const health=h.tags!=null?` ${h.tags} tags over ${h.memories} memories, ${h.untagged} untagged, ${h.single_use_tags} used once.`:'';
-  document.getElementById('upkeepwho').innerHTML=`<div class="hint">${who}${gate}${health} Every run is written to the server log too.</div>`;
+  document.getElementById('upkeepwho').innerHTML=`<div class="hint">${who}${gate} Every run is written to the server log too.</div>`;
   const pause=document.getElementById('upkeeppause');
   pause.textContent=info.paused?'Resume automatic upkeep':'Pause automatic upkeep';
   pause.setAttribute('aria-pressed',String(!!info.paused));
@@ -1838,7 +1825,7 @@ async function runPass(url,button,key){
   const after=document.getElementById('passlog-'+key);
   if(after){ after.textContent=line; after.classList.add(failed?'err':'ran'); }
 }
-// -- tags: deleted, and merged as suggested, on every memory filed under them
+// -- tags: deleted on every memory filed under them
 async function tagOp(body){
   await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(body)});
   activeMapKey=null;clearMapEntityDetail();
@@ -1850,23 +1837,6 @@ async function deleteTagEntity(id){
   if(!tag||!confirm('Delete tag "'+tag+'" from all memories? The memories stay.'))return;
   await tagOp({op:'delete',tag});
   if(document.getElementById('entitydetail').dataset.entityId===id)closeEntity();
-}
-async function suggestMerges(){
-  const box=document.getElementById('tagsuggest');
-  box.innerHTML='<div class="hint">Looking for tags that name one subject...</div>';
-  const groups=await api('/api/v1/tags/suggest-merges');
-  await Promise.all([loadEntities(),loadSearchFilters()]);
-  if(!groups.length){box.innerHTML='<div class="hint">Tags that differed only in format or plural were combined. No other tags look like one subject. People and things are compared on their own: see Merge proposals below.</div>';return}
-  box.innerHTML='<div class="hint">These cover tags only. People and things that may be one are under Merge proposals below.</div>'
-    +groups.map((group,index)=>`<div class="tagrow" id="sg${index}">
-    <span class="name">combine <b>${group.variants.map(esc).join('</b>, <b>')}</b> into <b>${esc(group.canonical)}</b></span>
-    <button class="act" onclick='applyMerge(${jsArg(group)},${index})' title="File every memory of these tags under the last one.">apply</button>
-    <button class="act del" onclick="document.getElementById('sg${index}').remove()" title="Hide this suggestion. Nothing changes.">dismiss</button>
-  </div>`).join('');
-}
-async function applyMerge(group,index){
-  await tagOp({op:'merge',tags:group.variants,to:group.canonical});
-  const row=document.getElementById('sg'+index);if(row)row.remove();
 }
 
 // -- the Entities tab: people, things and tags in one list ------------------
@@ -1880,22 +1850,20 @@ function renameTitle(tag){
   return tag?'Rename this tag on every memory filed under it.':'Change the name. The old name stays as an alias.';
 }
 let entityRows=[],entityRelations=0,entityType='all',entitySelected=new Set(),
-  entityExpanded=new Set(),hubsOnly=false,syntheticTags=new Set();
+  entityExpanded=new Set(),hubsOnly=false;
 // Tag names by entity id: a tag is deleted, and filtered on, by its name.
 const tagNames={};
 function tagKey(entity){return String(entity.normalized||entity.name||'').trim().toLowerCase()}
 function rememberTag(entity){if(entity&&entity.entity_type===TAG_TYPE)tagNames[entity.id]=tagKey(entity)}
 async function loadEntities(){
-  const [entities,relations,proposals,synthetic]=await Promise.all([
+  const [entities,relations,proposals]=await Promise.all([
     api('/api/v1/entities?limit=100000&include_merged=true&kind=any'),
     api('/api/v1/relations?limit=2000'),
-    api('/api/v1/entities/proposals?asked=true'),
-    api('/api/v1/tags/synthetic').catch(()=>[])]);
+    api('/api/v1/entities/proposals?asked=true')]);
   knowledgeNames={};
   entities.forEach(entity=>{knowledgeNames[entity.id]=entity.name;rememberTag(entity)});
   entityRows=entities.filter(entity=>!entity.merged_into);
   entityRelations=relations.length;
-  syntheticTags=new Set((Array.isArray(synthetic)?synthetic:[]).map(tag=>String(tag.tag).toLowerCase()));
   const live=new Set(entityRows.map(entity=>entity.id));
   entitySelected=new Set([...entitySelected].filter(id=>live.has(id)));
   renderEntityList();
@@ -1929,11 +1897,10 @@ function entityListView(rows,{type='all',needle='',hubs=false,expanded=new Set()
 }
 function entityRow(entity){
   const tag=entity.entity_type===TAG_TYPE,id=entity.id,count=entity.memories||0;
-  const synthetic=tag&&syntheticTags.has(tagKey(entity))?' <span class="syn">synthetic parent</span>':'';
   return `<div class="tagrow">
     <input type="checkbox" value="${esc(id)}"${entitySelected.has(id)?' checked':''} onchange='pickEntity(${jsArg(id)},this.checked)' title="Check to combine it with the other checked entries.">
     <span class="name"><button class="entity-link" onclick='openEntity(${jsArg(id)})' title="Open it: what is known, its memories, and what you can change.">${entity.home?`<span class="cnt">${esc(entity.home.name)} / </span>`:''}${esc(entity.name)}</button>
-      <span class="cnt" title="${count} memor${count===1?'y':'ies'}">${count}</span>${synthetic}</span>
+      <span class="cnt" title="${count} memor${count===1?'y':'ies'}">${count}</span></span>
     <button class="act" onclick='renameEntity(${jsArg(id)})' title="${renameTitle(tag)}">rename</button>
     ${tag?`<button class="act del" onclick='deleteTagEntity(${jsArg(id)})' title="${DELETE_TAG_TITLE}">delete</button>`:''}
   </div>`;
@@ -2787,13 +2754,19 @@ def create_app(
         data["when"] = when
         upcoming = next_occurrence(when) if when else None
         data["next_occurrence"] = upcoming.isoformat() if upcoming else None
+        # the things it is about: the named ones, then its tags (topic
+        # entities) in the order the memory lists them
+        listed = {str(tag).strip().casefold(): i for i, tag in enumerate(memory.categories)}
         data["entity_links"] = [
             {
                 "id": entity.id,
                 "name": entity.name,
                 "entity_type": entity.entity_type,
             }
-            for entity in store.backend.entities_of_memory(memory.id)
+            for entity in sorted(
+                store.backend.entities_of_memory(memory.id, kind="any"),
+                key=lambda entity: listed.get(entity.normalized, len(listed))
+                if entity.entity_type == TOPIC_TYPE else -1)
         ]
         return data
 
@@ -3021,14 +2994,6 @@ def create_app(
             agent_id=q.get("agent_id"),
             run_id=q.get("run_id"),
         ))
-        synthetic = {
-            t.tag for t in await run_in_threadpool(
-                partial(store.synthetic_tags, user_id=user_id)
-            )
-        }
-        for c in cats:
-            if c["category"] in synthetic:
-                c["synthetic"] = True
         return JSONResponse(cats)
 
     async def knowledge_map_route(request: Request) -> Response:
@@ -3046,23 +3011,6 @@ def create_app(
             kind=kind,
         ))
         return JSONResponse(data)
-
-    async def synthetic_tags_route(request: Request) -> Response:
-        tags = await run_in_threadpool(partial(
-            store.synthetic_tags,
-            user_id=_p(request).namespace(request.query_params.get("user_id")),
-        ))
-        return JSONResponse([t.model_dump() for t in tags])
-
-    async def abstract_tags_route(request: Request) -> Response:
-        """Run tag abstraction now for the caller's namespace (also runs on a
-        weekly schedule; this is the manual trigger)."""
-        body = await request.json() if await request.body() else {}
-        result = await run_in_threadpool(partial(
-            store.abstract_tags,
-            user_id=_p(request).namespace(body.get("user_id")),
-        ))
-        return JSONResponse(result)
 
     async def consolidate_route(request: Request) -> Response:
         """Preview or apply memory consolidation for the caller's namespace.
@@ -3196,9 +3144,7 @@ def create_app(
                 **extra,
             }
 
-        health = await run_in_threadpool(partial(store.tag_health, user_id=user_id))
-        queue = await run_in_threadpool(partial(
-            store.upkeep_queue, user_id=user_id, tag_health=health))
+        queue = await run_in_threadpool(partial(store.upkeep_queue, user_id=user_id))
         return JSONResponse({
             "namespace": user_id,
             "paused": store.upkeep_paused(),
@@ -3212,9 +3158,6 @@ def create_app(
                     "concept names are not things; those wait for you above.",
                     interval_days=every, needs_llm=False,
                 ),
-                # Tag abstraction is deliberately not listed: measured retrieval
-                # is best at the specific tag level, so it stays an opt-in set by
-                # MEMRY_TAG_ABSTRACTION or the CLI, not a switch in the dashboard.
                 entry(
                     "structure", "Entity structure",
                     "Records where each part belongs (a stated part-of relation, "
@@ -3245,7 +3188,6 @@ def create_app(
             "decider_available": store.decider.available,
             "merge_gate": store.merge_gate(),
             "embedding_model": store.embedder.model_id,
-            "tag_health": health,
             "entity_junk": await run_in_threadpool(partial(
                 store.entity_junk, user_id=user_id)),
         })
@@ -3328,19 +3270,6 @@ def create_app(
             user_id=_p(request).namespace(body.get("user_id")),
         ))
         return JSONResponse(outcome)
-
-    async def suggest_merges_route(request: Request) -> Response:
-        user_id = _p(request).namespace(request.query_params.get("user_id"))
-        # Formatting only: the judged tag merges belong to the weekly pass, not
-        # to a button that can be clicked any number of times. The pairs the
-        # judge puts at its tag merge bar come back as suggestions to apply.
-        await run_in_threadpool(partial(store.merge_obvious_topics, user_id=user_id,
-                                        judge=False))
-        groups = await run_in_threadpool(partial(
-            store.suggest_tag_merges,
-            user_id=user_id,
-        ))
-        return JSONResponse(groups)
 
     async def relations_route(request: Request) -> Response:
         rels = await run_in_threadpool(partial(
@@ -3843,17 +3772,14 @@ def create_app(
 
     async def _maintenance_scheduler() -> None:
         """Periodic per-namespace upkeep: entity self-healing, consolidation
-        and, where configured, durability scoring and tag abstraction, each on
-        its own interval. Last-run times are persisted (backend meta) so
+        and, where configured, durability scoring, each on its own interval. Last-run times are persisted (backend meta) so
         restarts don't re-run, and per-cycle work is capped so a many-account
         server spreads LLM cost across cycles. The passes themselves live in
         ``MemoryStore.run_upkeep_cycle`` so the dashboard's "run now" and the
         tests exercise the same code.
         """
-        tcfg = store.config.tags
-        tag_interval = max(tcfg.interval_days, 0.001)
         dedup_interval = max(store.config.dedup_interval_days, 0.001)
-        check_every = max(min(min(tag_interval, dedup_interval) * 86400, 6 * 3600), 60)
+        check_every = max(min(dedup_interval * 86400, 6 * 3600), 60)
         max_per_cycle = 25
 
         while True:
@@ -3916,10 +3842,7 @@ def create_app(
         Route("/api/v1/memories/{memory_id}/distill", guarded(distill_memory), methods=["POST"]),
         Route("/api/v1/categories", guarded(list_categories_route), methods=["GET"]),
         Route("/api/v1/map", guarded(knowledge_map_route), methods=["GET"]),
-        Route("/api/v1/tags/synthetic", guarded(synthetic_tags_route), methods=["GET"]),
-        Route("/api/v1/tags/abstract", guarded(abstract_tags_route), methods=["POST"]),
         Route("/api/v1/tags/edit", guarded(edit_tags_route), methods=["POST"]),
-        Route("/api/v1/tags/suggest-merges", guarded(suggest_merges_route), methods=["GET"]),
         Route("/api/v1/maintenance", guarded(maintenance_status_route), methods=["GET"]),
         Route("/api/v1/maintenance/consolidate", guarded(consolidate_route), methods=["POST"]),
         Route("/api/v1/maintenance/toggle", guarded(maintenance_toggle_route), methods=["POST"]),

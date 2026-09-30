@@ -875,68 +875,6 @@ def test_consolidation_abstention_leaves_the_text_model_in_charge():
 
 
 # --------------------------------------------------- tag drift
-def test_tags_merge_by_the_measured_question_at_its_measured_bar():
-    """Two tags merge when the judge, shown each with its 10 most recent
-    memories, in both orders, puts P(same subject) at Jev's
-    ``tag_merge_probability``, 0.55, or more. Measured on the 379 candidate
-    pairs of a real 417-tag store, labelled by hand (16 one subject, 41
-    borderline, 322 two subjects), two runs: no pair of two subjects scored
-    above 0.46, and from 0.55 the judge merged 7-9 of the 16 and nothing
-    wrong. The measurement is in the PhD repo, papers/memry-field-studies:
-    findings/identity-obvious-merges.md ("Tags on the same store") with
-    data/tag_pairs_jev.json, and for the wording
-    findings/identity-threshold-by-evidence.md ("Tag question") and
-    notes/scenario-registry.md, T-4 and T-8."""
-    from memry.intelligence.identity import TAG_EXAMPLES, TAG_QUESTION, judged_tag_merges
-    from memry.providers.decisions import Answers, JevDecider
-
-    assert JevDecider.tag_merge_probability == 0.55
-    assert TAG_EXAMPLES == 10
-    assert TAG_QUESTION.instructions == (
-        "Two tags that file memories in one person's memory store, each shown with "
-        "memories filed under it. Do tag A and tag B name the same subject, so that "
-        "every memory filed under one belongs under the other?")
-    assert TAG_QUESTION.criteria == {
-        "same": "One subject: the same tag written differently (spelling, typo, format, "
-                "singular or plural, abbreviation, acronym, translation, legal form or web "
-                "domain) or a synonym, and the memories under both are about that subject.",
-        "different": "Two subjects: unrelated subjects, related subjects, or one tag is a "
-                     "part, kind, aspect or detail of the other, as \"insurance\" and "
-                     "\"insurance contract\".",
-    }
-
-    class Recording(NoneDecider):
-        name, available, calibrated = "stub", True, True
-        tag_merge_probability = JevDecider.tag_merge_probability
-
-        def __init__(self, same):
-            self.same, self.asked = same, []
-
-        def decide(self, state, questions):
-            self.asked.append((state, questions))
-            return Answers({"tag": Answer("same", {"same": self.same,
-                                                   "different": 1 - self.same}, 0.9, True)})
-
-    tags = [{"category": "quality assurance", "count": 12}, {"category": "qa", "count": 11}]
-    recent = {tag: [f"{tag} memory {i}" for i in range(12)] for tag in ("qa", "quality assurance")}
-    for same, merged in ((0.55, True), (0.5499, False)):
-        judge = Recording(same)
-        groups = judged_tag_merges(judge, tags, {}, recent.get)
-        assert [group["variants"] for group in groups] == ([["qa", "quality assurance"]]
-                                                          if merged else [])
-        assert [questions for _, questions in judge.asked] == [{"tag": TAG_QUESTION}] * 2
-        first, second = sorted(state for state, _ in judge.asked)
-        assert first.index('TAG A: "qa" (on 11 memories)') < first.index(
-            'TAG B: "quality assurance" (on 12 memories)')
-        assert second.index('TAG A: "quality assurance" (on 12 memories)') < second.index(
-            'TAG B: "qa" (on 11 memories)')
-        for state in (first, second):  # the 10 most recent of each tag's 12
-            assert state.count("The 10 most recent memories filed under it:") == 2
-            assert "- qa memory 9" in state and "- qa memory 10" not in state
-            assert "- quality assurance memory 9" in state
-            assert "- quality assurance memory 10" not in state
-
-
 class _TagJudge(NoneDecider):
     """A calibrated judge at Jev's tag merge bar whose P(same subject) is
     ``same(state)``, recording what it is asked."""
@@ -956,19 +894,6 @@ class _TagJudge(NoneDecider):
                         for key in questions})
 
 
-def _suggest_merges(store):
-    """What the dashboard's "Suggest merges" button shows for this store."""
-    from starlette.testclient import TestClient
-
-    from memry.rest import create_app
-
-    # Not entered as a context manager, so the upkeep scheduler, whose weekly
-    # pass merges tags, does not start.
-    response = TestClient(create_app(store)).get("/api/v1/tags/suggest-merges")
-    assert response.status_code == 200
-    return response.json()
-
-
 def _tag_store(tagged):
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
     for tag, contents in tagged.items():
@@ -977,51 +902,77 @@ def _tag_store(tagged):
     return store
 
 
-def test_the_suggest_button_asks_the_measured_question_at_its_measured_bar():
-    """There is one tag question. The dashboard's "Suggest merges" asks it
-    about the pairs it would judge through the code the upkeep pass merges by
-    (``judged_tag_merges``): each tag shown with its 10 most recent memories,
-    in both orders, suggested from ``tag_merge_probability``, 0.55. The
-    suggestion only ever adds: the tags stay as they are until a person
-    applies it, and the upkeep pass's record of compared pairs is left alone,
-    so the weekly pass still compares the pair as its own."""
-    from memry.intelligence import clustering
-    from memry.intelligence.identity import TAG_QUESTION
+def _weekly(store, judge):
+    """The weekly pass's entity pairs, raised and compared by ``judge``: the
+    tags each memory is filed under afterwards."""
+    store.decider = judge
+    store.resolve_entities(user_id="default")
+    return {row["category"]: row["count"] for row in store.categories(user_id="default")}
 
-    assert not hasattr(clustering, "judge_tag_pairs")  # the names-only question
-    store = _tag_store({"quality assurance": [f"quality assurance note {i}" for i in range(12)],
-                        "qa": [f"qa note {i}" for i in range(11)]})
-    for same, suggested in ((0.55, True), (0.5499, False)):
-        judge = store.decider = _TagJudge(lambda state: same)
-        assert _suggest_merges(store) == ([{
-            "canonical": "quality assurance", "variants": ["qa", "quality assurance"],
-            "reason": "stub: same subject"}] if suggested else [])
+
+def test_tags_merge_by_the_measured_question_at_its_measured_bar():
+    """Two tags are an entity pair the funnel asks the tag question of: each
+    tag shown with how many memories it is on and its 10 most recent
+    memories, in both orders, merged from Jev's ``tag_merge_probability``,
+    0.55, into the more used tag. Measured on the 379 candidate pairs of a
+    real 417-tag store, labelled by hand (16 one subject, 41 borderline, 322
+    two subjects), two runs: no pair of two subjects scored above 0.46, and
+    from 0.55 the judge merged 7-9 of the 16 and nothing wrong; the entity
+    pair question on the same pairs merged fewer and some of two subjects.
+    The measurements are in the PhD repo, papers/memry-field-studies:
+    findings/identity-obvious-merges.md ("Tags on the same store") with
+    data/tag_pairs_jev.json, findings/identity-threshold-by-evidence.md ("Tag
+    question"), notes/scenario-registry.md, T-4 and T-8, and
+    data/topics-as-things/README.md. A judge with no measured bar is not asked."""
+    from memry.intelligence.identity import TAG_EXAMPLES, TAG_QUESTION
+
+    assert JevDecider.tag_merge_probability == 0.55
+    assert TAG_EXAMPLES == 10
+    assert TAG_QUESTION.instructions == (
+        "Two tags that file memories in one person's memory store, each shown with "
+        "memories filed under it. Do tag A and tag B name the same subject, so that "
+        "every memory filed under one belongs under the other?")
+    assert TAG_QUESTION.criteria == {
+        "same": "One subject: the same tag written differently (spelling, typo, format, "
+                "singular or plural, abbreviation, acronym, translation, legal form or web "
+                "domain) or a synonym, and the memories under both are about that subject.",
+        "different": "Two subjects: unrelated subjects, related subjects, or one tag is a "
+                     "part, kind, aspect or detail of the other, as \"insurance\" and "
+                     "\"insurance contract\".",
+    }
+    tags = {"quality assurance": [f"quality assurance note {i}" for i in range(12)],
+            "qa": [f"qa note {i}" for i in range(11)]}
+    for same, merged in ((0.55, True), (0.5499, False)):
+        store = _tag_store(tags)
+        judge = _TagJudge(lambda state: same)
+        assert _weekly(store, judge) == ({"quality assurance": 23} if merged
+                                         else {"quality assurance": 12, "qa": 11})
         assert [questions for _, questions in judge.asked] == [{"tag": TAG_QUESTION}] * 2
         first, second = sorted(state for state, _ in judge.asked)
         assert first.index('TAG A: "qa" (on 11 memories)') < first.index(
             'TAG B: "quality assurance" (on 12 memories)')
         assert second.index('TAG A: "quality assurance" (on 12 memories)') < second.index(
             'TAG B: "qa" (on 11 memories)')
-        for state in (first, second):  # 10 of each tag's 11 and 12
+        for state in (first, second):  # the 10 most recent of each tag's 11 and 12
             assert state.count("The 10 most recent memories filed under it:") == 2
             assert state.count("\n- qa note ") == 10
             assert state.count("\n- quality assurance note ") == 10
-        assert {row["category"]: row["count"] for row in store.categories(user_id="default")} \
-            == {"quality assurance": 12, "qa": 11}
-    assert store._upkeep_get("tag_pairs", "default", {}) == {}
-    unmeasured = store.decider = _TagJudge(lambda state: 0.99)
+        store.close()
+    store = _tag_store(tags)
+    unmeasured = _TagJudge(lambda state: 0.99)
     unmeasured.calibrated = False  # no measured bar, as a text model: not asked
-    assert _suggest_merges(store) == [] and unmeasured.asked == []
+    assert _weekly(store, unmeasured) == {"quality assurance": 12, "qa": 11}
+    assert unmeasured.asked == []
     store.close()
 
 
-def test_the_suggest_button_keeps_apart_two_subjects_the_names_alone_would_join():
+def test_tags_the_names_alone_would_join_stay_apart_when_their_memories_differ():
     """By their names "apple" and "apple inc" are one subject written with and
     without its legal form, and a judge shown the names alone joins them, as
-    names-only judging put "memry" and "memory" at 0.98. The button shows the
-    judge the memories under each tag: where one tag files the fruit and the
-    other the company, nothing is suggested; where both file the company, the
-    same two names are."""
+    names-only judging put "memry" and "memory" at 0.98. The tag question
+    shows the memories under each tag: where one tag files the fruit and the
+    other the company, they stay two tags; where both file the company, the
+    same two names merge."""
     from memry.intelligence.identity import TAG_QUESTION
 
     fruit = ["Picked apples at the orchard with Ada on Saturday",
@@ -1043,16 +994,14 @@ def test_the_suggest_button_keeps_apart_two_subjects_the_names_alone_would_join(
         return 0.1 if two else 0.98
 
     apart = _tag_store({"apple": fruit, "apple inc": company})
-    judge = apart.decider = _TagJudge(reads)
-    assert _suggest_merges(apart) == []
+    judge = _TagJudge(reads)
+    assert _weekly(apart, judge) == {"apple": 6, "apple inc": 6}
     assert [questions for _, questions in judge.asked] == [{"tag": TAG_QUESTION}] * 2
     assert all(all(m in state for m in fruit + company) for state, _ in judge.asked)
-    assert len(apart.categories(user_id="default")) == 2
     apart.close()
 
     one = _tag_store({"apple": company[:3], "apple inc": company[3:]})
-    one.decider = _TagJudge(reads)
-    assert [group["variants"] for group in _suggest_merges(one)] == [["apple", "apple inc"]]
+    assert _weekly(one, _TagJudge(reads)) == {"apple": 6}
     one.close()
 
 
@@ -1774,6 +1723,39 @@ def test_the_conversation_step_with_nothing_to_add_asks_nothing():
     store.resolve_entities(user_id="ada")
     assert judge.states == []
     assert [p.compared_step for p in store.merge_proposals(user_id="ada")] == [2]
+    store.close()
+
+
+def test_a_thin_pair_whose_conversation_adds_nothing_keeps_its_belongs_answer():
+    """A pair left waiting at the first step, whose conversation has nothing
+    more to show, keeps the belongs answer of that comparison. It came back
+    without one, so the pair was stored with none, and the weekly pass,
+    which asks again a pair that has none, asked it again every week."""
+    from memry.models import Entity, MergeProposal
+    from memry.providers.decisions import Answer
+
+    class PairAndBelongs(_PairJudge):
+        def decide(self, state, questions):
+            answers = super().decide(state, questions)
+            if "belongs" in questions:
+                answers.answers["belongs"] = Answer("neither", dict(NEITHER), 0.9, True)
+            return answers
+
+    store, _, _ = _judged_store(lambda state: (0.8, 0.1))
+    judge = store.decider = PairAndBelongs(lambda state: (0.8, 0.1))
+    weber = _entity_with(store, "Johnny Weber",
+                         [f"Johnny Weber rewired the kitchen socket {i}" for i in range(12)], "person")
+    johnny = store.backend.insert_entity(Entity(
+        name="Johnny", normalized="johnny", entity_type="person", user_id="ada"))
+    _conversation(store, johnny, ["Johnny comes on Tuesday"])
+    store.backend.add_proposal(MergeProposal(entity_a=weber.id, entity_b=johnny.id,
+                                             user_id="ada"))
+    store.resolve_entities(user_id="ada")
+    assert len(judge.states) == 2
+    [proposal] = store.merge_proposals(user_id="ada")
+    assert proposal.compared_step == 2 and proposal.belongs == NEITHER
+    store.resolve_entities(user_id="ada")
+    assert len(judge.states) == 2  # not asked again
     store.close()
 
 

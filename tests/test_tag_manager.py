@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
-from conftest import FakeLLM
 from starlette.testclient import TestClient
 
 from memry.config import Config
@@ -60,19 +57,6 @@ def test_curation_is_namespaced(store):
     assert store.get_all(user_id="bob", limit=5)[0].categories == ["budget"]
 
 
-def test_curating_drops_the_synthetic_marker():
-    from memry.models import SyntheticTag
-
-    s = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
-    s.add("x", user_id="ada", infer=False, categories=["running"])
-    s.backend.record_synthetic_tag(SyntheticTag(tag="running", source_tags=["a"], user_id="ada"))
-    assert [t.tag for t in s.synthetic_tags(user_id="ada")] == ["running"]
-    s.rename_tag("running", "jogging", user_id="ada")
-    # once the user renames it, it is no longer a system-owned synthetic tag
-    assert s.synthetic_tags(user_id="ada") == []
-    s.close()
-
-
 def test_rest_tag_edit_endpoint():
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
     store.add("a", user_id="default", infer=False, categories=["finance", "budget"])
@@ -88,38 +72,6 @@ def test_rest_tag_edit_endpoint():
         assert r.json()["memories_changed"] == 1
 
         assert client.post("/api/v1/tags/edit", json={"op": "bogus"}).status_code == 400
-
-
-@pytest.fixture
-def seeded():
-    s = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(96))
-    for content, cats in [("a", ["finance", "budget"]), ("b", ["financial"]),
-                          ("c", ["projects"]), ("d", ["project"]), ("e", ["running"])]:
-        s.add(content, user_id="u", infer=False, categories=cats)
-    yield s
-    s.close()
-
-
-def test_suggest_merges_keeps_only_real_variant_groups(seeded):
-    seeded.llm = FakeLLM()
-    seeded.llm.queue(json.dumps({"groups": [
-        {"canonical": "finance", "variants": ["finance", "financial"]},
-        {"canonical": "project", "variants": ["project", "projects"]},
-        {"canonical": "x", "variants": ["ghost"]},            # not real -> dropped
-        {"canonical": "running", "variants": ["running"]},    # size 1 -> dropped
-    ]}))
-    groups = seeded.suggest_tag_merges(user_id="u")
-    # project/projects was already collapsed deterministically during ingestion.
-    assert groups == [
-        {"canonical": "finance", "variants": ["finance", "financial"]},
-    ]
-
-
-def test_suggest_merges_no_llm_is_empty():
-    s = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
-    s.add("a", user_id="u", infer=False, categories=["x", "y"])
-    assert s.suggest_tag_merges(user_id="u") == []
-    s.close()
 
 
 # ---------------------------------------------------------------- collections

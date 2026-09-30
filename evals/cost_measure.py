@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from memry.config import Config
-from memry.intelligence import clustering, consolidate, entities, extraction, reconcile
+from memry.intelligence import consolidate, entities, extraction, reconcile
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import LLM
 from memry.store import MemoryStore
@@ -120,8 +120,6 @@ class CountingLLM(LLM):
             return "entity-type"
         if head == entities._REFERENT_SYSTEM[:60]:
             return "entity-referent"
-        if head == clustering.SYNTHETIC_TAG_SYSTEM[:60] or head == clustering.CANONICALIZE_SYSTEM[:60]:
-            return "tag-clustering"
         if head == consolidate.CONSOLIDATE_SYSTEM[:60]:
             return "consolidate"
         return "unknown"

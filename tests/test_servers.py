@@ -635,24 +635,31 @@ def test_consolidate_defaults_to_a_dry_run(client):
     assert len(after) == len(before)
 
 
-def test_maintenance_reports_tag_health(client):
-    """Fragmentation must be visible without anyone going looking for it."""
-    for text in ("liver enzyme panel high", "liver enzyme panel repeated",
-                 "liver enzyme panel reviewed"):
+def test_two_tags_that_may_be_one_wait_in_upkeep_as_a_merge_proposal(client):
+    """Without a calibrated judge, two tags spelled alike are an entity pair
+    like any: the weekly pass raises it, Upkeep lists it with the pairs of
+    people and things, and a yes files every memory under the more used tag.
+    There is no tag list of its own and no tag health report."""
+    for text, tag in (("liver enzymes high", "hepatology"), ("liver enzymes repeated", "hepatology"),
+                      ("liver enzymes reviewed", "hepatology"), ("liver scan booked", "hepatolgy")):
         client.post("/api/v1/memories", json={
-            "content": text, "user_id": "u", "infer": False,
-            "categories": ["liver lab results"]})
-    for text in ("liver enzyme panel high again", "liver enzyme panel once more"):
-        client.post("/api/v1/memories", json={
-            "content": text, "user_id": "u", "infer": False,
-            "categories": ["liver bloods"]})
+            "content": text, "user_id": "u", "infer": False, "categories": [tag]})
+    client.post("/api/v1/maintenance/run/dedup_entities", json={"user_id": "u"})
 
-    health = client.get("/api/v1/maintenance?user_id=u").json()["tag_health"]
-    assert health["memories"] == 5
-    assert health["tags"] == 2
-    assert health["untagged"] == 0
-    assert {row["tag"] for row in health["largest_tags"]} == {
-        "liver lab results", "liver bloods"}
+    report = client.get("/api/v1/maintenance?user_id=u").json()
+    assert "tag_health" not in report
+    assert [(row["kind"], sorted(row["title"].split(" and "))) for row in report["queue"]] == [
+        ("proposal", ["hepatolgy", "hepatology"])]
+    assert client.get("/api/v1/maintenance/count?user_id=u").json() == {"count": 1}
+    decided = client.post("/api/v1/maintenance/decide", json={
+        "kind": "proposal", "id": report["queue"][0]["id"], "decision": "accept", "user_id": "u"})
+    assert decided.json()["ok"]
+    assert client.get("/api/v1/categories?user_id=u").json() == [
+        {"category": "hepatology", "count": 4}]
+    found = client.post("/api/v1/search", json={
+        "query": "", "user_id": "u", "categories": ["hepatology"]}).json()
+    assert len(found) == 4
+    assert client.get("/api/v1/tags/suggest-merges").status_code == 404
 
 
 # ------------------------------------------------- forgotten memories
