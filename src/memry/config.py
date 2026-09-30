@@ -26,7 +26,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 DEFAULT_DIR = Path.home() / ".memry"
 
@@ -39,8 +39,8 @@ DecisionProvider = Literal["none", "llm", "jev"]
 #: The OpenAI default is gpt-6-luna, at half the price of gpt-5.6-luna. As the
 #: extraction model it matched gpt-5.6-luna on every measure (details kept,
 #: entities listed, same-name naming, coverage audit; two runs each on 118
-#: saves) and listed fewer ordinary nouns as entities. gpt-5.6-luna stays the
-#: only text model measured for re-ranking. Nobody has calibrated a text
+#: saves) and listed fewer ordinary nouns as entities. gpt-6-luna has not been
+#: measured for re-ranking (``MEASURED_RERANKERS``). Nobody has calibrated a text
 #: model's confidence, so Memry never merges entities on it alone (see
 #: providers/decisions.py); it sends those questions to the decision model.
 DEFAULT_LLM_MODELS: dict[str, str] = {
@@ -100,19 +100,14 @@ class DecisionConfig(BaseModel):
     pair_merge_probability: float | None = None
     #: Turn re-ranking on or off. Unset leaves it as the provider has it: on
     #: with Jev, off otherwise. Turning it on only works for a provider that
-    #: was measured to beat no re-ranking (Jev, and gpt-5.6-luna as the text
-    #: model); gpt-5-mini scored below the baseline, so for it and for any
-    #: unmeasured model the setting is refused.
+    #: was measured to beat no re-ranking (Jev, and gpt-5.6-luna or
+    #: gpt-5-mini as the text model); for any unmeasured model the setting is
+    #: refused. It decides only what "auto" relevance resolves to
+    #: (``MemoryStore.relevance_mode``).
     rerank: bool | None = None
-    #: How many of the hybrid candidates to judge.
+    #: How many of the first candidates to judge: the first of the linked
+    #: order with seeds, of the text ranking without (``MemoryStore.search``).
     rerank_pool: int = 20
-    #: How much the relevance judgement counts against the hybrid rank. The
-    #: hybrid rank carries recency, decay, anchors and relation hops, so
-    #: replacing it outright loses more than the judgement adds.
-    rerank_weight: float = 0.35
-    #: Below this, a candidate is treated as a clear non-answer and pushed to
-    #: the back whatever its hybrid rank.
-    rerank_floor: float = 0.15
 
 
 class EmbeddingConfig(BaseModel):
@@ -127,7 +122,18 @@ class EmbeddingConfig(BaseModel):
         return self.model or DEFAULT_EMBEDDING_MODELS.get(self.provider, "")
 
 
+#: Link modes that search no longer has, per setting: a config naming one is
+#: refused with a message saying so.
+REMOVED_RELATIONAL: dict[str, tuple[str, ...]] = {
+    "relational_mode": ("typed", "undirected"),
+    "relational_fusion": ("rescue", "weighted", "gated", "inherit"),
+}
+
+
 class RetrievalConfig(BaseModel):
+    # an assignment is validated too, so a removed mode cannot be set later
+    model_config = ConfigDict(validate_assignment=True)
+
     rrf_k: int = 60
     vector_weight: float = 1.0
     keyword_weight: float = 1.0
@@ -137,17 +143,63 @@ class RetrievalConfig(BaseModel):
     recency_half_life_days: float = 30.0
     candidate_multiplier: int = 3
     reconcile_similarity_limit: int = 5
-    # How many top hybrid results relational fusion may never displace. Graph
-    # distance is a much weaker relevance signal than semantic+lexical match, so
-    # without this a buried graph neighbour can outrank the correct answer. 0
-    # restores the unprotected behaviour.
-    relational_protect_top: int = 5
+    #: How search follows links from the entities a query names
+    #: (``intelligence/graph_retrieval.py``): "directed" weighs every link by
+    #: its kind, its direction and the judge's probability. The only value:
+    #: "typed" and "undirected" were removed (``REMOVED_RELATIONAL``).
+    relational_mode: Literal["directed"] = "directed"
+    #: How many links a search follows from the query's entities.
+    relational_depth: int = 1
+    #: How the linked memories join the text ranking: "linked" scores every
+    #: candidate, and the best of each linked entity's memories, by how well it
+    #: states the property asked times how strongly it is about the entity the
+    #: query names (``store._search_linked``). The only value: it beat the
+    #: typed search on every family of the relative retrieval benchmark.
+    relational_fusion: Literal["linked"] = "linked"
+    #: "linked" fusion: the power the property similarity is raised to before
+    #: it is multiplied by how strongly the memory is about the query's entity.
+    #: 1 measured best: 2 and 3 lost the versions whose change is worded as one.
+    relational_sharpness: float = 1.0
+    #: What judges whether a memory answers. "jev": the decision provider
+    #: judges the first ``decision.rerank_pool`` of every search in one call.
+    #: "vector": no search is judged; the property vectors order a search
+    #: whose question names a hub. "auto" (the default): "jev" where the
+    #: decision provider re-ranks (Jev, unless ``decision.rerank`` is false,
+    #: or a text model measured to help with ``decision.rerank`` true), else
+    #: "vector" (``MemoryStore.relevance_mode``).
+    relational_relevance: Literal["auto", "vector", "jev"] = "auto"
+    #: "linked" fusion: how many leading numbers of each vector the property
+    #: comparison keeps (None: all). The v3 OpenAI models are trained so a
+    #: vector cut short still works; property vectors are stored this short.
+    property_dimensions: int | None = None
+    #: A question that needs several memories (a list, a total, a comparison)
+    #: has at most this many more judged in one further call, after the first
+    #: ``decision.rerank_pool``: the memories filed under the topics the first
+    #: ones share, then those nearest the members found (``store._set_pool``).
+    #: Measured, the topics' held 85 to 100% of each set within 100
+    #: candidates.
+    set_pool: int = 80
+    #: The memories found are shown with the source turns they rest on that
+    #: best match the query, up to this many tokens in all
+    #: (``MemoryStore.evidence``); 0 shows none. A memory is a summary, and the
+    #: turn it came from keeps what the summary left out.
+    evidence_tokens: int = 600
+
+    @field_validator("relational_mode", "relational_fusion", mode="before")
+    @classmethod
+    def _not_removed(cls, value: Any, info: ValidationInfo) -> Any:
+        if value in REMOVED_RELATIONAL.get(info.field_name, ()):
+            only = "directed" if info.field_name == "relational_mode" else "linked"
+            raise ValueError(
+                f"retrieval.{info.field_name} {value!r} was removed; the only value is "
+                f"{only!r}")
+        return value
 
 
 class SupersedeConfig(BaseModel):
-    """When a contradiction may replace a stored memory without asking.
+    """When a change or a correction may replace a stored memory without asking.
 
-    Replacing is the one reconcile action that takes a fact out of use, and it
+    Replacing takes a fact out of use (or leaves it only as history), and it
     rests on a single model judgement. It went wrong in the way that matters:
     a document was misread as saying someone's wife was their mother, and that
     "corrected" the true fact out of the store. So the judgement only acts on
@@ -157,15 +209,24 @@ class SupersedeConfig(BaseModel):
 
     #: A memory at or above this importance is never replaced without asking.
     protect_importance: float = 0.8
-    #: Nor is one that this many separate saves have stated.
+    #: Nor is one that this many separate saves have stated: the saves behind
+    #: its evidence, not its episodes (``reconcile.saves_of``).
     protect_sources: int = 2
-    #: A typed decision below this confidence asks too. The prompt path
-    #: reports no confidence, so there only the two protections above apply.
+    #: The confidence from which a typed reconcile answer acts, for a
+    #: decision provider with no bars measured (``Decider.reconcile_bars``).
+    #: The prompt path reports no confidence, so there only the two
+    #: protections above apply.
     confidence: float = 0.9
 
 
 class DecayConfig(BaseModel):
     enabled: bool = True
+    #: The durability pass: the decision provider estimates, per memory,
+    #: whether it matters for days, months or years, and decay reads that in
+    #: place of the type's half-life. Off unless set (MEMRY_DURABILITY): the
+    #: config is the only way to put it in the upkeep cycle or to run it now;
+    #: a stored dashboard switch alone cannot.
+    durability: bool = False
     half_life_days: float = 90.0
     floor: float = 0.15  # decayed importance never drops below floor * importance
     # Memory type shapes how fast a memory fades. Episodic memories are dated
@@ -196,12 +257,15 @@ class AnnConfig(BaseModel):
 
 
 class TagAbstractionConfig(BaseModel):
-    """Optional topic abstraction.
+    """Optional topic abstraction (synthetic parent tags).
 
     An LLM proposes higher-level topic parents and the store records hierarchy
     edges to their existing members. Parent labels are not copied onto memories.
     It is off by default because generic abstraction can hurt retrieval; run it
-    only when the resulting navigation is useful.
+    only when the resulting navigation is useful. ``enabled`` is the only way
+    to put it in the upkeep cycle. Tags are topic entities now, which carry no
+    hierarchy: tag counts are direct and do not roll up into parents, whether
+    or not this is on; a filter on a recorded parent still reaches its members.
     """
     enabled: bool = False
     interval_days: float = 7.0
@@ -372,6 +436,7 @@ def _from_env() -> dict[str, Any]:
         data.setdefault("tags", {})["enabled"] = tag_enabled.lower() not in (
             "0", "false", "off", "no",
         )
+    put("decay", "durability", _bool(e("MEMRY_DURABILITY")))
     tag_interval = e("MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS")
     if tag_interval:
         try:

@@ -51,9 +51,20 @@ Try these in a chat:
   your memory store.
 
 The connector exposes the full toolset: `save_memories`, `search_memories`,
-`get_memory_context`, `list_memories`, `update_memory`, `delete_memory`,
-`memory_history`, `memory_stats`. Everything lands in the same store your
-other agents use, so what Claude Code learned yesterday, claude.ai knows today.
+`get_memory_context`, `list_memories`, `list_categories`, `update_memory`,
+`delete_memory`, `memory_history`, `memory_stats`. Everything lands in the same
+store your other agents use, so what Claude Code learned yesterday, claude.ai
+knows today.
+
+## What Claude sends to Memry when it saves
+
+The Memry server gives Claude a short set of rules for saving. Claude sends
+what you said in words close to your own, one statement per line, and names
+anyone else whose words it passes on ("Ada: I got the job"). Memry extracts the
+facts and shows your words beside them in later searches. When something
+changes or you correct a fact, Claude saves the new statement, and Memry keeps
+the old one as dated history, or retires it when it was wrong. For a
+conversation from another day, Claude passes the day it was said as `said_at`.
 
 ## Security notes
 

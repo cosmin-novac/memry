@@ -17,7 +17,7 @@ indexes and organization layered on top.
 | **Memory** | One distilled, self-contained fact/event/statement. Bi-temporal. | `memories` table | extraction + reconciliation |
 | **Entity** | A stable referent hub with aliases, a derived description, and linked evidence. | `entities` + `entity_mentions` | entity linking on save; description on first use |
 | **Relation** | A typed edge between two entities (`Ada -works_on-> Helios`). | `relations` table | relation extraction on save |
-| **Topic** | A scoped classification and filter, with optional parent/child hierarchy. | `topics` + `memory_topics` + `topic_relations` | extraction, user, or abstraction |
+| **Tag** | A classification and filter: an entity of type `topic`, one per user and name, mentioned by every memory filed under it. | `entities` + `entity_mentions`; the `categories` column and the `topics`/`memory_topics` filter index; `topic_relations` for optional parents | extraction, user, or abstraction |
 
 Two important properties of a **Memory**:
 
@@ -28,7 +28,12 @@ Two important properties of a **Memory**:
   `memory_events` as an audit trail.
 - **Derived, with provenance.** A memory links back to the episode(s) it came
   from (`source_episode_ids`), so you can always re-run a better extraction over
-  the original text.
+  the original text. A search returns each memory with the episodes it rests on
+  (`evidence`: the day each was said, the speaker, the text), and the context
+  block lists them under "What was said".
+- **The day it was said.** A memory's `created_at` is the time it was saved,
+  or the `said_at` day a caller gives for content said on another day.
+  Relative times in the text ("last Friday", "next month") count from that day.
 - **A "when" is separate from the record's own dates.** A memory whose fact
   happens at a time carries `metadata["when"]` with a `start` (`YYYY-MM-DD`,
   `YYYY-MM-DDTHH:MM`, or `--MM-DD` for a yearly date), an optional `end`, and an
@@ -47,9 +52,9 @@ Two important properties of a **Memory**:
 
 ```
 message ─▶ episode (verbatim, immutable)
-        ─▶ extract_facts (LLM)  →  candidate facts
+        ─▶ extract_facts (LLM)  →  candidate facts, each naming the lines it rests on
         ─▶ for each fact: reconcile against similar existing memories
-                             ADD / UPDATE / DELETE / NONE
+                             NEW / SAME / MORE / CHANGED / WRONG
         ─▶ store the memory (with embedding + categories)
         ─▶ link entities  (resolve_mentions, conservative disambiguation)
         ─▶ extract relations between those entities  (typed edges)
@@ -57,23 +62,65 @@ message ─▶ episode (verbatim, immutable)
 ```
 
 **Reconciliation** is the step that keeps the store from bloating. Each new fact
-is compared to the most similar existing memories and the LLM decides:
+is compared to the most similar existing memories, each shown with the day it
+was said, and the decision model gives one of five answers:
 
-- **ADD** – genuinely new → a new memory.
-- **UPDATE** – refines/corrects an existing one → rewritten in place, and the
-  rewrite must preserve every concrete detail from both versions.
-- **DELETE** – the old statement is now false → the old memory is invalidated and
-  superseded by the new one.
-- **NONE** – already known → skipped.
+- **NEW**: new information, including a second event of the same kind (two yoga
+  classes stay two). Memry adds a new memory.
+- **SAME**: the memory already holds everything in the fact. Memry stores no
+  second copy and records the save as more evidence for the memory.
+- **MORE**: the fact has a detail the memory lacks, and the memory is still
+  true. Memry writes one text of both, dated at the save, and keeps the old
+  memory as history.
+- **CHANGED**: the old memory was true and no longer is. Memry adds the new one
+  and keeps the old one as history.
+- **WRONG**: the old memory was never true (a correction). Memry retires it.
+
+A memory kept as history is still found by search, shown with the day it was
+said and `[until <date>]`, the day it stopped holding. When the old memory is
+rated important or was said in two or more saves, or the decision model is
+unsure of a CHANGED or a WRONG, Memry keeps both memories in use and lists the
+pair under Upkeep for you to decide. Section 4 of
+[architecture.md](architecture.md) has the details.
 
 `infer=false` skips extraction and reconciliation entirely and stores the text
 verbatim as one memory (the "just save this exactly" path).
 
+### What a client should send when it saves
+
+Memry keeps the saved text as the source turns of the memories it extracts, and
+extraction only has what that text says. Clients should send what was said in
+words close to the original, one statement per line. If a client sends a
+summary, a later search shows that summary as the source, and the feelings,
+advice, event details or photo descriptions it dropped are lost.
+
+Over MCP, `save_memories` stores its `content` as one turn by the user, so a
+client writes the name of anyone else who spoke into the text ("Ada: I got the
+job"). Over REST, `POST /api/v1/memories` also takes a `messages` list, one turn
+each, where a `role` other than a chat role (`user`, `assistant` and the like)
+or a `name` field is the speaker's name. Extraction then names each person as
+the conversation does, and writes "the user" only for an unnamed speaker in the
+role `user`.
+
+For content said on another day, such as an import or an earlier conversation,
+the client passes `said_at` (`YYYY-MM-DD`, or an ISO date and time, read in
+UTC). Memry dates the save and its memories that day, and "yesterday" or "next
+month" in the text counts from it. A value that is not an ISO date, or a day
+after today, is refused.
+
+When something changes or the user corrects a fact, the client saves the new
+statement as it was said, and Memry keeps or retires the old memory.
+`update_memory` rewrites a memory in place and dates it today, which suits a
+memory Memry wrote wrong. `delete_memory` forgets a memory when the user asks
+for that.
+
 For MCP saves with `infer=true`, the raw text remains immediately searchable
 while enrichment waits for two minutes of quiet. Related calls in the same
-user/agent/run scope and with the same optional `context` label are extracted
-together. Clients should preferably send related facts in one concise multiline
-call; optional `tags` help classification but do not define the ingestion group.
+user/agent/run scope, with the same optional `context` label and given the same
+`said_at` day, are extracted together. Clients should send related statements in
+one call. Optional `tags` are classification hints, and each tag becomes a topic
+in the user's tag list. The `context` label is also shown to the decision model
+when it compares two names that may be one person or thing.
 
 ## The read path (what happens on `search`)
 
@@ -91,17 +138,21 @@ question:
 
    This nails direct lookups ("what does Ada prefer?") and "about X" queries.
 
-2. **Relational traversal** — for questions whose answer shares no words with the
+2. **The linked search** — for questions whose answer shares no words with the
    query ("what tool does Ada use for work?", answered by a memory naming neither
-   "Ada" nor "tool"). The query's entities are detected, typed relations are
-   followed up to two hops, and the reached memories are fused in. When a
-   namespace has no typed relations yet, this falls back to localized PageRank
-   over entity co-occurrence (no LLM). A **rescue threshold** means relational
-   candidates only recover memories hybrid *buried or missed*; they never demote
-   a strong direct hit.
+   "Ada" nor "tool"). The query's entities are detected, their relations and
+   version and part links are followed (directed and weighted, one link deep by
+   default), and every candidate, the text ranking's and the linked entities'
+   best, is ordered by how well it states the property asked times how strongly
+   it is about the entity named. With Jev, the decision model then judges the
+   first 20 of every search in one call, whether it names anything or not, and a
+   question whose answer is a set gets one more call (see architecture.md, read
+   path, for the stages every search runs in order).
 
-3. **Filters** — an optional `categories` (tag) filter and a `since`/`until` date
-   window. An empty query with just a tag or date *browses* instead of ranking.
+3. **Filters** — an optional `categories` (tag) or entity filter and a
+   `since`/`until` date window, applied to every candidate before anything is
+   ordered or judged. An empty query with just a tag or date *browses* instead
+   of ranking.
 
 ## Memory types: semantic / episodic / procedural / working
 
@@ -116,9 +167,11 @@ fades** (via `half_life_by_type` in `DecayConfig`):
 - **working** — short-lived scratch; fades fastest.
 
 So over time an old dated event decays out of retrieval sooner than a standing
-rule, even at equal starting importance. The type is also shown in the context
-block label (`[procedural · 2026-…]`). It does not (yet) change ranking within a
-single query, only how importance decays with age.
+rule, even at equal starting importance. The type is not shown in the context
+block: a memory reads `[happened 2023-05-07] <text> (said 8 May 2023)`, with the
+day its event happens where known and the day it was said
+(`context.memory_lines`). It does not (yet) change ranking within a single
+query, only how importance decays with age.
 
 ## Entities and their types
 
@@ -142,15 +195,20 @@ Entities are **extracted, disambiguated, and typed.**
   The same data is available through **`GET /api/v1/entities`** and
   `/api/v1/relations`.
 
-## Topics: indexed classification, not identity
+## Tags: topic entities
 
-Public APIs still call the topic list `categories` for compatibility. Internally, topics are
-canonical scoped rows linked to memories through an indexed many-to-many table. They never
-enter entity disambiguation: `health` is a classification, while `Jonas` may refer to several
-people.
+Public APIs still call a memory's tags `categories`. Each tag is an entity of type `topic`,
+one per user and normalized name, and every memory filed under it mentions it. The
+`categories` column and the legacy `topics`/`memory_topics` index, which the filters read,
+are written from the same tags. Two tags merge through the tag question (each shown with
+its 10 most recent memories); a tag and a named thing of the same name ("bildy" and the
+product Bildy) through the entity pair question. A tag is never a hub and never what a
+search is about.
 
-- The **Tags** tab in the dashboard's Upkeep area lists topics A-to-Z with counts and
-  supports rename, combine, and delete operations.
+- The dashboard's Upkeep > Entities lists tags with the people and things, filtered by
+  type (a tag reads "tag"), with counts, and supports rename, combine, and delete; the map
+  draws tags once their type is turned on, and the memory list's About filter picks any
+  of them.
 - Separator and conservative singular/plural duplicates such as `food`/`foods` merge
   automatically. "Suggest merges" proposes semantic synonyms for review; distinct related
   topics remain separate.
@@ -158,10 +216,12 @@ people.
   `liver health`. The parent is not copied onto the child memories. Filtering by `health`
   expands through the hierarchy at query time. It is off by default and meant for
   browsing: a filter that names the specific tag retrieves better than its parent.
-- Entity structure decides which extracted names are hubs, files a part under the project
-  or product it keeps appearing with, and reads a shared name through that home. It is
-  computed from mentions and relations and deletes nothing; a removed name is retired and
-  can be restored under Upkeep > Archive.
+- Entity structure: whether a name is a hub is computed when asked, from its type, its
+  memories and relations and the name screen's verdict. The structure pass records each
+  part's home (a stated `part_of` relation, or the judge's answer that it is a version or
+  a part of another entity; appearing in the same memories gives none) and merges names
+  that are the same thing under the same home. It deletes nothing; a removed name is
+  retired and can be restored under Upkeep > Archive.
 - Consolidation merges memories that record the same fact more than once. Grouping is
   geometric over the stored vectors; the merge itself is judged by an LLM and written to
   preserve every detail. Originals are superseded, never deleted. Word-for-word duplicates
@@ -175,15 +235,15 @@ people.
             │
         episodes               ← immutable source of truth
             │
-     topic links              ← indexed cross-cutting filters and hierarchy
+     tags (topic entities)    ← cross-cutting filters, optional hierarchy
 ```
 
 - **Memories** are the atoms; **episodes** are what they came from.
 - **Entities + relations** are where retrieval intelligence lives: they turn a
   bag of facts into a graph you can traverse, which is the only thing that makes
   multi-hop questions answerable.
-- **Topics** cut across memories as indexed filters; hierarchy provides abstraction without copying labels.
-- Synthetic topic parents are an optional map on top, not places
+- **Tags** cut across memories as filters; hierarchy provides abstraction without copying labels.
+- Synthetic tag parents are an optional map on top, off by default, not places
   facts live.
 
 ## Keeping it manageable
@@ -200,7 +260,6 @@ people.
   are free).
 - Use **Upkeep > Tags** and conservative "Suggest merges" to keep the
   classification vocabulary clean; prefer specific topics.
-  runs on a schedule, so it spends no tokens unasked.
 - Nothing the system does destroys data: forgetting is invalidation, and every
   mutation is in `memory_events`.
 
@@ -209,11 +268,11 @@ people.
 | Capability | Status |
 |---|---|
 | Episodes, memories, bi-temporal, audit trail | real |
-| Extraction + reconciliation (ADD/UPDATE/SUPERSEDE/NONE) | real |
+| Extraction + reconciliation (NEW/SAME/MORE/CHANGED/WRONG) | real |
 | Hybrid retrieval (vector + BM25 + recency/importance) | real |
 | Entity extraction + conservative disambiguation + merge proposals | real |
-| Typed relations + relational retrieval (+ PPR fallback) | real |
-| Normalized topics, hierarchy expansion, canonicalization | real (abstraction opt-in) |
+| Typed relations + the linked search | real |
+| Tags as topic entities, hierarchy expansion, canonicalization | real (abstraction opt-in) |
 | Entity types (person/project/place/…) + typing backfill | real |
 | Memory-type-driven decay (episodic fades, procedural persists) | real |
 | Unified Upkeep area: what needs you, entity hubs with their relations, tags, and the archive of what was removed | real |

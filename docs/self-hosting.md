@@ -60,7 +60,8 @@ key and both models). See [`docker-compose.yml`](../docker-compose.yml).
 
 Docker automatically reuses the package layer for source-only updates. A first build or
 a change to `requirements-docker.txt` installs all dependencies; normal code and dashboard
-updates install only Memry itself. To deliberately refresh every package:
+updates install only Memry itself. The image includes usearch (the `ann` extra), so it
+builds the ANN index once a store passes the threshold. To deliberately refresh every package:
 
 ```bash
 docker compose build --no-cache memry
@@ -228,11 +229,11 @@ merge-proposal review under **Upkeep** matters as much as it did before.
 |---|---|
 | Entity identity | The verdict and the confidence the automatic-merge gate reads. |
 | Entity typing | One question per name in a single call, instead of one call per batch through the text model. |
-| Reconcile | The action and its target. Writing the merged sentence for an UPDATE still needs the text model. A contradiction only replaces a memory on its own where little is at stake; see below. |
-| How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. |
+| Reconcile | The action and its target. The text model writes the merged sentence for an UPDATE; without one, the old memory is kept and superseded by the new one, so no text is lost. A contradiction only replaces a memory on its own where little is at stake; see below. |
+| How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. Off unless `MEMRY_DURABILITY=1` (`decay.durability`), for the scheduler and "run now" alike; the score does not move a memory's `updated_at`. |
 | Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. Word-for-word duplicates merge on their own; a merge the model proposed waits under Upkeep, because that judgement has not been measured. |
-| Tag drift | Suggestions only, for review under Upkeep. Never applied automatically. |
-| Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna), and is refused for one that was not. |
+| Tag drift | Two tags merge on their own when the provider, shown each with its 10 most recent memories and asked in both orders, puts P(same subject) at 0.55 or more (measured for Jev on 379 tag pairs of a real store; a text model is not asked). **Suggest merges** on the **Entities** tab of Upkeep asks the same question at the same bar about the tags nothing else flagged, when at most 20 are left, and only suggests: a tag changes when you apply the suggestion. |
+| Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna, gpt-5-mini), and is refused for one that was not. Where it is on, `retrieval.relational_relevance` "auto" (the default) has the provider judge the first 20 of every search, filtered or not, in the linked search's order when the question names a hub and in the text ranking's otherwise, and the results are ordered by that judgement. `"vector"` judges no search: a question naming a hub is ordered by the property vectors, and one naming none by the text ranking. |
 
 ### The settings, and where they came from
 
@@ -240,26 +241,24 @@ Two numbers are not obvious, so both were measured rather than guessed. The data
 harnesses are in `evals/` if you want to re-run them against your own data, which is the
 only way to know whether these hold for your store.
 
-**The automatic-merge gate** (`Decider.auto_confirm_confidence`) is 0.70 with Jev and
-0.95 with gpt-5-mini as the text model. It is a property of the model because the number
-only means something relative to how that model's confidence is spread: a model
+**The automatic-merge gate** (`Decider.auto_confirm_confidence`) is 0.70 with Jev, and
+would be 0.95 for gpt-5-mini as the text model. It is a property of the model because
+the number only means something relative to how that model's confidence is spread: a model
 reporting a number about itself scores its wrong answers about as high as its right ones,
 so the gate has to sit high and little gets automated. Override with
 `MEMRY_DECISION_MERGE_CONFIDENCE`.
 
-**A text model nobody has measured never merges on its own.** On the same 56 cases,
-gpt-5.6-luna got 52 verdicts safe, better than gpt-5-mini's 49, and put its worst wrong
-"same" at 0.98, above any threshold. There is no number that is safe for a model that
-has not been run against the labelled set, so for any text model other than gpt-5-mini,
-gpt-5.6-luna and the OpenAI default gpt-6-luna included, you confirm every proposed merge
-under Upkeep when Memry sends the decision questions to the text model. To measure your own
-model, run `evals/identity_benchmark.py llm --model <name>` and set the gate it reports
-with `MEMRY_DECISION_MERGE_CONFIDENCE`. A confident "different" still blocks an
-obvious-looking merge at 0.95 whatever the gate, so raising the gate never makes merging
-easier.
-
-Raising the gpt-5-mini gate from 0.9 to 0.95 was a change to existing behaviour, and a
-fix: on the labelled set, 0.9 merged two entities that should have stayed apart.
+**A text model does not decide identity.** On the same 56 cases, gpt-5.6-luna got 52
+verdicts safe, better than gpt-5-mini's 49, and put its worst wrong "same" at 0.98, above
+any threshold: a number a model reports about itself says too little to merge on, and a
+confident "different" from it would keep two records of one person apart for good. So
+without a calibrated decision provider (a text model only, or `MEMRY_DECISION_PROVIDER=llm`)
+Memry asks no model whether two entities are one, at save or in upkeep, and writes no
+model's confidence on a pair. A name the store has joins its entity by rule, two entities
+of one name are joined by the same rule in the weekly pass, a tag folds into the thing of
+its very name, and every other pair waits for you under **Upkeep**.
+`evals/identity_benchmark.py llm --model <name>` measures a text model's gate all the same,
+for comparison.
 
 **When a contradiction may replace a memory.** Replacing is the one reconcile action that
 takes a fact out of use, and it rests on one model reading one text. So it only happens
@@ -271,17 +270,27 @@ go ahead is listed under **Upkeep > Archive > Replaced by a newer memory** and c
 undone there. The three thresholds are `MEMRY_SUPERSEDE_PROTECT_IMPORTANCE`,
 `MEMRY_SUPERSEDE_PROTECT_SOURCES` and `MEMRY_SUPERSEDE_CONFIDENCE`.
 
-**Re-ranking** blends the relevance judgement with the hybrid rank at 0.35 rather than
-replacing it, and pushes anything under 0.15 to the back. Replacing the hybrid rank
-outright measured worse than not re-ranking at all, because that rank already carries
-recency, decayed importance, entity anchors and the typed-relation hops multi-hop
-questions depend on.
+**Re-ranking** has the decision provider judge the first 20 of a search in one call and
+orders the results by that judgement. When it first asked whether a memory "helps answer
+the question", the judgement alone measured worse than not re-ranking at all, and it was
+blended with the hybrid rank instead. Every search now asks one question, whether someone
+who reads only the memory can answer it, and measured again on the same 228 memories and
+90 questions (`evals/datasets/distractors_v1.jsonl`, the `memry eval` protocol) the
+judgement alone did as well as any blend, so the blend is gone. A question naming
+something Memry knows is ordered by the linked search first (see `docs/architecture.md`,
+read path), which follows the links from it directed and weighted, one link deep; that is
+the only link mode (`retrieval.relational_mode` "directed", `relational_fusion` "linked"),
+and a config naming a removed one ("typed", "undirected", "rescue", "weighted", "inherit",
+"gated") is refused at startup. Where re-ranking is on, the provider judges its first 20
+(`retrieval.relational_relevance` "auto", see the table).
 
 It is on by default with Jev. With a text model it depends on which one, measured over
-the same 228 memories and 90 questions: gpt-5.6-luna lifted recall@3 from 0.933 to 0.956
-and MRR from 0.828 to 0.933 at 1.7 seconds a search, so `MEMRY_DECISION_RERANK=1` turns
-it on; gpt-5-mini scored below not re-ranking at all at nearly ten seconds a search, so
-for it, and for any model not measured, the setting is refused.
+the same 228 memories and 90 questions in the wording every search now asks in: judging
+every search, gpt-5.6-luna and gpt-5-mini both put the answer higher than no judging at
+all, and both below Jev, gpt-5.6-luna at about 2.6 seconds a call and gpt-5-mini at about
+9. So `MEMRY_DECISION_RERANK=1` turns either on, neither is on by default, and for any
+model not measured the setting is refused. (In the wording re-ranking first asked in,
+gpt-5-mini had scored below no re-ranking and was refused.)
 
 ### A trap worth remembering
 
@@ -294,7 +303,7 @@ was asked. A question carrying no information still gets a confident-looking rep
 
 | Situation | Setting |
 |---|---|
-| Faster vector search past ~5k memories | `pip install "memry[ann]"` - a usearch HNSW sidecar supplies candidates above the configured threshold; `memry reindex` rebuilds it |
+| Faster vector search past ~5k memories | `pip install "memry[ann]"` (the Docker image has it) - a usearch HNSW sidecar supplies candidates above the configured threshold; `memry reindex` rebuilds it |
 | Many agents or devices sharing memory | Point every client at the same `memry serve` URL. They share one server process and one SQLite store. |
 | Several server replicas or machines writing one store | Unsupported. Do not point multiple Memry processes at the same database file. This would require a separately reviewed storage architecture. |
 
@@ -327,7 +336,7 @@ For local single-machine use, prefer stdio (`memry mcp`) - no port, no auth surf
 | Default Anthropic extraction | `ANTHROPIC_API_KEY` + `pip install "memry[anthropic]"` (defaults to the fast, lower-cost `claude-haiku-4-5`) |
 | Larger Anthropic model | `MEMRY_LLM_MODEL=claude-opus-4-8` (explicitly trades more latency and cost for extraction quality) |
 | OpenAI end-to-end | `OPENAI_API_KEY` (LLM `gpt-6-luna`, embeddings `text-embedding-3-small`) |
-| Previous OpenAI default | `MEMRY_LLM_MODEL=gpt-5.6-luna` (the only text model measured for re-ranking) |
+| Previous OpenAI default | `MEMRY_LLM_MODEL=gpt-5.6-luna` (measured for re-ranking, with gpt-5-mini) |
 | Fully offline | `MEMRY_LLM_PROVIDER=ollama` + `MEMRY_EMBEDDING_PROVIDER=ollama` (e.g. `llama3.1`, `nomic-embed-text`) + `MEMRY_DECISION_PROVIDER=llm` |
 
 You also need a decision model for every server (see
@@ -347,7 +356,16 @@ memry sweep --threshold 0.1   # soft-forget stale, low-importance memories
 memry stats                   # counts, providers, db path
 memry export > backup.json    # knowledge only: IDs, provenance, entities, relations, history
 memry abstract-tags           # LLM clusters tags into higher-level ones now
+memry tags-to-things --dry-run   # tags to topic entities (done at first open): count only
 ```
+
+Tags are entities of type `topic`. A database or backup from before that change keeps its
+tags in the `categories` column and the legacy `topics`/`memory_topics` tables, which every
+filter still reads. The first open of such a database gives each tag its topic entity and
+each tagged memory its mention, so the Entities list and the tag counts see them, committing
+user by user and recording that it did so after the last (an open stopped midway picks up
+where it stopped); `memry tags-to-things [--user USER]` runs the same migration by hand. It
+only reads the legacy tables, and a second run changes nothing.
 
 When accounts or OAuth are enabled, also back up `auth.db` with `memry.db`. The JSON export
 does not contain login data.
@@ -357,20 +375,23 @@ are invalidated (auditable, recoverable), never destroyed.
 
 ## Managing topics and entities
 
-The dashboard's **Upkeep** button opens four tabs: Upkeep (what needs you), Entities, Tags, and
+The dashboard's **Upkeep** button opens three tabs: Upkeep (what needs you), Entities, and
 Archive (what was removed). A badge on the button counts what is waiting.
-Tags show memory counts, can be filtered by name, and can be renamed, combined, or deleted
-under the current user filter. The same topic operations remain available at
-`POST /api/v1/tags/edit` for API compatibility.
+Entities lists people, things and tags together, with a filter per type (tags are the type
+"tag") and by name. Each shows its memory count; a tag can be renamed, combined, or
+deleted under the current user filter, and checked entries of any type can be combined.
+The same topic operations remain available at `POST /api/v1/tags/edit` for API
+compatibility.
 
 An optional, off-by-default LLM pass proposes higher-level parents for browsing, such as
 `health` over `liver health` and `weekly gym`. Leave it off unless you want that navigation
 view: retrieval measures best when a filter names the specific level, and a broad parent
 adds candidates without adding coverage (`MEMRY_TAG_ABSTRACTION=on`,
-`MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7`, or `memry abstract-tags`). Memry stores hierarchy
-edges and expands a parent filter at query time; it does not copy the parent label onto each
-memory. Synthetic parents remain visible through `/api/v1/categories` and
-`GET /api/v1/tags/synthetic`.
+`MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7`, or `memry abstract-tags`; the config switch is the
+only way into the upkeep cycle). Memry stores hierarchy edges and expands a parent filter at
+query time; it does not copy the parent label onto each memory. Tag counts
+(`/api/v1/categories`, the tags in the Entities list) are direct and do not roll a parent
+up; recorded parents are listed at `GET /api/v1/tags/synthetic`.
 
 Entities open as hubs with aliases, a bounded description, and active
 supporting memories. Relations are listed under the entity they describe and can open their
@@ -380,8 +401,9 @@ Upkeep runs on its own and asks only for what it will not decide: it lists the e
 merges below the gate, the memory merges a model proposed, the tag pairs that look like one
 subject split in two, and the names the model judged not to be entities, each with a yes
 and a no. Everything else (entity self-healing, word-for-word duplicate consolidation, and
-durability scoring when a decision provider is configured) runs on its interval, records what it changed, and can be paused with one switch.
-`POST /api/v1/maintenance/run/<pass>` runs any pass now.
+durability scoring when a decision provider is configured and `MEMRY_DURABILITY=1` is set) runs on its interval, records what it changed, and can be paused with one switch.
+`POST /api/v1/maintenance/run/<pass>` runs any pass that is on now; a pass that is off
+runs neither there nor on its interval, and no run of it is recorded.
 
 ### Hubs, homes and shared names
 
@@ -398,21 +420,29 @@ earned it.
   The map asks for a little more: a planet is a hub that came up in at least two memories,
   and a person is one from the first mention. On the store above the hubs alone were 1,424
   planets, 610 of them things seen exactly once.
-- **A home** is the project or product a part belongs to, shown as
-  `AI-Flow / privacy policy`. A stated `part_of` relation sets it. Otherwise one project or
-  product has to appear in at least 70% of the part's memories, and a part seen once needs
-  that project to be the only project, product or organization in its memory. An
-  organization becomes a home only through a stated relation.
+- **A home** is the project, product or organization a part belongs to, shown as
+  `AI-Flow / privacy policy`. A stated `part_of` relation sets it, or the comparison below.
+  Appearing together in memories does not: homes from co-mention measured 68% right (86%
+  restricted) and are no longer derived.
+- **A version or a part** gets a home from the comparison itself. Whenever Memry compares
+  two entities with Jev, it asks in the same call whether one is a version, a dated
+  occurrence or a part of the other. At 0.80 or more, "bildy v4" gets "bildy" as its home
+  and "Tovel Forum 2025" gets "Tovel Forum", whatever their type, and Memry doesn't merge
+  the two. A home stated in a memory comes first. A person or a place never gets a home
+  this way.
 - **A shared name** is read through home. Two entities with the same name under different
   homes are never proposed for merging. Two with the same name and nothing setting them
-  apart are merged. Two people are never merged on a name alone.
+  apart are merged. Two people are never merged on a name alone, and two that the judge or
+  you kept apart (a rejected pair, or P(different) of 0.5 or more) are never merged on
+  their name, nor joined through a third.
 
 New names are screened before they become entities. Measurements and counts ("250 ms",
 "22 tests") are dropped by rule. With a decision provider, each new name gets one typed
 question in the memory it came from, and a name judged a value or a role with at least 0.80
-probability is not made an entity. The phrase stays on the memory. Names already in the
-store get the same question during upkeep, and the ones judged a value or a role wait under
-**Upkeep** for a yes or a no.
+probability is not made an entity. The phrase stays on the memory, and a name that does
+become an entity keeps its verdict. Names in the store without a verdict get the same
+question during upkeep, and the ones judged a value or a role wait under **Upkeep** for a
+yes or a no.
 
 An entity is never deleted. When you or a rule removes a name, Memry retires it, and
 **Upkeep > Archive > Removed names** lists it with the reason and a restore button.
@@ -425,15 +455,44 @@ every merge the pass would make, and changes nothing.
 | Name screen at the 0.80 gate | 360 labelled names | screened out 31, none of them a real thing; clean from 0.70 up |
 | Hub rule using the provider's verdict | 360 labelled names | 72% of hubs are real things, and 98% of real things are hubs |
 | Hub rule, first draft: type, or two memories, or a relation | the same names | 52% and 88% |
-| Home, as shipped | 141 labelled homes | 86% correct |
-| Home from co-mention alone | the same homes | 68% correct, and 47% when the home is an organization |
+| Home from co-mention, restricted (no longer derived) | 141 labelled homes | 86% correct |
+| Home from co-mention alone (no longer derived) | the same homes | 68% correct, and 47% when the home is an organization |
 | Same name, not a person, nothing setting them apart | 78 past merge decisions | all 78 had been confirmed |
+| Version or part at 0.80 | 427 pairs: the identity benchmark and 271 generated | no true merge held back; no wrong home outside web domains and handles; none pointing the wrong way |
 
 An independent reader labelled the names and homes, all from one real store. Two first
 drafts failed the labels and were changed: recurrence turned out to find topics like
 "billing", and the first screening question listed "path" among the values, so the provider
 screened out source files and street addresses. `evals/entity_structure_benchmark.py` runs
 the same scoring on your own store.
+
+## The fields you can send to POST /api/v1/memories
+
+| Field | Meaning |
+|---|---|
+| `content` or `messages` | The text to save, or a list of `{"role": ..., "content": ...}` messages, one turn each. A `role` other than `user`, `assistant`, `system`, `developer`, `tool` or `function` is the speaker's name (`{"role": "Ada", "content": "I got the job"}`), and so is a `name` field. Memry shows each turn with that name as its speaker. Anything other than a text or a list of objects gets a `400`. |
+| `user_id`, `agent_id`, `run_id` | The namespace, agent and run the memories belong to. Without `user_id`, Memry uses `MEMRY_DEFAULT_USER_ID`. |
+| `infer` | With `true` (the default), Memry extracts facts and reconciles them with what the store has. With `false`, Memry keeps the text as one memory. |
+| `defer` | With `infer` and `defer` both `true`, Memry stores what was said at once, replies `202` and extracts the facts in the background after two minutes of quiet. A `messages` list keeps one turn per message with its speaker, as without `defer`, and extraction reads it the same way. Until then it is searchable as one memory with a `Speaker: text` line per message. |
+| `said_at` | The day the content was said, as `YYYY-MM-DD` or an ISO date and time (read in UTC). Leave it out for what is said now. |
+| `metadata` | Memry keeps it with the saved turns. `metadata.context` is the context label: Memry extracts related saves with one label together. |
+| `categories` | Memry passes up to three of these tags to extraction as hints. With `infer=false` they are the memory's tags. |
+| `memory_type`, `importance` | With `infer=false` they are the memory's type (`semantic` by default) and importance (0.5 by default). |
+
+Send what was said, close to the words used. Memry keeps the saved turns and
+shows them with each memory in later searches (`evidence`), so if you send a
+summary, those searches show the summary.
+
+Use `said_at` for content said on another day, such as an import or an earlier
+conversation. Memry dates the save and its memories that day, and "yesterday"
+or "last Friday" in the text counts from it. A value that is not an ISO date gets a `400` with the reason, and so
+does a day after today: a future date is most likely the day something will
+happen, and that date belongs in the text. A time later today is taken as now.
+MCP `save_memories` takes the same `said_at`.
+
+When a fact changes or someone corrects it, save the new statement and leave the
+old memory as it is. Memry keeps the old value as dated history, or retires it
+when it was wrong.
 
 ## Searching by tag and date
 

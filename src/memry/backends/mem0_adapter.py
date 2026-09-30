@@ -11,6 +11,7 @@ It must not be used as persistence for a running Memry product.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from ..models import Episode, Memory, MemoryEvent, Scope, utcnow
@@ -87,12 +88,14 @@ class Mem0ComparisonAdapter(MemoryBackend):
             self._m.update(memory_id, content)
         return self.get_memory(memory_id)
 
-    def invalidate_memory(self, memory_id: str, *, superseded_by: str | None = None) -> Memory | None:
+    def invalidate_memory(
+        self, memory_id: str, *, superseded_by: str | None = None, at: str | None = None
+    ) -> Memory | None:
         # mem0 has no temporal invalidation; fall back to hard delete.
         memory = self.get_memory(memory_id)
         self._m.delete(memory_id)
         if memory:
-            memory.invalid_at = utcnow()
+            memory.invalid_at = at or utcnow()
             memory.superseded_by = superseded_by
         return memory
 
@@ -137,13 +140,13 @@ class Mem0ComparisonAdapter(MemoryBackend):
 
     def vector_search(
         self, embedding, embedding_model, scope, limit=20, include_invalid=False,
-        categories=None, entity_id=None,
+        categories=None, entity_id=None, history=False,
     ):
         return []  # native_search covers retrieval for this backend
 
     def keyword_search(
         self, query, scope, limit=20, include_invalid=False,
-        categories=None, entity_id=None,
+        categories=None, entity_id=None, history=False,
     ):
         return []  # native_search covers retrieval for this backend
 
@@ -173,5 +176,5 @@ class Mem0ComparisonAdapter(MemoryBackend):
     def stats(self) -> dict[str, Any]:
         return {"backend": "mem0", "note": "stats limited on the mem0 adapter"}
 
-    def reset(self) -> None:
+    def reset(self, *, keep_meta: Iterable[str] = ()) -> None:
         self._m.reset()

@@ -84,7 +84,14 @@ def test_backup_restores_exact_knowledge_and_is_idempotent():
         assert len(backup["tables"]["episodes"]) == 2
         assert len(backup["tables"]["memories"]) == 2
         assert len(backup["tables"]["memory_events"]) >= 4
-        assert len(backup["tables"]["entity_mentions"]) == 2
+        # two names, and each tag a memory is filed under (research twice,
+        # projects once) as a mention of its topic entity
+        topics = {row["id"] for row in backup["tables"]["entities"]
+                  if row["entity_type"] == "topic"}
+        mentions = backup["tables"]["entity_mentions"]
+        assert len([m for m in mentions if m["entity_id"] not in topics]) == 2
+        assert sorted(m["surface"] for m in mentions if m["entity_id"] in topics) == [
+            "projects", "research", "research"]
         assert len(backup["tables"]["relations"]) == 1
 
         result = target.import_backup(backup, owner_prefix="ada")
@@ -144,6 +151,27 @@ def test_a_backup_from_before_a_column_was_added_still_restores():
     finally:
         source.close()
         target.close()
+
+
+def test_a_database_from_before_mentions_kept_what_joined_them_gains_the_column(tmp_path):
+    import sqlite3
+
+    from memry.backends.local import LocalBackend
+
+    path = tmp_path / "old.db"
+    LocalBackend(str(path)).close()
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE entity_mentions DROP COLUMN decided")
+    db.execute("INSERT INTO entity_mentions (id, entity_id, memory_id, surface, created_at) "
+               "VALUES ('n1', 'e1', 'm1', 'Quillon', '2026-01-01')")
+    db.commit()
+    db.close()
+    backend = LocalBackend(str(path))
+    try:
+        [mention] = backend.entity_mentions("e1")
+        assert (mention.surface, mention.decided) == ("Quillon", None)
+    finally:
+        backend.close()
 
 
 def test_a_database_from_before_the_funnel_gains_its_column(tmp_path):

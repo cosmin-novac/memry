@@ -24,11 +24,12 @@ services:
       MEMRY_DECISION_BASE_URL: ${MEMRY_DECISION_BASE_URL:-}
       MEMRY_DECISION_MERGE_CONFIDENCE: ${MEMRY_DECISION_MERGE_CONFIDENCE:-}
       MEMRY_DECISION_RERANK: ${MEMRY_DECISION_RERANK:-}
+      MEMRY_DURABILITY: ${MEMRY_DURABILITY:-}
       MEMRY_TENANTS: ${MEMRY_TENANTS:-}
       # Set to your public https URL to turn on OAuth for accounts (see
       # docs/self-hosting.md#accounts-and-oauth). Unset = OAuth off.
       MEMRY_PUBLIC_URL: ${MEMRY_PUBLIC_URL:-}
-      # Weekly LLM tag abstraction (needs an LLM). "off" to disable.
+      # Weekly LLM tag abstraction (needs an LLM), off by default. "on" to enable.
       MEMRY_TAG_ABSTRACTION: ${MEMRY_TAG_ABSTRACTION:-}
       MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS: ${MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS:-}
     volumes:

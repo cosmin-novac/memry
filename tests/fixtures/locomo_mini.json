@@ -1,0 +1,64 @@
+[
+  {
+    "sample_id": "conv-mini-1",
+    "conversation": {
+      "speaker_a": "Maya",
+      "speaker_b": "Theo",
+      "session_1_date_time": "1:56 pm on 8 May, 2023",
+      "session_1": [
+        {"speaker": "Maya", "dia_id": "D1:1", "text": "Hey Theo! I finally adopted a rescue greyhound last weekend, her name is Pepper."},
+        {"speaker": "Theo", "dia_id": "D1:2", "text": "That's wonderful news! How is she settling in?"},
+        {"speaker": "Maya", "dia_id": "D1:3", "text": "She is shy but she loves the soft blanket by the window.",
+         "img_url": ["https://example.invalid/pepper.jpg"], "blip_caption": "a dog lying on a blue blanket"},
+        {"speaker": "Theo", "dia_id": "D1:4", "text": "I started pottery classes at the community studio on Tuesday evenings."}
+      ],
+      "session_2_date_time": "7:30 pm on 25 May, 2023",
+      "session_2": [
+        {"speaker": "Theo", "dia_id": "D2:1", "text": "My first bowl came out of the kiln cracked, but I am proud of it."},
+        {"speaker": "Maya", "dia_id": "D2:2", "text": "Pepper and I ran our first 5k together yesterday morning."},
+        {"speaker": "Theo", "dia_id": "D2:3", "text": "Impressive! Where did you run?"},
+        {"speaker": "Maya", "dia_id": "D2:4", "text": "Along the river trail in Riverside Park."}
+      ]
+    },
+    "qa": [
+      {"question": "What name did Maya give the rescue greyhound she adopted last weekend?",
+       "answer": "Pepper", "evidence": ["D1:1"], "category": 4},
+      {"question": "When did Maya and Pepper run their first 5k?",
+       "answer": "24 May 2023", "evidence": ["D2:2"], "category": 2},
+      {"question": "What did Theo make in his pottery classes?",
+       "answer": "a bowl", "evidence": ["D1:4; D2:1"], "category": 1},
+      {"question": "Which instrument does Maya play at the jazz club?",
+       "adversarial_answer": "saxophone", "evidence": [], "category": 5}
+    ],
+    "event_summary": {"events_session_1": {"Maya": ["Maya adopts Pepper."], "Theo": []}},
+    "observation": {"session_1_observation": {"Maya": [["Maya adopted a greyhound.", "D1:1"]]}},
+    "session_summary": {"session_1_summary": "Maya tells Theo about Pepper."}
+  },
+  {
+    "sample_id": "conv-mini-2",
+    "conversation": {
+      "speaker_a": "Jonas",
+      "speaker_b": "Ines",
+      "session_1_date_time": "10:02 am on 3 June, 2022",
+      "session_1": [
+        {"speaker": "Jonas", "dia_id": "D1:1", "text": "I moved to Lisbon in 2019 for a job at a solar energy startup."},
+        {"speaker": "Ines", "dia_id": "D1:2", "text": "Do you still work there?"},
+        {"speaker": "Jonas", "dia_id": "D1:3", "text": "Yes, I lead the battery storage team now."}
+      ],
+      "session_2_date_time": "4:15 pm on 20 June, 2022",
+      "session_2": [
+        {"speaker": "Ines", "dia_id": "D2:1", "text": "I booked flights to Japan for my sister's wedding in October."},
+        {"speaker": "Jonas", "dia_id": "D2:2", "text": "Which city is it in?"},
+        {"speaker": "Ines", "dia_id": "D2:3", "text": "Kyoto, at a small temple near the river."}
+      ]
+    },
+    "qa": [
+      {"question": "In which year did Jonas move to Lisbon?",
+       "answer": 2019, "evidence": ["D1:1"], "category": 2},
+      {"question": "Where is the wedding of Ines's sister?",
+       "answer": "Kyoto, Japan", "evidence": ["D2:1", "D2:3"], "category": 1},
+      {"question": "Would Jonas likely care about climate change?",
+       "answer": "Likely yes; he works in solar energy", "evidence": ["D1:1", "D1:3"], "category": 3}
+    ]
+  }
+]

@@ -67,7 +67,8 @@ none of them things; Jev agrees with the reader on 78% of names and screens
 out no "thing" from a gate of 0.60 up; the hub rule goes from 60% precision at
 78% recall without a verdict to 72% at 98% with one; and a home restricted to
 a project or product at share >= 0.7, sole anchor when the part was seen once,
-is 85% right against 68% unrestricted.
+is 85% right against 68% unrestricted. Memry has since stopped deriving homes
+from co-mention: a home comes from a stated relation or the judge's answer.
 """
 
 from __future__ import annotations
@@ -90,8 +91,6 @@ from memry.intelligence.entities import (  # noqa: E402
     non_referent_reason,
 )
 from memry.intelligence.structure import (  # noqa: E402
-    COMENTION_HOME_TYPES,
-    HOME_MIN_SHARE,
     NAMED_THING_MIN,
     is_hub,
 )
@@ -109,6 +108,11 @@ LABEL_TO_VERDICT = {
 LABELS = ("thing", "generic", "value", "role", "event")
 VERDICTS = tuple(SCREEN_CRITERIA)
 GATES = (0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95)
+#: The co-mention home rule these splits measured. Memry no longer derives
+#: homes from co-mention (``structure.derive_homes``); the numbers stay here so
+#: the ``homes`` subcommand still reports what that rule kept.
+COMENTION_HOME_TYPES = frozenset({"project", "product"})
+HOME_MIN_SHARE = 0.7
 
 
 # ------------------------------------------------------------------ loading
@@ -313,7 +317,7 @@ def run_homes(homes: dict[str, dict], labels: dict[str, str]) -> None:
         and float(homes[i].get("share") or 0.0) >= HOME_MIN_SHARE
         and (int(homes[i].get("mentions") or 0) >= 2 or not homes[i].get("other_anchors"))
     ]
-    print(f"\n  what the shipped rule keeps        {_precision(labels, shipped)}")
+    print(f"\n  what the co-mention rule kept      {_precision(labels, shipped)}")
 
 
 # ---------------------------------------------------------------------- ask

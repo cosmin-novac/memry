@@ -9,7 +9,10 @@ provider merely vouched for lands in the upkeep queue instead of happening.
 
 from __future__ import annotations
 
+import ast
+import pathlib
 import re
+import sys
 
 import pytest
 from starlette.testclient import TestClient
@@ -177,84 +180,44 @@ def _node(node_id: str, entity_type: str | None = None, **kw) -> Node:
                 entity_type=entity_type, **kw)
 
 
-def _links(*pairs: tuple[str, str]) -> list[tuple[str, str]]:
-    return list(pairs)
-
-
 PART_AND_PROJECT = [_node("part"), _node("nimbus", "project")]
-THREE_SHARED = _links(("part", "m1"), ("part", "m2"), ("part", "m3"),
-                      ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m3"))
 
 
-def test_a_stated_part_of_wins_over_the_anchor_it_co_occurs_with():
+def test_a_stated_part_of_makes_a_home():
     nodes = [*PART_AND_PROJECT, _node("atlas", "project")]
-    links = [*THREE_SHARED, ("atlas", "m7"), ("atlas", "m8"), ("atlas", "m9")]
 
-    homes = derive_homes(nodes, links, [("part", "part_of", "atlas")])
+    homes = derive_homes(nodes, [("part", "part_of", "atlas")])
 
     assert homes == {"part": {"id": "atlas", "share": 1.0, "source": "relation"}}
 
 
-def test_co_mention_needs_a_high_share_and_an_anchor_with_some_history():
-    assert derive_homes(PART_AND_PROJECT, THREE_SHARED, []) == {
-        "part": {"id": "nimbus", "share": 1.0, "source": "co-mention"}}
-    # the anchor itself is too thin: two memories is not a home
-    thin = _links(("part", "m1"), ("part", "m2"), ("nimbus", "m1"), ("nimbus", "m2"))
-    assert derive_homes(PART_AND_PROJECT, thin, []) == {}
-    # present in half the part's memories: below HOME_MIN_SHARE
-    half = _links(*[("part", f"m{i}") for i in (1, 2, 3, 4)],
-                  ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m9"))
-    assert derive_homes(PART_AND_PROJECT, half, []) == {}
+def test_appearing_together_makes_no_home():
+    """Homes from co-mention measured 68% right and were removed: a part that
+    rides along with a project in every memory has no home until a relation
+    or the judge gives it one."""
+    assert derive_homes(PART_AND_PROJECT, []) == {}
+    assert derive_homes(PART_AND_PROJECT, [("part", "mentioned_with", "nimbus")]) == {}
 
 
-def test_an_organization_is_a_home_only_when_a_relation_says_so():
+def test_an_organization_is_a_home_when_a_relation_says_so():
     nodes = [_node("part"), _node("acme", "organization")]
-    links = _links(("part", "m1"), ("part", "m2"), ("part", "m3"),
-                   ("acme", "m1"), ("acme", "m2"), ("acme", "m3"))
 
-    assert derive_homes(nodes, links, []) == {}
-    assert derive_homes(nodes, links, [("part", "part_of", "acme")]) == {
+    assert derive_homes(nodes, [("part", "part_of", "acme")]) == {
         "part": {"id": "acme", "share": 1.0, "source": "relation"}}
 
 
-def test_two_anchors_tied_for_the_top_leave_the_part_unhomed():
-    nodes = [_node("part"), _node("nimbus", "project"), _node("atlas", "project")]
-    links = _links(("part", "m1"), ("part", "m2"),
-                   ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m3"),
-                   ("atlas", "m1"), ("atlas", "m2"), ("atlas", "m3"))
+def test_a_person_or_a_place_is_no_home_even_when_a_relation_says_so():
+    nodes = [_node("part"), _node("ada", "person"), _node("berlin", "place")]
 
-    assert derive_homes(nodes, links, []) == {}
-
-
-def test_a_part_seen_once_needs_the_anchor_to_itself():
-    # NOTE: the explicit once-seen guard at structure.py:170 is unreachable -
-    # with one memory every count is 1, so a second home-capable anchor always
-    # trips the tie check three lines above it first. The outcome the rule
-    # wanted is what happens, so this pins the behaviour, not the branch.
-    nodes = [_node("part"), _node("nimbus", "project"), _node("acme", "organization")]
-    shared_memory = _links(("part", "m1"),
-                           ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m3"),
-                           ("acme", "m1"), ("acme", "m7"), ("acme", "m8"))
-    assert derive_homes(nodes, shared_memory, []) == {}
-
-    alone = _links(("part", "m1"),
-                   ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m3"))
-    assert derive_homes(nodes, alone, []) == {
-        "part": {"id": "nimbus", "share": 1.0, "source": "co-mention"}}
-
-
-def test_an_anchor_typed_node_never_gets_a_home_from_co_mention():
-    nodes = [_node("ada", "person"), _node("nimbus", "project")]
-    links = _links(("ada", "m1"), ("ada", "m2"), ("ada", "m3"),
-                   ("nimbus", "m1"), ("nimbus", "m2"), ("nimbus", "m3"))
-
-    assert derive_homes(nodes, links, []) == {}
+    assert derive_homes(nodes, [("part", "part_of", "ada"),
+                                ("part", "part_of", "berlin")]) == {}
 
 
 def test_home_is_one_level_so_a_home_keeps_none_of_its_own():
     nodes = [_node("part"), _node("nimbus", "project"), _node("atlas", "project")]
 
-    homes = derive_homes(nodes, THREE_SHARED, [("nimbus", "part_of", "atlas")])
+    homes = derive_homes(nodes, [("part", "part_of", "nimbus"),
+                                 ("nimbus", "part_of", "atlas")])
 
     assert set(homes) == {"part"}, "nimbus is a home, so it loses its own"
     assert homes["part"]["id"] == "nimbus"
@@ -311,6 +274,27 @@ def test_two_unhomed_names_of_the_same_kind_merge():
 
     assert [step["action"] for step in plan] == ["merge"]
     assert plan[0]["reason"] == "same name and nothing sets them apart"
+
+
+def test_a_pair_held_apart_is_never_merged_on_its_name():
+    """The rule of dd2c0e7 (``entities.join_namesakes``) holds in the
+    structure pass too: a pair the judge or a person held apart stays apart
+    however little sets it apart otherwise, under the same home as well."""
+    for homes in ({}, {"a": {"id": "nimbus"}, "b": {"id": "nimbus"}}):
+        plan = same_name_plan(_pair(type_a="concept", type_b="concept"), homes,
+                              apart=[("b", "a")])
+        assert [step["action"] for step in plan] == ["separate"]
+        assert plan[0]["reason"] == "held apart by the judge or by you"
+
+
+def test_two_held_apart_are_not_joined_through_a_third():
+    nodes = [*_pair(type_a="concept", type_b="concept"),
+             Node(id="c", name="privacy policy", normalized="privacy policy",
+                  entity_type="concept", memories=2)]
+    plan = same_name_plan(nodes, {}, apart=[("b", "c")])
+
+    assert [(step["other"], step["action"]) for step in plan] == [
+        ("c", "merge"), ("b", "separate")]
 
 
 # -------------------------------------------------------- screen_names / gate
@@ -408,6 +392,30 @@ def test_a_name_the_store_already_knows_is_not_screened_again(backend_store):
     assert resolved["nimbus"].id == existing.id
 
 
+def test_a_name_screened_at_save_is_not_asked_again_in_the_weekly_pass(backend_store):
+    """The save's verdict is stored on the entity it creates, as the weekly
+    screen stores its own, so that pass asks only about names without one."""
+    memory = _write(backend_store, "Nimbus shipped just under the deadline")
+    decider = FakeScreener({"nimbus": ("named_thing", 0.88),
+                            "deadline": ("value_or_fragment", 0.5)})
+
+    resolved = _resolve(backend_store, memory, ["Nimbus", "deadline"], decider)
+
+    assert decider.asked == ["Nimbus", "deadline"]
+    nimbus = backend_store.backend.get_entity(resolved["nimbus"].id).metadata["screen"]
+    assert (nimbus["verdict"], nimbus["probability"]) == ("named_thing", 0.88)
+    assert nimbus["at"]
+    deadline = backend_store.backend.get_entity(resolved["deadline"].id).metadata["screen"]
+    assert deadline["verdict"] == "value_or_fragment"  # below the gate: kept, and noted
+    structure = backend_store.entity_structure(user_id="ada")
+    assert structure[resolved["nimbus"].id]["why"] == "a named thing"
+
+    backend_store.decider = decider
+    assert backend_store.run_name_screen(user_id="ada") == {
+        "screened": 0, "queued": 0, "skipped": 0}
+    assert decider.asked == ["Nimbus", "deadline"]
+
+
 # ------------------------------------------------------------------- the store
 @pytest.fixture
 def store():
@@ -431,15 +439,19 @@ def _mention(store, entity: Entity, memory: Memory) -> None:
     )
 
 
-def _seed_part_and_home(store, user_id: str = "ada") -> dict[str, Entity]:
-    """A project seen three times, a part that rides along, and a duplicate
-    pair that shares a name in memories no anchor touches."""
+def _seed_part_and_home(store, user_id: str = "ada", stated: bool = True) -> dict[str, Entity]:
+    """A project seen three times, a part that rides along (``stated``: and
+    that a relation says is part of it), and a duplicate pair that shares a
+    name in memories no anchor touches."""
     nimbus = _entity(store, "Nimbus", "project", user_id)
     worker = _entity(store, "sync worker", None, user_id)
     for i in range(3):
         memory = _write(store, f"Nimbus sync worker note {i}", user_id)
         _mention(store, nimbus, memory)
         _mention(store, worker, memory)
+    if stated:
+        store.backend.add_relation(Relation(subject=worker.id, predicate="part_of",
+                                            object=nimbus.id, user_id=user_id))
     policy_a = _entity(store, "privacy policy", "concept", user_id)
     policy_b = _entity(store, "privacy policy", "concept", user_id)
     for entity in (policy_a, policy_b):
@@ -472,7 +484,7 @@ def test_a_dry_run_reports_the_whole_plan_and_applies_none_of_it(store):
     assert outcome["merged"] == 1
     assert [(step["action"], step["name"]) for step in outcome["plan"]] == [
         ("merge", "privacy policy")]
-    assert outcome["home_list"] == [("sync worker", "Nimbus", 1.0, "co-mention")]
+    assert outcome["home_list"] == [("sync worker", "Nimbus", 1.0, "relation")]
     # nothing was written: no metadata, no merge
     for entity in store.entities(user_id="ada", limit=100):
         assert not (entity.metadata or {}).get("home")
@@ -488,13 +500,46 @@ def test_the_real_pass_records_the_home_merges_the_duplicate_and_settles(store):
     assert outcome["homes_changed"] == 1 and outcome["merged"] == 1
     home = store.backend.get_entity(seeded["worker"].id).metadata["home"]
     assert home == {"id": seeded["nimbus"].id, "name": "Nimbus",
-                    "share": 1.0, "source": "co-mention"}
+                    "share": 1.0, "source": "relation"}
     _duplicate_pair(store, seeded)
     # a home has no home of its own, and the anchor is not a part
     assert not (store.backend.get_entity(seeded["nimbus"].id).metadata or {}).get("home")
 
     again = store.run_structure_pass(user_id="ada")
     assert again["homes_changed"] == 0 and again["merged"] == 0
+
+
+def test_a_part_that_only_appears_with_a_project_has_no_home(store):
+    seeded = _seed_part_and_home(store, stated=False)
+
+    structure = store.entity_structure(user_id="ada")
+    assert structure[seeded["worker"].id]["home"] is None
+    outcome = store.run_structure_pass(user_id="ada")
+    assert outcome["homes"] == 0
+    assert "home" not in (store.backend.get_entity(seeded["worker"].id).metadata or {})
+
+
+@pytest.mark.parametrize("status,different,merged", [
+    ("rejected", None, False),   # the judge's "apart", or a person's "keep separate"
+    ("proposed", 0.5, False),    # P(different) at the apart bar, still waiting
+    ("proposed", 0.93, False),
+    ("proposed", 0.49, True),    # under the bar: nothing sets them apart
+    ("proposed", None, True),    # never compared
+])
+def test_the_structure_pass_never_merges_a_pair_the_judge_held_apart(
+        store, status, different, merged):
+    from memry.models import MergeProposal
+
+    seeded = _seed_part_and_home(store)
+    store.backend.add_proposal(MergeProposal(
+        entity_a=seeded["a"].id, entity_b=seeded["b"].id, user_id="ada",
+        status=status, different=different))
+
+    outcome = store.run_structure_pass(user_id="ada")
+
+    states = [store.backend.get_entity(seeded[key].id).merged_into for key in ("a", "b")]
+    assert (outcome["merged"], outcome["separate"]) == ((1, 0) if merged else (0, 1))
+    assert any(states) is merged
 
 
 def test_entity_structure_reports_hub_status_and_the_home_it_derived(store):
@@ -645,6 +690,27 @@ def test_a_pair_under_different_homes_is_never_proposed(store):
     assert store.merge_proposals(user_id="ada") == []
 
 
+def test_a_tag_and_the_thing_of_its_name_are_raised_past_many_name_pairs(store):
+    """600 pairs of one name and a limit of 500: the name pairs used the whole
+    limit before the tag "bildy" and the product "Bildy" were reached, on this
+    pass and on each with as many new name pairs. They have a share of the
+    limit of their own, and the name pairs take the rest."""
+    from memry.intelligence.entities import propose_same_name_duplicates
+
+    scope = Scope(user_id="ada")
+    for i in range(600):
+        _entity(store, f"widget {i}", "product")
+        _entity(store, f"widget {i}", "product")
+    product = _entity(store, "Bildy", "product")
+    tag = store.backend.topic_entity("bildy", scope)
+
+    created = propose_same_name_duplicates(backend=store.backend, scope=scope, limit=500)
+
+    assert created == 500
+    assert store.backend.find_proposal(product.id, tag.id) is not None
+    assert len(store.backend.list_proposals(scope, status="proposed", limit=1000)) == 500
+
+
 # ------------------------------------------------------------------------ REST
 @pytest.fixture
 def client():
@@ -700,7 +766,7 @@ def test_running_the_structure_pass_dry_over_rest_changes_nothing(client):
     body = result.json()
     assert body["dry_run"] is True
     assert [step["action"] for step in body["plan"]] == ["merge"]
-    assert body["home_list"] == [["sync worker", "Nimbus", 1.0, "co-mention"]]
+    assert body["home_list"] == [["sync worker", "Nimbus", 1.0, "relation"]]
     assert client.store.backend.get_entity(seeded["b"].id).merged_into is None
     assert not (client.store.backend.get_entity(seeded["worker"].id).metadata or {})
 
@@ -762,3 +828,135 @@ def test_the_entity_tab_lists_only_the_pairs_memry_asks_about(client):
     s.decider = Calibrated()
     assert client.get(asked).json() == []
     assert len(client.get("/api/v1/entities/proposals?user_id=ada").json()) == 1
+
+
+def test_a_judged_version_gets_a_home_of_any_type_but_a_person_or_a_place():
+    """A version of a document or a dated occurrence of an event has a home,
+    which co-mention never gives (a document is not a home type there)."""
+    nodes = [_node("plan", "document"), _node("plan v3", "document"),
+             _node("fest", "event"), _node("fest 2025", "event"),
+             _node("ana", "person"), _node("family", "organization"),
+             _node("district", "place"), _node("city", "place")]
+    judged = [("plan v3", "plan", 0.93), ("fest 2025", "fest", 0.88),
+              ("ana", "family", 0.95), ("district", "city", 0.9)]
+    assert derive_homes(nodes, [], judged) == {
+        "plan v3": {"id": "plan", "share": 0.93, "source": "judged"},
+        "fest 2025": {"id": "fest", "share": 0.88, "source": "judged"},
+    }
+
+
+def test_a_stated_part_of_wins_over_a_judged_home():
+    nodes = [*PART_AND_PROJECT, _node("atlas", "project"), _node("orion", "project")]
+    assert derive_homes(nodes, [("part", "part_of", "atlas")],
+                        [("part", "orion", 0.9)])["part"]["source"] == "relation"
+    assert derive_homes(nodes, [], [("part", "orion", 0.9)]) == {
+        "part": {"id": "orion", "share": 0.9, "source": "judged"}}
+
+
+# ------------------------------ the structure benchmark on a public fixture
+#: 22 invented names with one reader label each, what a provider might have
+#: answered about 21 of them (it abstained on one), and 8 candidate homes, in
+#: the layout ``evals/entity_structure_benchmark.py`` documents. The labels
+#: behind the shipped numbers are private; the numbers below are worked out by
+#: hand from the rules, name by name, and the benchmark is checked on them.
+STRUCTURE_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "entity_structure"
+
+
+def _structure_benchmark(command: str, monkeypatch, capsys) -> str:
+    from evals import entity_structure_benchmark as bench
+
+    monkeypatch.setattr(sys, "argv", ["entity_structure_benchmark.py", command,
+                                      "--data", str(STRUCTURE_FIXTURE)])
+    bench.main()
+    return capsys.readouterr().out
+
+
+def test_the_mechanical_rule_on_the_fixture_fires_on_values_and_on_one_bare_year(
+        monkeypatch, capsys):
+    """It fires on "250 ms", "2026-03-14", "34 euros", "Sehr geehrte Frau
+    Quint" and "3 open tickets", five of the six values ("the second draft"
+    needs a reader), and on the board game "1987", a thing: the harm it
+    lists."""
+    out = _structure_benchmark("mechanical", monkeypatch, capsys)
+    assert "fires on        6 of 22" in out
+    assert "precision       5/6 = 83% against label 'value'" in out
+    assert "recall          5/6 = 83% of labelled values" in out
+    assert "by label        thing 1, value 5" in out
+    [reasons] = re.findall(r"by reason\s+(\{.*\})", out)
+    assert ast.literal_eval(reasons) == {
+        "a date or time span, not a referent": 2, "a count of things, not a referent": 2,
+        "an amount or measurement, not a referent": 1, "a salutation, not a referent": 1}
+    assert "HARM: 1 name(s) labelled 'thing' are rejected outright:" in out
+    assert "'1987'  -> a date or time span, not a referent" in out
+
+
+def test_the_screen_on_the_fixture_harms_nothing_from_the_shipped_gate(monkeypatch, capsys):
+    """The provider calls the product "Tarnby ledger" a value at 0.72, so it
+    is screened out at the gates from 0.50 to 0.70 only: at ``SCREEN_GATE``
+    nobody believes it. "invoices", a topic called a value at 0.85, goes at
+    every gate up to 0.85; "the accountant", a role at 0.70, below 0.75."""
+    out = _structure_benchmark("screen", monkeypatch, capsys)
+    assert "=== name screen: 21 of 22 names answered" in out
+    labels = ("thing", "generic", "value", "role", "event")
+    table = {row[0]: [int(n) for n in row[1:]]
+             for row in (line.split() for line in out.splitlines()) if row[:1] and row[0] in labels}
+    # columns: named_thing, generic_topic, role, value_or_fragment
+    assert table == {"thing": [7, 0, 0, 1], "generic": [0, 3, 0, 1], "value": [0, 1, 0, 5],
+                     "role": [0, 0, 2, 0], "event": [1, 0, 0, 0]}
+    assert "exact agreement 17/20 = 85% (events excluded: no verdict fits)" in out
+    sweep = {float(row[0]): [int(n) for n in row[1:6]]
+             for row in (line.replace("<-", " ").split() for line in out.splitlines())
+             if row and re.fullmatch(r"0\.\d\d", row[0])}
+    # per gate: screened out, of them values or roles, topics, events, things
+    assert sweep == {0.5: [9, 7, 1, 0, 1], 0.6: [9, 7, 1, 0, 1], 0.7: [9, 7, 1, 0, 1],
+                     0.75: [6, 5, 1, 0, 0], 0.8: [6, 5, 1, 0, 0], 0.85: [6, 5, 1, 0, 0],
+                     0.9: [4, 4, 0, 0, 0], 0.95: [1, 1, 0, 0, 0]}
+    harmed = [line.split()[0] for line in out.splitlines() if "'Tarnby ledger'" in line]
+    assert harmed == ["0.50", "0.60", "0.70"]
+    assert " 0.80 <-" in out and f"currently {SCREEN_GATE:.2f}" in out
+
+
+def test_the_hub_rule_on_the_fixture_gains_precision_from_the_verdict(monkeypatch, capsys):
+    """Without a verdict every anchor type and every name of two memories is
+    a hub: 15 of 22, 8 of them things. With one, a named thing from 0.6 is a
+    hub ("orchard-sync", one memory), a skip verdict from 0.80 takes hub
+    status away ("landlord"), and any other verdict keeps two memories from
+    counting ("billing", and "Quillon API" at 0.55): 9 hubs, 7 of them
+    things."""
+    out = _structure_benchmark("hubs", monkeypatch, capsys)
+    rows = {label.strip(): numbers for label, *numbers in re.findall(
+        r"^  (.{34}) hubs\s+(\d+)  precision\s+(\d+)%  recall\s+(\d+)%   (.*)$", out, re.M)}
+    assert rows == {
+        "is_hub(type, mentions)": ["15", "53", "89", "event 1 generic 3 role 2 value 1"],
+        "anchor type only": ["9", "78", "78", "role 2"],
+        "two or more memories only": ["9", "33", "33", "event 1 generic 3 role 1 value 1"],
+        "is_hub(type, mentions, screen)": ["9", "78", "88", "event 1 role 1"],
+        "is_hub, same names, no verdict": ["14", "50", "88", "event 1 generic 3 role 2 value 1"],
+        f"verdict named_thing >= {NAMED_THING_MIN} only": ["7", "86", "75", "event 1"],
+    }
+    assert "with the provider's verdict (21 answered):" in out
+
+
+def test_the_homes_report_on_the_fixture(monkeypatch, capsys):
+    """Memry no longer derives homes from co-mention; the report still scores
+    what that rule kept: a project or product home, a share of at least 0.7,
+    and a part seen once only where the home is its sole anchor."""
+    out = _structure_benchmark("homes", monkeypatch, capsys)
+
+    def split(label: str) -> tuple[int, ...]:
+        [line] = [line for line in out.splitlines() if line.strip().startswith(label)]
+        return tuple(int(n) for n in re.findall(
+            r"n=\s*(\d+)  precision\s+(\d+)%  \(yes\s+(\d+), no\s+(\d+), unsure\s+(\d+)\)",
+            line)[0])
+
+    assert split("every candidate") == (8, 57, 4, 3, 1)
+    assert [split(f"share >= {share:.2f}") for share in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)] == [
+        (8, 57, 4, 3, 1), (7, 50, 3, 3, 1), (6, 60, 3, 2, 1),
+        (4, 67, 2, 1, 1), (3, 100, 2, 0, 1), (2, 100, 1, 0, 1)]
+    assert split("home is a organization") == (2, 50, 1, 1, 0)
+    assert split("home is a product") == (4, 67, 2, 1, 1)
+    assert split("home is a project") == (2, 50, 1, 1, 0)
+    assert split("seen once, sole anchor") == (2, 100, 1, 0, 1)
+    assert split("seen once, other anchors present") == (1, 0, 0, 1, 0)
+    assert split("seen twice or more") == (5, 60, 3, 2, 0)
+    assert split("what the co-mention rule kept") == (3, 100, 2, 0, 1)

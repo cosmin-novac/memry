@@ -13,7 +13,6 @@ from memry.config import Config
 from memry.intelligence.clustering import propose_synthetic_tags
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
-from memry.rest import _tag_run_due
 from memry.store import MemoryStore
 
 
@@ -149,10 +148,10 @@ def test_abstract_tags_records_run_and_is_idempotent_on_reruns(seeded):
 def test_synthetic_parents_are_not_offered_back_to_abstraction(seeded):
     """A parent must never become a member of a broader parent.
 
-    ``topic_counts`` rolls descendants up, so a synthetic parent carries a
-    memory count and looks exactly like an ordinary tag. Feeding that histogram
-    back in lets run two cluster 'liver health' and 'weekly gym' into 'health',
-    losing the useful level one run at a time.
+    A count that rolled descendants up gave a synthetic parent a memory count,
+    so it looked exactly like an ordinary tag. Feeding that histogram back in
+    lets run two cluster 'liver health' and 'weekly gym' into 'health', losing
+    the useful level one run at a time.
     """
     store = seeded
     store.llm.queue(json.dumps({"clusters": [
@@ -165,12 +164,13 @@ def test_synthetic_parents_are_not_offered_back_to_abstraction(seeded):
     assert {t.tag for t in store.synthetic_tags(user_id="ada")} == {
         "liver health", "weekly gym",
     }
-    rolled = {row["category"] for row in store.categories(user_id="ada")}
-    assert {"liver health", "weekly gym"} <= rolled
+    assert {m.content for m in store.get_all(
+        user_id="ada", categories=["liver health"], limit=50)} == {"ran 10k", "ate salad"}
 
-    # ... but abstraction's own input never lists them
-    direct = {row["category"] for row in store.direct_categories(user_id="ada")}
-    assert not ({"liver health", "weekly gym"} & direct)
+    # ... but the histogram abstraction reads never lists them: tags are
+    # topic entities counted directly, with no rollup
+    listed = {row["category"] for row in store.categories(user_id="ada")}
+    assert not ({"liver health", "weekly gym"} & listed)
 
     # and even if a model names one anyway, it is rejected as a member
     store.llm.queue(json.dumps({"clusters": [
@@ -196,9 +196,11 @@ def test_propose_rejects_synthetic_members():
 
 
 # ---------------------------------------------------------------- scheduler due
-def test_tag_run_due():
+def test_a_pass_is_due_once_its_interval_has_passed():
+    from memry.store import _due
+
     now = _dt("2026-07-24T00:00:00+00:00")
-    assert _tag_run_due(None, 7.0, now) is True                       # never run
-    assert _tag_run_due("2026-07-16T00:00:00+00:00", 7.0, now) is True   # 8 days
-    assert _tag_run_due("2026-07-20T00:00:00+00:00", 7.0, now) is False  # 4 days
-    assert _tag_run_due("not-a-date", 7.0, now) is True                  # unparseable
+    assert _due(None, 7.0, now) is True                       # never run
+    assert _due("2026-07-16T00:00:00+00:00", 7.0, now) is True   # 8 days
+    assert _due("2026-07-20T00:00:00+00:00", 7.0, now) is False  # 4 days
+    assert _due("not-a-date", 7.0, now) is True                  # unparseable

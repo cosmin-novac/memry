@@ -34,7 +34,15 @@ def hybrid_search(
     categories: list[str] | None = None,
     entity_id: str | None = None,
     now: datetime | None = None,
+    history: bool = False,
+    query_vector: list[float] | None = None,
 ) -> list[SearchResult]:
+    """The memories in use that best match ``query``; with ``history`` also
+    those superseded as an update, which held until then (``MemoryBackend.
+    vector_search``); with ``include_invalid`` every memory.
+
+    ``query_vector`` is the query's vector when the caller has it already
+    ([] for none: the words alone rank); None embeds the query here."""
     cfg = cfg or RetrievalConfig()
     now = now or datetime.now(timezone.utc)
     n = max(limit * cfg.candidate_multiplier, limit)
@@ -52,7 +60,7 @@ def hybrid_search(
         if entity_id:
             allowed = {
                 memory.id for memory in backend.entity_memories(
-                    entity_id, limit=n, include_invalid=include_invalid
+                    entity_id, limit=n, include_invalid=include_invalid, scope=scope
                 )
             }
             native = [(memory, score) for memory, score in native if memory.id in allowed]
@@ -62,17 +70,18 @@ def hybrid_search(
     else:
         keyword = backend.keyword_search(
             query, scope, n, include_invalid=include_invalid, categories=categories,
-            entity_id=entity_id,
+            entity_id=entity_id, history=history,
         )
         vector: list[tuple[Memory, float]] = []
         if embedder.dimensions:
             try:
-                qvec = embedder.embed([query])[0]
-                vector = backend.vector_search(
-                    qvec, embedder.model_id, scope, n,
-                    include_invalid=include_invalid, categories=categories,
-                    entity_id=entity_id,
-                )
+                qvec = embedder.embed([query])[0] if query_vector is None else query_vector
+                if qvec:
+                    vector = backend.vector_search(
+                        qvec, embedder.model_id, scope, n,
+                        include_invalid=include_invalid, categories=categories,
+                        entity_id=entity_id, history=history,
+                    )
             except Exception:
                 vector = []  # embedding service down -> degrade to keyword-only
 
@@ -110,5 +119,7 @@ def hybrid_search(
         signals.update({"fused": norm_fused, "recency": rec, "importance": imp})
         results.append(SearchResult(memory=memory, score=final, signals=signals))
 
+    # A tie keeps the order the lists were fused in: the vector ranking's, then
+    # the keyword ranking's, each ordered by score and then memory id.
     results.sort(key=lambda r: r.score, reverse=True)
     return results[:limit]

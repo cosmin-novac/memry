@@ -10,7 +10,9 @@
     memry stats                   store statistics
     memry sweep                   decay sweep (soft-forget stale memories)
     memry reindex                 re-embed all memories
+    memry backfill-property-vectors  property vectors for the linked search
     memry export / import         lossless backup/restore; legacy JSON imports
+    memry tags-to-things          give existing tags their topic entities (first open does it)
     memry config                  print resolved configuration
     memry eval --dataset <path>   run the retrieval eval harness
 """
@@ -178,6 +180,11 @@ def main(argv: list[str] | None = None) -> int:
     ep = entity_sub.add_parser("merge", help="merge entity MERGE_ID into KEEP_ID directly")
     ep.add_argument("keep_id")
     ep.add_argument("merge_id")
+    ep = entity_sub.add_parser("merges", help="list merges that can be undone")
+    _scope_args(ep)
+    ep = entity_sub.add_parser(
+        "unmerge", help="undo the merge of ENTITY_ID (the one merged away); the two stay apart")
+    ep.add_argument("entity_id")
     ep = entity_sub.add_parser("alias", help="add a user-supplied alias to an entity")
     ep.add_argument("entity_id")
     ep.add_argument("alias")
@@ -261,6 +268,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="count without writing")
 
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
+
+    p = sub.add_parser(
+        "tags-to-things",
+        help="make every existing tag a topic entity and each tagged memory a "
+             "mention of it (token-free, idempotent; the legacy tag tables are "
+             "only read)",
+    )
+    p.add_argument("-u", "--user", default=None,
+                   help="namespace to migrate (default: every namespace)")
+    p.add_argument("--dry-run", action="store_true", help="count without writing")
+
+    p = sub.add_parser(
+        "backfill-property-vectors",
+        help="embed each memory with its entity names masked, for the linked search "
+             "(only what is missing or changed)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
 
     p = sub.add_parser("export", help="export a lossless JSON backup to stdout")
     _scope_args(p)
@@ -352,6 +376,13 @@ def main(argv: list[str] | None = None) -> int:
                 _print({"rejected": store.reject_merge(args.proposal_id)})
             elif sub_command == "merge":
                 _print({"merged": store.merge_entities(args.keep_id, args.merge_id)})
+            elif sub_command == "merges":
+                _print(store.merges(user_id=getattr(args, "user", None)))
+            elif sub_command == "unmerge":
+                result = store.undo_merge(args.entity_id)
+                _print(result)
+                if not result["undone"]:
+                    return 1
             elif sub_command == "alias":
                 entity = store.add_entity_alias(args.entity_id, args.alias)
                 if entity is None:
@@ -443,6 +474,21 @@ def main(argv: list[str] | None = None) -> int:
             )
             _print([store.restore_context_labels(user_id=uid, dry_run=args.dry_run)
                     for uid in namespaces])
+        elif args.command == "backfill-property-vectors":
+            namespaces = (
+                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
+            )
+            _print([{"user": uid, "embedded": store.refresh_property_vectors(user_id=uid)}
+                    for uid in namespaces])
+        elif args.command == "tags-to-things":
+            scopes = store.tags_to_topics(
+                user_id=args.user, all_users=args.user is None, dry_run=args.dry_run)
+            totals = {
+                key: sum(row[key] for row in scopes)
+                for key in ("topics", "skipped_parents", "entities_created",
+                            "entities_existing", "mentions_created", "mentions_existing")
+            }
+            _print({"dry_run": args.dry_run, "scopes": scopes, "total": totals})
         elif args.command == "reindex":
             count = store.reindex()
             _print({"reindexed": count, "embedder": store.embedder.model_id})

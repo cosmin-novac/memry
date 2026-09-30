@@ -7,6 +7,7 @@ back out through the store, REST and MCP filters.
 
 from __future__ import annotations
 
+import itertools
 import json
 from datetime import date
 
@@ -327,17 +328,19 @@ def test_an_update_keeps_the_stored_when(store, fake_llm):
     store.add("Helios launches on 3 October", user_id="u")
     original = store.get_all(user_id="u")[0]
 
-    # A refinement that says nothing about time: the occurrence time stands.
+    # A refinement that says nothing about time: the merged text keeps the
+    # occurrence time of the memory it replaces.
     fake_llm.queue(
         json.dumps({"facts": [_fact("The Helios launch is in Lisbon", None)]}),
-        json.dumps({"action": "UPDATE", "target": 0,
+        json.dumps({"action": "MORE", "target": 0,
                     "content": "The Helios launch is on 2026-10-03 in Lisbon",
                     "reason": "adds the place"}),
         json.dumps({"facts": []}),
         json.dumps({"missing": []}),
     )
     store.add("the Helios launch is in Lisbon", user_id="u")
-    kept = store.get(original.id)
+    [kept] = store.get_all(user_id="u")
+    assert kept.id != original.id and store.get(original.id).superseded_by == kept.id
     assert kept.content.endswith("in Lisbon")
     assert kept.metadata["when"] == {"start": "2026-10-03"}
 
@@ -355,25 +358,32 @@ def test_an_update_that_carries_a_when_replaces_it(store, fake_llm):
             _fact("The Helios launch moved to 2026-10-10",
                   {"start": "2026-10-10", "end": None, "recurrence": None}),
         ]}),
-        json.dumps({"action": "UPDATE", "target": 0,
+        json.dumps({"action": "MORE", "target": 0,
                     "content": "The Helios launch is on 2026-10-10",
                     "reason": "the date moved"}),
         json.dumps({"facts": []}),
         json.dumps({"missing": []}),
     )
     store.add("Helios now launches on 10 October", user_id="u")
-    assert store.get(original.id).metadata["when"] == {"start": "2026-10-10"}
+    [merged] = store.get_all(user_id="u")
+    assert merged.id != original.id
+    assert merged.metadata["when"] == {"start": "2026-10-10"}
 
 
 # ----------------------------------------------------------------- backfilling
 
 
+_SEEDED = itertools.count()
+
+
 def _seed(store, *contents, memory_type="episodic") -> list[str]:
     """Put memories in without going through reconciliation, which would want
-    scripted answers of its own and has nothing to do with the backfill."""
+    scripted answers of its own and has nothing to do with the backfill. Saved
+    within one second, they are read by id, so the ids follow the order given."""
     ids = []
     for content in contents:
-        memory = Memory(content=content, memory_type=memory_type, user_id="u")
+        memory = Memory(id=f"m{next(_SEEDED):04d}", content=content,
+                        memory_type=memory_type, user_id="u")
         store.backend.insert_memory(memory)
         ids.append(memory.id)
     return ids
@@ -495,7 +505,7 @@ def test_search_filters_on_occurrence_time(when_store):
 def test_context_line_says_when_the_fact_happens(when_store):
     store, _ids = when_store
     context = store.reconstruct_context("Lisbon offsite", user_id="u")
-    assert "(happened 2026-10-03)" in context.text or "(happens 2026-10-03)" in context.text
+    assert "[happened 2026-10-03] " in context.text or "[happens 2026-10-03] " in context.text
 
 
 # ----------------------------------------------------------- REST and the MCP

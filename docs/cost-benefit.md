@@ -36,10 +36,11 @@ Two facts about that 2,400 matter more than the number itself:
   ingestion, assume the full price. (OpenAI's automatic caching starts at 1,024
   tokens, same story.)
 - **The MCP path is half the price.** `save_memories` uses `add_deferred`; the
-  background worker groups a session's saves into one extraction call and skips
-  the coverage audit: 2.7 calls and ~1,300 input tokens per message in the same
-  scenario. Growing the history to 104 messages held at ~2,100 input tokens and
-  3.2 calls per message for the synchronous path.
+  background worker groups a session's saves into one extraction call: 2.7 calls
+  and ~1,300 input tokens per message in the same scenario, measured when that
+  path skipped the coverage audit (it now runs one audit per group). Growing the
+  history to 104 messages held at ~2,100 input tokens and 3.2 calls per message
+  for the synchronous path.
 
 Embeddings: ~2 texts per message (the message plus each stored fact), batched;
 free with the default hash embedder, one HTTP call per batch with OpenAI.
@@ -153,8 +154,8 @@ Ordered by measured impact:
    Dropping the per-line date, or the type tag, or shortening the footer, is
    free savings on every recall on the expensive model.
 5. **The coverage audit** (0.8 calls/msg, 7% of input) is a quality feature
-   with a token price; it is already absent on the deferred path and could be
-   config-gated on the synchronous one.
+   with a token price; it runs on both paths (once per group on the deferred
+   one) and could be config-gated.
 
 ## 6. Reproduce
 

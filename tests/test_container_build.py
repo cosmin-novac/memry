@@ -11,9 +11,12 @@ def test_container_requirements_match_pyproject():
     with (ROOT / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)
 
+    # the image serves Claude and builds the ANN index: the "anthropic" and
+    # "ann" (usearch) extras are part of it
     expected = [
         *project["project"]["dependencies"],
         *project["project"]["optional-dependencies"]["anthropic"],
+        *project["project"]["optional-dependencies"]["ann"],
     ]
     actual = [
         line.strip()

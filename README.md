@@ -157,13 +157,22 @@ troubleshooting: [docs/connect-chatgpt.md](docs/connect-chatgpt.md).
 The server exposes `save_memories`, `search_memories`, `get_memory_context`,
 `list_memories`, `list_categories`, `update_memory`, `delete_memory`,
 `memory_history`, and `memory_stats`. Agents are instructed to recall context
-at the start of a task and to batch related durable facts into one concise
-multiline `save_memories` call. If related facts arrive in separate calls, the
-client can repeat a semantic `context` label and `run_id`; up to three optional
-`tags` are treated as classification hints. With the default `infer=true`, the
-exact text is acknowledged immediately and remains searchable. The managed
-worker waits for two minutes of quiet, then distills each related group when an
-LLM is configured.
+at the start of a task and to send `save_memories` what was said in words close
+to the original, one statement per line, with the speaker named when it is
+someone other than the user ("Ada: I got the job"). Memry extracts the facts
+and keeps the saved text as the source turns it shows with each memory in later
+searches. If an agent sends a summary, those searches show the summary, and the
+details it dropped are lost. Related statements go in one call. If they arrive
+in separate calls, the client can repeat a semantic `context` label and
+`run_id`; up to three optional `tags` are treated as classification hints. For
+something said on another day, such as an imported chat, the client passes
+`said_at` (`YYYY-MM-DD`): the memories are dated that day, and "yesterday" or
+"next month" in the text counts from it. When a fact changes or the user
+corrects it, the agent saves the new statement, and Memry keeps the old value
+as dated history or retires it when it was wrong. With the default
+`infer=true`, the exact text is acknowledged immediately and remains
+searchable. The managed worker waits for two minutes of quiet, then distills
+each related group when an LLM is configured.
 
 ### As a Python library
 
@@ -199,17 +208,19 @@ memry serve --host 0.0.0.0 --port 8787
 
 The dashboard shows your memories with inline editing, filtered search, lossless JSON
 backup/restore, a unified Upkeep area, and a galaxy map aggregated over every active
-memory independently of the paginated detail list. The map groups by tag or entity, and on
-the entity side it shows hubs, with the parts of a project or product as moons on it;
-concept and other entity types are hidden by default and the type menu controls what is
-shown. Heavily-used groups gravitate to the gold core, the working set orbits in the teal
-belt, and one-off groups drift at the violet rim. Orbit-marker shapes distinguish semantic,
-procedural, episodic, and working memories. Idle link and orbit rendering is bounded for
-large stores (above 400 groups, orbit markers stay on the core and on whatever you hover
-or select); selecting a planet reveals its complete visible neighborhood and filters the
-detail list through the server. Selecting an entity also surfaces its summary, aliases, and
-rename control, with explicit controls to merge a duplicate or remove a mistaken entity without
-deleting memories. When a mistaken entity occurs in multiple memories, its name is retained as a tag.
+memory independently of the paginated detail list. The map groups by entity: it shows
+hubs, with the parts of a project or product as moons on it, and tags once their type is
+turned on; concept, other and tag are hidden by default and the type menu controls what is
+shown. Upkeep > Entities lists people, things and tags in one list filtered by type, and
+the memory list's About filter picks any of them. Heavily-used groups gravitate to the gold
+core, the working set orbits in the teal belt, and one-off groups drift at the violet rim.
+Orbit-marker shapes distinguish semantic, procedural, episodic, and working memories. Idle
+link and orbit rendering is bounded for large stores (above 400 groups, orbit markers stay
+on the core and on whatever you hover or select); selecting a planet reveals its complete
+visible neighborhood and filters the detail list through the server. Selecting an entity
+also surfaces its summary, aliases, and rename control, with explicit controls to merge a
+duplicate or remove a mistaken entity without deleting memories. When a mistaken entity
+occurs in multiple memories, its name is retained as a tag.
 Opening Upkeep temporarily unloads the map and restores it on close to avoid holding both views in memory.
 ![Memry dashboard: galaxy tag map and memory list](docs/assets/dashboard.png)
 
@@ -295,7 +306,9 @@ flowchart LR
    old memory and link it to its successor. The pending raw memory is superseded only
    after enrichment succeeds.
 4. **Retrieval.** BM25 and cosine similarity are fused with reciprocal-rank fusion, then
-   boosted by recency and importance. Pending raw memories are searchable immediately.
+   boosted by recency and importance. A question naming a known entity also takes the
+   memories of the entities linked to it (the linked search). Pending raw memories are
+   searchable immediately.
 5. **Forgetting.** Effective importance decays over time; `memry sweep` invalidates
    memories that fall below threshold. Tag filters (`memry search -c diet`) narrow any
    query.
@@ -335,11 +348,12 @@ export MEMRY_DECISION_API_KEY=...   # TypeSafe API key
 ```
 
 With Jev, Memry merges duplicate entities on its own above 0.70 confidence, a threshold
-measured on the labelled identity set in `evals/`. The upkeep pass scores how long each
-memory stays relevant, so each memory decays at its own pace, and search re-ranking is on.
-You still need a text model for extraction. If you set `MEMRY_DECISION_PROVIDER=llm`,
-Memry sends these questions to the text model, merges entities only by fixed rules, and
-you confirm the other merges yourself. The
+measured on the labelled identity set in `evals/`. Jev also judges the first 20 results
+of a search, and for a question whose answer is a set (a list, a total, a comparison) one
+more batch of memories. Scoring how long each memory stays relevant is off unless
+`MEMRY_DURABILITY=1`. You still need a text model for extraction. If you set
+`MEMRY_DECISION_PROVIDER=llm`, Memry sends these questions to the text model, merges
+entities only by fixed rules, and you confirm the other merges yourself. The
 measurements and the remaining settings are in [docs/self-hosting.md](docs/self-hosting.md#where-memry-sends-its-decision-questions).
 
 ## Evaluation
@@ -350,10 +364,9 @@ memry eval --dataset evals/datasets/synthetic_v1.jsonl -k 5
 
 The harness ingests each case through the full write path, then scores retrieval
 (recall@k, MRR, latency p50/p95). It is deterministic and offline, so it runs in CI.
-LoCoMo and LongMemEval can be formatted into the same JSONL schema to compare providers,
-configs, plus the optional Mem0 comparison adapter, under identical conditions. The
-landscape survey behind the design is in
-[docs/research/competitive-analysis.md](docs/research/competitive-analysis.md).
+Datasets in its JSONL schema compare providers, configs and the optional Mem0 comparison
+adapter under identical conditions. `evals/external_benchmarks.py` runs LoCoMo and
+LongMemEval as published (evidence recall at 5, 10 and 20 and MRR, without a model).
 
 ## Project layout
 

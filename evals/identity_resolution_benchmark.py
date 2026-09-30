@@ -21,12 +21,16 @@ and its facts. The judge sees both profiles side by side. Three designs:
 Nothing in any design lists suffixes, prefixes or forms of names: the judge
 decides whether two names are one name.
 
-Datasets: ``identity_v1`` (56), ``identity_v2`` (45) and ``identity_v3`` (55,
+Datasets: ``identity_v1`` (56), ``identity_v2`` (45) and ``identity_v3`` (60,
 both sides with several facts, name variants from many languages and legal
-systems, and near-identical names of two things). For each design the report
+systems, near-identical names of two things, and namesakes in related trades:
+two tradespeople of one first name on one house). For each design the report
 sweeps the merge threshold and the keep-apart threshold and prints the
 operating point with no wrong merge: how many pairs are decided without a
 person, and which are left. The last lines score the shipped thresholds.
+
+The answers are cached (``--cache``); a case added since the cache was written
+is asked and added to it, the rest are read.
 
 Run:
     TYPESAFE_API_KEY=... python evals/identity_resolution_benchmark.py
@@ -221,10 +225,12 @@ def operating_point(cases: list[dict], rows: dict[str, dict], design: str,
 
 def report(cases: list[dict], rows: dict[str, dict]) -> None:
     designs = ("today", "one order", "both orders", "three questions")
+    fitting = [c for c in cases if c["set"] != "identity_v3"]
+    unseen = [c for c in cases if c["set"] == "identity_v3"]
     subsets = {
-        "all 156": cases,
-        "v1+v2 (101)": [c for c in cases if c["set"] != "identity_v3"],
-        "v3 (55)": [c for c in cases if c["set"] == "identity_v3"],
+        f"all {len(cases)}": cases,
+        f"v1+v2 ({len(fitting)})": fitting,
+        f"v3 ({len(unseen)})": unseen,
     }
     print(f"\n{'design':<17} {'cases':<12} {'merge at':>8} {'apart at':>8} "
           f"{'merged':>7} {'kept apart':>10} {'left':>5} {'wrong merge':>11} "
@@ -239,9 +245,8 @@ def report(cases: list[dict], rows: dict[str, dict]) -> None:
                   f"{decided / point['n']:>7.0%}")
     print("\nthresholds chosen on v1+v2, applied to v3 unseen:")
     for design in designs:
-        fitted = operating_point(subsets["v1+v2 (101)"], rows, design)
-        held = operating_point(subsets["v3 (55)"], rows, design,
-                               fitted["merge_at"], fitted["apart_at"])
+        fitted = operating_point(fitting, rows, design)
+        held = operating_point(unseen, rows, design, fitted["merge_at"], fitted["apart_at"])
         decided = len(held["merged"]) + len(held["apart"]) + len(held["wrong_apart"])
         print(f"  {design:<16} merge at {fitted['merge_at']:.2f}, apart at "
               f"{fitted['apart_at']:.2f}: merged {len(held['merged'])}, kept apart "
@@ -249,8 +254,10 @@ def report(cases: list[dict], rows: dict[str, dict]) -> None:
               f"{held['wrong_merge'] or 0}, true pairs kept apart {held['wrong_apart'] or 0}, "
               f"decided {decided / held['n']:.0%}")
     shipped = operating_point(cases, rows, "both orders", 0.95, 0.5)
+    true_pairs = sum(1 for c in cases if c["truth"] == "same")
     print(f"\nshipped (both orders, merge at 0.95, apart at 0.50): merged "
-          f"{len(shipped['merged'])} of 81 true pairs, kept apart {len(shipped['apart'])} of 75, "
+          f"{len(shipped['merged'])} of {true_pairs} true pairs, kept apart "
+          f"{len(shipped['apart'])} of {len(cases) - true_pairs}, "
           f"waiting {len(shipped['left'])}, wrong merges {shipped['wrong_merge'] or 0}, "
           f"true pairs kept apart {shipped['wrong_apart'] or 0}")
     print(f"waiting: {shipped['left']}")
@@ -263,12 +270,14 @@ if __name__ == "__main__":
                         default=HERE / "results" / "identity_resolution_jev.jsonl")
     args = parser.parse_args()
     cases = load_cases()
-    if args.cache.exists():
-        judged = [json.loads(line) for line in args.cache.read_text(encoding="utf-8").splitlines()]
-    else:
+    judged = ([json.loads(line) for line in args.cache.read_text(encoding="utf-8").splitlines()
+               if line.strip()] if args.cache.exists() else [])
+    cached = {r["id"] for r in judged}
+    unasked = [c for c in cases if c["id"] not in cached]
+    if unasked:
         decider = JevDecider(DecisionConfig(provider="jev",
                                             api_key=os.environ["TYPESAFE_API_KEY"]))
-        judged = judge(cases, decider)
+        judged += judge(unasked, decider)
         args.cache.parent.mkdir(parents=True, exist_ok=True)
         args.cache.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in judged)
                               + "\n", encoding="utf-8")

@@ -21,7 +21,7 @@ def _mother_and_the_misreading(store, fake_llm):
     old = store.get_all(user_id="cos")[0]
     fake_llm.queue(
         facts_response(fact("Raluca is Cosmin's mother", importance=0.9)),
-        decision("DELETE", target=0, reason="replace outdated relationship"),
+        decision("WRONG", target=0, reason="the stored mother is wrong"),
     )
     result = store.add("rental form: applicant Raluca, for his mother", user_id="cos")
     return old, result
@@ -68,7 +68,7 @@ def test_saying_the_new_one_is_right_replaces_the_old_one(store, fake_llm):
     assert store.get(old.id).superseded_by == new_id
     assert CONFLICT_KEY not in store.get(new_id).metadata
     event = store.history(old.id)[-1]
-    assert (event.event, event.actor) == ("SUPERSEDE", "user")
+    assert (event.event, event.actor, event.kind) == ("SUPERSEDE", "user", "contradiction")
 
 
 def test_both_can_be_true(store, fake_llm):
@@ -91,25 +91,25 @@ def test_a_conflict_settled_by_deleting_one_side_leaves_the_queue(store, fake_ll
     assert store.upkeep_count(user_id="cos") == 0
 
 
-def _moved_cities(store, fake_llm):
+def _corrected(store, fake_llm):
     fake_llm.queue(facts_response(fact("User lives in Munich")))
     store.add("I live in Munich", user_id="ada")
     old = store.get_all(user_id="ada")[0]
     fake_llm.queue(
         facts_response(fact("User lives in Amsterdam")),
-        decision("DELETE", target=0, reason="moved cities"),
+        decision("WRONG", target=0, reason="it was never Munich"),
     )
-    result = store.add("I moved to Amsterdam", user_id="ada")
+    result = store.add("Sorry, I live in Amsterdam, not Munich", user_id="ada")
     assert result.actions[0].event == "DELETE", "little at stake, so it goes ahead"
     return old, result.actions[0].memory_id
 
 
 def test_a_replacement_is_listed_and_can_be_undone(store, fake_llm):
-    old, new_id = _moved_cities(store, fake_llm)
+    old, new_id = _corrected(store, fake_llm)
 
     rows = store.replaced(user_id="ada")
     assert [(r["memory"].id, r["replacement"].id) for r in rows] == [(old.id, new_id)]
-    assert rows[0]["reason"] == "moved cities"
+    assert rows[0]["reason"] == "it was never Munich"
 
     assert store.undo_replacement(old.id)
     assert [m.id for m in store.get_all(user_id="ada")] == [old.id]
@@ -119,9 +119,26 @@ def test_a_replacement_is_listed_and_can_be_undone(store, fake_llm):
 
 
 def test_undoing_can_keep_both(store, fake_llm):
-    old, new_id = _moved_cities(store, fake_llm)
+    old, new_id = _corrected(store, fake_llm)
     assert store.undo_replacement(old.id, keep_new=True)
     assert {m.id for m in store.get_all(user_id="ada")} == {old.id, new_id}
+
+
+def test_a_change_is_listed_and_its_undo_keeps_both(store, fake_llm):
+    """A changed value retires the old one as an update: listed under the
+    Archive as replaced (no contradiction), and if the change was a mistake
+    its undo brings the old one back beside the new one."""
+    fake_llm.queue(facts_response(fact("User lives in Munich")))
+    old = store.add("I live in Munich", user_id="ada").actions[0].memory_id
+    fake_llm.queue(facts_response(fact("User lives in Amsterdam")),
+                   decision("CHANGED", target=0, reason="moved cities"))
+    new = store.add("I moved to Amsterdam", user_id="ada").actions[0]
+    assert new.event == "SUPERSEDE"
+    [row] = store.replaced(user_id="ada")
+    assert (row["memory"].id, row["replacement"].id, row["contradiction"]) == (
+        old, new.memory_id, False)
+    assert store.undo_replacement(old)
+    assert {m.id for m in store.get_all(user_id="ada")} == {old, new.memory_id}
 
 
 def test_a_merge_of_duplicates_is_not_a_replacement_to_undo(verbatim_store):

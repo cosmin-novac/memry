@@ -12,6 +12,7 @@ skips rather than pretending to have checked.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from memry.config import Config
+from memry.models import Entity, EntityMention
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
 from memry.rest import create_app
@@ -64,7 +66,6 @@ def test_map_uses_complete_aggregates_entity_types_and_rendering_bounds():
     html = _dashboard_html()
     source = "\n".join(_scripts(html))
 
-    assert 'id="mapTagsBtn"' in html
     assert '<details class="gx-types" id="mapEntityFilter">' in html
     assert '<summary id="mapEntitiesBtn"' in html
     assert '>Types</summary>' not in html
@@ -78,7 +79,7 @@ def test_map_uses_complete_aggregates_entity_types_and_rendering_bounds():
     assert "if(event.target.closest&&event.target.closest('.gx-types'))return" in source
     assert "if(mapEntityFilterOpen()){closeMapEntityFilter();return}" in source
     assert 'aria-label="Memory type shapes"' in html
-    assert "api('/api/v1/map')" in source
+    assert "const data=await api(mapDataPath(tags));" in source
     assert "const MAX_IDLE_EDGES=400" in source
     assert "const displayedEdges=displayedGalaxyEdges(G,sel,hov)" in source
     assert "A+=((hovTouches?1:0.06)-A)*hoverMix" in source
@@ -94,78 +95,109 @@ def test_map_uses_complete_aggregates_entity_types_and_rendering_bounds():
     assert 'data-entity-type="' in source
     assert "handleMapEntityTypeChange" in source
 
+    type_label = source[source.index("function typeLabel(") :].split("\n", 1)[0]
     map_source = source[
         source.index("const hashCode=") : source.index("function drawMap(){")
     ]
-    contract = """
+    contract = type_label + """
 const window={};
-const document={getElementById:()=>({setAttribute:()=>{},addEventListener:()=>{}})};
-const localStorage={getItem:()=>null,setItem:()=>{}};
+const nodes={};
+const document={getElementById:id=>(nodes[id]??={setAttribute:()=>{},addEventListener:()=>{}})};
+const stored={};
+const localStorage={getItem:key=>stored[key]??null,setItem:(key,value)=>{stored[key]=value}};
 const matchMedia=()=>({matches:true});
 let activeMapKey=null,hoverMapKey=null,hoverFocusTag=null,redraws=0;
-const updateHover=()=>{};
+let knowledgeMapSuspended=false;
+const updateHover=()=>{},clearMapEntityDetail=()=>{};
 const drawMap=()=>{redraws++};
 const esc=value=>value;
+const asked=[];
+const api=async path=>{asked.push(path);return {memories:1,entity_memories:1,
+  entities:[{key:'entity:t1',label:'work',kind:'entity',entity_id:'t1',entity_type:'topic',count:3,type_counts:{semantic:3}}],
+  entity_edges:[]}};
 """ + map_source + """
 function check(condition,message){if(!condition)throw new Error(message)}
-const tagEdges=Array.from({length:430},(_,index)=>({
-  a:'tag:work',b:'tag:t'+index,weight:1
+const edges=Array.from({length:430},(_,index)=>({
+  a:'entity:hub',b:'entity:t'+index,weight:1
 }));
 const data={
-  memories:432,entity_memories:2,
-  tags:[
-    {key:'tag:work',label:'work',kind:'tag',count:2,
-     type_counts:{semantic:1,procedural:1}},
-    ...Array.from({length:430},(_,index)=>({
-      key:'tag:t'+index,label:'t'+index,kind:'tag',count:1,
-      type_counts:{episodic:1}
-    }))
-  ],
-  tag_edges:tagEdges,
+  memories:432,entity_memories:431,withTags:true,
   entities:[
-    {key:'entity:ada-1',label:'Ada',kind:'entity',entity_id:'ada-1',
-     entity_type:'person',count:2,type_counts:{semantic:1,procedural:1}},
+    {key:'entity:hub',label:'Ada',kind:'entity',entity_id:'hub',entity_type:'person',
+     count:2,type_counts:{semantic:1,procedural:1}},
+    ...Array.from({length:430},(_,index)=>({
+      key:'entity:t'+index,label:'t'+index,kind:'entity',entity_id:'t'+index,
+      entity_type:'person',count:1,type_counts:{episodic:1}
+    })),
     {key:'entity:rag-1',label:'RAG',kind:'entity',entity_id:'rag-1',
-     entity_type:'concept',count:1,type_counts:{semantic:1}}
+     entity_type:'concept',count:1,type_counts:{semantic:1}},
+    {key:'entity:work',label:'work',kind:'entity',entity_id:'work',
+     entity_type:'topic',count:5,type_counts:{semantic:5}}
   ],
-  entity_edges:[{a:'entity:ada-1',b:'entity:rag-1',weight:1}]
+  entity_edges:[...edges,{a:'entity:hub',b:'entity:rag-1',weight:1},
+    {a:'entity:work',b:'entity:hub',weight:2}]
 };
 mapData=data;
-mapMode='tags';
-const tags=buildGalaxy(data);
-check(tags.total===432,'tag total');
-check(tags.byKey['tag:work'].count===2,'tag count');
-check(tags.byKey['tag:work'].typeCounts.procedural===1,'type counts');
-check(tags.idleEdges.length===400,'idle edge cap');
-check(tags.lod===true,'431 planets is above the detail threshold');
-check(tags.byKey['tag:work'].satTypes.length===2,'orbit marker types are precomputed');
-const hoverEdges=displayedGalaxyEdges(tags,null,tags.byKey['tag:work']);
+const big=buildGalaxy(data);
+check(big.total===431,'linked memory total');
+check(big.byKey['entity:hub'].count===2,'entity count');
+check(big.byKey['entity:hub'].typeCounts.procedural===1,'type counts');
+check(big.idleEdges.length===400,'idle edge cap');
+check(big.lod===true,'431 planets is above the detail threshold');
+check(big.byKey['entity:hub'].satTypes.length===2,'orbit marker types are precomputed');
+const hoverEdges=displayedGalaxyEdges(big,null,big.byKey['entity:hub']);
 check(hoverEdges.length===430,'hover shows every node edge');
-check(tags.idleEdges.every(edge=>hoverEdges.includes(edge)),'hover preserves every idle edge');
-check(displayedGalaxyEdges(tags,tags.byKey['tag:work'],null).length===430,'selection shows every node edge');
-mapMode='entities';
-mapEntityTypes=null;
-const defaultEntities=buildGalaxy(data);
-check(defaultEntities.total===2,'linked memory total');
-check(defaultEntities.lod===false,'small graphs keep full detail');
-check(defaultEntities.byKey['entity:ada-1'].count===2,'entity count');
-check(!defaultEntities.byKey['entity:rag-1'],'concept should default off');
+check(big.idleEdges.every(edge=>hoverEdges.includes(edge)),'hover preserves every idle edge');
+check(displayedGalaxyEdges(big,big.byKey['entity:hub'],null).length===430,'selection shows every node edge');
+check(!big.byKey['entity:rag-1'],'concept should default off');
+check(!big.byKey['entity:work'],'tags start off');
+check(!mapWantsTags(),'so the map does not ask for them');
+check(mapDataPath(false)==='/api/v1/map?kind=named','people and things only');
+check(mapDataPath(true)==='/api/v1/map?kind=any','tags when asked for');
+check(knownEntityTypes().join()==='concept,person,topic','the tag type is offered: '+knownEntityTypes().join());
+renderMapEntityTypes();
+const menu=nodes.mapEntityTypeOptions.innerHTML;
+check(menu.includes('<span>tag</span>')&&!menu.includes('<span>topic</span>'),'tags read "tag"');
 mapEntityTypes.add('concept');
-const allEntities=buildGalaxy(data);
-check(allEntities.byKey['entity:rag-1'].entityType==='concept','concept opt-in');
+check(buildGalaxy(data).byKey['entity:rag-1'].entityType==='concept','concept opt-in');
 handleMapEntityTypeChange({target:{
   matches:selector=>selector==='input[data-entity-type]',
   dataset:{entityType:'concept'},checked:false
 }});
 check(!mapEntityTypes.has('concept'),'checkbox updates selected entity types');
 check(redraws===1,'checkbox redraws map immediately');
+check(asked.length===0,'no reload for a type that is loaded');
+toggleMapEntityType('topic',true);
+const withTag=buildGalaxy(data);
+check(withTag.byKey['entity:work'].entityType==='topic','a tag is a planet once its type is on');
+check(withTag.edges.some(edge=>withTag.nodes[edge.a].key==='entity:work'||withTag.nodes[edge.b].key==='entity:work'),
+  'and its co-mention edges are drawn');
+check(JSON.parse(stored.memry_map_entity_types).includes('topic'),'the choice is remembered');
+check(asked.length===0,'tags already loaded are not asked for again');
+// a map loaded without tags asks for them when their type is turned on
+mapEntityTypes.delete('topic');data.withTags=false;
+toggleMapEntityType('topic',true);
+check(asked.join()==='/api/v1/map?kind=any','turning tags on loads them: '+asked.join());
+// a later page load remembers it
+mapEntityTypes=null;
+check(mapWantsTags(),'a remembered tag type is asked for at once');
+stored.memry_map_entity_types=JSON.stringify(['person']);
+check(!mapWantsTags(),'and one left off is not');
+mapEntityTypes=null;
+setMapEntityTypes('defaults');
+check(!mapEntityTypes.has('topic')&&!mapEntityTypes.has('concept')&&mapEntityTypes.has('person'),'defaults leave tags off');
+setMapEntityTypes('all');
+check(mapEntityTypes.has('topic'),'all means tags too');
+setMapEntityTypes('none');
+check(mapEntityTypes.size===0,'none');
 // A long tail: the twos leave the over-packed belt for the rim.
-const crowd=(counts,edges=[])=>({memories:1,tags:counts.map((count,index)=>({
-  key:'tag:c'+index,label:'c'+index,kind:'tag',count,type_counts:{semantic:count}
-})),tag_edges:edges,entities:[],entity_edges:[]});
+mapEntityTypes=new Set(['person']);
+const crowd=(counts,edgeRows=[])=>({memories:1,entities:counts.map((count,index)=>({
+  key:'entity:c'+index,label:'c'+index,kind:'entity',entity_id:'c'+index,entity_type:'person',
+  count,type_counts:{semantic:count}
+})),entity_edges:edgeRows});
 const zones=graph=>graph.nodes.reduce((seen,node)=>{
   (seen[node.zone]??=new Set()).add(node.count);return seen},{});
-mapMode='tags';
 const tail=[200,...Array(20).fill(1),...Array(60).fill(2),...Array(40).fill(3),
   ...Array(30).fill(5),...Array(20).fill(8)];
 const long=zones(buildGalaxy(crowd(tail)));
@@ -185,10 +217,21 @@ check(twosIn('rim')===35,'the rim takes the twos that fit');
 check(twosIn('belt')===25,'the belt keeps the rest of its twos');
 // Least-linked first: the one two with edges is last in line and stays put.
 const linked=buildGalaxy(crowd([200,1,...Array(60).fill(2),3,4],[
-  {a:'tag:c11',b:'tag:c0',weight:1},{a:'tag:c11',b:'tag:c62',weight:1},
-  {a:'tag:c11',b:'tag:c63',weight:1}]));
-check(linked.byKey['tag:c11'].zone==='belt','a well-linked two keeps its place');
-check(linked.byKey['tag:c10'].zone==='rim','an unlinked two goes out to the rim');"""
+  {a:'entity:c11',b:'entity:c0',weight:1},{a:'entity:c11',b:'entity:c62',weight:1},
+  {a:'entity:c11',b:'entity:c63',weight:1}]));
+check(linked.byKey['entity:c11'].zone==='belt','a well-linked two keeps its place');
+check(linked.byKey['entity:c10'].zone==='rim','an unlinked two goes out to the rim');
+// Tags turned on while a load without them is on its way: they are asked
+// for, and the later load is the one kept.
+(async()=>{
+  mapEntityTypes=new Set(['person']);mapData=null;asked.length=0;
+  const first=loadMapData();
+  toggleMapEntityType('topic',true);
+  await first;await new Promise(resolve=>setTimeout(resolve,0));
+  check(asked.join()==='/api/v1/map?kind=named,/api/v1/map?kind=any',
+        'both loads asked: '+asked.join());
+  check(mapData&&mapData.withTags===true,'the load with tags is kept');
+})().catch(e=>{console.error(e.message);process.exit(1)});"""
     result = subprocess.run(
         ["node", "-"], input=contract, capture_output=True, text=True
     )
@@ -197,7 +240,7 @@ check(linked.byKey['tag:c10'].zone==='rim','an unlinked two goes out to the rim'
 def test_knowledge_modal_releases_and_restores_the_map():
     source = "\n".join(_scripts(_dashboard_html()))
     modal_source = source[
-        source.index("let knowledgeTab=") : source.index("function openAbout(){")
+        source.index("let knowledgeNames={};") : source.index("function openAbout(){")
     ]
     contract = r"""
 const classList=()=>({
@@ -302,11 +345,22 @@ def test_forgotten_panel_lists_removed_names_with_a_way_back():
     assert 'id="retiredlist"' in html
     assert ">Removed names</h2>" in html
     assert ("if(tab==='forgotten'){loadForgotten();loadReplaced();"
-            "loadRetiredEntities()}") in source
+            "loadRetiredEntities();loadMerges()}") in source
     assert "async function loadRetiredEntities()" in source
     assert "api('/api/v1/entities/retired')" in source
     assert "async function restoreEntity(id)" in source
     assert "api('/api/v1/entities/restore'" in source
+
+
+def test_the_archive_lists_merged_names_with_a_way_back():
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+
+    assert 'id="mergedlist"' in html and ">Merged names</h2>" in html
+    assert "async function loadMerges()" in source
+    assert "api('/api/v1/entities/merges')" in source
+    assert "async function undoMerge(id)" in source
+    assert "api('/api/v1/entities/unmerge'" in source
 
 
 def test_memory_cards_show_colored_type_symbols():
@@ -438,10 +492,12 @@ def test_duplicate_picker_on_the_entities_page_merges_this_into_the_chosen_one()
     source = "\n".join(_scripts(_dashboard_html()))
     esc_start = source.index("function esc(s)")
     esc_line = source[esc_start : source.index("\n", esc_start)]
+    label_start = source.index("function typeLabel(")
+    label_line = source[label_start : source.index("\n", label_start)]
     picker = source[
-        source.index("function knowledgeEntityTargetOptions(") : source.index("const ENTITY_ROW_CAP")
+        source.index("function knowledgeEntityTargetOptions(") : source.index("async function addAlias(")
     ]
-    contract = esc_line + "\n" + r"""
+    contract = esc_line + "\n" + label_line + "\n" + r"""
 function check(condition,message){if(!condition)throw new Error(message)}
 const entities=[
   {id:'self',name:'Jonas',entity_type:'person',memories:2},
@@ -449,13 +505,15 @@ const entities=[
   {id:'busy',name:'Jonas',entity_type:'person',memories:9},
   {id:'gone',name:'Ada',entity_type:'person',memories:4,merged_into:'x'},
   {id:'tag',name:'<b>Ada</b>',entity_type:null,memories:0},
+  {id:'topic',name:'work',entity_type:'topic',memories:3},
 ];
 """ + picker + r"""
 const html=knowledgeEntityTargetOptions(entities,'self');
 const values=[...html.matchAll(/value="([^"]+)"/g)].map(m=>m[1]);
 check(!values.includes('self'),'an entity cannot duplicate itself');
 check(!values.includes('gone'),'an already-merged entity is not offered');
-check(values.join()==='tag,busy,quiet','same names sort busiest first: '+values.join());
+check(values.join()==='tag,busy,quiet,topic','same names sort busiest first: '+values.join());
+check(html.includes('work · tag · 3 memories')&&!html.includes('topic ·'),'a tag reads "tag"');
 check(html.includes('Jonas · person · 9 memories'),'type and count tell twins apart');
 check(html.includes('1 memory<'),'singular');
 check(html.includes('&lt;b&gt;Ada&lt;/b&gt; · untyped · 0 memories'),'names are escaped, no type reads untyped');
@@ -473,13 +531,14 @@ const confirm=m=>{asked=m;return confirmed};
 const alert=m=>alerted=m;
 let reply={merged:true};
 const api=async(path,opts)=>{posted={path,body:JSON.parse(opts.body)};return reply};
-const loadEntities=async()=>reloaded++,loadStats=async()=>reloaded++,loadMapData=async()=>reloaded++;
+const loadEntities=async()=>reloaded++,loadStats=async()=>reloaded++,loadMapData=async()=>reloaded++,
+  loadSearchFilters=async()=>reloaded++;
 const openEntity=async id=>opened=id;
 (async()=>{
   await mergeKnowledgeEntity('self');
   check(posted.path==='/api/v1/entities/merge','uses the merge endpoint');
   check(posted.body.keep_id==='busy'&&posted.body.merge_id==='self','this one folds into the chosen one');
-  check(opened==='busy'&&reloaded===3,'lists refresh and the result opens');
+  check(opened==='busy'&&reloaded===4,'lists and the About filter refresh and the result opens');
   check(asked==='Combine Jonas (1 memory) into Jonas (9 memories)? Memories and aliases will be preserved.',
         'the confirm says which Jonas is which: '+asked);
 
@@ -522,9 +581,10 @@ for(const value of ["mum's health",'say "hi"','<b>&amp;</b>',"it's & <that>",
 """
     result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    for call in ("filterByTag(${jsArg(String(c))})", "renameTag(${jsArg(topic.category)})",
-                 "deleteTag(${jsArg(topic.category)})", "applyMerge(${jsArg(group)},${index})",
-                 "toggleEntityType(${jsArg(type)})"):
+    for call in ("filterByTag(${jsArg(String(c))})", "renameEntity(${jsArg(id)})",
+                 "deleteTagEntity(${jsArg(id)})", "applyMerge(${jsArg(group)},${index})",
+                 "toggleEntityType(${jsArg(group.type)})", "setEntityType(${jsArg(chip.type)})",
+                 "pickEntity(${jsArg(id)},this.checked)", "openEntity(${jsArg(id)})"):
         assert call in source, call
     for unsafe in ("JSON.stringify(String(c))", "JSON.stringify(topic.category)",
                    "JSON.stringify(group)", "JSON.stringify(type)", "JSON.stringify(entity.name)"):
@@ -541,6 +601,7 @@ function check(condition,message){if(!condition)throw new Error(message)}
 const box={dataset:{},innerHTML:''};
 const document={getElementById:id=>id==='entitydetail'?box:null};
 const setKnowledgeOpen=()=>{},showKnowledge=()=>{};
+const renameTitle=()=>'',DELETE_TAG_TITLE='',rememberTag=()=>{};
 const pending={};
 const api=path=>new Promise(resolve=>{pending[path.split('/').pop()]=resolve});
 const reply=name=>({entity:{name,description:name+' facts'},aliases:[],memories:[],relations:[],relation_names:{},hub:true});
@@ -555,3 +616,464 @@ const reply=name=>({entity:{name,description:name+' facts'},aliases:[],memories:
 """
     result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_a_rename_that_lands_in_another_entity_moves_the_panel_to_it():
+    """Renaming a tag to a name merged away folds it into that name's
+    survivor, and the rename answers with the survivor. The panels, the map
+    selection and the About filter follow it to its id and its name, and
+    each panel is drawn again for it (its buttons carry the id); the memory
+    list and the About filter are read again, since a tag is renamed on its
+    memories. A plain rename keeps the id and only updates the name."""
+    source = "\n".join(_scripts(_dashboard_html()))
+    rename = source[
+        source.index("function syncEntityIdentity(") : source.index("async function addMapAlias(")
+    ]
+    contract = r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+function option(value,selected,tag){
+  const o={value,textContent:value,selected,dataset:{tag},remove(){options.splice(options.indexOf(o),1)}};
+  return o;
+}
+const options=[option('tag-old',true,'tax')];
+const nodes={
+  mapentitydetail:{dataset:{entityId:'tag-old'}},
+  entitydetail:{dataset:{entityId:'tag-old'}},
+  mapentityname:{textContent:'tax'},mapentityidentity:{innerHTML:''},
+  knowledgeentityname:{textContent:'tax'},knowledgeentityidentity:{innerHTML:''},
+  'filter-about':{get options(){return options}},
+};
+const document={getElementById:id=>nodes[id]};
+let activeMapKey='entity:tag-old',mapData={entities:[{entity_id:'tag-old',label:'tax'}]},G=null;
+const knowledgeNames={},TAG_TYPE='topic',tagNames={'tag-old':'tax'};
+const tagKey=entity=>String(entity.normalized||entity.name).toLowerCase();
+const rememberTag=entity=>{if(entity.entity_type===TAG_TYPE)tagNames[entity.id]=tagKey(entity)};
+const galaxyRead=()=>{},entityIdentityBlock=(entity,aliases)=>'identity of '+entity.name;
+const shown=[],opened=[];let reloaded=[];
+const showMapEntityDetail=id=>shown.push(id),openEntity=id=>opened.push(id);
+const loadEntities=async()=>reloaded.push('entities'),loadMapData=async()=>reloaded.push('map');
+const loadSearchFilters=async()=>reloaded.push('filters'),search=async()=>reloaded.push('search');
+const alert=message=>{throw new Error(message)};
+let answer='levies',reply=null,patched=null;
+const prompt=()=>answer;
+const api=async(path,opts)=>{patched=path;return reply};
+""" + rename + r"""
+(async()=>{
+  reply={entity_id:'survivor',entity:{id:'survivor',name:'levies',normalized:'levies',entity_type:'topic'},aliases:[]};
+  await renameEntity('tag-old');
+  check(patched==='/api/v1/entities/tag-old','the rename is sent for the entity shown');
+  check(nodes.mapentitydetail.dataset.entityId==='survivor','the map panel shows the survivor');
+  check(nodes.entitydetail.dataset.entityId==='survivor','the entities panel shows the survivor');
+  check(activeMapKey==='entity:survivor','the map selection follows it');
+  check(shown.join()==='survivor'&&opened.join()==='survivor','both panels are drawn for it');
+  check(options.length===1&&options[0].value==='survivor'&&options[0].selected,'the filter follows it');
+  check(options[0].dataset.tag==='levies','and filters by the new tag name');
+  check(tagNames.survivor==='levies','the tag is known under its new id');
+  check(reloaded.includes('filters')&&reloaded.at(-1)==='search','the About filter and the memory list are read again');
+  check(knowledgeNames.survivor==='levies','its name is known under its id');
+  check(reloaded.includes('map')&&reloaded.includes('entities'),'the map and the list reload');
+
+  // a plain rename keeps the id and draws nothing again
+  shown.length=0;opened.length=0;reloaded=[];answer='duties';delete tagNames.survivor;
+  reply={entity_id:'survivor',entity:{id:'survivor',name:'duties'},aliases:[]};
+  mapData.entities[0].entity_id='survivor';mapData.entities[0].label='levies';
+  await renameEntity('survivor');
+  check(nodes.mapentitydetail.dataset.entityId==='survivor'&&activeMapKey==='entity:survivor','same id');
+  check(nodes.mapentityname.textContent==='duties'&&nodes.knowledgeentityname.textContent==='duties',
+        'the name is updated in place');
+  check(shown.length===0&&opened.length===0&&reloaded.join()==='entities','nothing is drawn again');
+})().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+    result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_rename_route_answers_with_the_entity_the_tag_went_into(tmp_path):
+    """Renaming a tag to a name merged away answers with that name's
+    survivor, and says its id."""
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    try:
+        for content, tag in (("a", "tax"), ("b", "levies"), ("c", "duties")):
+            store.add(content, user_id="default", infer=False, categories=[tag])
+        store.merge_tags(["tax"], "levies", user_id="default")
+        from memry.models import Scope
+
+        scope = Scope(user_id="default")
+        duties = store.backend.topic_entity("duties", scope, create=False)
+        levies = store.backend.topic_entity("levies", scope, create=False)
+        with TestClient(create_app(store)) as client:
+            response = client.patch(f"/api/v1/entities/{duties.id}", json={"name": "tax"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["entity_id"] == levies.id == body["entity"]["id"]
+    finally:
+        store.close()
+
+
+# ------------------------------------------------ one Entities view, one filter
+def _lines(source: str, *starts: str) -> str:
+    """The one line of the dashboard script that begins with each of ``starts``."""
+    return "\n".join(
+        source[source.index(start) : source.index("\n", source.index(start))]
+        for start in starts
+    )
+
+
+def _region(source: str, start: str, end: str) -> str:
+    """From ``start`` up to the first ``end`` after it."""
+    begin = source.index(start)
+    return source[begin : source.index(end, begin)]
+
+
+def _run_node(contract: str, *args: str) -> str:
+    result = subprocess.run(
+        ["node", "-", *args], input=contract, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_upkeep_has_one_entities_view_and_the_map_one_mode():
+    """Tags are entities of the type "topic": they are listed, filtered and
+    drawn with the people and things, not on a Tags tab or in a Tags mode."""
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+
+    tabs = re.findall(r'<button id="ktab-(\w+)"[^>]*>([^<]+)</button>', html)
+    assert tabs == [("maintenance", "Upkeep"), ("entities", "Entities"), ("forgotten", "Archive")]
+    for gone in ('id="kpanel-topics"', 'id="taglist"', 'id="tagsearch"',
+                 'id="mapTagsBtn"', 'id="filter-topic"', 'id="filter-entity"'):
+        assert gone not in html, gone
+    for gone in ("setMapMode", "mapMode", "renderTags", "loadTags", "Tags page",
+                 "mergeTags", "into one named", "legacy_tags", "tag_edges"):
+        assert gone not in source, gone
+    # the one combine path: keep one, merge the rest into it
+    combine = _region(source, "async function combineSelected(", "function closeCombine(")
+    assert "/api/v1/tags/edit" not in combine and "prompt(" not in combine
+    assert "api('/api/v1/entities/merge'" in _region(source, "async function applyCombine(", "// Where this")
+    panel = _region(html, '<section class="kpanel" id="kpanel-entities"', "</section>")
+    for control in ('id="entsearch"', 'id="enttypes"', 'id="entsel"', ">Suggest merges</button>",
+                    ">Combine selected...</button>", ">Backfill types</button>",
+                    ">Merge proposals</h2>", 'id="entitydetail"'):
+        assert control in panel, control
+    # Suggest merges says what it covers
+    assert "This covers tags only: people and things that may be one are under Merge proposals." in panel
+    # the map offers tags as a type, off until turned on
+    assert 'title="Show every type except concept, other and tag.">defaults</button>' in html
+    assert 'title="Show every type, tags included.">all</button>' in html
+    # the memory list has one About filter
+    assert html.count('<select id="filter-about" multiple') == 1
+    # a tag reads "tag", never "topic"
+    assert "function typeLabel(type){return type==='topic'?'tag':(type||'untyped')}" in source
+    assert "or topic." not in html and "A topic is a tag" not in html
+    # no dashes in the words this change wrote
+    for text in (panel, _region(html, '<div class="search-filters"', "</div>"),
+                 _region(html, '<div class="gx-ctrl">', '<div class="gx-read"')):
+        assert "\u2014" not in text and "\u2013" not in text  # no em or en dash
+
+
+def test_the_entities_list_holds_tags_beside_people_and_things_with_a_type_filter():
+    source = "\n".join(_scripts(_dashboard_html()))
+    contract = _lines(source, "function esc(s)", "function typeLabel(", "function jsArg(v)",
+                      "const TAG_TYPE=") + r"""
+let knowledgeNames={};
+const nodes={};
+const document={getElementById:id=>(nodes[id]??={innerHTML:'',textContent:'',value:'',dataset:{}})};
+const concepts=Array.from({length:13},(_,i)=>({id:'c'+i,name:'idea '+String(i).padStart(2,'0'),
+  entity_type:'concept',hub:true,memories:1}));
+const rows=[
+  {id:'ada',name:'Ada',entity_type:'person',hub:true,memories:4},
+  {id:'widget',name:'Widget',entity_type:'product',hub:false,memories:1},
+  {id:'t-travel',name:'travel',normalized:'travel',entity_type:'topic',hub:false,memories:3},
+  {id:'t-life',name:'life',normalized:'life',entity_type:'topic',hub:false,memories:1},
+  {id:'gone',name:'Old',entity_type:'person',hub:true,memories:1,merged_into:'ada'},
+  ...concepts];
+const reads={
+  '/api/v1/entities?limit=100000&include_merged=true&kind=any':rows,
+  '/api/v1/relations?limit=2000':[],'/api/v1/entities/proposals?asked=true':[],
+  '/api/v1/tags/synthetic':[{tag:'life',source_tags:['travel']}]};
+const api=async path=>reads[path];
+""" + _region(source, "// -- tags: deleted, and merged as suggested", "// Where this entity belongs") + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+const chips=view=>view.chips.map(chip=>chip.label+'='+chip.count).join();
+let view=entityListView(rows);
+check(chips(view)==='all=17,concept=13,person=1,product=1,tag=2','every live entity, tags included: '+chips(view));
+check(view.groups.find(g=>g.type==='concept').rows.length===12,'a type is capped in the all view');
+view=entityListView(rows,{type:'topic'});
+check(view.groups.length===1&&view.groups[0].rows.map(e=>e.name).join()==='life,travel','the tag filter shows the tags');
+check(entityListView(rows,{type:'concept'}).groups[0].rows.length===13,'one type shows its rows');
+check(chips(entityListView(rows,{hubs:true}))==='all=16,concept=13,person=1,tag=2','hubs only keeps the tags');
+check(chips(entityListView(rows,{needle:'TRA'}))==='all=1,tag=1','the name filter');
+check(chips(entityListView(rows,{type:'event'})).endsWith('event=0'),'a type picked stays a chip');
+(async()=>{
+  await loadEntities();
+  const list=nodes.entlist.innerHTML,types=nodes.enttypes.innerHTML;
+  check(types.includes('>tag<span class="cnt">2</span>')&&!types.includes('topic<'),'the chip reads "tag"');
+  check(list.includes('<div class="ent-group"><span>tag</span>'),'the tag group reads "tag"');
+  check(!/>topic</.test(list),'never "topic"');
+  // 12 of the 13 concepts, Ada, Widget and the two tags
+  check((list.match(/type="checkbox"/g)||[]).length===16,'a checkbox a row: '+(list.match(/type="checkbox"/g)||[]).length);
+  check(list.includes("deleteTagEntity(&quot;t-travel&quot;)"),'a tag row deletes');
+  check(!list.includes("deleteTagEntity(&quot;ada&quot;)"),'a person row does not');
+  check(list.includes("renameEntity(&quot;ada&quot;)")&&list.includes("renameEntity(&quot;t-travel&quot;)"),'every row renames');
+  check(list.includes('life</button>')&&list.includes('synthetic parent'),'a synthetic tag is marked');
+  check(list.includes('show 1 more'),'the capped type offers the rest');
+  check(nodes.entsel.textContent==='none selected','nothing checked yet');
+  pickEntity('t-travel',true);pickEntity('ada',true);
+  check(nodes.entsel.textContent==='2 selected','the checked are counted');
+  setEntityType('topic');
+  check(!nodes.entlist.innerHTML.includes('Ada<')&&nodes.entlist.innerHTML.includes('travel<'),'filtered to tags');
+  check(nodes.entlist.innerHTML.includes('value="t-travel" checked'),'a check survives the filter');
+  check(nodes.entcount.innerHTML.startsWith('17 names, 0 relations'),'the count line: '+nodes.entcount.innerHTML);
+})().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+    _run_node(contract)
+
+
+def test_a_tag_is_renamed_deleted_and_combined_from_the_entities_list():
+    """What the Entities list sends for a tag, replayed on a real store: a
+    rename renames it on its memories, a delete takes it off them (the
+    memories stay), and Combine keeps the one picked and merges the rest into
+    it (``/entities/merge``): two tags become the tag kept, and a tag combined
+    with a person goes into the person, the only one offered to keep."""
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    try:
+        for content, tags in (("Trip to Lisbon with the kids", ["travel", "family"]),
+                              ("Flights to Oslo are booked", ["trips"]),
+                              ("Pack light this time", ["packing"]),
+                              ("Jonas runs every Saturday", ["running"])):
+            added = store.add(content, user_id="default", infer=False, categories=tags)
+        jonas = store.backend.insert_entity(
+            Entity(name="Jonas", entity_type="person", user_id="default"))
+        store.backend.add_mention(EntityMention(
+            entity_id=jonas.id, memory_id=added.actions[0].memory_id, surface="Jonas"))
+        reads_paths = ("/api/v1/entities?limit=100000&include_merged=true&kind=any",
+                       "/api/v1/relations?limit=2000", "/api/v1/entities/proposals?asked=true",
+                       "/api/v1/tags/synthetic")
+        with TestClient(create_app(store)) as client:
+            html = client.get("/").text
+            reads = {path: client.get(path).json() for path in reads_paths}
+            ids = {row["name"]: row["id"] for row in reads[reads_paths[0]]}
+            source = "\n".join(_scripts(html))
+            contract = _lines(source, "function esc(s)", "function typeLabel(",
+                              "function jsArg(v)", "const TAG_TYPE=") + r"""
+let knowledgeNames={},activeMapKey=null,G=null,mapData=null;
+const nodes={};
+const document={getElementById:id=>(nodes[id]??={innerHTML:'',textContent:'',value:'',dataset:{},options:[]})};
+const reads=JSON.parse(process.argv[2]),ids=JSON.parse(process.argv[3]);
+const writes=[],asked=[];
+const api=async(path,opts={})=>{
+  const method=opts.method||'GET';
+  if(method==='GET')return reads[path];
+  const body=opts.body?JSON.parse(opts.body):null;
+  writes.push({method,path,body});
+  if(method==='PATCH'){const id=path.split('/').pop();
+    return {entity_id:id,entity:{id,name:body.name,normalized:body.name,entity_type:'topic'},aliases:[]}}
+  return {};
+};
+let answer='';
+const prompt=(question,value)=>{asked.push(question+' ['+value+']');return answer};
+const confirm=question=>{asked.push(question);return true};
+const alert=message=>{throw new Error(message)};
+const noop=async()=>{};
+const loadSearchFilters=noop,loadMapData=noop,loadStats=noop,search=noop,openEntity=noop,
+  closeEntity=()=>{},clearMapEntityDetail=()=>{},galaxyRead=()=>{},showMapEntityDetail=()=>{},
+  entityIdentityBlock=()=>'';
+""" + _region(source, "// -- tags: deleted, and merged as suggested", "// Where this entity belongs") \
+                + _region(source, "function syncEntityIdentity(", "async function addMapAlias(") + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+(async()=>{
+  await loadEntities();
+  answer='journeys';
+  await renameEntity(ids.travel);
+  await deleteTagEntity(ids.packing);
+  pickEntity(ids.trips,true);pickEntity(ids.family,true);
+  await combineSelected();
+  let panel=nodes.entcombine.innerHTML;
+  check(panel.includes('value="'+ids.trips+'"')&&panel.includes('value="'+ids.family+'"'),
+        'of two tags either can be kept');
+  document.getElementById('entcombinekeep').value=ids.trips;
+  await applyCombine();
+  check(nodes.entsel.textContent==='none selected','combined tags leave nothing checked');
+  pickEntity(ids.Jonas,true);pickEntity(ids.running,true);
+  await combineSelected();
+  panel=nodes.entcombine.innerHTML;
+  check(!nodes.entcombine.hidden,'a person among them asks which one to keep');
+  check(panel.includes('value="'+ids.Jonas+'"')&&!panel.includes('value="'+ids.running+'"'),
+        'only the person can be kept: a tag goes into the person');
+  document.getElementById('entcombinekeep').value=ids.Jonas;
+  await applyCombine();
+  console.log(JSON.stringify({writes,asked}));
+})().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+            out = json.loads(_run_node(contract, json.dumps(reads), json.dumps(ids)))
+            for write in out["writes"]:
+                response = client.request(write["method"], write["path"], json=write["body"])
+                assert response.status_code == 200, (write, response.text)
+            tags = client.get("/api/v1/categories").json()
+            listed = client.get("/api/v1/entities", params={"kind": "any", "limit": 100}).json()
+            person = client.get(f"/api/v1/entities/{jonas.id}").json()
+            memories = client.get("/api/v1/memories").json()
+    finally:
+        store.close()
+
+    writes = [(w["method"], w["path"], w["body"]) for w in out["writes"]]
+    assert writes[0] == ("PATCH", f"/api/v1/entities/{ids['travel']}", {"name": "journeys"})
+    assert writes[1] == ("POST", "/api/v1/tags/edit", {"op": "delete", "tag": "packing"})
+    assert writes[2] == ("POST", "/api/v1/entities/merge",
+                         {"keep_id": ids["trips"], "merge_id": ids["family"]})
+    assert writes[3] == ("POST", "/api/v1/entities/merge",
+                         {"keep_id": ids["Jonas"], "merge_id": ids["running"]})
+    assert len(writes) == 4
+    assert out["asked"] == [
+        'Rename tag "travel" on every memory to: [travel]',
+        'Delete tag "packing" from all memories? The memories stay.',
+        "Combine family into trips? Memories and names are kept.",
+        "Combine running into Jonas? Memories and names are kept."]
+    # what the store holds afterwards
+    assert sorted((tag["category"], tag["count"]) for tag in tags) == [("journeys", 1), ("trips", 2)]
+    assert sorted(row["name"] for row in listed) == ["Jonas", "journeys", "trips"]
+    assert "running" in [alias.lower() for alias in person["aliases"]]
+    assert len(person["memories"]) == 1
+    assert len(memories) == 4, "no memory is lost"
+
+
+def test_the_about_filter_maps_picks_onto_the_api_parameters():
+    """A tag picked goes to ``categories``, anything else to ``entity_id``:
+    the tag filter reaches the tags under a broader one, which an entity
+    filter on the topic id does not, and the two filters hold together."""
+    from memry.models import Scope, Topic, TopicRelation
+
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    try:
+        added = {}
+        for content, tags in (("Ada's standup notes", ["work"]), ("Quarterly planning", ["work"]),
+                              ("Sleep eight hours", ["life"]), ("Ada's running plan", ["health"])):
+            added[content] = store.add(content, user_id="default", infer=False,
+                                       categories=tags).actions[0].memory_id
+        ada = store.backend.insert_entity(Entity(name="Ada", entity_type="person", user_id="default"))
+        for content in ("Ada's standup notes", "Ada's running plan"):
+            store.backend.add_mention(EntityMention(
+                entity_id=ada.id, memory_id=added[content], surface="Ada"))
+        scope = Scope(user_id="default")
+        parent = store.backend.upsert_topic(Topic(
+            name="life", normalized="life", user_id="default", provenance="synthetic"))
+        for child in store.backend.list_topics(scope, limit=100):
+            if child.normalized in ("work", "health"):
+                store.backend.add_topic_relation(TopicRelation(
+                    broader_topic_id=parent.id, narrower_topic_id=child.id,
+                    user_id="default", provenance="synthetic"))
+        life = store.backend.topic_entity("life", scope, create=False)
+        with TestClient(create_app(store)) as client:
+            html = client.get("/").text
+
+            def found(**body):
+                rows = client.post("/api/v1/search", json={"query": "", **body}).json()
+                return sorted(row["memory"]["content"] for row in rows)
+
+            by_tag = found(categories=["life"])
+            by_topic_id = found(entity_id=[life.id])
+            both = found(categories=["work"], entity_id=[ada.id])
+    finally:
+        store.close()
+    # why a tag goes to categories: the broader tag reaches its narrower ones
+    assert by_tag == ["Ada's running plan", "Ada's standup notes", "Quarterly planning",
+                      "Sleep eight hours"]
+    assert by_topic_id == ["Sleep eight hours"]
+    # a tag and a person together: the memories that have both
+    assert both == ["Ada's standup notes"]
+
+    source = "\n".join(_scripts(html))
+    contract = _lines(source, "function esc(s)", "function typeLabel(", "const TAG_TYPE=",
+                      "function tagKey(", "function rememberTag(") + r"""
+const tagNames={};
+class Option{constructor(text,value){this.textContent=text;this.value=value;this.dataset={};this.selected=false}}
+const option=(value,tag)=>{const o=new Option(value,value);if(tag)o.dataset.tag=tag;return o};
+const select={options:[option('ada'),option('t-work','work'),option('t-travel','travel')],
+  get selectedOptions(){return this.options.filter(o=>o.selected)},
+  add(o){this.options.push(o)},appendChild(o){this.options.push(o)},querySelector:()=>null,innerHTML:''};
+const nodes={'filter-about':select,'filter-date':{value:''},'filter-date-to':{value:''},q:{value:''}};
+const document={getElementById:id=>nodes[id]};
+const panels={filters:true};
+let activeMapKey=null,haveMore=false,searchActive=false,current=[],offset=0;
+const PAGE=100,sent=[];
+const api=async(path,opts={})=>{sent.push(opts.body?JSON.parse(opts.body):path);return []};
+const render=()=>{},togglePanel=()=>{},toggleClear=()=>{},clearMapEntityDetail=()=>{},
+  showMapEntityDetail=()=>{},galaxyRead=()=>{};
+""" + _region(source, "function filterByTag(tag){", "function toggleClear(){") \
+        + _region(source, "// A click on a planet makes it", "document.getElementById('map').addEventListener('click'") + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+const pick=(...values)=>select.options.forEach(o=>{o.selected=values.includes(o.value)});
+(async()=>{
+  // the list: grouped by type, tags labelled "tag", only what a memory is about
+  const html=aboutOptions([
+    {id:'t-work',name:'work',normalized:'work',entity_type:'topic',memories:2},
+    {id:'ada',name:'Ada',entity_type:'person',memories:2},
+    {id:'lis',name:'Lisbon',entity_type:'place',memories:1},
+    {id:'idle',name:'Idle',entity_type:'place',memories:0}],new Set(['ada']));
+  const groups=[...html.matchAll(/<optgroup label="([^"]+)"/g)].map(m=>m[1]);
+  check(groups.join()==='person,place,tag','groups: '+groups.join());
+  check(html.includes('value="t-work" data-tag="work">work (2)'),'a tag option names its tag');
+  check(html.includes('value="ada" selected>Ada (2)'),'a pick is kept');
+  check(!html.includes('Idle'),'nothing no memory is about');
+  // picks onto parameters
+  const params=aboutParams([option('ada'),option('t-work','work'),option('tag:x','x')]);
+  check(JSON.stringify(params)==='{"categories":["work","x"],"entities":["ada"]}',JSON.stringify(params));
+  pick('ada','t-work');await search();
+  check(JSON.stringify(sent.at(-1))==='{"query":"","limit":100,"categories":["work"],"entity_id":["ada"]}',
+        'a tag and a person: '+JSON.stringify(sent.at(-1)));
+  pick();
+  // a map click fills the one filter: a tag by its name, a person by its id
+  await applyMapNodeFilter({key:'entity:t-home',entity_id:'t-home',label:'home',entity_type:'topic'});
+  check(JSON.stringify(sent.at(-1))==='{"query":"","limit":100,"categories":["home"]}','a tag planet: '+JSON.stringify(sent.at(-1)));
+  check(select.selectedOptions.length===1&&select.selectedOptions[0].dataset.tag==='home','its option is added and picked');
+  await applyMapNodeFilter({key:'entity:t-home',entity_id:'t-home',label:'home',entity_type:'topic'});
+  check(select.selectedOptions.length===0&&activeMapKey===null,'a second click clears it');
+  await applyMapNodeFilter({key:'entity:ada',entity_id:'ada',label:'Ada',entity_type:'person'});
+  check(JSON.stringify(sent.at(-1))==='{"query":"","limit":100,"entity_id":["ada"]}','a person planet');
+  check(select.selectedOptions.map(o=>o.value).join()==='ada','only the planet clicked is picked');
+  // a tag chip on a memory card toggles its tag, and adds one the list lacks
+  pick();filterByTag('Travel');await Promise.resolve();
+  check(select.selectedOptions.map(o=>o.value).join()==='t-travel','the listed tag is picked');
+  filterByTag('packing');
+  const loose=select.options.find(o=>o.value==='tag:packing');
+  check(loose&&loose.selected&&loose.dataset.tag==='packing','an unlisted tag gets an option');
+  check(JSON.stringify(searchFilters().topics)==='["travel","packing"]','both are tag filters');
+})().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+    _run_node(contract)
+
+
+def test_a_tag_panel_renames_and_deletes_but_offers_no_alias():
+    """A name lookup never finds a tag, so its panels, on the Entities tab and
+    under the map, have no "add alias"; a person's keep it."""
+    source = "\n".join(_scripts(_dashboard_html()))
+    contract = _lines(source, "function esc(s)", "function typeLabel(", "function jsArg(v)",
+                      "const TAG_TYPE=") + r"""
+const nodes={};
+const document={getElementById:id=>(nodes[id]??={innerHTML:'',dataset:{},hidden:true})};
+const panels={map:true};let knowledgeMapSuspended=false,activeMapKey=null,mapData={entities:[]};
+const setKnowledgeOpen=()=>{},showKnowledge=()=>{},rememberTag=()=>{};
+const renameTitle=tag=>tag?'tag rename':'rename',DELETE_TAG_TITLE='delete this tag';
+const replies={
+  't1':{entity:{id:'t1',name:'travel',entity_type:'topic'},aliases:[],memories:[],relations:[],relation_names:{},hub:false},
+  'p1':{entity:{id:'p1',name:'Ada',entity_type:'person'},aliases:[],memories:[],relations:[],relation_names:{},hub:true}};
+const api=async path=>replies[path.split('/').pop()];
+""" + _region(source, "let mapEntityDetailRequest=0;", "// A rename can answer") \
+        + _region(source, "function placeBlock(", "function closeEntity(") + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+(async()=>{
+  await openEntity('t1');
+  let html=nodes.entitydetail.innerHTML;
+  check(html.includes('>rename</button>')&&html.includes('>delete tag</button>'),'a tag renames and deletes');
+  check(!html.includes('add alias')&&!html.includes('not an entity'),'and nothing else');
+  check(html.includes('<span class="syn">tag</span>'),'it reads "tag"');
+  await openEntity('p1');
+  html=nodes.entitydetail.innerHTML;
+  check(html.includes('>add alias</button>')&&html.includes('>not an entity</button>'),'a person keeps both');
+  activeMapKey='entity:t1';await showMapEntityDetail('t1');
+  html=nodes.mapentitydetail.innerHTML;
+  check(html.includes('>delete tag</button>')&&!html.includes('add alias'),'the map panel of a tag too');
+})().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+    _run_node(contract)

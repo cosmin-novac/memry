@@ -21,7 +21,7 @@ from conftest import FakeLLM
 
 from memry.config import Config
 from memry.intelligence.consolidate import representative, similarity_groups
-from memry.models import Memory
+from memry.models import Memory, Scope
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
 from memry.store import MemoryStore
@@ -117,6 +117,8 @@ def test_superseded_memories_are_kept_and_linked(store):
     dropped = [m for m in everything if m.invalid_at is not None]
     assert len(dropped) == 3
     assert {m.superseded_by for m in dropped} == {merged_memory.id}
+    assert {e.kind for m in dropped for e in store.history(m.id)
+            if e.event == "SUPERSEDE"} == {"consolidation"}
     # the merged record inherits the earliest creation date of the family
     assert merged_memory.created_at == min(m.created_at for m in dropped)
 
@@ -207,3 +209,50 @@ def test_only_applies_the_chosen_groups(store):
     active = {m.id for m in store.get_all(user_id="ada", limit=50)}
     assert set(groups[1]["memory_ids"]) <= active
     assert not set(groups[0]["memory_ids"]) & active
+
+
+# ---------------------------------------------------------------- what it keeps
+def _entity_on_each(store):
+    """The entity "Marcus Vandenberg" mentioned by every original."""
+    from memry.models import Entity, EntityMention
+
+    marcus = store.backend.insert_entity(Entity(
+        name="Marcus Vandenberg", normalized="marcus vandenberg", user_id="ada"))
+    for memory in store.get_all(user_id="ada", limit=50):
+        store.backend.add_mention(EntityMention(
+            entity_id=marcus.id, memory_id=memory.id, surface="Marcus Vandenberg"))
+    return marcus
+
+
+def test_the_consolidated_memory_is_found_by_vector_and_keeps_its_entities(store):
+    """Its vector carries the embedding model, which vector search filters on,
+    and it mentions what its originals mentioned."""
+    _seed_identity(store)
+    marcus = _entity_on_each(store)
+    merged = "User is Marcus Vandenberg (goes by Marc)."
+    store.llm.queue(_verdict(True, merged, "same person"))
+    store.consolidate_memories(user_id="ada", threshold=0.25)
+    survivor = store.get_all(user_id="ada", limit=50)[0]
+    assert survivor.embedding_model == store.embedder.model_id
+    hits = store.backend.vector_search(
+        store.embedder.embed([merged])[0], store.embedder.model_id, Scope(user_id="ada"), 5)
+    assert survivor.id in [memory.id for memory, _ in hits]
+    assert [e.id for e in store.backend.entities_of_memory(survivor.id)] == [marcus.id]
+
+
+def test_a_memory_consolidated_before_the_fix_is_repaired(store):
+    """Stored without a model and without mentions, as consolidation did: the
+    next repair re-embeds it and gives the mentions back, once."""
+    _seed_identity(store)
+    marcus = _entity_on_each(store)
+    originals = [m.id for m in store.get_all(user_id="ada", limit=50)]
+    old = store.backend.insert_memory(
+        Memory(content="User is Marcus Vandenberg (goes by Marc).", user_id="ada",
+               metadata={"consolidated_from": originals}),
+        embedding=store.embedder.embed(["User is Marcus Vandenberg"])[0])
+    for original in originals:
+        store.backend.invalidate_memory(original, superseded_by=old.id)
+    assert store.repair_consolidated(user_id="ada") == {"re_embedded": 1, "mentions_restored": 1}
+    assert store.backend.get_memory(old.id).embedding_model == store.embedder.model_id
+    assert [e.id for e in store.backend.entities_of_memory(old.id)] == [marcus.id]
+    assert store.repair_consolidated(user_id="ada") == {"re_embedded": 0, "mentions_restored": 0}

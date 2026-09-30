@@ -21,7 +21,9 @@ from pydantic import BaseModel, ConfigDict
 
 from .config import Config, require_models
 from .enrichment import EnrichmentWorker
-from .models import EventType, MemoryType
+from .intelligence.context import said_at
+from .intelligence.when import describe_when
+from .models import EventType, MemoryType, parse_said_at
 from .principal import ADMIN, Principal
 from .store import MemoryStore
 
@@ -45,19 +47,43 @@ of the subject:
   "the project"). Recall is cheap and stops you contradicting or re-asking what
   you were already told.
 
+In what comes back:
+- "[happened 2023-05-07] <text> (said 8 May 2023)" (search rows: "happened",
+  "said") gives when the thing happens, where known, and the day it was said.
+  Do not take one for the other;
+- "[until <date>]" (search rows: "invalid_at") marks a value that stopped
+  holding that day; the current value is in another memory;
+- "What was said" (search rows: "evidence") lists the saved turns the memories
+  rest on, with date and speaker. They keep details a memory leaves out.
+
 SAVE - call save_memories:
-- whenever the user states a stable fact, preference, decision, correction, or
-  plan - capture it in their own words;
+- whenever the user states a fact, preference, decision, correction, or plan,
+  or tells you about something that happened;
+- send what was said, close to the words used, one statement per line, and
+  name any speaker who is not the user ("Ada: I got the job"). Keep feelings,
+  advice and event details, and say what a shared photo shows. Memry extracts
+  the facts itself and later shows your text as what was said, so a summary
+  loses whatever it leaves out;
 - as a running checkpoint when the topic is about to change, rather than only
   at the end of the chat;
-- batch related facts into ONE call as concise multiline content. Do not call
-  once per sentence: Memry extracts the atomic facts itself while seeing their
-  shared context. Keep unrelated topics in separate calls;
+- batch related facts into ONE call. Do not call once per sentence: Memry
+  extracts the atomic facts itself while seeing their shared context. Keep
+  unrelated topics in separate calls;
 - if related facts must arrive in separate calls, reuse the same short semantic
   context label and run_id. Memry waits for two minutes of quiet, then extracts
-  that group together;
+  that group together. The label is also shown when Memry judges whether two
+  names are one person or thing;
+- pass said_at (YYYY-MM-DD) only for content said on another day, such as an
+  import or an earlier conversation. Memry dates it that day and reads
+  "yesterday" or "next month" against it;
+- when something changed or the user corrects a fact, save the new statement
+  as said. Memry keeps the old value as dated history, or retires it when it
+  was wrong; do not delete or rewrite it yourself. Use update_memory only to
+  fix a memory Memry wrote wrong, and delete_memory only when the user asks
+  you to forget something;
 - add up to three tags only when they are useful recurring retrieval subjects.
-  Tags are hints; context is the temporary ingestion grouping.
+  Each tag becomes a topic in the user's tag list. Tags are hints; context is
+  the temporary ingestion grouping.
 
 With infer=true, a successful response means the exact text is durable and
 searchable while enrichment is pending. Use infer=false only for content that
@@ -75,6 +101,12 @@ class MemoryEnrichmentOutput(BaseModel):
     last_error: str | None = None
 
 
+class EvidenceTurnOutput(BaseModel):
+    said: str
+    speaker: str
+    text: str
+
+
 class MemoryRowOutput(BaseModel):
     id: str
     content: str
@@ -83,9 +115,12 @@ class MemoryRowOutput(BaseModel):
     categories: list[str]
     created_at: str
     updated_at: str
+    said: str | None = None
+    happened: str | None = None
     enrichment: MemoryEnrichmentOutput | None = None
     invalid_at: str | None = None
     score: float | None = None
+    evidence: list[EvidenceTurnOutput] | None = None
 
 
 class SaveActionOutput(BaseModel):
@@ -167,6 +202,7 @@ class MemoryStatsData(BaseModel):
     memories_by_type: dict[str, int] | None = None
     users: list[str] | None = None
     entities: int | None = None
+    topics: int | None = None
     open_merge_proposals: int | None = None
     ann: dict[str, Any] | None = None
     llm: str | None = None
@@ -199,7 +235,13 @@ def _tool_result(
     )
 
 
-def _memory_row(m: Any, score: float | None = None) -> dict[str, Any]:
+def _memory_row(m: Any, score: float | None = None, evidence: Any = ()) -> dict[str, Any]:
+    """A memory as the tools return it. "said" is the day it was recorded
+    (its last change; for one out of use, such as an update's old value kept
+    as history, the day it began to hold, and ``invalid_at`` the day it held
+    until) and "happened" when the thing it tells happens, where known: the
+    dates the context builder labels (``context.memory_line``). "evidence"
+    are the source turns a search chose for it (``MemoryStore.evidence``)."""
     row = {
         "id": m.id,
         "content": m.content,
@@ -208,7 +250,11 @@ def _memory_row(m: Any, score: float | None = None) -> dict[str, Any]:
         "categories": m.categories,
         "created_at": m.created_at,
         "updated_at": m.updated_at,
+        "said": (said_at(m) or "")[:10],
     }
+    happened = describe_when((m.metadata or {}).get("when"))
+    if happened:
+        row["happened"] = happened
     if m.metadata.get("pending_distillation"):
         job = m.metadata.get("_enrichment") or {"status": "pending"}
         row["enrichment"] = {
@@ -220,6 +266,9 @@ def _memory_row(m: Any, score: float | None = None) -> dict[str, Any]:
         row["invalid_at"] = m.invalid_at
     if score is not None:
         row["score"] = round(score, 4)
+    if evidence:
+        row["evidence"] = [{"said": t.said_at[:10], "speaker": t.speaker, "text": t.content}
+                           for t in evidence]
     return row
 
 
@@ -310,25 +359,40 @@ def create_server(
         context: str = "",
         tags: list[str] | None = None,
         infer: bool = True,
+        said_at: str = "",
     ) -> Annotated[CallToolResult, SaveMemoriesOutput]:
-        """Store information in long-term memory. Batch related facts into one
-        concise multiline content value so Memry can extract atomic facts with
-        their shared context; do not call once per sentence. If related facts
-        must be sent across several calls, reuse the same semantic context label
-        and run_id. Enrichment starts after that group has been quiet for two
-        minutes. Optional tags are up to three suggested recurring retrieval
-        subjects, not grouping identifiers.
+        """Store what was said in long-term memory. Send it close to the words
+        used, one statement per line, and name any speaker who is not the user
+        ("Ada: I got the job"). Memry extracts the facts itself and keeps this
+        text as the turn it shows with them later ("evidence"), so a summary
+        loses what it leaves out. Batch related statements into one call; do
+        not call once per sentence. If related statements must be sent across
+        several calls, reuse the same semantic context label and run_id.
+        Enrichment starts after that group has been quiet for two minutes.
+        Optional tags are up to three suggested recurring retrieval subjects,
+        not grouping identifiers.
+
+        A change or a correction is saved as said, like anything else: Memry
+        keeps the old value as dated history, or retires it when it was wrong.
 
         infer=true commits the exact text immediately and distills it in the
         managed background worker. A provider failure leaves the raw memory
         active for retry. infer=false keeps the content as one verbatim memory.
 
         Args:
-            content: One durable fact or a concise multiline bundle of related facts.
+            content: What was said, one statement per line, naming any
+                speaker who is not the user.
             context: Short shared subject reused across related calls.
             tags: Up to three suggested recurring retrieval subjects.
             run_id: Stable client run identifier; reuse it for related calls.
+            said_at: The day the content was said (YYYY-MM-DD, or an ISO date
+                and time, read in UTC), only for content said on another day,
+                such as an import or an earlier conversation. The memories are
+                dated that day and "yesterday" or "next month" is read against
+                it. Leave it empty for what is said now; a day after today is
+                an error.
         """
+        said = parse_said_at(said_at)  # a malformed or future value is a tool error
         add = store.add_deferred if infer else store.add
         shared_context = " ".join(context.split())[:200]
         tag_hints: list[str] = []
@@ -353,6 +417,10 @@ def create_server(
         }
         if not infer:
             kwargs["infer"] = False
+        if said is not None:
+            # the save's time, and the day extraction reads "yesterday" against
+            kwargs["created_at"] = said.isoformat(timespec="seconds")
+            kwargs["now"] = said
         result = await _threaded(add, **kwargs)
         if infer and result.actions:
             enrichment_worker.notify()
@@ -406,6 +474,13 @@ def create_server(
         happens rather than when it was saved, which is what answers "what is on
         this weekend"; only memories that carry an occurrence time match.
 
+        Each row carries "said" (the day it was said), "happened" (when the
+        thing happens, where known; do not read "said" as that day),
+        "invalid_at" on a value kept as history (it held until then; the
+        current value is another memory), and "evidence": the saved turns it
+        rests on (said, speaker, text), which keep details the memory leaves
+        out.
+
         PASS categories WHENEVER YOU KNOW THE SUBJECT. You are holding the
         conversation, so you know what it is about even when the user's words do
         not say so. Scoping to the right topic measurably beats an unfiltered
@@ -429,7 +504,7 @@ def create_server(
             when_since=when_since or None,
             when_until=when_until or None,
         )
-        memory_rows = [_memory_row(r.memory, r.score) for r in results]
+        memory_rows = [_memory_row(r.memory, r.score, r.evidence) for r in results]
         return _tool_result(
             memory_rows,
             SearchMemoriesOutput(memories=memory_rows),
@@ -452,7 +527,12 @@ def create_server(
         over search_memories when you just want background injected before you
         answer. Worth calling at the start of a session and whenever a new topic
         comes up. This can refresh and persist a derived entity summary when the
-        stored summary is stale; it never changes the underlying memories."""
+        stored summary is stale; it never changes the underlying memories.
+
+        A memory reads "[happened <date>] <text> (said <date>)": when the
+        thing happens, where known, and the day it was said. "[until <date>]"
+        marks a value that stopped holding that day. Under "What was said" are
+        the saved turns the memories rest on, with date and speaker."""
         ctx = await _threaded(
             store.reconstruct_context,
             query=query, user_id=_uid(user_id), token_budget=token_budget,
@@ -515,8 +595,8 @@ def create_server(
     ) -> Annotated[CallToolResult, ListCategoriesOutput]:
         """List all memory categories (tags) with their memory counts, sorted
         by count descending. Use this to see how knowledge is organized before
-        drilling into a category with search_memories. Some tags are synthetic:
-        higher-level themes Memry adds to cluster related tags."""
+        drilling into a category with search_memories. Each count is the
+        memories filed directly under that tag."""
         cats = await _threaded(store.categories, user_id=_uid(user_id))
         synthetic = {
             t.tag for t in await _threaded(store.synthetic_tags, user_id=_uid(user_id))
@@ -537,8 +617,12 @@ def create_server(
         memory_id: str,
         content: str,
     ) -> Annotated[CallToolResult, UpdateMemoryOutput]:
-        """Rewrite the content of an existing memory (e.g. after the user
-        corrects a stored fact)."""
+        """Rewrite the text of a memory Memry wrote wrong, such as a misread
+        name or number. The new text replaces the old one and is dated today;
+        the old text stays only in memory_history. When something changed, or
+        the user corrects what they said, call save_memories with the new
+        statement instead: Memry then keeps the old value as dated history or
+        retires it as wrong."""
         memory = await _threaded(
             store.update,
             memory_id=memory_id,
@@ -561,9 +645,11 @@ def create_server(
     async def delete_memory(
         memory_id: str,
     ) -> Annotated[CallToolResult, DeleteMemoryOutput]:
-        """Forget a memory (soft delete: it is invalidated and kept in the
-        audit history, not destroyed). Use when the user asks you to forget
-        something."""
+        """Forget a memory when the user asks you to forget something (soft
+        delete: it leaves search and context, its saved turns are no longer
+        shown, and it is kept in the audit history and can be brought back).
+        Do not delete a memory because it changed or was wrong: save the new
+        statement with save_memories, and Memry keeps or retires the old one."""
         ok = await _threaded(
             store.delete, memory_id=memory_id, owner_prefix=_principal().prefix
         )

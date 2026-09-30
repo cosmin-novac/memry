@@ -180,6 +180,7 @@ def test_accepting_an_entity_review_removes_only_the_entity(store):
 
 # --------------------------------------------------------------- the cycle
 def test_cycle_scores_durability_when_a_decider_is_configured(store):
+    store.config.decay.durability = True
     store.decider = FakeDecider(1.5)
     store.add("Allergic to penicillin", user_id="ada", infer=False)
 
@@ -192,7 +193,73 @@ def test_cycle_scores_durability_when_a_decider_is_configured(store):
     assert store.decider.calls == 1
 
 
+def test_the_durability_pass_is_off_unless_configured(store):
+    """Neither the scheduler nor "run now" scores durability unless
+    ``decay.durability`` is set; a stored dashboard switch alone cannot turn
+    it on, and a pass that is off leaves no record of a run."""
+    from memry.intelligence.decay import DURABILITY_KEY
+
+    assert Config().decay.durability is False
+    store.decider = FakeDecider(1.5)
+    store.add("Allergic to penicillin", user_id="ada", infer=False)
+    store.set_maintenance_enabled("durability", True)
+    assert not store.maintenance_enabled("durability")
+    assert "durability" not in store.run_upkeep_cycle(user_id="ada")
+    scored = []
+    score = store.score_memory_durability
+    store.score_memory_durability = lambda **kw: scored.append(kw) or score(**kw)
+    outcome = store.run_upkeep_pass("durability", user_id="ada")
+    assert outcome == {"ran": False, "reason": "decay.durability is off (MEMRY_DURABILITY)"}
+    assert scored == []  # checked before the pass, not by it
+    assert store.last_pass_run("durability", "ada") is None
+    assert DURABILITY_KEY not in (store.get_all(user_id="ada")[0].metadata or {})
+    # called directly (the REST route), the pass still refuses
+    assert score(user_id="ada")["skipped"] == -1
+    assert DURABILITY_KEY not in (store.get_all(user_id="ada")[0].metadata or {})
+    del store.score_memory_durability
+
+    store.config.decay.durability = True
+    assert store.maintenance_enabled("durability")
+    assert store.run_upkeep_pass("durability", user_id="ada")["scored"] == 1
+
+
+def test_a_pass_switched_off_does_not_run_and_records_no_run(store):
+    """Whatever turned a pass off (its switch here), ``run_upkeep_pass`` asks
+    ``maintenance_enabled`` before running it: nothing runs, no run is
+    recorded, and the result says why."""
+    store.set_maintenance_enabled("structure", False)
+    ran = []
+    store.run_structure_pass = lambda **kw: ran.append(kw) or {}
+    outcome = store.run_upkeep_pass("structure", user_id="ada")
+    assert outcome["ran"] is False and "off" in outcome["reason"]
+    assert ran == [] and store.last_pass_run("structure", "ada") is None
+    store.set_maintenance_enabled("structure", True)
+    assert store.run_upkeep_pass("structure", user_id="ada") == {}
+    assert ran == [{"user_id": "ada"}]
+    assert store.last_pass_run("structure", "ada")["result"] == {}
+    with pytest.raises(ValueError):
+        store.run_upkeep_pass("nonsense")
+
+
+def test_a_durability_score_does_not_move_updated_at(store, monkeypatch):
+    """The score is housekeeping: ``updated_at`` drives recency and decay age,
+    and a pass that bumped it made every scored memory look new."""
+    from memry import models
+    from memry.intelligence.decay import DURABILITY_KEY
+
+    store.config.decay.durability = True
+    store.decider = FakeDecider(1.5)
+    memory_id = store.add("Allergic to penicillin", user_id="ada", infer=False).actions[0].memory_id
+    before = store.get(memory_id)
+    monkeypatch.setattr(models, "utcnow", lambda: "2099-01-01T00:00:00+00:00")  # a later clock
+    assert store.score_memory_durability(user_id="ada")["scored"] == 1
+    after = store.get(memory_id)
+    assert DURABILITY_KEY in after.metadata
+    assert after.updated_at == before.updated_at
+
+
 def test_pausing_stops_every_pass(store):
+    store.config.decay.durability = True
     store.decider = FakeDecider()
     store.add("Allergic to penicillin", user_id="ada", infer=False)
     store.set_upkeep_paused(True)
@@ -258,6 +325,11 @@ def test_status_carries_the_queue_and_the_pause_switch(client):
 
 
 def test_run_now_uses_the_same_pass_as_the_scheduler(client):
+    # off here (the fixture), so "run now" runs nothing, as the scheduler would not
+    result = client.post("/api/v1/maintenance/run/dedup_entities", json={"user_id": "u"})
+    assert result.status_code == 200 and result.json()["ran"] is False
+    assert client.store.last_pass_run("dedup_entities", "u") is None
+    client.post("/api/v1/maintenance/toggle", json={"key": "dedup_entities", "enabled": True})
     result = client.post("/api/v1/maintenance/run/dedup_entities", json={"user_id": "u"})
     assert result.status_code == 200
     assert "purged" in result.json()
@@ -354,7 +426,7 @@ def test_the_button_is_upkeep_and_the_tabs_open_on_what_needs_you(client):
     page = client.get("/").text
     assert '>Upkeep<span class="badge" id="upkeepbadge" hidden></span></a>' in page
     order = [page.index(f'id="ktab-{name}"') for name in
-             ("maintenance", "entities", "topics", "forgotten")]
-    assert order == sorted(order), "Upkeep, Entities, Tags, Archive"
+             ("maintenance", "entities", "forgotten")]
+    assert order == sorted(order), "Upkeep, Entities, Archive"
     assert ">Entities</button>" in page and ">Archive</button>" in page
     assert "async function openKnowledge(tab='maintenance')" in page

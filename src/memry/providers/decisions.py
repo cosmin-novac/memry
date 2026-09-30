@@ -136,12 +136,12 @@ MEASURED_MERGE_GATES: dict[str, float] = {
     "gpt-5-mini": 0.95,
 }
 
-#: Text models measured to make search re-ranking better than no re-ranking.
-#: gpt-5-mini scored below the baseline, so it is not here and cannot be turned
-#: on; gpt-5.6-luna scored above it (recall@3 0.933 -> 0.956, MRR 0.828 ->
-#: 0.933 over 90 questions) at 1.7 s a search, so it may be turned on but is
-#: not on by default.
-MEASURED_RERANKERS: frozenset[str] = frozenset({"gpt-5.6-luna"})
+#: Text models measured to make search better by judging it than without a
+#: judge, in the wording every search asks in (registry R-118, measured again
+#: after the pipeline was unified): both may be turned on (``decision.rerank``)
+#: and neither is on by default, since each waits seconds a call where Jev
+#: waits a fraction of one. A model not measured cannot be turned on.
+MEASURED_RERANKERS: frozenset[str] = frozenset({"gpt-5.6-luna", "gpt-5-mini"})
 
 
 def merge_gate_for(model: str | None) -> float:
@@ -195,6 +195,15 @@ class Decider(ABC):
     #: P(same subject), averaged over both orders, from which two tags merge.
     tag_merge_probability: float = NEVER_AUTO_MERGE
 
+    #: The confidence from which each reconcile answer acts on the memory it
+    #: names (``intelligence.reconcile``): SAME records the save on it, MORE
+    #: merges the two, CHANGED ends it as history, WRONG retracts it. Below
+    #: its bar a SAME or a MORE is stored as new, and a CHANGED or a WRONG
+    #: keeps both and asks a person. Measured per provider, like the gates
+    #: above; None (not measured) leaves every answer at
+    #: ``SupersedeConfig.confidence``.
+    reconcile_bars: dict[str, float] | None = None
+
     #: Whether an open merge proposal is compared again as soon as a new
     #: memory mentions either side of it. New evidence is the only thing that
     #: can change the answer, so that is when to ask again. The question is
@@ -211,9 +220,8 @@ class Decider(ABC):
         return self.pair_merge_by_step[max(reached)] if reached else self.pair_merge_probability
 
     #: Whether re-ranking may be turned on at all. A provider that was not
-    #: measured to beat no re-ranking cannot be talked into it: through
-    #: gpt-5-mini the same work scored below the baseline at ten seconds a
-    #: search.
+    #: measured to beat no re-ranking cannot be talked into it
+    #: (``MEASURED_RERANKERS``).
     may_rerank: bool = False
 
     @abstractmethod
@@ -352,8 +360,9 @@ class JevDecider(Decider):
     # of headroom over the worst observed mistake and still merges 20 of 22
     # correct pairs without asking.
     auto_confirm_confidence = 0.7
-    # recall@3 0.933 -> 0.967 and MRR 0.828 -> 0.917 over a 228-memory store,
-    # at 190 ms against the 9.7 s gpt-5-mini takes to score below the baseline.
+    # Judging every search, it put an answer first on every question of
+    # distractors_v1, better than either text model measured, at a fraction
+    # of their wait (registry R-117, R-118).
     reranks_by_default = True
     may_rerank = True
     # An identity question took a median 211 ms, against 2.5 s through a text
@@ -375,6 +384,28 @@ class JevDecider(Decider):
     # 379 candidate tag pairs from a real store, 10 memories per tag, two runs:
     # nothing wrong from 0.55, the highest pair of two subjects at 0.46.
     tag_merge_probability = 0.55
+    # Measured with evals/reconcile_benchmark.py: Jev's answers to the
+    # reconcile question, with the dates shown, on its synthetic update cases
+    # and on labelled pairs of memories from a conversation benchmark (kept
+    # outside the repository). A SAME drops what was said, so it acts only
+    # above every SAME that dropped a detail of its own, with a little
+    # headroom. MORE sits above every MORE that merged two separate events;
+    # the few above it that the labels file under another answer joined a
+    # plan with its outcome or two accounts of one event, which the merged
+    # text holds whole. No CHANGED and no WRONG was wrong in either set, so
+    # the data sets no bar for them: they act from the middle of the scale,
+    # and one Jev is less sure of still waits for a person. Measured again
+    # with the worked examples in CHANGED (``reconcile.ACTION_QUESTION``), two
+    # runs: the wrong SAMEs at 0.83 and below, the same three MOREs above 0.8
+    # (a plan with its outcome, two accounts of one event), and one CHANGED
+    # outside the labels, at 0.31 and 0.33, under its bar. The bars stand.
+    # Measured again with cases of two events of one kind and of a relative
+    # time in a merged fact (two runs): no new wrong SAME, CHANGED or WRONG;
+    # the only new wrong MORE is two road trips told months apart (LoCoMo
+    # conv-41 in fictional form) at 0.88 to 0.97, as high as right merges, so
+    # no bar separates it. The merge writer keeps such a pair apart or dates
+    # each trip (``reconcile.MERGE_REQUEST``). The bars stand.
+    reconcile_bars = {"SAME": 0.85, "MORE": 0.8, "CHANGED": 0.5, "WRONG": 0.5}
 
     def __init__(self, cfg: DecisionConfig) -> None:
         self.cfg = cfg

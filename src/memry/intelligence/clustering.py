@@ -129,6 +129,17 @@ def _obvious_topic_key(value: str) -> str:
     return " ".join(words)
 
 
+def obvious_variant_prefix(value: str) -> str:
+    """What every tag sharing ``value``'s obvious key (formatting and
+    singular/plural, ``obvious_canonical_merges``) starts with once leading
+    separators are dropped: the key's first word, less a final "y" when it
+    is the only word ("companies" and "company" share "compan"). It narrows a
+    lookup of one tag's obvious variants; the key decides which they are."""
+    words = _obvious_topic_key(value).split(" ")
+    first = words[0]
+    return first[:-1] if len(words) == 1 and first.endswith("y") else first
+
+
 def obvious_canonical_merges(tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Find deterministic formatting and singular/plural duplicates.
 
@@ -152,32 +163,6 @@ def obvious_canonical_merges(tags: list[dict[str, Any]]) -> list[dict[str, Any]]
         )
         merges.append({"canonical": canonical, "variants": variants, "automatic": True})
     return merges
-
-def judge_tag_pairs(decider, pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Which of these tag pairs mean the same thing, judged in one call.
-
-    Only ever adds suggestions: on a labelled set this missed pairs a person
-    would merge ("food" beside "diet") but never proposed an unrelated pair, so
-    it is safe in front of a review queue and wrong as automation.
-    """
-    from ..providers.decisions import Noul
-
-    if decider is None or not decider.available or not pairs:
-        return []
-    questions = {
-        f"t{i}": Noul(instructions=f'Do the tags "{a}" and "{b}" mean the same thing '
-                                   f"and should be merged into one?")
-        for i, (a, b) in enumerate(pairs)
-    }
-    answers = decider.decide(
-        "Tags used to file memories in a personal long-term memory store.", questions
-    )
-    out = []
-    for i, pair in enumerate(pairs):
-        answer = answers[f"t{i}"]
-        if answer.available and answer.value >= 0.5:
-            out.append(pair)
-    return out
 
 
 def suggest_canonical_merges(

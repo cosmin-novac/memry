@@ -13,8 +13,9 @@ backends, LLMs, and embedders are all replaceable underneath it.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -22,7 +23,7 @@ import logging
 import re
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -32,23 +33,32 @@ from .backends.base import MemoryBackend
 from .backends.local import LocalBackend
 from .config import Config
 from .intelligence.clustering import (
-    judge_tag_pairs,
     obvious_canonical_merges,
+    obvious_variant_prefix,
     propose_synthetic_tags,
     semantic_duplicate_tags,
     suggest_canonical_merges,
 )
 from .intelligence.consolidate import judge_group, representative, similarity_groups
-from .intelligence.context import build_context, estimate_tokens
+from .intelligence.context import (
+    CONTEXT_TOKENS,
+    build_context,
+    description_budget,
+    entities_fitting,
+    entities_text,
+    estimate_tokens,
+    fitting,
+    turn_line,
+)
 from .intelligence.decay import (
     DURABILITY_KEY,
     decay_sweep,
-    effective_importance,
     score_durability,
 )
 from .intelligence.entities import (
     _gate,
     classify_entity_types,
+    DESCRIPTION_FACTS,
     judge_entity_referents,
     non_referent_reason,
     screen_names,
@@ -59,27 +69,57 @@ from .intelligence.entities import (
     resolve_open_proposals,
     synthesize_entity_description,
 )
-from .intelligence.graph_retrieval import detect_query_entities, relational_memory_ids
+from .intelligence.graph_retrieval import (
+    FAMILY_MIN,
+    FAMILY_SCAN,
+    FAMILY_TOP,
+    SET_BAR,
+    SET_NEAREST,
+    SET_RESULT_CAP,
+    SET_SCAN,
+    SET_SHARED,
+    SET_TIE_MARGIN,
+    aboutness,
+    activation_paths,
+    detect_query_entities,
+    homes_of,
+    longest_names,
+    mask_first_person,
+    mask_names,
+    parts_of,
+    set_members,
+    speaks_in_first_person,
+)
 from .intelligence.identity import (
+    BELONGS_BAR,
     TAG_EXAMPLES,
     NameIndex,
+    belonging,
     judged_tag_merges,
     judges_pairs,
     name_vectors,
 )
 from .intelligence.extraction import (
+    OWNER_PLACEHOLDER,
     VOCABULARY_LIMIT,
     extract_facts,
     extract_relations,
+    speaker_name,
+    speaks_with_the_user,
     verbatim_candidates,
     verify_coverage,
 )
-from .intelligence.reconcile import CONFLICT_KEY, reconcile_candidate
+from .intelligence.reconcile import (
+    CONFLICT_KEY,
+    UPDATE_SUPERSEDE_REASON,
+    reconcile_candidate,
+)
 from .intelligence.structure import (
     ANCHOR_TYPES,
     Node,
     derive_homes,
     hub_reason,
+    is_hub,
     same_name_plan,
 )
 from .intelligence.when import confirm_whens, extract_when, overlaps as when_overlaps
@@ -92,6 +132,7 @@ from .models import (
     Entity,
     EntityMention,
     Episode,
+    EvidenceTurn,
     Memory,
     MemoryEvent,
     MemoryType,
@@ -100,14 +141,17 @@ from .models import (
     Scope,
     SearchResult,
     SyntheticTag,
+    TOPIC_TYPE,
     clean_tags,
     Topic,
     TopicRelation,
+    later_ts,
     parse_ts,
+    same_ts,
     utcnow,
 )
 from .providers.embeddings import Embedder, build_embedder
-from .providers.decisions import Decider, Noul, build_decider
+from .providers.decisions import NEVER_AUTO_MERGE, Decider, Noul, build_decider
 from .providers.llm import LLM, build_llm
 from .retrieval import hybrid_search
 
@@ -117,8 +161,96 @@ _ENRICHMENT_BATCH_SIZE = 8
 _ENRICHMENT_MAX_BACKOFF_SECONDS = 300
 
 
+def _queued_at(memory: Memory) -> datetime:
+    """When a pending save was queued: the quiet period counts from it. A save
+    given an earlier ``created_at`` (``add_deferred``) still waits its turn."""
+    job = (memory.metadata or {}).get(_ENRICHMENT_KEY) or {}
+    return parse_ts(job.get("queued_at") or memory.created_at)
+
+
+def _said_day(memory: Memory) -> str | None:
+    """The day a pending save was given as its time (``add_deferred``'s
+    ``created_at``, in UTC), or None for a save dated when it is distilled."""
+    given = ((memory.metadata or {}).get(_ENRICHMENT_KEY) or {}).get("created_at")
+    if not given:
+        return None
+    try:
+        return parse_ts(str(given)).astimezone(timezone.utc).date().isoformat()
+    except (ValueError, OverflowError):
+        return str(given)[:10]
+
+
 def _ingestion_context(metadata: dict[str, Any] | None) -> str:
     return " ".join(str((metadata or {}).get("context") or "").split())[:200]
+
+
+def _as_messages(content: str | list[dict[str, str]]) -> list[dict[str, str]]:
+    """A save's content as messages: a text is one message, said by the user."""
+    return [{"role": "user", "content": content}] if isinstance(content, str) else content
+
+
+def _says_something(message: dict[str, str]) -> bool:
+    return bool((message.get("content") or "").strip())
+
+
+def _said_episodes(
+    messages: list[dict[str, str]],
+    *,
+    user_id: str | None,
+    agent_id: str | None,
+    run_id: str | None,
+    metadata: dict[str, Any] | None,
+    created_at: str,
+) -> list[Episode]:
+    """The turns a save keeps, a direct save's (``add``) and a deferred one's
+    (``add_deferred``) alike: one episode per message that says something, in
+    order, with its role and the speaker's name it gives (``name``), all at
+    the save's time. They are the lines extraction numbers
+    (``extraction._transcript``)."""
+    return [
+        Episode(
+            content=m.get("content", ""),
+            role=m.get("role", "user"),
+            name=speaker_name(m) or None,
+            user_id=user_id,
+            agent_id=agent_id,
+            run_id=run_id,
+            metadata=metadata or {},
+            created_at=created_at,
+        )
+        for m in messages
+        if _says_something(m)
+    ]
+
+
+def _speaker_lines(messages: list[dict[str, str]]) -> str:
+    """Messages as a person reads them, the text of a deferred save of
+    messages while it waits: one "Speaker: text" line per message that says
+    something, the speaker being its ``name``, else its role."""
+    lines = []
+    for m in messages:
+        if _says_something(m):
+            lines.append(f"{speaker_name(m) or m.get('role', 'user')}: "
+                         f"{str(m['content']).strip()}")
+    return "\n".join(lines)
+
+
+def _pending_lines(memory: Memory) -> tuple[list[dict[str, str]], list[list[str]]]:
+    """What a pending memory says, as the messages extraction reads, and the
+    episodes of each line. A deferred save of messages keeps them with its
+    work marker (``add_deferred``): one line each, resting on its own episode,
+    which are the memory's first sources in order (a restatement adds its
+    episodes after them). Any other pending memory, and one whose text was
+    edited while it waited, is one line, its text said by the user, resting
+    on all its episodes."""
+    job = (memory.metadata or {}).get(_ENRICHMENT_KEY) or {}
+    sources = list(memory.source_episode_ids or [])
+    said = [dict(m) for m in job.get("messages") or [] if _says_something(m)]
+    if said and memory.content == _speaker_lines(said):
+        return said, [[episode_id] for episode_id in sources[:len(said)]]
+    if not memory.content.strip():
+        return [], []
+    return [{"role": "user", "content": memory.content}], [sources]
 
 
 def _keep_context(candidates: list[CandidateFact], context: str) -> None:
@@ -128,6 +260,18 @@ def _keep_context(candidates: list[CandidateFact], context: str) -> None:
     if context:
         for candidate in candidates:
             candidate.metadata.setdefault("context", context)
+
+
+def _with_memory_metadata(
+    candidates: list[CandidateFact], memory_metadata: dict[str, Any] | None
+) -> None:
+    """Merge a save's ``memory_metadata`` into every candidate's metadata. A
+    key Memry set for the memory itself (its "when", its "context", a pending
+    marker) is kept: the caller's value fills in, it does not overwrite."""
+    if not memory_metadata:
+        return
+    for candidate in candidates:
+        candidate.metadata = {**memory_metadata, **(candidate.metadata or {})}
 
 
 def _client_tag_hints(
@@ -207,6 +351,12 @@ def _upkeep_key(name: str, user_id: str | None) -> str:
     return f"upkeep:{name}:{user_id or ''}"
 
 
+#: Meta keys that are the store's own settings, not a namespace's state: the
+#: pause switch and each pass turned on or off (``maintenance:``). A reset
+#: keeps them; the queues, the owner and when each pass ran go.
+_SETTINGS_KEYS = ("maintenance:",)
+
+
 def _group_id(parts) -> str:
     """A stable, URL-safe id for a set of names or memory ids."""
     joined = "\x1f".join(sorted(str(part) for part in parts))
@@ -246,13 +396,47 @@ def _forgetting_trigger(event: Any) -> str:
     return reason or f"Removed by {event.actor or 'the system'}, with no reason recorded."
 
 
+def _is_update_supersede(event: MemoryEvent) -> bool:
+    """A SUPERSEDE of an update (``reconcile.SUPERSEDE_KIND``): a newer memory
+    said what changed, merged a detail in, or added to it with no merged text
+    written. The old one was never contradicted: it held until then, and
+    stays searchable as history (``models.HISTORY_KINDS``). Read from the
+    event's ``kind``; an older row without one, from its reason."""
+    if event.kind is not None:
+        return event.kind == "update"
+    return (event.reason or "").startswith(UPDATE_SUPERSEDE_REASON)
+
+
+def _coverage_warning(missing: list[str]) -> str:
+    """The warning a save returns when the coverage audit
+    (``MemoryStore._coverage_gaps``) names details no fact captured; the
+    same for a direct save and a distillation."""
+    return ("some details were not captured as facts; consider saving "
+            "them explicitly: " + "; ".join(missing))
+
+
+def _conflict_mark(memory: Memory) -> dict[str, Any]:
+    """The conflict marker of a memory kept beside the one it would have
+    replaced (``reconcile.CONFLICT_KEY``), empty when it has none. Its
+    ``kind`` is "update" when a change (or a MORE with no merged text) was
+    held back, and absent for a contradiction."""
+    mark = (memory.metadata or {}).get(CONFLICT_KEY)
+    return mark if isinstance(mark, dict) else {}
+
+
 def _is_contradiction(event: MemoryEvent) -> bool:
-    """A SUPERSEDE that reconciliation made, as opposed to a merge of duplicates
-    or the distilling of a raw message, which record their own reasons."""
+    """A SUPERSEDE that reconciliation made because the new memory contradicts
+    the old one, as opposed to a merge of duplicates, the distilling of a raw
+    message or an update kept and superseded. Read from the event's ``kind``
+    (``models.SUPERSEDE_KINDS``); an older row without one is classified by
+    the reason those others record."""
+    if event.kind is not None:
+        return event.kind == "contradiction"
     reason = event.reason or ""
     return not (
         reason.startswith("consolidated into")
         or reason.startswith("distilled with its context")
+        or _is_update_supersede(event)
     )
 
 
@@ -314,6 +498,130 @@ def _when_within(
     )
 
 
+@dataclass(frozen=True)
+class _Reads:
+    """What a search reads (stage 2 of ``MemoryStore.search``), kept to by
+    every candidate it gathers: the text ranking, the linked pool and the
+    set call's. In SQL, as ``MemoryBackend.keyword_search`` reads: the scope
+    searched (a run's memories are those said in it), the memories in use
+    and those kept as history (every memory with ``include_invalid``), the
+    tags and the entities asked for. Here, the date windows (``admits``)."""
+
+    scope: Scope
+    include_invalid: bool = False
+    categories: list[str] | None = None
+    entity_id: str | list[str] | None = None
+    since: str | None = None
+    until: str | None = None
+    when_since: str | None = None
+    when_until: str | None = None
+
+    def admits(self, memory: Memory) -> bool:
+        """Whether a memory was saved inside ``since``/``until`` and what it
+        tells happens inside ``when_since``/``when_until``."""
+        return ((not (self.since or self.until)
+                 or _within(memory.created_at, self.since, self.until))
+                and _when_within(memory, self.when_since, self.when_until))
+
+    def entity_memories(
+        self, backend: MemoryBackend, entity_id: str, limit: int
+    ) -> list[Memory]:
+        """The newest ``limit`` memories of an entity that the search reads,
+        its filters applied in SQL before ``limit`` counts."""
+        return [memory for memory in backend.entity_memories(
+                    entity_id, limit=limit, include_invalid=self.include_invalid,
+                    scope=self.scope, history=True, categories=self.categories,
+                    mentioning=self.entity_id)
+                if self.admits(memory)]
+
+
+@dataclass
+class _SearchPlan:
+    """One search as it goes through the stages of ``MemoryStore.search``:
+    what it reads and is about, and what each stage leaves the next."""
+
+    reads: _Reads
+    #: stage 1: the hubs the question is about, whether that is the owner of
+    #: a question in the first person, and the question as the order and
+    #: the judge read it ("it" for the one seed's names)
+    seeds: list[str] = field(default_factory=list)
+    first_person: bool = False
+    question: str = ""
+    #: whether the decision provider judges the search (stages 4 to 6)
+    judges: bool = False
+    #: stages 2 and 3 with seeds: how strongly the links reach each entity,
+    #: those reached by a step up, each memory's entities as read, and the
+    #: question's vector as the property comparison reads it
+    act: dict[str, float] = field(default_factory=dict)
+    above: set[str] = field(default_factory=set)
+    entities: dict[str, list[Entity]] = field(default_factory=dict)
+    asked: np.ndarray | None = None
+    #: stages 5 and 6: each memory judged (member of the set, score), in the
+    #: order judged
+    judged: dict[str, tuple[bool, float]] = field(default_factory=dict)
+
+
+def _cut(vector: list[float], keep: int | None) -> list[float]:
+    """The first ``keep`` numbers of a vector, scaled back to length 1."""
+    if not keep or keep >= len(vector):
+        return vector
+    short = np.asarray(vector[:keep], dtype=np.float32)
+    return (short / (float(np.linalg.norm(short)) or 1.0)).tolist()
+
+
+def _similarity(asked: np.ndarray, vector: np.ndarray | None) -> float:
+    """Cosine of a memory's vector and the question's (already of length one),
+    the vector cut to the question's length; 0 for a missing or shorter one
+    and for an opposite one."""
+    if vector is None or vector.shape[0] < asked.shape[0]:
+        return 0.0
+    vector = vector[: asked.shape[0]]  # an ordinary vector is cut like the question
+    return max(float(vector @ asked) / (float(np.linalg.norm(vector)) or 1.0), 0.0)
+
+
+def _centre(vectors: list[np.ndarray]) -> np.ndarray | None:
+    """The mean direction of vectors of one length, of length one; None for
+    none, or for vectors of different lengths."""
+    if not vectors or len({v.shape for v in vectors}) != 1:
+        return None
+    centre = np.mean([v / (float(np.linalg.norm(v)) or 1.0) for v in vectors], axis=0)
+    return centre / (float(np.linalg.norm(centre)) or 1.0)
+
+
+def _across_runs(scope: Scope) -> Scope:
+    """A save's scope as the lookups across one person's saves read it: the
+    whole user (with the agent), not one run. Reconcile's candidates and the
+    tag vocabulary offered to extraction use it; topic canonicalization and
+    entity lookup (``entities.resolve_mentions``) read the whole user too.
+    Reconcile acts on the memory it matched whatever its run
+    (``reconcile.reconcile_candidate``); the save's run decides only where a
+    new memory is stored, and a restatement of another run's memory is
+    recorded on it as evidence of the save, whose episodes keep it findable
+    by a search of the save's run."""
+    if scope.user_id is None:
+        return scope
+    return Scope(user_id=scope.user_id, agent_id=scope.agent_id)
+
+
+def _rests_on(
+    candidate: CandidateFact, line_episodes: list[list[str]] | None, episode_ids: list[str]
+) -> list[str]:
+    """The episodes a candidate fact rests on: those of the transcript lines it
+    names (``CandidateFact.sources``). A fact that names no line, or a line the
+    transcript does not have, rests on every episode of the save, as a fact
+    did before facts named their lines: a number out of range says the model
+    lost count, so none of its numbers is trusted."""
+    lines = candidate.sources
+    if not lines or not line_episodes or any(not 1 <= n <= len(line_episodes) for n in lines):
+        return episode_ids
+    return list(dict.fromkeys(e for n in lines for e in line_episodes[n - 1])) or episode_ids
+
+
+def _text_hash(text: str) -> str:
+    """Identifies a property vector's masked text, to tell when it changed."""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
 class MemoryStore:
     def __init__(
         self,
@@ -337,6 +645,7 @@ class MemoryStore:
         # lost and every group was sent to the model twice.
         self._pass_locks: dict[tuple[str, str | None], threading.RLock] = {}
         self._pass_locks_guard = threading.Lock()
+        self.backend.names_changed = self._names_changed
 
     # ------------------------------------------------------------------
     # write path
@@ -353,33 +662,42 @@ class MemoryStore:
         memory_type: MemoryType = "semantic",
         importance: float = 0.5,
         categories: list[str] | None = None,
+        created_at: str | None = None,
+        memory_metadata: dict[str, Any] | None = None,
+        now: datetime | None = None,
     ) -> AddResult:
         """Record raw content and derive memories from it.
 
         ``infer=True`` runs extraction + reconciliation (needs an LLM;
         degrades to verbatim mode without one). ``infer=False`` stores the
         content directly as a single memory - the "just save this fact" path.
+
+        ``metadata`` goes to the episodes. ``memory_metadata`` is merged into
+        every memory the save produces (a key Memry sets itself, such as
+        "when", is kept). ``created_at`` (ISO 8601) is the time of the save:
+        the episodes' and new memories' ``created_at``, ``updated_at`` and
+        ``valid_from`` (a merged text of a MORE included), the ``invalid_at``
+        of one it supersedes, and the time of the events it records (the
+        NONE event of a memory it restates). A memory it supersedes keeps a
+        later ``updated_at`` it has (``repair_updated_at`` reads the same).
+        ``now`` is the reference date extraction resolves "yesterday"
+        against, and the when-confirmation reads as the day of writing,
+        instead of the clock. All three are for replaying dated
+        conversations, as the benchmarks do.
         """
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        messages = (
-            [{"role": "user", "content": content}] if isinstance(content, str) else content
-        )
-        episodes = [
-            Episode(
-                content=m.get("content", ""),
-                role=m.get("role", "user"),
-                user_id=user_id,
-                agent_id=agent_id,
-                run_id=run_id,
-                metadata=metadata or {},
-            )
-            for m in messages
-            if (m.get("content") or "").strip()
-        ]
+        messages = _as_messages(content)
+        # One time for every message of the save: a save is its run and its
+        # time, which is how the saves stating a memory are counted
+        # (``reconcile.saves_of``).
+        saved_at = created_at or utcnow()
+        episodes = _said_episodes(messages, user_id=user_id, agent_id=agent_id,
+                                  run_id=run_id, metadata=metadata, created_at=saved_at)
         if not episodes:
             return AddResult()
         if episodes:
             self.backend.add_episodes(episodes)
+            self._embed_episodes(episodes)
         episode_ids = [e.id for e in episodes]
 
         candidates: list[CandidateFact]
@@ -398,24 +716,13 @@ class MemoryStore:
             ]
         elif self.llm.available:
             try:
-                candidates = extract_facts(
-                    self.llm,
+                candidates = self._extract(
                     messages,
-                    vocabulary=self._tag_vocabulary(
-                        scope,
-                        text="\n".join(
-                            str(m.get("content") or "") for m in messages
-                        ),
-                    ),
+                    scope,
+                    now=now,
                     context=_ingestion_context(metadata),
                     tag_hints=_client_tag_hints(metadata, categories),
-                    owner=self.owner_name(scope.user_id),
-                    entity_names=self._entity_vocabulary(
-                        scope,
-                        "\n".join(str(m.get("content") or "") for m in messages),
-                    ),
                 )
-                self._confirm_candidate_whens(candidates)
             except Exception as exc:
                 # Provider outage / exhausted credits must not lose the save:
                 # degrade to verbatim, tell the caller, and flag the memories
@@ -428,27 +735,64 @@ class MemoryStore:
             candidates = self._pending_verbatim(messages)
 
         _keep_context(candidates, _ingestion_context(metadata))
-        actions = self._apply_candidates(candidates, scope, episode_ids)
+        _with_memory_metadata(candidates, memory_metadata)
+        actions = self._apply_candidates(candidates, scope, episode_ids, created_at=created_at,
+                                         messages=messages,
+                                         line_episodes=[[e] for e in episode_ids])
 
-        # Post-write audit: extraction is lossy and non-deterministic, and a
-        # dropped constraint is invisible in a "success" response. One cheap
-        # LLM pass compares input against what landed and reports the gap.
-        if infer and self.llm.available and actions:
-            stored = [a.content for a in actions if a.content]
-            try:
-                missing = verify_coverage(self.llm, messages, stored)
-            except Exception:
-                missing = []  # audit is best-effort; never fail the save
-            if missing:
-                warnings.append(
-                    "some details were not captured as facts; consider saving "
-                    "them explicitly: " + "; ".join(missing)
-                )
+        missing = self._coverage_gaps(messages, actions) if infer else []
+        if missing:
+            warnings.append(_coverage_warning(missing))
         return AddResult(episode_ids=episode_ids, actions=actions, warnings=warnings)
+
+    def _coverage_gaps(
+        self, messages: list[dict[str, str]], actions: list[AddAction]
+    ) -> list[str]:
+        """Post-write audit: extraction is lossy and non-deterministic, and a
+        dropped constraint is invisible in a "success" response. One cheap LLM
+        pass compares the input against what landed and names the gap. Run
+        after a direct save and after distillation (the deferred save), with a
+        text model and something written; best-effort, it never fails a save."""
+        if not (self.llm.available and actions):
+            return []
+        stored = [a.content for a in actions if a.content]
+        try:
+            return verify_coverage(self.llm, messages, stored)
+        except Exception:
+            return []
+
+    def _extract(
+        self,
+        messages: list[dict[str, str]],
+        scope: Scope,
+        *,
+        now: datetime | None,
+        context: str,
+        tag_hints: list[str],
+    ) -> list[CandidateFact]:
+        """The facts extraction finds in a direct save's messages (``add``)
+        or a pending group's (``_distill_pending_group``), asked the same way:
+        offered the tags and entities their words may name and the owner as
+        these messages speak of them (``owner_name``), each fact's time then
+        checked against ``now``. A deferred save is extracted as it would have
+        been saved directly."""
+        said = "\n".join(str(m.get("content") or "") for m in messages)
+        candidates = extract_facts(
+            self.llm,
+            messages,
+            now=now,
+            vocabulary=self._tag_vocabulary(scope, text=said),
+            context=context,
+            tag_hints=tag_hints,
+            owner=self.owner_name(scope.user_id, messages),
+            entity_names=self._entity_vocabulary(scope, said),
+        )
+        self._confirm_candidate_whens(candidates, now=now)
+        return candidates
 
     def add_deferred(
         self,
-        content: str,
+        content: str | list[dict[str, str]],
         *,
         user_id: str | None = None,
         agent_id: str | None = None,
@@ -457,33 +801,56 @@ class MemoryStore:
         memory_type: MemoryType = "episodic",
         importance: float = 0.5,
         categories: list[str] | None = None,
+        created_at: str | None = None,
+        memory_metadata: dict[str, Any] | None = None,
+        now: datetime | None = None,
     ) -> AddResult:
-        """Durably save raw text for managed background enrichment.
+        """Durably save raw content for managed background enrichment.
 
-        This path performs no provider calls. The episode and searchable pending
+        ``content`` is a text or a list of messages, as for ``add``, and its
+        turns are kept as ``add`` keeps them: one episode per message that
+        says something, with its role (a text is one, said by the user). One
+        searchable pending memory holds the save: the text, or for messages
+        one "Speaker: text" line each (``_speaker_lines``). Messages are also
+        kept with the work marker, so the distillation reads them as a direct
+        save's extraction does: the same numbered lines and speakers, each
+        line resting on its own episode (``_pending_lines``).
+
+        This path performs no provider calls. The episodes and searchable pending
         memory are committed before the caller receives the result; the pending
         metadata is the restart-safe work marker consumed by the server worker.
+        ``created_at``, ``memory_metadata`` and ``now`` mean what they mean for
+        ``add``: they apply to the pending memory and are kept with the work
+        marker for the distillation that follows. The quiet period counts from
+        when the save was queued, whatever ``created_at`` says.
         """
-        text = content.strip()
-        if not text:
-            return AddResult()
+        if isinstance(content, str):
+            content = content.strip()
         queued_at = utcnow()
-        episode = Episode(
-            content=text,
-            role="user",
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-            metadata=metadata or {},
-            created_at=queued_at,
-        )
-        pending_metadata = dict(metadata or {})
+        stamp = created_at or queued_at
+        episodes = _said_episodes(_as_messages(content), user_id=user_id, agent_id=agent_id,
+                                  run_id=run_id, metadata=metadata, created_at=stamp)
+        if not episodes:
+            return AddResult()
+        text = content if isinstance(content, str) else _speaker_lines(content)
+        pending_metadata = {**(memory_metadata or {}), **(metadata or {})}
         pending_metadata["pending_distillation"] = True
-        pending_metadata[_ENRICHMENT_KEY] = {
-            "status": "pending",
-            "attempts": 0,
-            "queued_at": queued_at,
-        }
+        job: dict[str, Any] = {"status": "pending", "attempts": 0, "queued_at": queued_at}
+        if not isinstance(content, str):
+            # what extraction reads of each message (extraction._transcript)
+            job["messages"] = [
+                {"role": m.get("role", "user"), "content": m["content"],
+                 **({"name": m["name"]} if m.get("name") else {})}
+                for m in content
+                if _says_something(m)
+            ]
+        if created_at:
+            job["created_at"] = created_at
+        if memory_metadata:
+            job["memory_metadata"] = dict(memory_metadata)
+        if now is not None:
+            job["now"] = now.isoformat()
+        pending_metadata[_ENRICHMENT_KEY] = job
         memory = Memory(
             content=text,
             memory_type=memory_type,
@@ -493,11 +860,11 @@ class MemoryStore:
             importance=importance,
             categories=clean_tags(categories),
             metadata=pending_metadata,
-            source_episode_ids=[episode.id],
-            created_at=queued_at,
-            updated_at=queued_at,
+            source_episode_ids=[episode.id for episode in episodes],
+            created_at=stamp,
+            updated_at=stamp,
         )
-        self.backend.add_episodes([episode])
+        self.backend.add_episodes(episodes)
         self.backend.insert_memory(memory)
         self.backend.add_event(
             MemoryEvent(
@@ -508,7 +875,7 @@ class MemoryStore:
             )
         )
         return AddResult(
-            episode_ids=[episode.id],
+            episode_ids=[episode.id for episode in episodes],
             actions=[
                 AddAction(
                     event="ADD",
@@ -530,39 +897,83 @@ class MemoryStore:
     def _canonicalize_obvious_topics(
         self, candidates: list[CandidateFact], scope: Scope
     ) -> None:
+        """Write each candidate's tags as a save stores them (``_canonical_tags``)."""
+        tags = self._canonical_tags([candidate.categories for candidate in candidates], scope)
+        for candidate, canonical in zip(candidates, tags):
+            candidate.categories = canonical
+
+    def _canonical_tags(
+        self, tag_lists: list[list[str]], scope: Scope, *, merge_stored: bool = True
+    ) -> list[list[str]]:
+        """Each list of tags as the store writes it, on a save and on an
+        update alike: a name merged away written as its own survivor
+        (``MemoryBackend.tag_filing``), and each tag in the obvious canonical
+        form (singular, plural, spacing) it shares with the user's tags, so
+        the column names the tag its memory is counted and filtered under.
+
+        Each incoming name merged away is resolved through its own tombstone
+        first ("tax" went into "levies", "taxes" into "duties": "taxes" is
+        written "duties"), and obvious variants are grouped only among names
+        still active (the user's active topics and the incoming names as
+        resolved): a retired name is never grouped, so a group never sends a
+        variant to another name's survivor or brings a retired name back. A
+        save (``merge_stored``) runs the pass over the whole vocabulary and
+        folds each stored variant into the form its group is written as
+        (``_merge_topics``). An update rewrites its own tags only
+        (``merge_stored`` False): it reads just the incoming tags' obvious
+        variants and merges nothing, so no other memory is retagged; the
+        vocabulary-wide pass is the next save's, or upkeep's."""
         incoming = {
-            str(category).strip().casefold()
-            for candidate in candidates
-            for category in candidate.categories
-            if str(category).strip()
+            str(tag).strip().casefold()
+            for tags in tag_lists
+            for tag in tags
+            if str(tag).strip()
         }
         if not incoming:
-            return
-        existing = {
-            topic.normalized
-            for topic in self.backend.list_topics(scope, limit=100_000)
-        }
-        groups = obvious_canonical_merges(
-            [{"category": topic} for topic in existing | incoming]
-        )
+            return [list(tags) for tags in tag_lists]
+        user = Scope(user_id=scope.user_id)
+        prefixes = None if merge_stored else {obvious_variant_prefix(tag) for tag in incoming}
+        vocabulary = self.backend.topic_names(user, prefixes=prefixes)
+        # only names merged away need resolving here; every other tag is
+        # resolved once, where the backend files the column
+        survivor = self.backend.tag_filing(
+            sorted(name for name in incoming if vocabulary.get(name) is False), user)
+        resolved = {name: survivor.get(name, name) for name in incoming}
+        if prefixes is not None:
+            # a survivor's own obvious variants, read as the incoming ones' are
+            more = {obvious_variant_prefix(name) for name in resolved.values()} - prefixes
+            if more:
+                vocabulary.update(self.backend.topic_names(user, prefixes=more))
+        active = {name for name, alive in vocabulary.items() if alive}
+        # a survivor that is a named thing's tag (merged away) stays as it is
+        candidates = active | {name for name in resolved.values() if name not in vocabulary
+                               or vocabulary[name]}
+        wanted = set(resolved.values())
+        groups = [
+            group for group in obvious_canonical_merges(
+                [{"category": name} for name in candidates])
+            if merge_stored or wanted.intersection(group["variants"])
+        ]
         replacements: dict[str, str] = {}
         for group in groups:
-            canonical = group["canonical"]
-            variants = set(group["variants"])
-            replacements.update({variant: canonical for variant in variants})
-            stored_variants = (variants - {canonical}) & existing
-            if stored_variants:
-                self.backend.retag_topics(scope, stored_variants, canonical)
-        for candidate in candidates:
+            target = group["canonical"]
+            replacements.update({variant: target for variant in group["variants"]})
+            stored = {name for name in group["variants"] if name in active and name != target}
+            if merge_stored and stored:
+                self._merge_topics(scope.user_id, stored, target, exact_user=True)
+        rewritten_lists: list[list[str]] = []
+        for tags in tag_lists:
             rewritten: list[str] = []
             seen: set[str] = set()
-            for raw in candidate.categories:
+            for raw in tags:
                 normalized = str(raw).strip().casefold()
-                canonical = replacements.get(normalized, normalized)
+                canonical = resolved.get(normalized, normalized)  # merged away: its survivor
+                canonical = replacements.get(canonical, canonical)
                 if canonical and canonical not in seen:
                     seen.add(canonical)
                     rewritten.append(canonical)
-            candidate.categories = rewritten
+            rewritten_lists.append(rewritten)
+        return rewritten_lists
 
     def _apply_candidates(
         self,
@@ -571,8 +982,19 @@ class MemoryStore:
         episode_ids: list[str],
         *,
         exclude_ids: set[str] | None = None,
+        created_at: str | None = None,
+        messages: list[dict[str, str]] | None = None,
+        line_episodes: list[list[str]] | None = None,
     ) -> list[AddAction]:
         """Reconcile candidates into the store (shared by add and distill).
+
+        ``messages`` are what the candidates were extracted from: they say
+        whether an owner without a name is "the user" (``owner_name``).
+
+        ``line_episodes`` are the episodes of each transcript line, in order:
+        a candidate rests on the episodes of the lines it names
+        (``CandidateFact.sources``), and on all ``episode_ids`` when it names
+        none or a line there is not (``_rests_on``).
 
         ``exclude_ids`` keeps memories out of the similarity set: distillation
         must not reconcile facts against the verbatim memory they came from,
@@ -587,11 +1009,13 @@ class MemoryStore:
         excluded: set[str] = set(exclude_ids or ())
         actions: list[AddAction] = []
         for candidate in candidates:
+            # the user's memories across runs, judged alike whatever their
+            # run; the save's scope is where a new memory goes
             similar = hybrid_search(
                 backend=self.backend,
                 embedder=self.embedder,
                 query=candidate.content,
-                scope=scope,
+                scope=_across_runs(scope),
                 limit=self.config.retrieval.reconcile_similarity_limit,
                 cfg=self.config.retrieval,
             )
@@ -604,13 +1028,14 @@ class MemoryStore:
                 backend=self.backend,
                 embedder=self.embedder,
                 llm=self.llm,
-                episode_ids=episode_ids,
+                episode_ids=_rests_on(candidate, line_episodes, episode_ids),
                 decider=self.decider,
                 retrieval_cfg=self.config.retrieval,
                 supersede_cfg=self.config.supersede,
                 prepare_update=lambda memory_id, final_content: (
                     self._reanalyze_edited_entities(memory_id, final_content, scope)
                 ),
+                created_at=created_at,
             )
             actions.append(action)
             if action.conflicts_with and action.memory_id:
@@ -632,7 +1057,7 @@ class MemoryStore:
                     memory_content=action.content or candidate.content,
                     surfaces=candidate.entities,
                     types=candidate.entity_types,
-                    owner=self._owner_for(scope, candidate.entities),
+                    owner=self._owner_for(scope, candidate.entities, messages),
                 )
                 self._resolve_relations(
                     candidate.relations, resolved, scope, action.memory_id
@@ -640,12 +1065,68 @@ class MemoryStore:
                 self._recheck_proposals(
                     scope, open_before, {entity.id for entity in resolved.values()}
                 )
+        self._property_vectors_after_save(
+            [a.memory_id for a in actions if a.event != "NONE" and a.memory_id])
         return actions
 
+    def _property_vectors_after_save(self, memory_ids: list[str]) -> None:
+        """Property vectors of memories just saved or edited, once their
+        mentions are attached. A failure never fails the save: the weekly
+        refresh computes what is missing."""
+        if not memory_ids:
+            return
+        try:
+            self.refresh_property_vectors(memory_ids=memory_ids)
+        except Exception as exc:
+            log.warning("property vectors not computed on save: %s", exc)
+
+    def _names_changed(self, entity_ids: list[str]) -> None:
+        """Property vectors after a merge, a rename, a new alias or a restore
+        (``MemoryBackend.names_changed``): of the memories that read these
+        entities' names as "it" (``_memories_reading``). Left to the weekly
+        refresh, a merged name read as a name in them for up to a week. A
+        failure never fails the change: the weekly refresh computes what is
+        missing."""
+        try:
+            self.refresh_property_vectors(memory_ids=self._memories_reading(entity_ids))
+        except Exception as exc:
+            log.warning("property vectors not refreshed after a name changed: %s", exc)
+
+    def _memories_reading(self, entity_ids: list[str]) -> list[str]:
+        """The memories that read these entities' names as "it": their own,
+        and their versions' and parts', which read the names of what they
+        belong to as "it" too. A tag's memories mask no tag, so a tag's
+        change concerns none."""
+        named = {entity_id for entity_id in entity_ids
+                 if (entity := self.backend.get_entity(entity_id)) is not None
+                 and entity.entity_type != TOPIC_TYPE}
+        named |= parts_of(self.backend, sorted(named))
+        return sorted({memory.id for entity_id in sorted(named)
+                       for memory in self.backend.entity_memories(entity_id, limit=1_000_000)})
+
+    def _retire(self, entity_id: str, reason: str) -> bool:
+        """Retire an entity (``MemoryBackend.retire_entity``) and refresh at
+        once the property vectors of the memories that read its names as
+        "it", which read them as names again. Once it is gone nothing links
+        them to it, so they are read first."""
+        try:
+            reading = self._memories_reading([entity_id])
+        except Exception as exc:
+            log.warning("property vectors of a removed name not found: %s", exc)
+            reading = []
+        if not self.backend.retire_entity(entity_id, reason):
+            return False
+        try:
+            self.refresh_property_vectors(memory_ids=reading)
+        except Exception as exc:
+            log.warning("property vectors not refreshed after a name was removed: %s", exc)
+        return True
+
     def _open_proposals_to_recheck(self, scope: Scope) -> list[MergeProposal]:
-        """Open proposals a save may compare again, or none when the provider
-        is too slow to ask inside a save."""
-        if not (self.decider.rejudges_on_new_evidence and self.decider.available):
+        """Open proposals a save may compare again: none without a calibrated
+        judge, whose answer is the only thing new evidence can change, or
+        when the judge is too slow to ask inside a save."""
+        if not (judges_pairs(self.decider) and self.decider.rejudges_on_new_evidence):
             return []
         return self.backend.list_proposals(scope, status="proposed", limit=1000)
 
@@ -670,7 +1151,7 @@ class MemoryStore:
             return
         try:
             outcome = resolve_open_proposals(
-                backend=self.backend, llm=self.llm, decider=self.decider,
+                backend=self.backend, decider=self.decider,
                 scope=scope, proposal_ids=touched,
             )
         except Exception as exc:  # a provider hiccup must not fail a save
@@ -714,8 +1195,12 @@ class MemoryStore:
         """Return the complete entity fields for edited memory text.
 
         With an LLM, extraction and identity resolution finish before the
-        caller replaces the stored text and mentions. Without one, Memry can
-        still retain or remove existing links by matching their known aliases;
+        caller replaces the stored text and mentions: a name the memory
+        already names an entity by keeps that entity, with nothing compared,
+        and only a name new to the memory is resolved (``resolve_mentions``).
+        Each mention is written with what decided it and the type extraction
+        gave the name, as a save writes it. Without one, Memry can still
+        retain or remove existing links by matching their known aliases;
         zero-key mode cannot discover a brand-new entity name.
         """
         if not self.llm.available:
@@ -743,6 +1228,7 @@ class MemoryStore:
                             entity_id=entity.id,
                             memory_id=memory_id,
                             surface=surface,
+                            decided={"reason": "the memory already names it"},
                         )
                     )
             return {"entities": surfaces, "mentions": mentions}
@@ -762,7 +1248,9 @@ class MemoryStore:
                     if normalized and normalized not in seen:
                         seen.add(normalized)
                         surfaces.append(surface.strip())
-            resolved = resolve_mentions(
+            # written as resolved: with what decided each and its type
+            mentions = []
+            resolve_mentions(
                 backend=self.backend,
                 llm=self.llm,
                 decider=self.decider,
@@ -773,20 +1261,12 @@ class MemoryStore:
                 types=types,
                 attach=False,
                 owner=self._owner_for(scope, surfaces),
+                mentions=mentions,
             )
         except Exception as exc:
             raise ValueError(
                 f"memory text was not changed because entity re-analysis failed: {exc}"
             ) from exc
-        mentions = [
-            EntityMention(
-                entity_id=resolved[surface.lower()].id,
-                memory_id=memory_id,
-                surface=surface,
-            )
-            for surface in surfaces
-            if surface.lower() in resolved
-        ]
         return {"entities": surfaces, "mentions": mentions}
 
     def _has_near_duplicate(
@@ -893,6 +1373,10 @@ class MemoryStore:
         ]
         if episodes:
             self.backend.add_episodes(episodes)
+            # an imported row's episode says what its memory says: one vector
+            self.backend.set_episode_vectors(
+                {episode.id: vector for (_, vector), episode in zip(accepted, episodes) if vector},
+                self.embedder.model_id)
 
         memory_ids: list[str] = []
         for (row, vector), episode in zip(accepted, episodes):
@@ -958,8 +1442,9 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """Process one bounded batch of durable pending memories.
 
-        Related saves in the same scope and with the same optional ``context``
-        metadata are distilled together after the group has been quiet. Raw
+        Related saves in the same scope, with the same optional ``context``
+        metadata and given the same day (``_said_day``), are distilled
+        together after the group has been quiet. Raw
         records keep independent provenance and retry state, while extraction
         sees the complete thought instead of one client call at a time.
         """
@@ -982,11 +1467,14 @@ class MemoryStore:
         )
         groups: dict[tuple[Any, ...], list[Memory]] = {}
         for memory in pending:
+            # A group is extracted with one date, so saves said on different
+            # days (a ``created_at`` given, or none) are never one group.
             key = (
                 memory.user_id,
                 memory.agent_id,
                 memory.run_id,
                 _ingestion_context(memory.metadata).casefold(),
+                _said_day(memory),
             )
             groups.setdefault(key, []).append(memory)
 
@@ -995,13 +1483,8 @@ class MemoryStore:
         bursts: list[list[Memory]] = []
         for related in groups.values():
             burst: list[Memory] = []
-            for memory in sorted(related, key=lambda item: item.created_at):
-                if (
-                    burst
-                    and parse_ts(memory.created_at)
-                    - parse_ts(burst[-1].created_at)
-                    > quiet
-                ):
+            for memory in sorted(related, key=_queued_at):
+                if burst and _queued_at(memory) - _queued_at(burst[-1]) > quiet:
                     bursts.append(burst)
                     burst = []
                 burst.append(memory)
@@ -1011,7 +1494,7 @@ class MemoryStore:
         for group in bursts:
             if summary["claimed"] >= batch_limit:
                 break
-            if max(parse_ts(memory.created_at) for memory in group) > cutoff:
+            if max(_queued_at(memory) for memory in group) > cutoff:
                 continue
             remaining = batch_limit - summary["claimed"]
             claimed: list[Memory] = []
@@ -1112,9 +1595,14 @@ class MemoryStore:
         if not self.llm.available:
             raise ValueError("no LLM configured; distillation needs one")
 
-        messages = [
-            {"role": "user", "content": memory.content} for memory in active
-        ]
+        # one transcript line per raw text, and per message of a deferred
+        # save of messages, each with the episodes it rests on
+        messages: list[dict[str, str]] = []
+        line_episodes: list[list[str]] = []
+        for memory in active:
+            said, lines = _pending_lines(memory)
+            messages.extend(said)
+            line_episodes.extend(lines)
         contexts = list(
             dict.fromkeys(
                 value
@@ -1139,21 +1627,23 @@ class MemoryStore:
                 for episode_id in memory.source_episode_ids
             )
         )
-        candidates = extract_facts(
-            self.llm,
-            messages,
-            vocabulary=self._tag_vocabulary(
-                first_scope,
-                text="\n".join(memory.content for memory in active),
-            ),
-            context=context or None,
-            tag_hints=tag_hints,
-            owner=self.owner_name(first_scope.user_id),
-            entity_names=self._entity_vocabulary(
-                first_scope, "\n".join(memory.content for memory in active)
-            ),
-        )
-        self._confirm_candidate_whens(candidates)
+        # a deferred save made no provider call: its episodes are embedded now
+        embedded = self.backend.episode_vectors_of(episode_ids, self.embedder.model_id)
+        self._embed_episodes([episode for episode in self.backend.episodes_by_id(
+            [e for e in episode_ids if e not in embedded]).values()])
+        # What the saves asked of their memories (add_deferred): the latest
+        # time and reference date given, and every memory_metadata merged.
+        jobs = [memory.metadata.get(_ENRICHMENT_KEY) or {} for memory in active]
+        created_at: str | None = None
+        for job in jobs:
+            if job.get("created_at"):  # compared as times: "...Z" is "+00:00"
+                created_at = later_ts(created_at, job["created_at"])
+        now = max((parse_ts(j["now"]) for j in jobs if j.get("now")), default=None)
+        memory_metadata: dict[str, Any] = {}
+        for job in jobs:
+            memory_metadata.update(job.get("memory_metadata") or {})
+        candidates = self._extract(
+            messages, first_scope, now=now, context=context, tag_hints=tag_hints)
         if not candidates:
             for memory in active:
                 metadata = self._clear_enrichment_metadata(memory.metadata)
@@ -1166,11 +1656,15 @@ class MemoryStore:
             )
 
         _keep_context(candidates, context)
+        _with_memory_metadata(candidates, memory_metadata)
         actions = self._apply_candidates(
             candidates,
             first_scope,
             episode_ids,
             exclude_ids={memory.id for memory in active},
+            created_at=created_at,
+            messages=messages,
+            line_episodes=line_episodes,
         )
         landed = sum(1 for action in actions if action.event != "NONE")
         new_id = next(
@@ -1181,9 +1675,19 @@ class MemoryStore:
             ),
             None,
         )
+        # The same audit as a direct save. Nobody waits on a deferred save, so
+        # the gap is also noted where the raw text goes: its SUPERSEDE event.
+        missing = self._coverage_gaps(messages, actions)
+        warnings = []
+        gap = ""
+        if missing:
+            warnings.append(_coverage_warning(missing))
+            gap = "; not captured as facts: " + "; ".join(missing)
+            log.warning("distillation of %s did not capture: %s",
+                        ", ".join(m.id for m in active), "; ".join(missing))
         for memory in active:
             invalidated = self.backend.invalidate_memory(
-                memory.id, superseded_by=new_id
+                memory.id, superseded_by=new_id, at=created_at
             )
             if invalidated is not None:
                 self.backend.update_memory(
@@ -1198,10 +1702,12 @@ class MemoryStore:
                     memory_id=memory.id,
                     event="SUPERSEDE",
                     old_content=memory.content,
-                    reason=f"distilled with its context into {landed} fact(s)",
+                    reason=f"distilled with its context into {landed} fact(s){gap}",
+                    kind="distillation",
+                    **({"created_at": created_at} if created_at else {}),
                 )
             )
-        return AddResult(episode_ids=episode_ids, actions=actions)
+        return AddResult(episode_ids=episode_ids, actions=actions, warnings=warnings)
 
     def distill(
         self, memory_id: str, *, owner_prefix: str | None = None
@@ -1228,7 +1734,38 @@ class MemoryStore:
         when_since: str | None = None,
         when_until: str | None = None,
         relational: bool = True,
+        evidence: bool = True,
     ) -> list[SearchResult]:
+        """The memories that best answer ``query``, best first.
+
+        Every search runs one pipeline, its stages in this order, each rule
+        in one stage (docs/architecture.md, read path):
+
+        1. the seeds (``_seeds``): the hubs the question names, the longest
+           names among them, else the owner for a question in the first
+           person; none with ``relational=False``;
+        2. the candidates, as deep for every search: the text ranking
+           (``_text_ranking``) and, with seeds, the linked pool
+           (``_search_linked``), every filter (scope and run, history, tags,
+           entity, date windows: ``_Reads``) applied as they are gathered,
+           before anything is ordered or judged;
+        3. the order: the linked order with seeds, the text ranking's
+           without (``_search_linked``);
+        4. the judged pool: the first ``decision.rerank_pool`` of the order,
+           the keyword search's best match keeping a place in it on every
+           search, judged or not (``_with_the_keyword_place``);
+        5. the judge (``_judge_ranking``), in one wording
+           (``_judged_relevance``), names read "it" only for a single seed,
+           on every search where ``relevance_mode()`` is "jev" and none
+           elsewhere;
+        6. the set call and the set's members (``_set_pool``);
+        7. the final order (``_final_order``: judged, the members first and
+           then the judged score, a tie in the order judged, whose ties go by
+           memory id), the limit (a set question returns every member found,
+           up to ``SET_RESULT_CAP``), then the evidence: with ``evidence``
+           each result carries the source turns it is the best ranked of the
+           results to rest on, chosen within ``retrieval.evidence_tokens``
+           (``evidence``)."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         if entity_id:
             entity_id = self._resolve_entity_filter(entity_id)
@@ -1243,130 +1780,808 @@ class MemoryStore:
                 when_since=when_since, when_until=when_until,
             )
             return [SearchResult(memory=m, score=0.0) for m in memories]
-        # Over-fetch when we will post-filter or fuse, so a full page survives.
-        wide = (since or until or when_since or when_until) or (
-            relational and not categories and not entity_id
-        )
-        fetch = limit if not wide else min(max(limit * 8, 40), 500)
-        results = hybrid_search(
-            backend=self.backend,
-            embedder=self.embedder,
-            query=query,
-            scope=scope,
-            limit=fetch,
-            cfg=self.config.retrieval,
-            include_invalid=include_invalid,
-            categories=categories,
-            entity_id=entity_id,
-        )
-        # Relational fusion: add memories reachable by typed relations from the
-        # query's entities (multi-hop answers hybrid alone scores at zero).
-        if relational and not categories and not entity_id:
-            rel_ids = relational_memory_ids(self.backend, scope, query, hops=2)
-            if rel_ids:
-                results = self._fuse_relational(results, rel_ids, include_invalid)
-        if since or until:
-            results = [r for r in results if _within(r.memory.created_at, since, until)]
-        if when_since or when_until:
-            results = [
-                r for r in results if _when_within(r.memory, when_since, when_until)
-            ]
-        return self._rerank(query, results)[:limit]
+        reads = _Reads(scope, include_invalid, categories, entity_id, since, until,
+                       when_since, when_until)
+        # 1. the seeds, the question as it is read, and whether it is judged
+        plan = self._plan(query, reads, relational)
+        # 2. the candidates: the text ranking, as deep for every search
+        query_vector = self._query_vector(query)  # the ranking and the evidence read it
+        results = self._text_ranking(query, reads, limit, query_vector)
+        # 2 to 4. the linked pool, the order and the judged pool
+        ranked = self._search_linked(query, scope, results, include_invalid, plan=plan)
+        # 5 and 6. the judge and the set call
+        if plan.judges:
+            ranked = self._judge_ranking(plan.question, ranked, scope, include_invalid, plan)
+        # 7. the final order and the limit, then the evidence
+        ranked = self._final_order(ranked, plan)
+        members = sum(1 for r in ranked if r.signals.get("member"))
+        found = ranked[:max(limit, min(members, SET_RESULT_CAP))]
+        if evidence:
+            by_id = {r.memory.id: r for r in found}
+            for turn in self.evidence(query, found, user_id=user_id, agent_id=agent_id,
+                                      run_id=run_id, query_vector=query_vector):
+                by_id[turn.memory_ids[0]].evidence.append(turn)
+        return found
 
-    def _rerank(self, query: str, results: list[SearchResult]) -> list[SearchResult]:
-        """Let a relevance judgement adjust the hybrid order, not replace it.
-
-        Hybrid ranking matches wording and carries recency, decayed importance,
-        entity anchors and relation hops with it. Ordering purely by "does this
-        text answer the question" measured worse than doing nothing, because it
-        throws all of that away. Blending keeps it and adds what wording alone
-        cannot see, and a floor lets an obvious non-answer be pushed back
-        however well it matched.
-
-        One call covers the whole shortlist. A provider that abstains or fails
-        leaves the order exactly as it found it.
-        """
-        cfg = self.config.decision
-        # The setting decides where it is set; otherwise the provider's default
-        # stands. Either way a provider that was not measured to beat no
-        # re-ranking cannot be talked into it: through gpt-5-mini the same work
-        # scored below the baseline at ten seconds a search.
-        wanted = cfg.rerank if cfg.rerank is not None else self.decider.reranks_by_default
-        if not wanted or not self.decider.may_rerank:
-            return results
-        if not self.decider.available or len(results) < 2:
-            return results
-        pool = results[: max(cfg.rerank_pool, 2)]
-        answers = self.decider.decide(
-            f"QUESTION: {query}",
-            {f"m{i}": Noul(instructions="This memory helps answer the question. "
-                                        f"Memory: {r.memory.content}")
-             for i, r in enumerate(pool)},
-        )
-        if not any(answers[f"m{i}"].available for i in range(len(pool))):
-            return results
-        span = max(len(pool) - 1, 1)
-        ordered = []
-        for i, result in enumerate(pool):
-            hybrid = 1.0 - (i / span)
-            answer = answers[f"m{i}"]
-            relevance = answer.value if answer.available else hybrid
-            demoted = 1 if (answer.available and relevance < cfg.rerank_floor) else 0
-            blended = cfg.rerank_weight * relevance + (1 - cfg.rerank_weight) * hybrid
-            ordered.append((demoted, -blended, i, result))
-        ordered.sort()
-        return [r for _d, _s, _i, r in ordered] + results[len(pool):]
-
-    def _fuse_relational(
-        self,
-        hybrid_results: list[SearchResult],
-        rel_ids: list[str],
-        include_invalid: bool,
+    def _text_ranking(
+        self, query: str, reads: _Reads, limit: int, query_vector: list[float] | None = None,
     ) -> list[SearchResult]:
-        """RRF-fuse hybrid results (ranked by relevance) with relational
-        candidates (ranked by graph distance).
+        """Stage 2's text ranking: keyword and vector candidates fused
+        (``retrieval.hybrid_search``), as deep for every search (eight per
+        result asked for, at least 40 and at most 500), of what the search
+        reads (``reads``). What was true until an update replaced it is read
+        too, for questions about the past (``_final_order`` puts it after the
+        current value). ``query_vector`` None embeds the query."""
+        return [r for r in hybrid_search(
+            backend=self.backend, embedder=self.embedder, query=query, scope=reads.scope,
+            limit=min(max(limit * 8, 40), 500), cfg=self.config.retrieval,
+            include_invalid=reads.include_invalid, categories=reads.categories,
+            entity_id=reads.entity_id, history=True, query_vector=query_vector,
+        ) if reads.admits(r.memory)]
 
-        The graph boost is what makes multi-hop work: the answer to "what tool
-        does Ada use?" is usually present but buried, and lifting it is the
-        whole point. The same lift is also the cost, because on an ordinary
-        query a buried graph neighbour can leapfrog the correct answer:
-        ``1/(k+relrank)`` added to ``1/(k+hybridrank)`` can exceed the score of
-        hybrid's own top hit.
+    def _seeds(self, query: str, scope: Scope) -> tuple[list[str], bool]:
+        """Stage 1 of a search: the entities its question is about, and
+        whether that is the owner of a question in the first person.
 
-        Measured on a 456-memory store with a dense entity graph, the two
-        effects share one mechanism and no weighting or injection cap separates
-        them. Reserving the strongest hybrid results does: graph distance
-        competes for the rest of the page but can never evict a top direct
-        answer. That keeps multi-hop hit@10 at 0.917 (against 0.417 for hybrid
-        alone) while ordinary recall@10 returns to 0.649 from 0.474.
-        """
-        k = 60
-        rescue = 10  # only rescue memories hybrid buried (rank >= this) or missed
-        protect = max(0, self.config.retrieval.relational_protect_top)
-        pinned = [r for r in hybrid_results[:protect]]
-        pinned_ids = {r.memory.id for r in pinned}
-        hybrid_rank = {r.memory.id: rank for rank, r in enumerate(hybrid_results)}
-        score: dict[str, float] = {}
-        for rank, r in enumerate(hybrid_results):
-            score[r.memory.id] = 1.0 / (k + rank)
-        for rank, mid in enumerate(rel_ids):
-            hr = hybrid_rank.get(mid)
-            # A memory hybrid already ranked highly needs no graph boost; adding
-            # it would let a well-ranked neighbor outrank the true direct answer.
-            # Only the buried/absent (the multi-hop answers) get rescued.
-            if hr is None or hr >= rescue:
-                score[mid] = score.get(mid, 0.0) + 1.0 / (k + rank)
-        have: dict[str, SearchResult] = {r.memory.id: r for r in hybrid_results}
-        for mid in rel_ids:
-            if mid not in have:
-                memory = self.backend.get_memory(mid)
-                if memory is not None and (include_invalid or memory.invalid_at is None):
-                    have[mid] = SearchResult(memory=memory, score=0.0)
-        fused = sorted(have.values(), key=lambda r: -score.get(r.memory.id, 0.0))
-        ranked = pinned + [r for r in fused if r.memory.id not in pinned_ids]
-        for r in ranked:
-            r.signals = {**r.signals, "fused": round(score.get(r.memory.id, 0.0), 5)}
+        Only a hub counts (``_is_hub``): a stray phrase stored as an entity
+        does not decide what a search is about. Of the hubs named, those
+        whose name another's holds are dropped ("bildy v4", not also
+        "bildy": a search from bildy reaches every version below it). The
+        hubs are kept first, so a stray name holding a hub's ("bildy sync")
+        does not hide it. A question naming no hub that speaks in the first
+        person ("Where do I live?") is about the store's owner, when the
+        owner is one."""
+        hubs = [e for e in detect_query_entities(self.backend, scope, query) if self._is_hub(e)]
+        seeds = longest_names(self.backend, hubs)
+        if seeds or not speaks_in_first_person(query):
+            return seeds, False
+        owner = self.owner_entity(scope.user_id)
+        if owner is not None and self._is_hub(owner.id):
+            return [owner.id], True
+        return [], False
+
+    def _plan(self, query: str, reads: _Reads, relational: bool) -> _SearchPlan:
+        """A search's seeds (stage 1, none with ``relational=False``), the
+        question as the linked order and the judge read it, and whether the
+        decision provider judges it.
+
+        With one seed its names read "it" ("Where does it live?", and "it"
+        for "I" when the seed is the owner); a question naming several hubs
+        is read as written ("Did it like it?" says nothing), and so is one
+        naming none.
+
+        The decision provider judges a search if and only if
+        ``relevance_mode()`` is "jev" ("auto" resolves from the provider and
+        ``decision.rerank``); with "vector" no search is judged."""
+        seeds, first_person = self._seeds(query, reads.scope) if relational else ([], False)
+        question = query
+        if len(seeds) == 1:
+            question = mask_names(query, self.backend.entity_aliases(seeds[0]))
+            if first_person:
+                question = mask_first_person(question)
+        judges = bool(self.decider.available) and self.relevance_mode() == "jev"
+        return _SearchPlan(reads=reads, seeds=seeds, first_person=first_person,
+                           question=question, judges=judges)
+
+    def _current_first(self, results: list[SearchResult]) -> list[SearchResult]:
+        """A memory kept as history (``models.HISTORY_KINDS``) comes right
+        after the memory in use that replaced it, followed through a chain
+        of updates, when that one is among the results: for one question the
+        current value comes first. It is moved up, not the history down, so a
+        question about the past keeps its answer as high as it ranked. The
+        rest keep their order."""
+        if all(r.memory.invalid_at is None for r in results):
+            return results
+        by_id = {r.memory.id: r for r in results}
+
+        def current(memory: Memory) -> Memory:
+            seen: set[str] = set()
+            while memory.invalid_at is not None and memory.superseded_by and memory.id not in seen:
+                seen.add(memory.id)
+                found = by_id.get(memory.superseded_by)
+                later = found.memory if found else self.backend.get_memory(memory.superseded_by)
+                if later is None:
+                    break
+                memory = later
+            return memory
+
+        ordered: list[SearchResult] = []
+        placed: set[str] = set()
+        for result in results:
+            if result.memory.id in placed:
+                continue
+            head = current(result.memory) if result.memory.invalid_at is not None else None
+            if head is not None and head.id != result.memory.id and head.id in by_id \
+                    and head.id not in placed:
+                ordered.append(by_id[head.id])
+                placed.add(head.id)
+            ordered.append(result)
+            placed.add(result.memory.id)
+        return ordered
+
+    def _query_vector(self, query: str) -> list[float]:
+        """The query's vector, or [] with no embedder or while it is down (the
+        ranking then reads the words alone)."""
+        if not self.embedder.dimensions:
+            return []
+        try:
+            return self.embedder.embed([query])[0] or []
+        except Exception:
+            return []
+
+    def _embed_episodes(self, episodes: list[Episode]) -> None:
+        """Store each episode's vector, as a memory's is stored. Best effort:
+        without one an episode is still chosen as evidence by its words."""
+        if not episodes or not self.embedder.dimensions:
+            return
+        try:
+            vectors = self.embedder.embed([e.content for e in episodes])
+        except Exception:
+            return
+        self.backend.set_episode_vectors(
+            {e.id: v for e, v in zip(episodes, vectors) if v}, self.embedder.model_id)
+
+    def evidence(
+        self,
+        query: str,
+        results: list[SearchResult],
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        token_budget: int | None = None,
+        query_vector: list[float] | None = None,
+    ) -> list[EvidenceTurn]:
+        """The source turns of the memories found that best match the query,
+        in the order they were said: provenance, shown with the facts.
+
+        Only the episodes the results in use or kept as history rest on are
+        candidates (``Memory.source_episode_ids``): a memory an update
+        replaced, which search returns after the one that replaced it, shows
+        what was said while it held, as any memory does; one out of use
+        otherwise (``include_invalid``) shows none. Each is taken once,
+        credited to the best ranked memory resting on it; only those of the
+        scope searched; none withheld or resting under a memory removed
+        (``MemoryBackend.evidence_episodes``); none whose words a memory
+        resting on it already says whole (a verbatim save). They are taken by
+        their similarity to the query (the full-text match breaks a tie), each
+        while it fits the budget (``token_budget``, default
+        ``retrieval.evidence_tokens``; ``build_context`` counts a turn as it
+        renders it)."""
+        budget = self.config.retrieval.evidence_tokens if token_budget is None else token_budget
+        if budget <= 0 or not (query or "").strip():
+            return []
+        history = self.backend.history_ids(
+            [r.memory.id for r in results if r.memory.invalid_at is not None])
+        resting: dict[str, list[str]] = {}
+        texts: dict[str, str] = {}
+        for result in results:
+            memory = result.memory
+            if memory.invalid_at is not None and memory.id not in history:
+                continue
+            texts[memory.id] = " ".join(memory.content.casefold().split())
+            for episode_id in memory.source_episode_ids or []:
+                resting.setdefault(episode_id, []).append(memory.id)
+        if not resting:
+            return []
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        episodes = [
+            e for e in self.backend.evidence_episodes(list(resting))
+            if all(getattr(scope, f) is None or getattr(scope, f) == getattr(e, f)
+                   for f in ("user_id", "agent_id", "run_id"))
+            and not any(" ".join(e.content.casefold().split()) in texts[mid]
+                        for mid in resting[e.id])
+        ]
+        if not episodes:
+            return []
+        if query_vector is None:
+            query_vector = self._query_vector(query)
+        asked = np.asarray(query_vector, dtype=np.float32) if query_vector else None
+        vectors = (self.backend.episode_vectors_of([e.id for e in episodes],
+                                                   self.embedder.model_id)
+                   if asked is not None else {})
+        if asked is not None:
+            asked /= float(np.linalg.norm(asked)) or 1.0
+        words = self.backend.episode_keyword_scores(query, [e.id for e in episodes])
+        turns = [
+            EvidenceTurn(episode_id=e.id, content=e.content, speaker=e.speaker,
+                         said_at=e.created_at, memory_ids=resting[e.id],
+                         score=round(_similarity(asked, vectors.get(e.id))
+                                     if asked is not None else 0.0, 6))
+            for e in episodes
+        ]
+        order = {turn.episode_id: i for i, turn in enumerate(turns)}  # as said
+        chosen: set[str] = set()
+        used = 0
+        for turn in sorted(turns, key=lambda t: (-t.score, -words.get(t.episode_id, 0.0),
+                                                 order[t.episode_id])):
+            cost = estimate_tokens(turn_line(turn)) + 1
+            if used + cost > budget:
+                continue
+            chosen.add(turn.episode_id)
+            used += cost
+        return [turn for turn in turns if turn.episode_id in chosen]
+
+    def _reranks(self) -> bool:
+        """Whether the decision provider re-ranks. The setting decides where it
+        is set; otherwise the provider's default stands. Either way a provider
+        that was not measured to beat no re-ranking cannot be talked into it
+        (``providers.decisions.MEASURED_RERANKERS``)."""
+        cfg = self.config.decision
+        wanted = cfg.rerank if cfg.rerank is not None else self.decider.reranks_by_default
+        return bool(wanted and self.decider.may_rerank)
+
+    def relevance_mode(self) -> str:
+        """What judges whether a memory answers: ``retrieval.
+        relational_relevance``, with "auto" read as "jev" where the decision
+        provider re-ranks (``_reranks``: Jev by default, a text model measured
+        to help when ``decision.rerank`` is on) and as "vector" elsewhere.
+        "jev" has the provider judge every search; with "vector" none is
+        judged (``_plan``)."""
+        mode = self.config.retrieval.relational_relevance
+        if mode != "auto":
+            return mode
+        return "jev" if self._reranks() else "vector"
+
+    def _search_linked(
+        self, query: str, scope: Scope, results: list[SearchResult], include_invalid: bool,
+        *, plan: _SearchPlan,
+    ) -> list[SearchResult]:
+        """Stages 2 to 4 of a search, after its text ranking (``results``,
+        what the search reads of it): the linked pool and the order, then the
+        judged pool.
+
+        With seeds (``plan.seeds``), the candidates are the text ranking's
+        and, for every entity the links reach at ``FAMILY_MIN`` or more, the
+        ``FAMILY_TOP`` of its memories that the search reads (``_Reads``:
+        its scope and run, history, tags, entity and date windows, applied
+        before they are chosen) that best state the property asked. The
+        links are followed directed and weighted, ``relational_depth`` deep
+        (``graph_retrieval.activation_paths``). No link reaches a tag
+        (``links_of``), so a tag's memories are never such candidates, as a
+        tag is never a seed. Each candidate is ordered by how well it states
+        the property asked (similarity of the question and the memory with
+        the names of the entities the links reach replaced by "it"; a
+        question naming several hubs is compared as written, with each
+        memory's names kept) to the power ``relational_sharpness``, times how
+        strongly it is about the entity the query names (``aboutness``), a
+        tie by memory id. Without seeds the order is the text ranking's.
+
+        The judged pool is the first ``decision.rerank_pool`` of the order,
+        where the keyword search's best match keeps a place on every search,
+        judged or not (``_with_the_keyword_place``)."""
+        ranked = self._linked_order(results, plan) if plan.seeds else results
+        return self._with_the_keyword_place(ranked, results)
+
+    def _linked_order(self, results: list[SearchResult], plan: _SearchPlan) -> list[SearchResult]:
+        """The linked pool and the linked order of a search with seeds
+        (``_search_linked``); what the judge needs of them is left in
+        ``plan``."""
+        cfg = self.config.retrieval
+        seeds = plan.seeds
+        act, above = activation_paths(self.backend, seeds, depth=cfg.relational_depth)
+        # With several hubs named, "it" could stand for any of them: masked,
+        # "Why do Ada and Kai find Mira inspiring?" reads "Why do it and it
+        # find it inspiring?", which says nothing about which of their
+        # memories answers. So the names stay, as the judge reads them
+        # (``_plan``), and every memory is compared by its ordinary vector,
+        # names kept: those naming more of the things asked about come first.
+        several = len(seeds) > 1
+        asked = self._asked_vector(plan.question)
+        pool: dict[str, SearchResult] = {r.memory.id: r for r in results}
+        for entity_id, strength in act.items():
+            if strength < FAMILY_MIN:
+                continue
+            # what the search reads of an entity's memories is kept to in
+            # SQL before the newest FAMILY_SCAN are taken
+            members = plan.reads.entity_memories(self.backend, entity_id, FAMILY_SCAN)
+            vectors = (self.backend.vectors_of([m.id for m in members], self.embedder.model_id)
+                       if several else self._property_vectors([m.id for m in members]))
+            # a tie keeps the order read: the newest first, then by memory id
+            for memory in sorted(members,
+                                 key=lambda m: -_similarity(asked, vectors.get(m.id)))[:FAMILY_TOP]:
+                pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
+        scores = self._linked_scores(asked, list(pool), act, plan.entities, names_kept=several)
+        scored = []
+        for mid, result in pool.items():
+            relevance, about = scores[mid]
+            result.signals = {**result.signals, "property": round(relevance, 4),
+                              "about": round(about, 3)}
+            scored.append((relevance ** cfg.relational_sharpness * about, result.score, result))
+        # a tie in both scores by memory id, not by the order the pool was filled in
+        scored.sort(key=lambda item: (-item[0], -item[1], item[2].memory.id))
+        plan.act, plan.above, plan.asked = act, above, asked
+        return [result for _, _, result in scored]
+
+    def _with_the_keyword_place(
+        self, ranked: list[SearchResult], results: list[SearchResult]
+    ) -> list[SearchResult]:
+        """Stage 4, the judged pool, on every search: the keyword search's
+        best match among ``results`` (the text ranking) keeps a place among
+        the first ``decision.rerank_pool`` of ``ranked``, which the decision
+        provider reads where it judges. Only the keyword search sees an
+        identifier ("invoice
+        2024-117") the question shares with a memory: the vectors, and so the
+        property similarity, cannot tell 2024-117 from 2024-118, a memory
+        linked to nothing counts as about something else (0.3), and in the
+        text ranking newer memories matching more of the question's other
+        words fill the first places. Judged, the answer ranks above the
+        non-answers."""
+        size = max(self.config.decision.rerank_pool, 2)
+        worded = [r for r in results if "keyword" in r.signals]
+        if not worded:
+            return ranked
+        best = max(worded, key=lambda r: r.signals["keyword"]).memory.id
+        place = next(i for i, r in enumerate(ranked) if r.memory.id == best)
+        if place < size:
+            return ranked
+        ranked = list(ranked)
+        ranked.insert(size - 1, ranked.pop(place))
         return ranked
+
+    def _asked_vector(self, question: str) -> np.ndarray:
+        """The question's vector as the property comparison reads it: cut to
+        ``retrieval.property_dimensions`` and of length one."""
+        asked = np.asarray(self.embedder.embed([question])[0], dtype=np.float32)
+        asked = asked[: self.config.retrieval.property_dimensions or len(asked)]
+        asked /= float(np.linalg.norm(asked)) or 1.0
+        return asked
+
+    def _linked_scores(
+        self, asked: np.ndarray, memory_ids: list[str], act: dict[str, float],
+        entities: dict[str, list[Entity]], names_kept: bool = False,
+    ) -> dict[str, tuple[float, float]]:
+        """(property similarity to ``asked``, aboutness) of each memory, as the
+        linked search scores it. Only the names the links account for are
+        masked: a memory naming an entity they reach is compared by its
+        property vector, any other by its ordinary one, names kept ("Lena Blum
+        works on Project Ekmibo" would otherwise read "It works on it", as
+        empty as "What do I know about it?"). With ``names_kept`` (a question
+        naming several hubs, asked as written) every memory is compared by its
+        ordinary vector. ``entities`` caches each memory's
+        entities and is filled in, those not cached yet read at once."""
+        missing = [mid for mid in dict.fromkeys(memory_ids) if mid not in entities]
+        if missing:
+            entities.update(self.backend.entities_of_memories(missing))
+        reached = [] if names_kept else [
+            mid for mid in memory_ids if any(e.id in act for e in entities[mid])]
+        vectors = self._property_vectors(reached)
+        vectors.update(self.backend.vectors_of([mid for mid in memory_ids if mid not in vectors],
+                                               self.embedder.model_id))
+        return {mid: (_similarity(asked, vectors.get(mid)),
+                      aboutness([act.get(e.id) for e in entities[mid]]))
+                for mid in memory_ids}
+
+    def _judge_ranking(
+        self, question: str, ranked: list[SearchResult], scope: Scope, include_invalid: bool,
+        plan: _SearchPlan,
+    ) -> list[SearchResult]:
+        """Stages 5 and 6 of a search: the decision provider judges the
+        judged pool (the first ``decision.rerank_pool`` of ``ranked``), and
+        with them what kind of question it is, in one call:
+        - about everything ("Show everything about X") or with one answer
+          ("Where does Ada live?"): that is all;
+        - several ("Which car is the cheapest?", "How much did I spend on
+          groceries?"): one more call judges up to ``retrieval.set_pool``
+          memories more that the search reads (``_set_pool``), and the
+          members of the set are found over both calls' scores
+          (``set_members``).
+        The "calls" signal says how many calls were made (1 or 2), "pool" how
+        many memories the second judged.
+
+        With one seed, "it" stands for each memory's own entity (the one the
+        links reach most strongly, a tie by entity id) in the question and
+        the memories; with several or none, both are read as written. With
+        seeds aboutness weighs each score, and a thing's answer yields to
+        its version's own. Each memory judged, with whether it is a member
+        and its score, is left in ``plan.judged`` for the final order
+        (``_final_order``); ``ranked`` is returned with the memories the
+        second call added after it."""
+        size = max(self.config.decision.rerank_pool, 2)
+        act, above, entities = plan.act, plan.above, plan.entities
+        seeds = set(plan.seeds)
+        homes: dict[str, set[str]] = {}
+        aliases: dict[str, list[str]] = {}
+
+        def ents(mid: str) -> list:
+            if mid not in entities:
+                entities[mid] = self.backend.entities_of_memory(mid)
+            return entities[mid]
+
+        def subject(mid: str) -> str | None:
+            # the strongest reached, a tie by entity id: not by which of the
+            # memory's mentions was written first
+            linked = sorted(e.id for e in ents(mid) if e.id in act)
+            return max(linked, key=act.get) if linked else None
+
+        # With one entity named, "it" stands for it in the question and the
+        # memories; with several ("Did Ilva like Olive Kitchen?") the names
+        # stay, or the question would read "Did it like it?".
+        masking = len(seeds) == 1
+
+        def text_of(result: SearchResult) -> str:
+            # "it" stands for the entity a memory's aboutness comes from and
+            # the things that entity more likely than not belongs to ("The
+            # first release of bildy" in a memory of bildy v1). Every other
+            # name stays: it can be the answer ("uses Redis"), someone else
+            # ("Kai Lund works on it", not "it works on it") or another
+            # entity ("Bildy Bakery").
+            who = subject(result.memory.id) if masking else None
+            if who is None:
+                return result.memory.content
+            it = {who} | homes.get(who, set())
+            for entity_id in it - aliases.keys():
+                aliases[entity_id] = self.backend.entity_aliases(entity_id)
+            return mask_names(
+                result.memory.content, [n for entity_id in it for n in aliases[entity_id]],
+                keep=[e.name for e in ents(result.memory.id) if e.id not in it])
+
+        def judge(batch: list[SearchResult], meta: bool):
+            if seeds:
+                unread = [r.memory.id for r in batch if r.memory.id not in entities]
+                if unread:  # read at once, not one memory at a time
+                    entities.update(self.backend.entities_of_memories(unread))
+                new = {subject(r.memory.id) for r in batch} - homes.keys() - {None}
+                homes.update(homes_of(self.backend, sorted(new)))
+            return self._judged_relevance(
+                question, [(r.memory.id, text_of(r)) for r in batch], meta=meta)
+
+        judged, specific, several = judge(ranked[:size], True)
+        if not judged:
+            return ranked
+        found: dict[str, SearchResult] = {r.memory.id: r for r in ranked}
+        extra: list[SearchResult] = []
+        calls, pooled = 1, 0
+
+        members: set[str] = set()
+        if specific >= 0.5 and several >= SET_BAR:
+            asked = plan.asked
+            if asked is None:
+                try:
+                    asked = self._asked_vector(question)
+                except Exception:  # embedding service down: the batch keeps its order
+                    asked = None
+            batch = self._set_pool(ranked, size, judged, scope, include_invalid,
+                                   asked=asked, act=act, entities=entities,
+                                   members=set_members(judged), names_kept=len(seeds) > 1,
+                                   reads=plan.reads)
+            if batch:
+                for result in batch:
+                    if result.memory.id not in found:
+                        found[result.memory.id] = result
+                        extra.append(result)
+                got, _, _ = judge(batch, False)
+                calls, pooled = 2, len(batch)
+                judged.update(got)
+            members = set_members(judged)
+        # What is true of the thing a seed belongs to holds for the seed only
+        # where nothing nearer says otherwise: an answer reached by a step up
+        # counts as far as none of the seed's own memories answers, nor one of
+        # a thing between them. bildy v4, a version of bildy v3 and of bildy,
+        # takes v3's change over bildy's default, as v3 does. A thing is
+        # between when the seed more likely than not belongs to it and it to
+        # the thing the answer is about (``homes_of``); a sibling reached
+        # through the thing is not. Both relevance and that override are per
+        # property, so they count as far as the question asks for one ("Show
+        # everything about it" does not).
+        own = max((value for mid, value in judged.items()
+                   if seeds and any(e.id in seeds for e in ents(mid))), default=0.0)
+        best: dict[str | None, float] = defaultdict(float)  # the best answer about each entity
+        if seeds:
+            homes.update(homes_of(self.backend, sorted(seeds - homes.keys())))
+            for mid, value in judged.items():
+                best[subject(mid)] = max(best[subject(mid)], value)
+
+        def overridden(thing: str) -> float:
+            between = {x for seed in seeds for x in homes[seed]
+                       if x != thing and thing in homes.get(x, ())}
+            return max([own] + [best[x] for x in between])
+
+        for mid, value in judged.items():
+            result = found[mid]
+            if seeds and subject(mid) in above:
+                discount = overridden(subject(mid))
+                value *= 1.0 - discount
+                result.signals = {**result.signals, "overridden": round(discount, 4)}
+            about = 1.0
+            if seeds:
+                about = result.signals.get("about") or aboutness([act.get(e.id) for e in ents(mid)])
+                result.signals = {**result.signals, "about": round(about, 3)}
+            result.signals = {**result.signals, "judged": round(value ** specific, 4),
+                              "specific": round(specific, 4), "several": round(several, 4),
+                              "calls": calls, "pool": pooled,
+                              **({"member": True} if mid in members else {})}
+            plan.judged[mid] = (mid in members, value ** specific * about)
+        return ranked + extra
+
+    def _final_order(self, ranked: list[SearchResult], plan: _SearchPlan) -> list[SearchResult]:
+        """Stage 7 of a search, the final order, before the limit. A judged
+        search puts the members of a set first, then every memory judged by
+        its judged score (times aboutness with seeds), a tie in the order
+        judged (the order's, whose ties went by memory id), and the rest
+        after, as they were; a search not judged keeps its order. A memory
+        kept as history then comes right after the memory in use that
+        replaced it (``_current_first``)."""
+        judged = plan.judged
+        if judged:
+            turn = {mid: i for i, mid in enumerate(judged)}
+            first = sorted((r for r in ranked if r.memory.id in judged),
+                           key=lambda r: (not judged[r.memory.id][0],
+                                          -judged[r.memory.id][1], turn[r.memory.id]))
+            ranked = first + [r for r in ranked if r.memory.id not in judged]
+        return self._current_first(ranked)
+
+    def _set_pool(
+        self, ranked: list[SearchResult], size: int, judged: dict[str, float], scope: Scope,
+        include_invalid: bool, *, asked: np.ndarray | None, act: dict[str, float],
+        entities: dict[str, list[Entity]], members: set[str], names_kept: bool = False,
+        reads: _Reads | None = None,
+    ) -> list[SearchResult]:
+        """What the second call of a question needing several memories judges:
+        at most ``retrieval.set_pool`` memories not judged yet, of those the
+        search reads (``reads``: its scope and run, history, tags, entity and
+        date windows, as the first call's).
+
+        The members of a set are the same kind of fact and filed under the same
+        topics (tags). So the topics that at least ``SET_SHARED`` of the first
+        ``size`` of the ranking carry are gathered, and every memory filed
+        under one of them (its newest ``SET_SCAN``) scores, over those topics,
+        how many of the first carry the topic over how many memories the topic
+        has in the scope searched: a small topic most of them share counts
+        most. The best are taken, a tie at the cut by the property ranking,
+        over the tied candidates the newest first (then by memory id) as many
+        as places are left and ``SET_TIE_MARGIN`` more (a tie of hundreds, one
+        topic's share, is not scored whole). Measured on the dense world's set
+        questions, those held 85 to 100% of each set within 100 candidates.
+
+        Where the topics give fewer than the budget (the first share none: an
+        untagged store, memories saved with ``infer=False`` or imported
+        verbatim), the rest are the unjudged memories nearest the ``members``
+        found in the first call (``_nearest_unjudged``, half by memory vector
+        and half by property vector): members of a set are the same kind of
+        fact, so their neighbours hold more of the rest of the set than the
+        ranking past the first does.
+        Only with no member to start from is the ranking past the first taken.
+        Either way the batch is ordered as the linked search orders (the
+        property similarity to ``asked``, to the power
+        ``relational_sharpness``, times aboutness)."""
+        budget = max(self.config.retrieval.set_pool, 0)
+        if not budget:
+            return []
+        reads = reads or _Reads(scope, include_invalid)
+        sharpness = self.config.retrieval.relational_sharpness
+
+        def linked_order(memory_ids: list[str]) -> dict[str, float]:
+            if asked is None or not memory_ids:
+                return dict.fromkeys(memory_ids, 0.0)
+            scores = self._linked_scores(asked, memory_ids, act, entities,
+                                         names_kept=names_kept)
+            return {mid: relevance ** sharpness * about
+                    for mid, (relevance, about) in scores.items()}
+
+        first = [r.memory.id for r in ranked[:size]]
+        done = set(first) | set(judged)
+        topics = self.backend.entities_of_memories(first, kind="topic")
+        carried = Counter(topic.id for mid in first for topic in topics.get(mid, []))
+        shared = [topic_id for topic_id, count in carried.items() if count >= SET_SHARED]
+        # how many memories each has where the search looks, as ``filed`` is read
+        sizes = self.backend.entity_memory_counts(
+            shared, scope=reads.scope, history=True, categories=reads.categories,
+            mentioning=reads.entity_id) if shared else {}
+        walk: dict[str, float] = defaultdict(float)
+        memories: dict[str, Memory] = {}
+        for topic_id in shared:
+            # what the search reads is kept to in SQL, before the newest SET_SCAN
+            filed = reads.entity_memories(self.backend, topic_id, SET_SCAN)
+            share = carried[topic_id] / max(sizes.get(topic_id, 0), len(filed), 1)
+            for memory in filed:
+                if memory.id in done:
+                    continue
+                memories[memory.id] = memory
+                walk[memory.id] += share
+        known = {r.memory.id: r for r in ranked}
+        order: dict[str, float] = {}
+        batch: list[SearchResult] = []
+        if walk:
+            # by the share, then the newest first, then by memory id: a key
+            # that costs nothing (each sort keeps the order of the one before)
+            best = sorted(walk)
+            best.sort(key=lambda mid: memories[mid].updated_at or "", reverse=True)
+            best.sort(key=lambda mid: -round(walk[mid], 9))
+            edge = round(walk[best[min(budget, len(best)) - 1]], 9)
+            # the candidates: all above the cut, and of those tied at it the
+            # first by that key, as many as places are left and a margin
+            # (SET_TIE_MARGIN), each scored once for the tie-break and the
+            # batch's order alike; a tie of hundreds is not scored whole
+            chosen = [mid for mid in best if round(walk[mid], 9) > edge]
+            tied = [mid for mid in best if round(walk[mid], 9) == edge]
+            tied = tied[: max(budget - len(chosen), 0) + SET_TIE_MARGIN]
+            order = linked_order(chosen + tied)
+            tied = sorted(tied, key=lambda mid: -order[mid])
+            best = chosen + tied[: max(budget - len(chosen), 0)]
+            batch = [known.get(mid) or SearchResult(memory=memories[mid], score=0.0)
+                     for mid in best]
+        if len(batch) < budget:
+            taken = done | {r.memory.id for r in batch}
+            rest = [known.get(m.id) or SearchResult(memory=m, score=0.0)
+                    for m in self._nearest_unjudged(members, taken, scope, include_invalid,
+                                                    budget - len(batch), reads=reads)]
+            if not batch and not rest:  # no member to start from
+                rest = [r for r in ranked[size:] if r.memory.id not in done][:budget]
+            order.update(linked_order([r.memory.id for r in rest]))
+            batch += rest
+        return sorted(batch, key=lambda r: -order[r.memory.id])
+
+    def _nearest_unjudged(
+        self, members: set[str], taken: set[str], scope: Scope, include_invalid: bool,
+        count: int, reads: _Reads | None = None,
+    ) -> list[Memory]:
+        """The ``count`` memories the search reads (``reads``, by default the
+        scope searched) nearest the members of a set found so far, none of
+        ``taken``: half by memory vector (the store's vector search from the
+        centroid of the members' vectors), half by property vector (the rest
+        of the ``SET_NEAREST`` nearest, ordered by their property similarity
+        to the centroid of the members'). Members of
+        a set are the same kind of fact ("It costs 21,000 euros"), so they sit
+        closer to each other than to the question. A memory vector also
+        follows the names in the text, and where the names weigh most the
+        nearest to one car's price are that car's insurance and test drive;
+        with the names read "it" the property vector keeps the kind of fact.
+        Empty with no member, or none with a vector of the embedder in use."""
+        if count <= 0 or not members:
+            return []
+        model = self.embedder.model_id
+        centre = _centre(list(self.backend.vectors_of(sorted(members), model).values()))
+        if centre is None:
+            return []
+        reads = reads or _Reads(scope, include_invalid)
+        hits = self.backend.vector_search(centre.tolist(), model, reads.scope,
+                                          limit=max(count, SET_NEAREST) + len(taken),
+                                          include_invalid=reads.include_invalid,
+                                          categories=reads.categories,
+                                          entity_id=reads.entity_id, history=True)
+        near = [memory for memory, _ in hits
+                if memory.id not in taken and reads.admits(memory)]
+        picked, rest = near[: count // 2], near[count // 2:]
+        keep = self.config.retrieval.property_dimensions
+        alike = _centre([v[: keep or len(v)]
+                         for v in self._property_vectors(sorted(members)).values()])
+        if alike is not None:
+            vectors = self._property_vectors([m.id for m in rest])
+            # a tie keeps the order of the memory vectors
+            rest.sort(key=lambda m: -_similarity(alike, vectors.get(m.id)))
+        return picked + rest[: count - len(picked)]
+
+    def _judged_relevance(
+        self, asked: str, memories: list[tuple[str, str]], meta: bool = True,
+    ) -> tuple[dict[str, float], float, float]:
+        """P(the memory answers the question) from the decision provider, for
+        (memory id, text) pairs, in one call. With ``meta``, also what kind of
+        question it is: P(it asks for one particular property rather than
+        everything about its entity) and P(it needs several memories: a
+        comparison, a list or a total). A memory the provider did not answer
+        for is left out; an unanswered meta question counts as a property
+        question with one answer."""
+        if not self.decider.available or not memories:
+            return {}, 1.0, 0.0
+        questions: dict[str, Noul] = {
+            f"m{i}": Noul(instructions="Someone who reads only this memory can answer the "
+                                       f"question. Memory: {text}")
+            for i, (_, text) in enumerate(memories)}
+        if meta:
+            questions["property"] = Noul(instructions="The question asks for one particular "
+                                                      "property or fact of it, not for "
+                                                      "everything about it.")
+            questions["several"] = Noul(instructions="The question needs several memories to "
+                                                     "be answered, such as a comparison, a "
+                                                     "list or a total.")
+        answers = self.decider.decide(f"QUESTION: {asked}", questions)
+        judged = {mid: float(answers[f"m{i}"].value) for i, (mid, _) in enumerate(memories)
+                  if answers[f"m{i}"].available}
+        if not meta:
+            return judged, 1.0, 0.0
+        specific, several = answers["property"], answers["several"]
+        return (judged, float(specific.value) if specific.available else 1.0,
+                float(several.value) if several.available else 0.0)
+
+    def _property_vectors(self, memory_ids: list[str]) -> dict[str, np.ndarray]:
+        """Property vectors, and the ordinary vector for a memory saved before
+        property vectors existed."""
+        vectors = self.backend.property_vectors_of(memory_ids, self._property_label())
+        missing = [mid for mid in memory_ids if mid not in vectors]
+        if missing:
+            vectors.update(self.backend.vectors_of(missing, self.embedder.model_id))
+        return vectors
+
+    def _property_label(self) -> str:
+        """The embedding model and length a property vector was stored at: a
+        vector of another model or length is not read, and is re-embedded."""
+        return f"{self.embedder.model_id}#{self.config.retrieval.property_dimensions or 'all'}"
+
+    def _masked_texts(
+        self, contents: dict[str, str], entities: dict[str, list[str]]
+    ) -> dict[str, str]:
+        """Each memory's text with every alias of its entities, and of the
+        things those belong to (``graph_retrieval.HOME_P``), read as "it".
+
+        ``entities`` holds named things only: a tag is not masked, and the
+        callers' lookups (``kind="named"``) leave tags out in SQL. "Spent 34
+        euros on groceries at Lidl" filed under "groceries" says "Spent 34
+        euros on groceries at it", since the tag is what the memory states,
+        not what it is about."""
+        homes = homes_of(self.backend, sorted({e for ids in entities.values() for e in ids}))
+        aliases: dict[str, list[str]] = {}
+        masked = {}
+        for memory_id, content in contents.items():
+            named = set(entities.get(memory_id, ()))
+            for entity_id in list(named):
+                named |= homes.get(entity_id, set())
+            for entity_id in named - aliases.keys():
+                aliases[entity_id] = self.backend.entity_aliases(entity_id)
+            masked[memory_id] = mask_names(
+                content, [n for entity_id in named for n in aliases[entity_id]])
+        return masked
+
+    def refresh_property_vectors(
+        self, *, user_id: str | None = None, memory_ids: list[str] | None = None
+    ) -> int:
+        """Embed the property vector of each valid memory whose masked text is
+        new, changed (a merge, a rename, a new home) or was embedded by another
+        model, in batches of 64. A memory whose masked text is its text gets no
+        row: search reads its ordinary vector, which is the same. With
+        ``memory_ids`` only those memories (a save, an edit, a merge or a
+        rename); otherwise every memory of the namespace that names an entity
+        or holds a row (the weekly upkeep, a backfill). Returns how many it
+        embedded."""
+        if not self.embedder.dimensions:
+            return 0
+        entities: dict[str, list[str]] = defaultdict(list)
+        if memory_ids is None:
+            scope = Scope(user_id=user_id)
+            for entity_id, memory_id in self.backend.entity_memory_links(scope, kind="named"):
+                entities[memory_id].append(entity_id)
+            listed = self.backend.list_memories(scope, limit=10_000_000)
+            # A memory whose last entity was removed names nothing now, but
+            # its row still reads the name as "it" until it is dropped here.
+            held = self.backend.property_vector_hashes([m.id for m in listed])
+            contents = {m.id: m.content for m in listed if m.id in entities or m.id in held}
+        else:
+            contents = {}
+            for memory_id in memory_ids:
+                memory = self.backend.get_memory(memory_id)
+                if memory is not None and memory.invalid_at is None:
+                    contents[memory_id] = memory.content
+                    entities[memory_id] = [
+                        e.id for e in self.backend.entities_of_memory(memory_id, kind="named")]
+        masked = self._masked_texts(contents, entities)
+        stored = self.backend.property_vector_hashes(list(masked))
+        model = self._property_label()
+        keep = self.config.retrieval.property_dimensions
+        unmasked = [mid for mid, text in masked.items() if text == contents[mid] and mid in stored]
+        if unmasked:
+            self.backend.delete_property_vectors(unmasked)
+        due = [(mid, text) for mid, text in masked.items()
+               if text != contents[mid] and stored.get(mid) != (_text_hash(text), model)]
+        embedded = 0
+        for start in range(0, len(due), 64):
+            batch = due[start:start + 64]
+            vectors = self.embedder.embed([text for _, text in batch])
+            rows = {mid: _cut(vector, keep) for (mid, _), vector in zip(batch, vectors) if vector}
+            self.backend.set_property_vectors(
+                rows, model, {mid: _text_hash(text) for mid, text in batch if mid in rows})
+            embedded += len(rows)
+        return embedded
+
+    def _is_hub(self, entity_id: str) -> bool:
+        """Whether an entity counts as one a query can name: a hub by the
+        structure rules, so a stray phrase stored as an entity ("go",
+        "upkeep") does not decide what a search is about."""
+        entity = self.backend.get_entity(entity_id)
+        if entity is None or entity.entity_type == TOPIC_TYPE:
+            return False  # a tag's word in a question never makes it the subject
+        return is_hub(entity.entity_type, self.backend.count_entity_memories(entity_id),
+                      len(self.backend.relations_of([entity_id])),
+                      (entity.metadata or {}).get("screen"))
 
     def reconstruct_context(
         self,
@@ -1375,18 +2590,33 @@ class MemoryStore:
         user_id: str | None = None,
         agent_id: str | None = None,
         run_id: str | None = None,
-        token_budget: int = 1200,
+        token_budget: int = CONTEXT_TOKENS,
         limit: int = 20,
     ) -> ContextResult:
-        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        """The memories found for ``query`` that fit ``token_budget``, rendered
+        for a model (``intelligence.context``), after the descriptions of the
+        entities the query names (``described_entities``, within
+        ``context.description_budget``). The memories that fit take the budget
+        but a share for their evidence (``retrieval.evidence_tokens``, at most
+        half of what is left), and their source turns that best match the
+        query fill that share (``evidence``)."""
         results = self.search(
-            query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit
+            query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit,
+            evidence=False,
         )
-        entity_text, entity_memory_ids = self._entity_context(
-            scope, query, token_budget=min(300, max(80, token_budget // 4))
+        entities = self.described_entities(
+            query, user_id=user_id, agent_id=agent_id, run_id=run_id,
+            token_budget=description_budget(token_budget),
         )
+        entity_text = entities_text(entities)
+        entity_memory_ids = [memory.id for entity in entities
+                             for memory in self.backend.entity_memories(entity.id, limit=20)]
         remaining = max(0, token_budget - estimate_tokens(entity_text))
-        memory_context = build_context(results, token_budget=remaining)
+        share = min(max(self.config.retrieval.evidence_tokens, 0), remaining // 2)
+        shown = fitting(results, remaining - share)
+        turns = self.evidence(query, shown, user_id=user_id, agent_id=agent_id,
+                              run_id=run_id, token_budget=share)
+        memory_context = build_context(shown, token_budget=remaining, evidence=turns)
         parts = [part for part in (entity_text, memory_context.text) if part]
         combined = "\n\n".join(parts)
         memory_ids = list(dict.fromkeys([*entity_memory_ids, *memory_context.memory_ids]))
@@ -1394,37 +2624,29 @@ class MemoryStore:
             text=combined,
             memory_ids=memory_ids,
             token_estimate=estimate_tokens(combined) if combined else 0,
+            episode_ids=memory_context.episode_ids,
         )
 
-    def _entity_context(
-        self, scope: Scope, query: str, *, token_budget: int
-    ) -> tuple[str, list[str]]:
-        entity_ids = detect_query_entities(self.backend, scope, query)[:3]
-        if not entity_ids:
-            return "", []
-        header = "## Known entities (memry)\n"
-        used = estimate_tokens(header)
-        lines: list[str] = []
-        memory_ids: list[str] = []
-        for entity_id in entity_ids:
-            entity = self._refresh_entity_description(entity_id)
-            if entity is None or not entity.description:
-                continue
-            label = entity.name
-            if entity.entity_type:
-                label += f" ({entity.entity_type})"
-            line = f"- {label}: {entity.description}"
-            cost = estimate_tokens(line) + 1
-            if used + cost > token_budget:
-                continue
-            lines.append(line)
-            used += cost
-            memory_ids.extend(
-                memory.id for memory in self.backend.entity_memories(entity.id, limit=20)
-            )
-        if not lines:
-            return "", []
-        return header + "\n".join(lines), list(dict.fromkeys(memory_ids))
+    def described_entities(
+        self,
+        query: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        token_budget: int = description_budget(CONTEXT_TOKENS),
+    ) -> list[Entity]:
+        """The entities ``query`` names (the first three
+        ``detect_query_entities`` finds), each with its description, built
+        or rebuilt where it is stale (``_refresh_entity_description``), as
+        many as fit ``token_budget`` (``context.entities_fitting``): what
+        ``reconstruct_context`` shows before the memories, and what the
+        benchmark runner shows before its memory list. The default budget
+        is ``reconstruct_context``'s at its default."""
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        described = [self._refresh_entity_description(entity_id)
+                     for entity_id in detect_query_entities(self.backend, scope, query)[:3]]
+        return entities_fitting([e for e in described if e is not None], token_budget)
 
     def _resolve_entity_filter(
         self, entity_id: str | list[str]
@@ -1449,6 +2671,7 @@ class MemoryStore:
         user_id: str | None = None,
         agent_id: str | None = None,
         run_id: str | None = None,
+        kind: str = "named",
     ) -> dict[str, Any]:
         """Content-free aggregate graph over every active memory in scope.
 
@@ -1459,10 +2682,13 @@ class MemoryStore:
         that has a home is not a planet of its own: it rides along on its home
         as one of its ``parts``. Nothing is hidden for good, since all of this
         is recomputed from the memories each time.
+
+        With ``kind`` "any" every tag with an active memory is a planet too
+        (its topic entity): a tag is never a hub nor a home, so the rules
+        above are for named things only.
         """
         data = self.backend.knowledge_map(
-            Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        )
+            Scope(user_id=user_id, agent_id=agent_id, run_id=run_id), kind=kind)
         structure = self.entity_structure(user_id=user_id)
         nodes = data.get("entities") or []
         by_id = {node.get("entity_id"): node for node in nodes}
@@ -1474,6 +2700,9 @@ class MemoryStore:
                 info["memories"] >= 2 or entity_type == "person"))
 
         for node in nodes:
+            if node.get("entity_type") == TOPIC_TYPE:
+                planets.append(node)
+                continue
             info = structure.get(node.get("entity_id"))
             if not info or info.get("screened_out"):
                 continue
@@ -1496,7 +2725,8 @@ class MemoryStore:
             node["parts"] = mine[:24]
             node["part_count"] = len(mine)
         shown = {node["key"] for node in planets}
-        data["entity_names"] = len(nodes)
+        data["entity_names"] = sum(1 for node in nodes
+                                   if node.get("entity_type") != TOPIC_TYPE)
         data["entities"] = planets
         data["entity_edges"] = [
             edge for edge in data.get("entity_edges") or []
@@ -1511,9 +2741,14 @@ class MemoryStore:
         agent_id: str | None = None,
         run_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Category histogram over active memories, largest count first."""
+        """Category histogram over active memories, largest count first.
+
+        Each tag is a topic entity, counted by the active memories that
+        mention it. Counts are direct: a synthetic parent does not roll up the
+        memories of the tags under it, so tag abstraction, which reads this,
+        never sees a parent of its own making as a tag."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        indexed = self.backend.topic_counts(scope)
+        indexed = self.backend.topic_mention_counts(scope)
         if indexed is not None:
             return indexed
         counter: dict[str, int] = {}
@@ -1563,7 +2798,7 @@ class MemoryStore:
         when it is the 300th most common tag.
         """
         try:
-            counts = self.backend.direct_topic_counts(scope)
+            counts = self.backend.topic_mention_counts(_across_runs(scope))
         except Exception:
             return []
         if not counts:
@@ -1592,20 +2827,6 @@ class MemoryStore:
             if name not in chosen:
                 chosen.append(name)
         return chosen
-
-    def direct_categories(
-        self, *, user_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Histogram over tags attached straight to memories, no parent rollup.
-
-        ``categories()`` rolls descendants up into their parents, which is what
-        the Knowledge UI and parent filtering want. Abstraction wants the
-        opposite: if a system-generated parent appears in its own input, the
-        next run happily clusters ``liver health`` and ``weekly gym`` into
-        ``health`` and the useful level decays one run at a time.
-        """
-        direct = self.backend.direct_topic_counts(Scope(user_id=user_id))
-        return direct if direct is not None else self.categories(user_id=user_id)
 
     def get_all(
         self,
@@ -1684,7 +2905,11 @@ class MemoryStore:
         if not _owned(old, owner_prefix):
             return None
         if categories is not None:
-            categories = clean_tags(categories)
+            # written as a save writes them (the column names the tags the
+            # memory is counted and filtered under), without retagging any
+            # other memory: the vocabulary-wide merge is the save's and upkeep's
+            [categories] = self._canonical_tags(
+                [clean_tags(categories)], old.scope(), merge_stored=False)
         entity_update: dict[str, Any] = {}
         if content is not None and content != old.content:
             entity_update = self._reanalyze_edited_entities(
@@ -1719,18 +2944,25 @@ class MemoryStore:
                     actor="user",
                 )
             )
+            self._property_vectors_after_save([memory_id])
         return updated
 
     def delete(
         self, memory_id: str, *, hard: bool = False, owner_prefix: str | None = None
     ) -> bool:
+        """Forget a memory (with ``hard``, delete it for good). A memory kept
+        as history (``models.HISTORY_KINDS``), which search still reads, is
+        forgotten as one in use is: search reads it no more, and it is listed
+        as forgotten, where it can be brought back or purged."""
         memory = self.backend.get_memory(memory_id)
         if not _owned(memory, owner_prefix):
             return False
         if hard:
-            ok = self.backend.delete_memory(memory_id)
-        else:
+            ok = self._delete_for_good(memory_id)
+        elif memory.invalid_at is None:
             ok = self.backend.invalidate_memory(memory_id) is not None
+        else:
+            ok = self.backend.forget_history(memory_id) is not None
         if ok:
             self.backend.add_event(
                 MemoryEvent(
@@ -1742,6 +2974,23 @@ class MemoryStore:
                 )
             )
         return ok
+
+    def _delete_for_good(self, memory_id: str) -> bool:
+        """Delete a memory for good (``MemoryBackend.delete_memory``). The
+        memories it had replaced (consolidated or distilled into it, or
+        contradicted or updated by it) have nothing standing in for them any
+        more: no pointer to it is left, and each is listed under Forgotten,
+        where it can be brought back, with why it is there."""
+        originals = self.backend.replaced_by(memory_id)
+        if not self.backend.delete_memory(memory_id):
+            return False
+        for original in originals:
+            self.backend.add_event(MemoryEvent(
+                memory_id=original.id, event="DELETE", old_content=original.content,
+                actor="system",
+                reason=f"The memory that had replaced it ({memory_id}) was deleted for good.",
+            ))
+        return True
 
     def forgotten(
         self,
@@ -1756,7 +3005,9 @@ class MemoryStore:
         Removed, not replaced: a memory that was superseded (reconciled away,
         consolidated, distilled) has ``superseded_by`` pointing at whatever took
         its place and is part of that memory's history, not something the user
-        threw out. Only records with nothing standing in for them belong here.
+        threw out. Only records with nothing standing in for them belong here,
+        which includes those whose replacement was deleted for good
+        (``_delete_for_good``).
         """
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         out: list[dict[str, Any]] = []
@@ -1876,20 +3127,27 @@ class MemoryStore:
         _, new, old = found
         if not (_owned(new, owner_prefix) and _owned(old, owner_prefix)):
             return False
+        # held back from an update (a change, or a MORE with no merged text):
+        # a confirmed replacement is an update's, which keeps the old one as
+        # history and which the Archive's undo reverses keeping both
+        # (``undo_replacement``)
+        update = _conflict_mark(new).get("kind") == "update"
         if decision == "accept":  # the new one is right
             self.backend.invalidate_memory(old.id, superseded_by=new.id)
             self.backend.add_event(MemoryEvent(
                 memory_id=old.id, event="SUPERSEDE", old_content=old.content,
                 new_content=new.content, actor="user",
-                reason=f"you confirmed that memory {new.id} replaces it",
+                reason=(f"you confirmed that memory {new.id} updates it" if update
+                        else f"you confirmed that memory {new.id} replaces it"),
+                kind="update" if update else "contradiction",
             ))
         elif decision == "decline":  # the old one is right
             self.backend.invalidate_memory(new.id)
             self.backend.add_event(MemoryEvent(
                 memory_id=new.id, event="DELETE", old_content=new.content,
                 actor="user",
-                reason=f"you judged it wrong: it contradicted memory {old.id}, "
-                       "which you kept",
+                reason=f"you judged it wrong: it {'updated' if update else 'contradicted'} "
+                       f"memory {old.id}, which you kept",
             ))
         else:  # both are true
             self.backend.add_event(MemoryEvent(
@@ -1908,12 +3166,17 @@ class MemoryStore:
     def replaced(
         self, *, user_id: str | None = None, limit: int = 200
     ) -> list[dict[str, Any]]:
-        """Memories a contradiction took out of use, newest first.
+        """Memories a contradiction or an update took out of use, newest
+        first; ``contradiction`` says which.
 
-        Only contradictions: a memory that was consolidated or distilled lives
-        on inside what replaced it, so there is nothing to undo. One that was
-        contradicted is the opposite case - the store stopped believing it on
-        one model's say-so - and that is the judgement worth a second look.
+        A memory that was consolidated or distilled lives on inside what
+        replaced it, so there is nothing to undo. One that was contradicted is
+        the opposite case - the store stopped believing it on one model's
+        say-so - and that is the judgement worth a second look. One an update
+        superseded (a change, a merged detail, or an addition with no merged
+        text written) held until then and stays searchable as history: if the
+        update was a mistake, its undo brings it back into use beside the
+        newer one.
         """
         scope = Scope(user_id=user_id)
         out: list[dict[str, Any]] = []
@@ -1929,7 +3192,10 @@ class MemoryStore:
                 ),
                 None,
             )
-            if event is None or not _is_contradiction(event):
+            if event is None:
+                continue
+            contradiction = _is_contradiction(event)
+            if not (contradiction or _is_update_supersede(event)):
                 continue
             out.append({
                 "memory": memory,
@@ -1937,6 +3203,7 @@ class MemoryStore:
                 "replacement": self.backend.get_memory(memory.superseded_by),
                 "reason": event.reason,
                 "actor": event.actor,
+                "contradiction": contradiction,
             })
         out.sort(key=lambda row: row["replaced_at"] or "", reverse=True)
         return out[:limit]
@@ -1945,11 +3212,14 @@ class MemoryStore:
         self, memory_id: str, *, keep_new: bool = False,
         owner_prefix: str | None = None,
     ) -> bool:
-        """Bring back a memory that a contradiction replaced.
+        """Bring back into use a memory that a contradiction or an update
+        replaced.
 
         ``keep_new`` leaves the replacement in use as well, for when both turn
         out to be true. Otherwise the replacement is forgotten - it goes to the
-        Archive like any deleted memory, so this is itself undoable.
+        Archive like any deleted memory, so this is itself undoable. The
+        replacement of an update never contradicted the memory and is always
+        kept.
         """
         memory = self.backend.get_memory(memory_id)
         if not _owned(memory, owner_prefix):
@@ -1961,7 +3231,9 @@ class MemoryStore:
              if e.event == "SUPERSEDE"),
             None,
         )
-        if event is None or not _is_contradiction(event):
+        if event is not None and _is_update_supersede(event):
+            keep_new = True  # the newer memory adds to it; both stay
+        elif event is None or not _is_contradiction(event):
             raise ValueError(
                 "this memory was merged into its replacement, not contradicted "
                 "by it; there is nothing to undo"
@@ -1999,7 +3271,7 @@ class MemoryStore:
             return False
         if memory.invalid_at is None:
             raise ValueError("only a forgotten memory can be permanently deleted")
-        return self.backend.delete_memory(memory_id)
+        return self._delete_for_good(memory_id)
 
     def delete_all(
         self,
@@ -2026,9 +3298,13 @@ class MemoryStore:
         run_id: str | None = None,
         include_merged: bool = False,
         limit: int = 100,
+        kind: str = "named",
     ) -> list[Entity]:
+        """Entities in scope: named things by default, tags (topic entities)
+        with ``kind="topic"``, both with ``kind="any"``."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        return self.backend.list_entities(scope, include_merged=include_merged, limit=limit)
+        return self.backend.list_entities(
+            scope, include_merged=include_merged, limit=limit, kind=kind)
 
     def relations(self, *, user_id: str | None = None, limit: int = 1000) -> list[Relation]:
         return self.backend.list_relations(Scope(user_id=user_id), limit=limit)
@@ -2079,6 +3355,10 @@ class MemoryStore:
         updated_at; this recomputes the true value as the time of the last
         content-changing event (ADD/UPDATE/SUPERSEDE), or created_at if there was
         none. Token-free; idempotent. Fixes recency and decay after such a run.
+
+        Times are compared as times (``later_ts``, ``same_ts``), as the write
+        path compares them: a replayed save's "...T10:00:00Z" is earlier than
+        a live "...T10:00:00.500000+00:00", though it sorts later as text.
         """
         fixed = 0
         for memory in self.get_all(user_id=user_id, include_invalid=True, limit=1_000_000):
@@ -2086,8 +3366,10 @@ class MemoryStore:
                 e.created_at for e in self.backend.history(memory.id)
                 if e.event in ("ADD", "UPDATE", "SUPERSEDE")
             ]
-            true_ts = max([memory.created_at, *times])
-            if true_ts != memory.updated_at:
+            true_ts = memory.created_at
+            for stamp in times:
+                true_ts = later_ts(true_ts, stamp)
+            if not same_ts(true_ts, memory.updated_at):
                 self.backend.set_memory_timestamp(memory.id, true_ts)
                 fixed += 1
         return {"fixed": fixed}
@@ -2170,13 +3452,16 @@ class MemoryStore:
                     summary["typed"] += 1
         return summary
 
-    def _confirm_candidate_whens(self, candidates: list[Any]) -> None:
+    def _confirm_candidate_whens(
+        self, candidates: list[Any], *, now: datetime | None = None
+    ) -> None:
         """Drop an extracted "when" the checks in intelligence/when.py do not
-        believe. The text model proposes a date; it is not taken at its word."""
+        believe. The text model proposes a date; it is not taken at its word.
+        ``now`` is the day of writing (the clock unless a save gave one)."""
         dated = [c for c in candidates if (c.metadata or {}).get(WHEN_KEY)]
         if not dated:
             return
-        today = utcnow()
+        today = now.isoformat(timespec="seconds") if now is not None else utcnow()
         kept = confirm_whens(
             self.decider,
             [{"content": c.content, "recorded_at": today} for c in dated],
@@ -2270,7 +3555,7 @@ class MemoryStore:
             )
         ):
             return entity
-        memories = self.backend.entity_memories(entity_id, limit=50)
+        memories = self.backend.entity_memories(entity_id, limit=DESCRIPTION_FACTS)
         description = synthesize_entity_description(
             self.llm,
             entity,
@@ -2333,10 +3618,23 @@ class MemoryStore:
     def rename_entity(
         self, entity_id: str, name: str, *, owner_prefix: str | None = None
     ) -> Entity | None:
-        """Rename the canonical entity while retaining its old name as an alias."""
+        """Rename the canonical entity while retaining its old name as an alias.
+
+        A tag (topic entity) is renamed as a tag: on every memory carrying it
+        (``rename_tag``), so its memories' ``categories`` say the new name.
+        Returned is the entity the tag went into: a new topic of that name,
+        the topic already named so, or, for a name merged away, its survivor
+        (``_merge_topics``)."""
         entity = self.backend.get_entity(entity_id)
         if not _owned(entity, owner_prefix) or not name.strip():
             return None
+        if entity.entity_type == TOPIC_TYPE:
+            tag = next(iter(clean_tags(name)), None)
+            if entity.merged_into is not None or tag is None:
+                return None
+            self._retag(entity.user_id, {entity.normalized}, tag, exact_user=True)
+            return self.backend.topic_entity(
+                tag.lower(), Scope(user_id=entity.user_id), create=False, follow_merged=True)
         return self.backend.rename_entity(entity_id, name)
 
     def merge_proposals(
@@ -2384,7 +3682,7 @@ class MemoryStore:
             return False
         if entity_a != entity_b and not self.backend.merge_entities(entity_a, entity_b):
             return False
-        self.backend.set_proposal_status(proposal_id, "confirmed")
+        self.backend.set_proposal_status(proposal_id, "confirmed", reason="confirmed by you")
         return True
 
     def reject_merge(
@@ -2442,12 +3740,18 @@ class MemoryStore:
 
         Retired, not deleted: the name lands in Upkeep > Archive with its
         mentions, aliases and relations kept, so a removal made in error - by
-        the user or by an automatic pass - can be taken back.
+        the user or by an automatic pass - can be taken back. Its memories'
+        property vectors read its names as names again at once (``_retire``).
         """
         removed = 0
         for entity_id in entity_ids:
-            if _owned(self.backend.get_entity(entity_id), owner_prefix):
-                removed += int(self.backend.retire_entity(entity_id, reason))
+            entity = self.backend.get_entity(entity_id)
+            # A tag is removed from its memories on the tag page (delete_tag);
+            # retiring its entity alone would leave the memories filed under it.
+            if entity is not None and entity.entity_type == TOPIC_TYPE:
+                continue
+            if _owned(entity, owner_prefix):
+                removed += int(self._retire(entity_id, reason))
         return removed
 
     def retired_entities(
@@ -2459,7 +3763,9 @@ class MemoryStore:
     def restore_entities(
         self, entity_ids: list[str], *, owner_prefix: str | None = None
     ) -> int:
-        """Bring retired entities back, with the evidence that still exists."""
+        """Bring retired entities back, with the evidence that still exists
+        (``MemoryBackend.restore_entity``), each then met as a save meets a
+        name the store has (``_meet_namesakes``)."""
         owners = {
             row["entity_id"]: row.get("user_id")
             for row in self.backend.list_retired_entities(Scope(), limit=1_000_000)
@@ -2470,8 +3776,83 @@ class MemoryStore:
                 continue
             if not _owned(_Owner(owners[entity_id]), owner_prefix):
                 continue
-            restored += int(self.backend.restore_entity(entity_id))
+            if self.backend.restore_entity(entity_id):
+                restored += 1
+                self._meet_namesakes(entity_id)
         return restored
+
+    def _meet_namesakes(self, entity_id: str) -> None:
+        """A restored entity and the entities that took its name while it was
+        gone (a save named it, found no entity and made one), treated as at
+        save: with a calibrated judge each is a pair the funnel compares, at
+        once when the judge is quick enough to ask inside a save
+        (``Decider.rejudges_on_new_evidence``) and otherwise in the weekly
+        pass; without one, two of one name are joined by rule
+        (``entities.resolve_open_proposals``). Left alone, the two stood
+        side by side with no pair between them. A pair the snapshot brought
+        back, kept apart by a person, stays apart. A failure never fails the
+        restore: the weekly pass pairs them."""
+        entity = self.backend.get_entity(entity_id)
+        if entity is None or entity.entity_type == TOPIC_TYPE or not entity.normalized:
+            return
+        scope = Scope(user_id=entity.user_id)
+        try:
+            pairs: set[str] = set()
+            for other in self.backend.find_entity_candidates(entity.normalized, scope):
+                if other.id == entity.id:
+                    continue
+                proposal = self.backend.find_proposal(entity.id, other.id)
+                if proposal is None:
+                    # the restored one first: a merge the judge decides keeps it
+                    proposal = self.backend.add_proposal(MergeProposal(
+                        entity_a=entity.id, entity_b=other.id, user_id=entity.user_id,
+                        confidence=0.5, reason="not yet compared"))
+                if proposal.status == "proposed":
+                    pairs.add(proposal.id)
+            # a judge too slow to ask inside a save compares them weekly
+            slow = judges_pairs(self.decider) and not self.decider.rejudges_on_new_evidence
+            if pairs and not slow:
+                resolve_open_proposals(backend=self.backend, decider=self.decider,
+                                       scope=scope, proposal_ids=pairs)
+        except Exception as exc:  # a provider hiccup must not fail a restore
+            log.warning("a restored name was not met with its namesakes: %s", exc)
+
+    def merges(self, *, user_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        """Merges of two entities that can be undone, newest first, with what
+        decided each."""
+        return self.backend.list_merges(Scope(user_id=user_id), limit=limit)
+
+    def undo_merge(
+        self, entity_id: str, *, owner_prefix: str | None = None
+    ) -> dict[str, Any]:
+        """Undo the merge of ``entity_id`` into another entity: both are as
+        they were before it, and their pair is kept apart ("undone by you"),
+        so no pass merges them again on the same evidence
+        (``MemoryBackend.undo_merge``, which also says where memories saved
+        since go). Refused, with the reason, when no merge of it is on record
+        or the kept entity was merged into another since: that merge is
+        undone first."""
+        record = self.backend.merge_record(entity_id)
+        if record is None or not _owned(_Owner(record["user_id"]), owner_prefix):
+            return {"undone": False, "reason": "no merge of this entity is on record"}
+        keep = self.backend.get_entity(record["keep_id"])
+        merged = self.backend.get_entity(entity_id)
+        if keep is None:
+            return {"undone": False,
+                    "reason": "the entity it was merged into was removed: restore that first"}
+        if keep.merged_into is not None:
+            later = self.backend.get_entity(self.backend.resolve_entity_id(keep.id) or "")
+            return {"undone": False, "reason": (
+                f'"{keep.name}" was merged into "{later.name if later else keep.merged_into}" '
+                "since: undo that merge first")}
+        if merged is None or merged.merged_into != keep.id:
+            return {"undone": False, "reason": "it is no longer merged into that entity"}
+        if not self.backend.undo_merge(entity_id):
+            return {"undone": False, "reason": "it changed while being undone: try again"}
+        if (merged.metadata or {}).get("owner"):
+            # the store owner was merged away: it is the owner again
+            self._upkeep_set("owner_entity", merged.user_id, entity_id)
+        return {"undone": True, "entity_id": entity_id, "keep_id": keep.id}
 
     def remove_entity_preserving_tag(
         self, entity_id: str, *, owner_prefix: str | None = None
@@ -2480,6 +3861,9 @@ class MemoryStore:
         entity = self.backend.get_entity(entity_id)
         if not _owned(entity, owner_prefix):
             return {"removed": 0, "tagged": 0, "tag": None}
+        if entity.entity_type == TOPIC_TYPE:
+            # already a tag, and nothing but one: there is nothing to remove
+            return {"removed": 0, "tagged": 0, "tag": entity.name}
 
         memories = [
             memory
@@ -2501,7 +3885,7 @@ class MemoryStore:
                         continue
                 tagged += 1
 
-        removed = int(self.backend.retire_entity(
+        removed = int(self._retire(
             entity_id,
             "removed by you, name kept as a tag" if preserve else "removed by you",
         ))
@@ -2514,7 +3898,12 @@ class MemoryStore:
     def merge_entities(
         self, keep_id: str, merge_id: str, *, owner_prefix: str | None = None
     ) -> bool:
-        """Idempotent direct merge outside of a proposal."""
+        """Idempotent direct merge outside of a proposal.
+
+        Two tags merge as tags, so the memories of the one folded in are
+        filed under the one kept (``_fold_topic``: by id, whatever the kept
+        topic's stored name). A tag and a named thing fold into the thing
+        (``MemoryBackend.merge_entities``)."""
         keep_root = self.backend.resolve_entity_id(keep_id)
         merge_root = self.backend.resolve_entity_id(merge_id)
         if keep_root is None or merge_root is None:
@@ -2524,7 +3913,54 @@ class MemoryStore:
             for entity_id in (keep_root, merge_root)
         ):
             return False
-        return self.backend.merge_entities(keep_root, merge_root)
+        keep, other = self.backend.get_entity(keep_root), self.backend.get_entity(merge_root)
+        if (
+            keep is not None and other is not None and keep_root != merge_root
+            and keep.entity_type == TOPIC_TYPE and other.entity_type == TOPIC_TYPE
+        ):
+            merged = self._fold_topic(keep, other)
+        else:
+            merged = self.backend.merge_entities(keep_root, merge_root)
+        if merged and keep_root != merge_root:
+            self._record_merged_by_you(keep_root, merge_root)
+        return merged
+
+    def _record_merged_by_you(self, keep_id: str, merge_id: str) -> None:
+        """Record on the pair of the two that a person merged them, where the
+        merge history reads what decided a merge: on their pair, open or
+        decided before, or on a new one."""
+        proposal = self.backend.find_proposal(keep_id, merge_id)
+        if proposal is not None:
+            self.backend.set_proposal_status(proposal.id, "confirmed", reason="merged by you")
+            return
+        entity = self.backend.get_entity(keep_id)
+        self.backend.add_proposal(MergeProposal(
+            entity_a=keep_id, entity_b=merge_id, user_id=entity.user_id if entity else None,
+            status="confirmed", confidence=1.0, reason="merged by you", decided_at=utcnow()))
+
+    def _fold_topic(self, keep: Entity, other: Entity) -> bool:
+        """Merge the tag ``other`` into the tag ``keep``, both active topic
+        entities: ``other`` folds into ``keep`` by id, then every column
+        naming ``other`` names ``keep`` (``retag_topics``), under ``keep``'s
+        name as stored. That name is not cleaned again (``clean_tags``): one
+        it would refuse (over ``TAG_MAX_LENGTH``, brackets, commas, as older
+        imports and the migration left them) stays the topic's name, where a
+        cleaned name made the merge a delete of ``other`` or a refile under
+        a fresh topic. Everything is checked before the fold, the first
+        write, and the columns are rewritten only after it, so a merge
+        refused changes nothing."""
+        if (
+            keep.user_id != other.user_id
+            or keep.merged_into is not None or other.merged_into is not None
+            or not keep.normalized.strip() or not other.normalized.strip()
+        ):
+            return False
+        if not self.backend.merge_entities(keep.id, other.id):
+            return False
+        scope = Scope(user_id=keep.user_id)
+        self.backend.retag_topics(scope, {other.normalized}, keep.normalized, exact_user=True)
+        self.backend.delete_synthetic_tag(scope, other.normalized)
+        return True
 
     # -- the store owner ----------------------------------------------------
     def set_owner_name(self, user_id: str | None, name: str) -> None:
@@ -2553,22 +3989,36 @@ class MemoryStore:
             entity = entity.model_copy(update={"metadata": metadata})
         return entity
 
-    def owner_name(self, user_id: str | None) -> str:
-        """The name the extractor lists the owner under: the owner entity's,
-        else the account's, else "the user"."""
+    def owner_name(
+        self, user_id: str | None, messages: list[dict[str, str]] | None = None
+    ) -> str | None:
+        """The name the extractor lists the owner of ``messages`` under: the
+        owner entity's, else the account's, else "the user". Without a real
+        name, "the user" is the owner only of a conversation with the user
+        (``speaks_with_the_user``; no ``messages`` asks about one): where the
+        speakers are named it would be one of them, so there is none (None)."""
         entity = self.owner_entity(user_id)
-        if entity is not None:
-            return entity.name
-        return self._upkeep_get("owner_name", user_id, None) or "the user"
+        name = entity.name if entity is not None else self._upkeep_get(
+            "owner_name", user_id, None)
+        if name and name.strip().casefold() != OWNER_PLACEHOLDER:
+            return name
+        if messages is not None and not speaks_with_the_user(messages):
+            return None
+        return name or OWNER_PLACEHOLDER
 
-    def _owner_for(self, scope: Scope, surfaces: list[str]) -> Entity | None:
-        """The owner entity, created when these extracted names first include
-        the owner's. It belongs to the whole namespace, not to one run."""
+    def _owner_for(
+        self, scope: Scope, surfaces: list[str],
+        messages: list[dict[str, str]] | None = None,
+    ) -> Entity | None:
+        """The owner entity, created when these extracted names, from
+        ``messages``, first include the owner's (``owner_name``). It belongs to
+        the whole namespace, not to one run."""
         owner = self.owner_entity(scope.user_id)
         if owner is not None:
             return owner
-        name = self.owner_name(scope.user_id)
-        if not any(str(s).strip().casefold() == name.casefold() for s in surfaces):
+        name = self.owner_name(scope.user_id, messages)
+        if name is None or not any(
+                str(s).strip().casefold() == name.casefold() for s in surfaces):
             return None
         owner = self.backend.insert_entity(Entity(
             name=name, normalized=name.lower(), entity_type="person",
@@ -2599,7 +4049,7 @@ class MemoryStore:
             owner=self.owner_entity(user_id),
         )
         outcome = resolve_open_proposals(
-            backend=self.backend, llm=self.llm, decider=self.decider, scope=scope
+            backend=self.backend, decider=self.decider, scope=scope
         )
         outcome["proposed"] = proposed
         outcome["purged"] = self.backend.purge_orphan_entities(
@@ -2620,6 +4070,15 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # tag abstraction
     # ------------------------------------------------------------------
+    def tags_to_topics(
+        self, *, user_id: str | None = None, all_users: bool = True, dry_run: bool = False
+    ) -> list[dict[str, Any]]:
+        """Give every tag of the legacy ``topics`` table its topic entity and
+        every ``memory_topics`` link its mention, user by user; see
+        ``LocalBackend.tags_to_topics``. Idempotent; ``dry_run`` only counts."""
+        return self.backend.tags_to_topics(
+            user_id=user_id, all_users=all_users, dry_run=dry_run)
+
     def synthetic_tags(self, *, user_id: str | None = None) -> list[SyntheticTag]:
         """The higher-level tags the system invented for this namespace."""
         return self.backend.list_synthetic_tags(Scope(user_id=user_id))
@@ -2635,7 +4094,7 @@ class MemoryStore:
         if not self.llm.available:
             summary["skipped"] = "no LLM configured"
             return summary
-        histogram = self.direct_categories(user_id=user_id)
+        histogram = self.categories(user_id=user_id)
         if len(histogram) < cfg.min_tags:
             summary["skipped"] = f"only {len(histogram)} tags (< {cfg.min_tags})"
             self._stamp_tag_run(user_id)
@@ -2708,20 +4167,29 @@ class MemoryStore:
         judge and ``judge`` set, the tags it puts at its tag merge threshold
         (identity.py). Each tag pair's funnel step is stored, so a pair is
         compared when found and once more at 10 memories a tag, not on every
-        pass."""
+        pass.
+
+        Tags are topic entities of one user, so a merge is theirs whole:
+        ``agent_id`` and ``run_id`` narrow which memories are counted, not
+        which are rewritten. Each merge folds the variant's topic entity into
+        the canonical one and rewrites the ``categories`` column
+        (``_merge_topics``)."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        categories = self.categories(
-            user_id=user_id, agent_id=agent_id, run_id=run_id
-        )
-        groups = obvious_canonical_merges(categories)
+
+        def counted() -> list[dict[str, Any]]:
+            rows = self.backend.topic_mention_counts(scope, exact_user=True)
+            return rows if rows is not None else self.categories(
+                user_id=user_id, agent_id=agent_id, run_id=run_id)
+
+        groups = obvious_canonical_merges(counted())
         changed = 0
         for group in groups:
             remove = set(group["variants"]) - {group["canonical"]}
-            result = self.backend.retag_topics(scope, remove, group["canonical"])
-            changed += result or 0
+            changed += self._merge_topics(
+                user_id, remove, group["canonical"], exact_user=True) or 0
         judged: list[dict[str, Any]] = []
         if judge and judges_pairs(self.decider):
-            tags = self.categories(user_id=user_id, agent_id=agent_id, run_id=run_id)
+            tags = counted()
             compared = self._upkeep_get("tag_pairs", user_id, {})
             judged = judged_tag_merges(
                 self.decider, tags, self._entities_named(scope, tags),
@@ -2734,8 +4202,72 @@ class MemoryStore:
             self._upkeep_set("tag_pairs", user_id, compared)
             for group in judged:
                 remove = set(group["variants"]) - {group["canonical"]}
-                changed += self.backend.retag_topics(scope, remove, group["canonical"]) or 0
+                changed += self._merge_topics(
+                    user_id, remove, group["canonical"], exact_user=True) or 0
         return {"groups_merged": len(groups) + len(judged), "memories_changed": changed}
+
+    def _merge_topics(
+        self, user_id: str | None, remove: set[str], into: str | None, *,
+        exact_user: bool = False,
+    ) -> int:
+        """Merge tags the way entities merge: each tag in ``remove`` that is an
+        active topic entity of ``user_id`` is folded into the topic entity of
+        ``into`` (``MemoryBackend.merge_entities``: its mentions move, its id
+        redirects), then the ``categories`` column is rewritten
+        (``retag_topics``), which files every rewritten memory's tags again.
+        ``into`` None drops the tags. Returns how many memories changed, or
+        None when the backend keeps no tag index.
+
+        ``into`` is read as a column files it (``MemoryBackend.tag_filing``):
+        a name merged away means its survivor, never a fresh topic of a
+        retired name. After "tax" went into "levies", merging "taxes" into
+        "tax" merges it into "levies"; after "bildy" the tag went into
+        "Bildy" the product, merging "bildy app" into "bildy" folds it into
+        the product. The names merged away resolve among the active topics
+        only, never through a tombstone: a name merged away before names
+        nothing to merge again ("taxes" into "tax", then "taxes" into
+        "levies" leaves "tax" alone). When ``into`` names no topic at all it
+        gets one of its own and the others fold into it, so every name merged
+        away keeps its tombstone; one tag folded into a new name is a rename,
+        and the new topic takes over the old one's description and metadata
+        (``_carry_renamed_topic``)."""
+        scope = Scope(user_id=user_id)
+        wanted = {str(tag).strip().lower() for tag in remove if str(tag).strip()}
+        target = str(into).strip().lower() if into and str(into).strip() else None
+        if target is not None:
+            target = self.backend.tag_filing([target], scope).get(target, target)
+            variants = [
+                other for other in (
+                    self.backend.topic_entity(tag, scope, create=False)
+                    for tag in sorted(wanted - {target})
+                )
+                if other is not None
+            ]
+            if variants:
+                # the active topic of that name, or the named thing a tag of
+                # that name went into
+                keep = self.backend.topic_entity(target, scope, create=False,
+                                                 follow_merged=True)
+                fresh = keep is None
+                if keep is None:
+                    keep = self.backend.topic_entity(target, scope)
+                for other in variants:
+                    if keep is not None and other.id != keep.id:
+                        self.backend.merge_entities(keep.id, other.id)
+                if fresh and keep is not None and len(variants) == 1:
+                    self._carry_renamed_topic(variants[0], keep)
+        return self.backend.retag_topics(scope, wanted, target, exact_user=exact_user)
+
+    def _carry_renamed_topic(self, old: Entity, new: Entity) -> None:
+        """A renamed tag's topic entity (``new``, made for the new name) takes
+        over what the old one (``old``, now a tombstone pointing to it) had:
+        its description with the time it was written, since the tag files the
+        same memories, and its metadata, with ``renamed_from`` naming the old
+        id, so a reference stored under it can be followed."""
+        self.backend.set_entity_metadata(new.id, {**old.metadata, "renamed_from": old.id})
+        if old.description:
+            self.backend.set_entity_description(
+                new.id, old.description, old.description_updated_at)
 
     def _entities_named(
         self, scope: Scope, tags: list[dict[str, Any]]
@@ -2864,7 +4396,11 @@ class MemoryStore:
         embedding = (
             self.embedder.embed([content])[0] if self.embedder.dimensions else None
         )
+        if embedding:
+            # vector search reads only vectors labelled with the current model
+            merged.embedding_model = self.embedder.model_id
         stored = self.backend.insert_memory(merged, embedding=embedding)
+        self._carry_mentions(stored.id, [m.id for m in memories])
         self.backend.add_event(MemoryEvent(
             memory_id=stored.id, event="ADD", new_content=content,
             reason=f"consolidated {len(memories)} duplicate memories",
@@ -2875,9 +4411,45 @@ class MemoryStore:
             self.backend.add_event(MemoryEvent(
                 memory_id=memory.id, event="SUPERSEDE",
                 old_content=memory.content, new_content=content,
-                reason=f"consolidated into {stored.id}",
+                reason=f"consolidated into {stored.id}", kind="consolidation",
             ))
         return stored.id
+
+    def _carry_mentions(self, memory_id: str, originals: list[str]) -> None:
+        """The entities its originals mention, onto a consolidated memory, so
+        it stays on those entities' pages and in their links."""
+        seen: set[str] = set()
+        for original in originals:
+            for entity in self.backend.entities_of_memory(original):
+                if entity.id not in seen:
+                    seen.add(entity.id)
+                    self.backend.add_mention(EntityMention(
+                        entity_id=entity.id, memory_id=memory_id, surface=entity.name))
+
+    def repair_consolidated(self, *, user_id: str | None = None) -> dict[str, int]:
+        """Memories consolidated before the merge kept their vector's model and
+        their originals' mentions: re-embed those stored without a model (the
+        model that made them is unknown) and give back the mentions."""
+        scope = Scope(user_id=user_id)
+        embedded = 0
+        unlabelled = self.backend.unlabelled_vector_ids(scope)
+        if unlabelled and self.embedder.dimensions:
+            memories = [m for m in (self.backend.get_memory(i) for i in unlabelled) if m]
+            for start in range(0, len(memories), 64):
+                batch = memories[start:start + 64]
+                for memory, vector in zip(batch, self.embedder.embed([m.content for m in batch])):
+                    if vector:
+                        self.backend.update_memory(
+                            memory.id, embedding=vector,
+                            embedding_model=self.embedder.model_id, touch=False)
+                        embedded += 1
+        mentioned = 0
+        for memory in self.backend.consolidated_memories(scope):
+            originals = (memory.metadata or {}).get("consolidated_from") or []
+            if originals and not self.backend.entities_of_memory(memory.id):
+                self._carry_mentions(memory.id, list(originals))
+                mentioned += bool(self.backend.entities_of_memory(memory.id))
+        return {"re_embedded": embedded, "mentions_restored": mentioned}
 
     def semantic_tag_duplicates(
         self, *, user_id: str | None = None, threshold: float = 0.93
@@ -2890,7 +4462,7 @@ class MemoryStore:
         excludes memories the question needed.
         """
         scope = Scope(user_id=user_id)
-        links = self.backend.topic_memory_ids(scope)
+        links = self.backend.topic_mention_links(scope)
         if not links:
             return []
         vectors = dict(self.backend.memory_vectors(scope, limit=1_000_000))
@@ -2948,9 +4520,9 @@ class MemoryStore:
         vectors already stored.
         """
         scope = Scope(user_id=user_id)
-        counts = self.backend.direct_topic_counts(scope) or []
+        counts = self.backend.topic_mention_counts(scope) or []
         total = len(self.get_all(user_id=user_id, limit=1_000_000))
-        tagged = len({mid for _, mid in (self.backend.topic_memory_ids(scope) or [])})
+        tagged = len({mid for _, mid in (self.backend.topic_mention_links(scope) or [])})
         singles = sum(1 for row in counts if row.get("count") == 1)
         splits = self.semantic_tag_duplicates(user_id=user_id)
         return {
@@ -2969,10 +4541,12 @@ class MemoryStore:
     def suggest_tag_merges(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
         """Suggest duplicate tags: spelling variants, then synonyms, then splits.
 
-        Three detectors, cheapest first, each catching what the previous cannot:
-        deterministic inflection, an LLM synonym pass, and vector-centroid
-        overlap for the near-synonyms that share no words ("liver bloods" beside
-        "liver lab results").
+        Detectors, cheapest first, each catching what the previous cannot:
+        deterministic inflection, an LLM synonym pass, vector-centroid overlap
+        for the near-synonyms that share no words ("liver bloods" beside "liver
+        lab results"), and, with a calibrated judge, the tag question.
+
+        Nothing is merged here; every group waits for the person to apply it.
         """
         tags = self.categories(user_id=user_id)
         proposals = suggest_canonical_merges(self.llm, tags)
@@ -2981,18 +4555,25 @@ class MemoryStore:
             if not seen.intersection(pair["variants"]):
                 proposals.append(pair)
                 seen.update(pair["variants"])
-        # A fourth pass for the synonyms the three above miss. Suggestion only:
-        # every one of these still needs confirming under Upkeep.
+        # The synonyms the passes above miss, by the question tags merge by
+        # (identity.TAG_QUESTION: each tag shown with its 10 most recent
+        # memories, both orders, at the judge's tag merge bar), asked about
+        # every pair of the tags left, when at most 20 are left. The names
+        # alone read two subjects as one: "memry" as a typo of "memory" (0.98).
         names = [str(t["category"]).strip().lower() for t in tags]
         names = [n for n in names if n and n not in seen]
         candidates = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
-        if candidates and len(candidates) <= 200:
-            for a, b in judge_tag_pairs(self.decider, candidates):
-                if a in seen or b in seen:
-                    continue
-                proposals.append({"canonical": a, "variants": [a, b],
-                                  "reason": f"{self.decider.name}: same meaning"})
-                seen.update({a, b})
+        if candidates and len(candidates) <= 200 and judges_pairs(self.decider):
+            scope = Scope(user_id=user_id)
+            for group in judged_tag_merges(
+                self.decider, tags, self._entities_named(scope, tags),
+                lambda tag: [m.content for m in self.get_all(
+                    user_id=user_id, categories=[tag], limit=TAG_EXAMPLES)],
+                pairs=candidates,
+            ):
+                if not seen.intersection(group["variants"]):
+                    proposals.append(group)
+                    seen.update(group["variants"])
         return proposals
 
     # -- manual tag curation -----------------------------------------------
@@ -3006,14 +4587,24 @@ class MemoryStore:
         return self._retag(user_id, remove, to.strip().lower())
 
     def delete_tag(self, tag: str, *, user_id: str | None = None) -> int:
-        """Remove a tag from every memory (the memories stay)."""
+        """Remove a tag from every memory (the memories stay). Its topic
+        entity is retired with its last mention (``retag_topics``), so no
+        active tag is left with nothing filed under it."""
         return self._retag(user_id, {tag.strip().lower()}, None)
 
     def _retag(
-        self, user_id: str | None, remove: set[str], add: str | None
+        self, user_id: str | None, remove: set[str], add: str | None, *,
+        exact_user: bool = False,
     ) -> int:
         """Strip ``remove`` tags from matching memories and optionally add
-        ``add``, preserving the other tags and their original casing.
+        ``add``, preserving the other tags and their original casing. The
+        tags' topic entities merge with it (``_merge_topics``).
+
+        A topic entity belongs to one namespace, so the edit is made one
+        namespace at a time: ``user_id``'s, or, with ``user_id`` None (an
+        admin's edit, ``exact_user`` unset), every namespace that carries one
+        of the tags (``MemoryBackend.tag_namespaces``), each in full: its
+        entities, mentions, a renamed topic's description, its columns.
 
         Once a tag is curated by hand its synthetic marker is dropped: the tag
         is now the user's, not the system's guess.
@@ -3021,12 +4612,20 @@ class MemoryStore:
         remove = {r for r in remove if r}
         if not remove:
             return 0
-        if add is not None:
-            # The new name is a tag like any other, so it is held to the same
-            # shape; one that cleans away to nothing is a plain removal.
+        if user_id is None and not exact_user:
+            namespaces = self.backend.tag_namespaces(remove)
+            if namespaces is not None:
+                return sum(self._retag(namespace, remove, add, exact_user=True)
+                           for namespace in namespaces)
+        if add is not None and self.backend.topic_entity(
+                add, Scope(user_id=user_id), create=False) is None:
+            # A new name is a tag like any other, so it is held to the same
+            # shape; one that cleans away to nothing is a plain removal. The
+            # name of a tag that exists is taken as stored, even one a new
+            # tag could not have (``_fold_topic``).
             add = next(iter(clean_tags(add)), None)
         scope = Scope(user_id=user_id)
-        indexed = self.backend.retag_topics(scope, remove, add)
+        indexed = self._merge_topics(user_id, remove, add, exact_user=exact_user)
         if indexed is not None:
             for tag in remove:
                 self.backend.delete_synthetic_tag(scope, tag)
@@ -3055,6 +4654,18 @@ class MemoryStore:
     _MAINTENANCE_KEYS = (
         "dedup_entities", "tag_abstraction", "durability", "consolidation", "structure",
     )
+    #: The passes a config switch gates, with why one is off while its
+    #: switch is: a stored toggle cannot turn such a pass on
+    #: (``maintenance_enabled``), "run now" says why it did not run
+    #: (``_pass_off_reason``) and the dashboard offers no toggle for it
+    #: (``pass_allowed``).
+    _CONFIG_GATES: dict[str, tuple[Callable[[Config], bool], str]] = {
+        # synthetic parent tags (MEMRY_TAG_ABSTRACTION)
+        "tag_abstraction": (lambda config: config.tags.enabled,
+                            "tag abstraction is off (MEMRY_TAG_ABSTRACTION)"),
+        "durability": (lambda config: config.decay.durability,
+                       "decay.durability is off (MEMRY_DURABILITY)"),
+    }
 
     #: How many memories one durability pass scores. Jev answers 128 questions
     #: in a single call, so the batch is bounded by prudence, not by cost.
@@ -3069,8 +4680,17 @@ class MemoryStore:
         delayed this morning" and "allergic to penicillin" the same because both
         are semantic. A per-fact estimate replaces that guess; anything still
         unscored keeps the old behaviour.
+
+        Off unless ``decay.durability`` is set, whoever asks (the scheduler,
+        "run now", the REST route). The score is housekeeping: it is written
+        without moving the memory's ``updated_at``, which drives recency and
+        decay age.
         """
         outcome: dict[str, Any] = {"scored": 0, "skipped": 0, "provider": self.decider.name}
+        if not self.pass_allowed("durability"):
+            outcome["skipped"] = -1
+            outcome["reason"] = self._pass_off_reason("durability")
+            return outcome
         if not self.decider.available:
             outcome["skipped"] = -1
             log.info("durability: no decision provider configured, nothing scored")
@@ -3091,7 +4711,7 @@ class MemoryStore:
                 continue
             metadata = dict(memory.metadata or {})
             metadata[DURABILITY_KEY] = round(score, 3)
-            self.backend.update_memory(memory.id, metadata=metadata)
+            self.backend.update_memory(memory.id, metadata=metadata, touch=False)
             outcome["scored"] += 1
         outcome["ms"] = round((time.time() - started) * 1000)
         log.info(
@@ -3101,14 +4721,28 @@ class MemoryStore:
         )
         return outcome
 
+    def pass_allowed(self, key: str) -> bool:
+        """Whether the config lets the pass run at all (``_CONFIG_GATES``): a
+        pass no switch gates always may."""
+        gate = self._CONFIG_GATES.get(key)
+        return gate is None or bool(gate[0](self.config))
+
+    def _pass_off_reason(self, key: str) -> str:
+        """Why a pass that is off (``maintenance_enabled``) is off."""
+        if not self.pass_allowed(key):
+            return self._CONFIG_GATES[key][1]
+        return "this pass is off; turn it on under Upkeep to run it"
+
     def maintenance_enabled(self, key: str) -> bool:
+        if not self.pass_allowed(key):
+            return False  # off by its config switch, whatever a toggle says
         override = self.backend.get_meta(f"maintenance:{key}:enabled")
         if override is not None:
             return override == "true"
         if key == "dedup_entities":
             return self.config.dedup_entities
         if key == "tag_abstraction":
-            return self.config.tags.enabled and self.llm.available
+            return self.llm.available
         if key == "durability":
             return self.decider.available
         if key == "consolidation":
@@ -3159,7 +4793,44 @@ class MemoryStore:
             for e in entities
         ]
         triples = [(r.subject, r.predicate, r.object) for r in relations]
-        return entities, nodes, links, triples
+        return entities, nodes, triples, self._judged_homes(scope)
+
+    def _held_apart(self, scope: Scope) -> list[tuple[str, str]]:
+        """Entity pairs the judge or a person held apart: a rejected proposal
+        (the judge's "apart", or a person's "keep separate"), or one whose
+        latest comparison gave P(different) at the judge's apart bar, which
+        waits before ``identity.APART_STEP`` without being rejected. The rule
+        ``entities.join_namesakes`` keeps, for the structure pass."""
+        bar = self.decider.pair_apart_probability
+        pairs: list[tuple[str, str]] = []
+        for status in ("rejected", "proposed"):
+            for proposal in self.backend.list_proposals(scope, status=status, limit=100_000):
+                if status == "proposed" and (proposal.different is None
+                                             or proposal.different < bar):
+                    continue
+                a = self.backend.resolve_entity_id(proposal.entity_a)
+                b = self.backend.resolve_entity_id(proposal.entity_b)
+                if a is not None and b is not None and a != b:
+                    pairs.append((a, b))
+        return pairs
+
+    def _judged_homes(self, scope: Scope) -> list[tuple[str, str, float]]:
+        """(child, parent, probability) for every compared pair the decision
+        provider answered is a version or a part, at ``BELONGS_BAR`` or above.
+        Kept on open and ruled-out pairs alike: a version is ruled out as the
+        same thing and still belongs to its thing."""
+        judged: list[tuple[str, str, float]] = []
+        for status in ("proposed", "rejected"):
+            for proposal in self.backend.list_proposals(scope, status=status, limit=100_000):
+                side, probability = belonging(proposal.belongs)
+                if side is None or probability < BELONGS_BAR:
+                    continue
+                a = self.backend.resolve_entity_id(proposal.entity_a)
+                b = self.backend.resolve_entity_id(proposal.entity_b)
+                if a is None or b is None or a == b:
+                    continue
+                judged.append((a, b, probability) if side == "a" else (b, a, probability))
+        return judged
 
     def entity_structure(self, *, user_id: str | None = None) -> dict[str, dict[str, Any]]:
         """Hub status and home for every active entity.
@@ -3167,8 +4838,8 @@ class MemoryStore:
         Computed on request and never stored, so a phrase seen a second time is
         a hub the next time anyone looks, and nothing has to be kept in step.
         """
-        entities, nodes, links, triples = self._structure_inputs(user_id)
-        homes = derive_homes(nodes, links, triples)
+        entities, nodes, triples, judged = self._structure_inputs(user_id)
+        homes = derive_homes(nodes, triples, judged)
         names = {node.id: node.name for node in nodes}
         screens = {e.id: (e.metadata or {}).get("screen") for e in entities}
         out: dict[str, dict[str, Any]] = {}
@@ -3191,6 +4862,14 @@ class MemoryStore:
                           "share": home["share"], "source": home["source"]}
                          if home else None),
             }
+        # Tags are listed with their memories, and are never a hub nor a home:
+        # the structure rules above only ever see named things.
+        tagged = Counter(
+            entity_id for entity_id, _ in self.backend.entity_memory_links(
+                Scope(user_id=user_id), kind="topic"))
+        for entity_id, memories in tagged.items():
+            out[entity_id] = {"hub": False, "why": "", "screened_out": False,
+                              "memories": memories, "relations": 0, "home": None}
         return out
 
     def run_structure_pass(
@@ -3203,8 +4882,8 @@ class MemoryStore:
         less evidence, exactly as a confirmed proposal does. ``dry_run=True``
         changes nothing and returns the full plan instead.
         """
-        entities, nodes, links, triples = self._structure_inputs(user_id)
-        homes = derive_homes(nodes, links, triples)
+        entities, nodes, triples, judged = self._structure_inputs(user_id)
+        homes = derive_homes(nodes, triples, judged)
         names = {node.id: node.name for node in nodes}
         outcome: dict[str, Any] = {
             "homes": len(homes), "homes_changed": 0,
@@ -3228,7 +4907,7 @@ class MemoryStore:
                 metadata.pop("home", None)
             self.backend.set_entity_metadata(entity.id, metadata)
 
-        plan = same_name_plan(nodes, homes)
+        plan = same_name_plan(nodes, homes, self._held_apart(Scope(user_id=user_id)))
         tally = {"merge": "merged", "ask": "asked", "separate": "separate"}
         for step in plan:
             outcome[tally[step["action"]]] += 1
@@ -3254,8 +4933,9 @@ class MemoryStore:
 
         The verdict is a note on the entity and nothing more: a name judged a
         value or a role shows up under Upkeep for a yes or a no, and a name
-        judged a named thing is a hub. A name already screened is not asked
-        about again.
+        judged a named thing is a hub. A name already screened, here or when
+        the save that created it screened it (``entities.resolve_mentions``),
+        is not asked about again.
         """
         outcome: dict[str, Any] = {"screened": 0, "queued": 0, "skipped": 0}
         if not self.decider.available:
@@ -3348,7 +5028,15 @@ class MemoryStore:
         ``at`` is the tick the scheduler is working through, which is what the
         run is stamped with. Stamping the wall clock instead put the next run
         due at a different time than the tick that triggered it.
+
+        A pass that is off (``maintenance_enabled``) runs nowhere: neither the
+        scheduler nor "run now" starts it, and no run is recorded; the result
+        says so (``ran`` False, with the reason).
         """
+        if key not in self._MAINTENANCE_KEYS:
+            raise ValueError(f"unknown pass: {key}")
+        if not self.maintenance_enabled(key):
+            return {"ran": False, "reason": self._pass_off_reason(key)}
         with self._pass_lock(key, user_id):
             stamp = at.isoformat(timespec="seconds") if at is not None else utcnow()
             if key == "dedup_entities":
@@ -3416,6 +5104,16 @@ class MemoryStore:
                 self._upkeep_set("last:durability", user_id,
                                  {"at": now.isoformat(timespec="seconds"), "result": result})
                 ran["durability"] = result
+        if dedup_due:
+            # After this week's merges and new homes: re-embed the memories
+            # whose masked names changed. Nothing to embed is no run.
+            try:
+                embedded = self.refresh_property_vectors(user_id=user_id)
+            except Exception as exc:
+                log.warning("property vector refresh failed: %s", exc)
+                embedded = 0
+            if embedded:
+                ran["property_vectors"] = {"embedded": embedded}
         return ran
 
     def run_consolidation_pass(self, *, user_id: str | None = None) -> dict[str, Any]:
@@ -3427,6 +5125,7 @@ class MemoryStore:
         remembered, so the model is asked about each one once.
         """
         with self._pass_lock("consolidation", user_id):
+            repaired = self.repair_consolidated(user_id=user_id)
             seen_lists = self._upkeep_get("consolidation:seen", user_id, [])
             seen = {frozenset(ids) for ids in seen_lists}
             result = self.consolidate_memories(
@@ -3435,7 +5134,8 @@ class MemoryStore:
             )
             pending = self._upkeep_get("consolidation:pending", user_id, [])
             known = {frozenset(entry["memory_ids"]) for entry in pending}
-            outcome = {"scanned": result["scanned"], "judged": 0, "merged": 0, "queued": 0}
+            outcome = {"scanned": result["scanned"], "judged": 0, "merged": 0, "queued": 0,
+                       **{key: n for key, n in repaired.items() if n}}
             for group in result["groups"]:
                 ids = frozenset(group["memory_ids"])
                 seen_lists.append(sorted(ids))
@@ -3523,14 +5223,19 @@ class MemoryStore:
             self._upkeep_set("consolidation:pending", user_id, live)
 
         for entry, new, old in self._open_conflicts(user_id):
-            held = ((new.metadata or {}).get(CONFLICT_KEY) or {}).get("held")
+            mark = _conflict_mark(new)
+            held = mark.get("held")
+            update = mark.get("kind") == "update"
             items.append({
                 "kind": "conflict", "id": new.id,
                 "title": new.content,
-                "detail": "This contradicts a memory you already have."
+                "detail": ("This updates a memory you already have: the older one "
+                           "would stay as history." if update
+                           else "This contradicts a memory you already have.")
                           + (f" Memry kept both because {held}." if held else ""),
                 "replaces": [old.content],
-                "replaces_label": "the memory it contradicts",
+                "replaces_label": ("the memory it updates" if update
+                                   else "the memory it contradicts"),
                 "accept": "the new one is right",
                 "decline": "the old one is right",
                 "other": "both are true",
@@ -3701,9 +5406,6 @@ class MemoryStore:
     def decay_sweep(self, threshold: float = 0.1) -> list[str]:
         return decay_sweep(self.backend, self.config.decay, threshold=threshold)
 
-    def effective_importance(self, memory: Memory) -> float:
-        return effective_importance(memory, self.config.decay)
-
     def reindex(self) -> int:
         """Re-embed every memory with the currently configured embedder, then
         rebuild the ANN sidecar (when available)."""
@@ -3725,6 +5427,16 @@ class MemoryStore:
         rebuild = getattr(self.backend, "rebuild_ann", None)
         if rebuild is not None:
             rebuild(self.embedder.model_id, self.embedder.dimensions)
+        for user_id in self.backend.distinct_user_ids() or [None]:
+            self.refresh_property_vectors(user_id=user_id)
+        # the episodes' vectors, which evidence is chosen by (older stores had none)
+        while episodes := self.backend.episodes_to_embed(self.embedder.model_id,
+                                                         limit=batch_size):
+            vectors = self.embedder.embed([e.content for e in episodes])
+            self.backend.set_episode_vectors(
+                {e.id: v for e, v in zip(episodes, vectors)}, self.embedder.model_id)
+            if not all(vectors):
+                break  # an episode the embedder gives no vector would come back forever
         return count
 
     def stats(self) -> dict[str, Any]:
@@ -3755,9 +5467,12 @@ class MemoryStore:
         return data
 
     def merge_gate(self) -> float:
-        """The automatic-merge gate in force: the provider's own while it can
-        answer, else the text model's. Above 1.0 means merges never happen on
-        their own."""
+        """The automatic-merge gate in force: a calibrated judge's own while it
+        can answer. Without one no model's confidence merges anything
+        (``entities.resolve_open_proposals``): above 1.0, merges never happen
+        on a model's answer."""
+        if not judges_pairs(self.decider):
+            return NEVER_AUTO_MERGE
         return _gate(self.decider, self.llm)
 
     def count_memories(self, *, owner_prefix: str | None = None) -> dict[str, int]:
@@ -3765,7 +5480,7 @@ class MemoryStore:
         return self.backend.count_memories(owner_prefix)
 
     def reset(self) -> None:
-        self.backend.reset()
+        self.backend.reset(keep_meta=_SETTINGS_KEYS)
 
     def close(self) -> None:
         try:

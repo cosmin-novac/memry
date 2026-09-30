@@ -84,6 +84,33 @@ def test_entity_filter_uses_exact_mentions_and_intersects_with_topics(store):
     assert store.get_all(user_id="ada", entity_id="missing") == []
 
 
+def test_a_vague_question_is_searched_within_the_subject_the_caller_gives():
+    """A question too vague to say what it is about ("What changed this
+    week?") cannot be routed by its words; the caller can pass its subject
+    alongside, as a tag or an entity. The search then looks within it before
+    the page is cut: the garden's three memories come back although thirty
+    others match the question's words better, and a search of five without
+    the subject returns none of them."""
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    for i in range(30):
+        store.add(f"What changed this week: release {i} of the billing service shipped",
+                  user_id="ada", infer=False, categories=["work"])
+    garden = {store.add(text, user_id="ada", infer=False, categories=["garden"]).actions[0]
+              .memory_id for text in ("Planted tulip bulbs along the fence",
+                                      "The apple tree needs pruning in March",
+                                      "Moved the compost bin behind the shed")}
+    plot = store.backend.insert_entity(Entity(name="Plot 7", normalized="plot 7",
+                                              entity_type="place", user_id="ada"))
+    for memory_id in garden:
+        store.backend.add_mention(EntityMention(entity_id=plot.id, memory_id=memory_id,
+                                                surface="Plot 7"))
+    question = "What changed this week?"
+    assert not garden & {r.memory.id for r in store.search(question, user_id="ada", limit=5)}
+    for scoped in ({"categories": ["garden"]}, {"entity_id": plot.id}):
+        found = store.search(question, user_id="ada", limit=5, **scoped)
+        assert {r.memory.id for r in found} == garden, scoped
+
+
 def test_get_all_date_window_excludes_everything_in_the_future(store):
     assert store.get_all(user_id="ada", since="2999-01-01") == []
     assert len(store.get_all(user_id="ada", since="2000-01-01")) == 3
@@ -114,6 +141,4 @@ def test_rest_search_accepts_date_and_tag_filters():
             "/api/v1/search", json={"query": "", "entity_id": "missing"}
         ).status_code == 404
         page = client.get("/").text
-        assert all(marker in page for marker in (
-            'id="filter-date"', 'id="filter-topic"', 'id="filter-entity"'
-        ))
+        assert all(marker in page for marker in ('id="filter-date"', 'id="filter-about"'))

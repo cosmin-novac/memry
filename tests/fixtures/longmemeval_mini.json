@@ -1,0 +1,62 @@
+[
+  {
+    "question_id": "mini-ssu-1",
+    "question_type": "single-session-user",
+    "question": "What breed is my dog?",
+    "answer": "golden retriever",
+    "question_date": "2023/05/30 (Tue) 23:40",
+    "haystack_session_ids": ["s-dog", "s-soup"],
+    "haystack_dates": ["2023/05/20 (Sat) 02:21", "2023/05/22 (Mon) 10:05"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I need tips for teaching my golden retriever puppy to walk on a leash.", "has_answer": true},
+        {"role": "assistant", "content": "Keep sessions short, reward loose-leash walking with treats and stop when the leash goes tight."}
+      ],
+      [
+        {"role": "user", "content": "Can you give me a recipe for a quick tomato soup?"},
+        {"role": "assistant", "content": "Saute an onion, add canned tomatoes and stock, simmer for 15 minutes and blend."}
+      ]
+    ],
+    "answer_session_ids": ["s-dog"]
+  },
+  {
+    "question_id": "mini-ku-1",
+    "question_type": "knowledge-update",
+    "question": "How many days a week do I go to the gym now?",
+    "answer": "four",
+    "question_date": "2023/07/01 (Sat) 09:00",
+    "haystack_session_ids": ["s-gym-old", "s-gym-new"],
+    "haystack_dates": ["2023/03/02 (Thu) 18:10", "2023/06/15 (Thu) 07:45"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I go to the gym three days a week and want a better routine.", "has_answer": false},
+        {"role": "assistant", "content": "A push, pull and legs split works well with three days."}
+      ],
+      [
+        {"role": "user", "content": "I switched to going to the gym four days a week, so I need a new split.", "has_answer": true},
+        {"role": "assistant", "content": "With four days, try an upper and lower split done twice."}
+      ]
+    ],
+    "answer_session_ids": ["s-gym-new"]
+  },
+  {
+    "question_id": "mini-ms-1",
+    "question_type": "multi-session",
+    "question": "How many books did I finish in March and April together?",
+    "answer": 5,
+    "question_date": "2023/05/02 (Tue) 12:00",
+    "haystack_session_ids": ["s-books-march", "s-books-april"],
+    "haystack_dates": ["2023/03/31 (Fri) 21:00", "2023/04/30 (Sun) 20:30"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I finished 2 books in March, both mysteries.", "has_answer": true},
+        {"role": "assistant", "content": "Nice! Would you like more mystery recommendations?"}
+      ],
+      [
+        {"role": "user", "content": "This month I finished 3 books, one of them a biography.", "has_answer": true},
+        {"role": "assistant", "content": "Great pace. Biographies make a good change from fiction."}
+      ]
+    ],
+    "answer_session_ids": ["s-books-march", "s-books-april"]
+  }
+]

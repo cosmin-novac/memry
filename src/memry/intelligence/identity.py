@@ -38,6 +38,15 @@ in ``evals/identity_resolution_benchmark.py``, five runs:
   comparisons per pair. Each side is shown 10 memories (50 at the last step),
   chosen as the most recent few and the rest most similar to the other side's.
 
+One comparison is asked in one order: the known-name check at save. A mention
+of a name an entity already carries joins the likeliest entity of that name
+unless the judge says "different" (``entities._judged_join``). That check reads
+no merge bar, only P(different) against 0.5, which candidate has the higher
+P(same), and ``BELONGS_BAR``, so it is asked with the entity first only: one
+call a candidate instead of two, and most of a save's pair calls. In two runs
+it decided as well as both orders (PhD notes, O-35). Every other comparison
+keeps both orders: it reads a merge bar, and one order moves the merge bars.
+
 Every fact carries its date (when it became true where that is known, else
 when it was recorded). Without dates, "lives in Munich" against "moved to
 Amsterdam last month" read as two people (P(same) 0.54), and a promotion as
@@ -91,6 +100,61 @@ PAIR_QUESTION = Choice(
         ),
     },
 )
+
+#: Asked with the pair question in the same call: is one entity a version or a
+#: part of the other? "bildy v4" is not the same thing as "bildy", so the pair
+#: question alone either waits or, with enough memories, merges them: on 427
+#: measured pairs, versions, dated occurrences and owned items of a model
+#: scored P(same) 0.6-0.99. Asked in the same call, it left the pair question's
+#: answers within their run-to-run noise (0.011 against 0.013), cost no time,
+#: and from 0.8 on it set no wrong home outside web domains and handles and
+#: none in the wrong direction. See the PhD notes, belongs-to-question.
+BELONGS_QUESTION = Choice(
+    instructions=(
+        "In one person's memory store, entity A and entity B may be two different "
+        "things where one belongs to the other. Does one of them belong to the other, "
+        "and how?"
+    ),
+    criteria={
+        "a_kind_of_b": (
+            "A is one version, release, generation, edition, variant, dated occurrence "
+            "or single item of B: what is true of B in general is true of A unless a "
+            "fact says otherwise."
+        ),
+        "a_part_of_b": (
+            "A is a part of B: a component, module, chapter, department, branch, "
+            "subsidiary, member or smaller place inside B. A is inside B, and what is "
+            "true of B as a whole is not true of A."
+        ),
+        "b_kind_of_a": (
+            "B is one version, release, generation, edition, variant, dated occurrence "
+            "or single item of A: what is true of A in general is true of B unless a "
+            "fact says otherwise."
+        ),
+        "b_part_of_a": (
+            "B is a part of A: a component, module, chapter, department, branch, "
+            "subsidiary, member or smaller place inside A. B is inside A, and what is "
+            "true of A as a whole is not true of B."
+        ),
+        "neither": (
+            "Neither belongs to the other: they are one and the same thing, two "
+            "unrelated things, or two things side by side, such as two versions of one "
+            "product, two editions of one event or two people in one family."
+        ),
+    },
+)
+#: The same answers seen from the other side: asked with B shown first.
+BELONGS_SWAP = {"a_kind_of_b": "b_kind_of_a", "b_kind_of_a": "a_kind_of_b",
+                "a_part_of_b": "b_part_of_a", "b_part_of_a": "a_part_of_b",
+                "neither": "neither"}
+#: P(one belongs to the other) from which the child gets the other as its home,
+#: and from which the pair is not merged. On 427 pairs, 145 true pairs reached
+#: their merge bar with P(belongs) at most 0.55; at 0.8 none was held back,
+#: and every version that reached the bar was.
+BELONGS_BAR = 0.8
+#: Types that never get a home, whatever the judge says: a person is not a
+#: version or a part of a group, and a place inside another stays a place.
+HOMELESS_TYPES = frozenset({"person", "place"})
 
 #: A word carried by more than this share of the store's entity names (and by
 #: more than two) is too common to pair two names on its own.
@@ -169,11 +233,6 @@ SESSION_HOURS = 3.0
 #: ones whose names are worth comparing: an account named "admin", or none,
 #: shares no name with the owner's.
 OWNER_CANDIDATES = 3
-
-
-def pair_step(count: int) -> int:
-    """The funnel step a pair whose smaller side has ``count`` memories is at."""
-    return max((step for step in PAIR_STEPS if count >= step), default=0)
 
 
 def memories_shown(step: int) -> int:
@@ -648,20 +707,63 @@ def pair_state(a: Profile, b: Profile) -> str:
             + "\n\n" + side("A", a) + "\n\n" + side("B", b))
 
 
-def judge_pair(decider: Decider, a: Profile, b: Profile) -> dict[str, float] | None:
-    """P(same), P(different) and P(unsure), averaged over both orders. None
-    when the judge did not answer both."""
-    def ask(state: str):
-        return decider.decide(state, {"pair": PAIR_QUESTION})["pair"]
+def judge_pair_and_belongs(
+    decider: Decider, a: Profile, b: Profile, *, one_order: bool = False
+) -> tuple[dict[str, float] | None, dict[str, float] | None]:
+    """The pair question and ``BELONGS_QUESTION`` in one call per order, both
+    averaged over the two orders, the belongs answer keyed from A's side. With
+    ``one_order`` only A first is asked, in one call, and its answers are
+    returned as they are (the known-name check, ``compare``). The pair answer
+    is None when the judge did not answer it in every order asked; the
+    belongs answer is None when it did not answer that one, which leaves the
+    pair answer as it is."""
+    questions = {"pair": PAIR_QUESTION, "belongs": BELONGS_QUESTION}
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        answers = list(pool.map(ask, (pair_state(a, b), pair_state(b, a))))
-    if not all(answer.available and answer.probabilities for answer in answers):
-        return None
-    return {
-        option: sum(answer.probabilities.get(option, 0.0) for answer in answers) / 2
-        for option in PAIR_QUESTION.criteria
-    }
+    def ask(state: str):
+        answers = decider.decide(state, questions)
+        return answers["pair"], answers["belongs"]
+
+    if one_order:
+        asked = [ask(pair_state(a, b))]
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            asked = list(pool.map(ask, (pair_state(a, b), pair_state(b, a))))
+    pairs = [pair for pair, _ in asked]
+    if not all(x.available and x.probabilities for x in pairs):
+        return None, None
+    pair = {option: sum(x.probabilities.get(option, 0.0) for x in pairs) / len(pairs)
+            for option in PAIR_QUESTION.criteria}
+    belongs_answers = [belongs for _, belongs in asked]
+    if not all(x.available and x.probabilities for x in belongs_answers):
+        return pair, None
+    # the answer asked with B first, keyed from A's side
+    keyed = [belongs_answers[0].probabilities] + [
+        {BELONGS_SWAP[k]: v for k, v in x.probabilities.items() if k in BELONGS_SWAP}
+        for x in belongs_answers[1:]]
+    belongs = {option: sum(x.get(option, 0.0) for x in keyed) / len(keyed)
+               for option in BELONGS_QUESTION.criteria}
+    return pair, belongs
+
+
+def belonging(belongs: dict[str, float] | None) -> tuple[str | None, float]:
+    """Which side belongs to the other ("a" or "b") and how likely, from a
+    belongs answer keyed from A's side; (None, 0.0) without one."""
+    if not belongs:
+        return None, 0.0
+    a_side = belongs.get("a_kind_of_b", 0.0) + belongs.get("a_part_of_b", 0.0)
+    b_side = belongs.get("b_kind_of_a", 0.0) + belongs.get("b_part_of_a", 0.0)
+    return ("a", a_side) if a_side >= b_side else ("b", b_side)
+
+
+def belongs_blocks(
+    belongs: dict[str, float] | None, type_a: str | None, type_b: str | None
+) -> bool:
+    """Whether a pair must not be merged or attached: one side is a version or
+    a part of the other at ``BELONGS_BAR``, and neither side is a person or a
+    place."""
+    if type_a in HOMELESS_TYPES or type_b in HOMELESS_TYPES:
+        return False
+    return belonging(belongs)[1] >= BELONGS_BAR
 
 
 def decide_pair(probabilities: dict[str, float], decider: Decider, step: int = 1) -> str:
@@ -684,11 +786,14 @@ class Verdict:
     action: str
     #: The funnel step the pair has now been compared at.
     step: int
+    #: The belongs answer of the last comparison, keyed from A's side; None
+    #: when none was asked or the judge did not answer it.
+    belongs: dict[str, float] | None = None
 
 
 def compare(
     decider: Decider, backend: MemoryBackend, a: Entity, b: Entity | Mention,
-    compared: int = 0,
+    compared: int = 0, *, recheck: bool = False, one_order: bool = False,
 ) -> Verdict:
     """Decide a pair at the funnel steps it has reached since it was last
     compared at step ``compared`` (0: never). Nothing is asked when it has
@@ -703,10 +808,22 @@ def compare(
     that side's, once they have been quiet for ``CONTEXT_QUIET_HOURS``.
 
     ``b`` is an entity, or a mention a save has not attached yet.
+
+    Each comparison also asks ``BELONGS_QUESTION``. A pair where one side is
+    a version or a part of the other at ``BELONGS_BAR`` is not merged: it
+    waits, and the answer is kept on the verdict. ``recheck`` asks once at
+    the step already reached, for a pair compared before a question was added.
+
+    ``one_order`` asks every comparison with A first only, one call instead
+    of two: the known-name check at save, where A is an entity that carries
+    the mention's name and B the mention (``entities._judged_join``). It
+    reads no merge bar, only P(different) against the apart bar, which
+    candidate is likelier, and ``BELONGS_BAR``: measured in the module
+    docstring.
     """
     count_b = 1 if isinstance(b, Mention) else backend.count_entity_memories(b.id)
     smaller = min(backend.count_entity_memories(a.id), count_b)
-    owed = rounds(compared, smaller)
+    owed = _owed(compared, smaller, recheck)
     if not owed and not _context_owed(compared, smaller):
         return Verdict(None, "wait", compared)
     pool_a = backend.entity_memories(a.id, limit=PAIR_POOL)
@@ -715,34 +832,53 @@ def compare(
     # A memory that names both entries says nothing about whether they are one
     # thing: the extractor listed two names for it. Shown on both sides it
     # read as the same fact twice, and "Michaela Neumann" merged with
-    # "Dr. Neumann", named in one note, at P(same) 1.0. It is left out.
+    # "Dr. Neumann", named in one note, at P(same) 1.0. It is left out. A side
+    # left with no memory is not asked about and keeps its step: no answer,
+    # which says neither "same" nor "different". A mention whose memory an
+    # entity of its name already holds is that entity's; ``resolve_mentions``
+    # keeps it without a comparison, since this one would have nothing to ask.
     shared = {m.id for m in pool_a} & {m.id for m in pool_b}
     if shared:
         pool_a = [m for m in pool_a if m.id not in shared]
         pool_b = [m for m in pool_b if m.id not in shared]
         smaller = min(len(pool_a), len(pool_b))
-        owed = rounds(compared, smaller)
+        owed = _owed(compared, smaller, recheck)
         if not owed and not _context_owed(compared, smaller):
             return Verdict(None, "wait", compared)
     vectors = backend.vectors_of([m.id for m in pool_a + pool_b])
     ids_a, ids_b = [m.id for m in pool_a], [m.id for m in pool_b]
     verdict = Verdict(None, "wait", compared)
     for step, shown in owed:
-        probabilities = judge_pair(
+        probabilities, belongs = judge_pair_and_belongs(
             decider,
             profile_from(a, choose(pool_a, shown, vectors, ids_b)),
             profile_from(b, choose(pool_b, shown, vectors, ids_a)),
+            one_order=one_order,
         )
         if probabilities is None:
             break
-        verdict = Verdict(probabilities, decide_pair(probabilities, decider, step), step)
+        verdict = Verdict(probabilities, decide_pair(probabilities, decider, step), step,
+                          belongs)
         if verdict.action == "apart" and step < APART_STEP:
+            verdict.action = "wait"
+        if verdict.action == "merge" and belongs_blocks(belongs, a.entity_type, b.entity_type):
             verdict.action = "wait"
         if verdict.action != "wait":
             break
     if verdict.action == "wait" and verdict.step == PAIR_STEPS[0]:
-        return _in_context(decider, backend, a, b, pool_a, pool_b, vectors, verdict)
+        return _in_context(decider, backend, a, b, pool_a, pool_b, vectors, verdict,
+                           one_order=one_order)
     return verdict
+
+
+def _owed(compared: int, smaller: int, recheck: bool) -> list[tuple[int, int]]:
+    """The comparisons owed, and with ``recheck`` one at the step already
+    reached when none is."""
+    owed = rounds(compared, smaller)
+    if not owed and recheck and smaller >= PAIR_STEPS[0]:
+        step = max(s for s in PAIR_STEPS if s <= smaller)
+        owed = [(step, memories_shown(step))]
+    return owed
 
 
 def _context_owed(compared: int, smaller: int) -> bool:
@@ -760,11 +896,12 @@ def _recorded(memory: Memory) -> datetime | None:
 def _in_context(
     decider: Decider, backend: MemoryBackend, a: Entity, b: Entity | Mention,
     pool_a: list[Memory], pool_b: list[Memory], vectors: dict[str, np.ndarray],
-    verdict: Verdict,
+    verdict: Verdict, *, one_order: bool = False,
 ) -> Verdict:
     """The ``CONTEXT_STEP`` comparison of a pair ``verdict`` left waiting at
     the first step. Nothing is asked while a conversation may still be adding
-    memories; when there is nothing to add, the step counts as done."""
+    memories; when there is nothing to add, the step counts as done.
+    ``one_order`` as in ``compare``."""
     thin = [pool if len(pool) < PAIR_STEPS[1] else [] for pool in (pool_a, pool_b)]
     quiet = datetime.now(timezone.utc) - timedelta(hours=CONTEXT_QUIET_HOURS)
     for memory in thin[0] + thin[1]:
@@ -778,8 +915,9 @@ def _in_context(
         found: dict[str, Memory] = {}
         for memory in pool:
             for other in backend.session_memories(memory, hours=SESSION_HOURS):
+                # a memory filed under a side that is a tag names it as well
                 if other.id not in named and other.id not in found and not sides & {
-                        e.id for e in backend.entities_of_memory(other.id)}:
+                        e.id for e in backend.entities_of_memory(other.id, kind="any")}:
                     found[other.id] = other
         around = list(found.values())
         if len(around) > CONTEXT_MEMORIES:
@@ -791,15 +929,19 @@ def _in_context(
         return Verdict(verdict.probabilities, verdict.action, CONTEXT_STEP)
     ids_a, ids_b = [m.id for m in pool_a], [m.id for m in pool_b]
     shown = memories_shown(PAIR_STEPS[0])
-    probabilities = judge_pair(
+    probabilities, belongs = judge_pair_and_belongs(
         decider,
         profile_from(a, choose(pool_a, shown, vectors, ids_b), context[0]),
         profile_from(b, choose(pool_b, shown, vectors, ids_a), context[1]),
+        one_order=one_order,
     )
     if probabilities is None:
         return verdict
     action = decide_pair(probabilities, decider, CONTEXT_STEP)
-    return Verdict(probabilities, "wait" if action == "apart" else action, CONTEXT_STEP)
+    if action == "apart" or (action == "merge"
+                             and belongs_blocks(belongs, a.entity_type, b.entity_type)):
+        action = "wait"
+    return Verdict(probabilities, action, CONTEXT_STEP, belongs or verdict.belongs)
 
 
 def is_owner(entity: Entity | Mention) -> bool:
@@ -976,6 +1118,7 @@ def judged_tag_merges(
     vectors: dict[str, np.ndarray] | None = None,
     compared: dict[str, int] | None = None,
     limit: int = 400,
+    pairs: Iterable[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Groups of tags the judge puts at ``decider.tag_merge_probability`` or
     higher, each kept under its most used tag. ``memories_of(tag)`` returns the
@@ -985,6 +1128,13 @@ def judged_tag_merges(
     last compared at, and is updated in place: only pairs that reached a new
     step are asked about, and pairs of tags that no longer exist are dropped.
 
+    ``pairs``, when given, are asked about in place of the name index's
+    candidates, whatever step they are at, and ``compared`` is neither read nor
+    written: the dashboard's suggest button (``MemoryStore.suggest_tag_merges``)
+    asks this question about every pair of the tags nothing else flagged and
+    suggests the groups instead of merging them. The funnel belongs to the
+    upkeep pass, which merges.
+
     Measured on the 379 candidate pairs of a real 417-tag store, 10 memories per
     tag, two runs: from 0.55 it merged 7-9 of the 16 pairs I labelled one
     subject ("fundation" and "fundation gmbh" at 0.86-0.88, "bildy" and
@@ -992,24 +1142,32 @@ def judged_tag_merges(
     41 borderline or 322 two-subject pairs; the highest two-subject pair was
     "restart" and "shutdown" at 0.46.
     """
-    compared = {} if compared is None else compared
     counts = {str(t["category"]).strip().casefold(): int(t.get("count") or 0) for t in tags}
     labels = sorted(counts)
-    nodes = [Entity(id=label, name=label, user_id=None) for label in labels]
-    index = NameIndex(nodes, vectors, rare_words=False)
-    step = {
-        pair: tag_step(min(counts[pair[0]], counts[pair[1]]))
-        for pair in {
-            tuple(sorted((label, other.name)))
-            for label in labels
-            for other in index.candidates(label, vector=(vectors or {}).get(label),
-                                          exclude={label})
+    if pairs is not None:
+        compared = {}
+        given = {tuple(sorted((str(a).strip().casefold(), str(b).strip().casefold())))
+                 for a, b in pairs}
+        step = {pair: tag_step(min(counts[pair[0]], counts[pair[1]])) for pair in given
+                if pair[0] != pair[1] and pair[0] in counts and pair[1] in counts}
+        pairs = sorted(step)[:limit]
+    else:
+        compared = {} if compared is None else compared
+        nodes = [Entity(id=label, name=label, user_id=None) for label in labels]
+        index = NameIndex(nodes, vectors, rare_words=False)
+        step = {
+            pair: tag_step(min(counts[pair[0]], counts[pair[1]]))
+            for pair in {
+                tuple(sorted((label, other.name)))
+                for label in labels
+                for other in index.candidates(label, vector=(vectors or {}).get(label),
+                                              exclude={label})
+            }
         }
-    }
-    live = {tag_pair_key(*pair) for pair in step}
-    for key in [key for key in compared if key not in live]:
-        del compared[key]
-    pairs = sorted(p for p in step if step[p] > compared.get(tag_pair_key(*p), 0))[:limit]
+        live = {tag_pair_key(*pair) for pair in step}
+        for key in [key for key in compared if key not in live]:
+            del compared[key]
+        pairs = sorted(p for p in step if step[p] > compared.get(tag_pair_key(*p), 0))[:limit]
     examples = {tag: memories_of(tag) for tag in sorted({t for pair in pairs for t in pair})}
     scores = parallel(
         lambda pair: judge_tag_pair(decider, *pair, counts, known, examples), pairs

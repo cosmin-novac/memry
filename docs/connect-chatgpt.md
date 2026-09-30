@@ -44,6 +44,16 @@ Requirements:
 Memories written here land in the same store as every other client, namespaced
 to the account that signed in.
 
+## What ChatGPT sends to Memry when it saves
+
+The Memry server gives ChatGPT a short set of rules for saving. ChatGPT sends
+what you said in words close to your own, one statement per line, and names
+anyone else whose words it passes on ("Ada: I got the job"). Memry extracts the
+facts and shows your words beside them in later searches. When something
+changes or you correct a fact, ChatGPT saves the new statement, and Memry keeps
+the old one as dated history, or retires it when it was wrong. For a
+conversation from another day, ChatGPT passes the day it was said as `said_at`.
+
 ## Troubleshooting
 
 **"There was a problem connecting Memry. Try again later."** - the browser

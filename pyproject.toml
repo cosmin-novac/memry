@@ -35,6 +35,9 @@ anthropic = ["anthropic>=0.40"]
 mem0 = ["mem0ai>=0.1.100"]
 ann = ["usearch>=2.12"]
 dev = ["pytest>=8.0", "httpx>=0.27"]
+# evals/external_benchmarks.py: BLEU-1 as Mem0 computes it (NLTK, with its
+# "punkt_tab" data) and context tokens in cl100k_base (tiktoken)
+eval = ["nltk>=3.9", "tiktoken>=0.7"]
 
 [project.scripts]
 memry = "memry.cli:main"

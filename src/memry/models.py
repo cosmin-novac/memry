@@ -23,6 +23,31 @@ EventType = Literal["ADD", "UPDATE", "DELETE", "SUPERSEDE", "NONE"]
 
 MEMORY_TYPES: tuple[str, ...] = ("semantic", "episodic", "procedural", "working")
 
+#: The type of an entity that is a tag: a "category" or "topic" a memory is
+#: filed under ("groceries", "2026 taxes"). A tag is an entity like a person or
+#: a product, with one merge machinery and one set of links, but extraction
+#: never names one: the store creates it from a memory's ``categories``.
+TOPIC_TYPE = "topic"
+
+#: The kinds of named thing, the types extraction assigns
+#: (``intelligence.extraction.ENTITY_TYPES`` is this tuple). Defined once, so a
+#: type added here is one extraction offers and ``set_entity_type`` accepts.
+#: `document` and `code` were added after reviewing what a real store dumped
+#: into "other": contracts, invoices and registration numbers on one side,
+#: files, symbols and tables on the other. Both are common enough to be worth
+#: naming, and a named type keeps a document from being merged with a person
+#: who happens to share its name. Types are deliberately few - each extra one
+#: is another way for the model to mis-sort, and the type does not affect
+#: search ranking.
+NAMED_ENTITY_TYPES: tuple[str, ...] = (
+    "person", "organization", "project", "product", "place", "event",
+    "document", "code", "concept", "other",
+)
+
+#: Every type an entity may be stored with: the named kinds and
+#: ``TOPIC_TYPE``, which extraction never offers.
+ENTITY_TYPES: tuple[str, ...] = (*NAMED_ENTITY_TYPES, TOPIC_TYPE)
+
 
 #: A tag is a short retrieval subject. Anything longer is a sentence or a list
 #: that was glued together, and is dropped rather than stored.
@@ -88,6 +113,59 @@ def parse_ts(ts: str) -> datetime:
     return dt
 
 
+def later_ts(current: str | None, stamp: str) -> str:
+    """The later of two ISO 8601 times, compared as times (a time without a
+    zone is UTC); ``stamp`` when ``current`` is None. A time that does not
+    parse compares as text."""
+    if not current:
+        return stamp
+    try:
+        return stamp if parse_ts(stamp) > parse_ts(current) else current
+    except (ValueError, TypeError):
+        return max(current, stamp)
+
+
+def parse_said_at(value: Any, *, now: datetime | None = None) -> datetime | None:
+    """The time a save says its content was said (``said_at`` on MCP
+    ``save_memories`` and REST ``POST /api/v1/memories``), as the store keeps
+    times: UTC, to the second. A date alone is the start of that day, and a
+    time without a zone is UTC. None when nothing is given.
+
+    Raises ValueError for anything else, and for a day after today (``now``,
+    the clock by default): the words were said already, so a later day is
+    most likely the day what they tell happens, which the text carries. A
+    later time today is taken as ``now``, for a client clock a little ahead.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    shape = "an ISO 8601 date (2023-05-08) or date and time (2023-05-08T14:30:00Z)"
+    if not isinstance(value, str):
+        raise ValueError(f"said_at must be {shape}, not {value!r}")
+    try:
+        moment = parse_ts(value.strip()).astimezone(timezone.utc).replace(microsecond=0)
+    except (ValueError, OverflowError):
+        raise ValueError(f"said_at {value!r} is not {shape}") from None
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+    if moment.date() > now.date():
+        raise ValueError(
+            f"said_at {value!r} is after today ({now.date().isoformat()}): it is the day "
+            "the words were said, and a date they name belongs in the text. Leave it out "
+            "for what is said now.")
+    return min(moment, now)
+
+
+def same_ts(a: str | None, b: str | None) -> bool:
+    """Whether two ISO 8601 times name the same instant, compared as times
+    ("...T10:00:00Z" is "...T10:00:00+00:00"; a time without a zone is UTC).
+    A time that does not parse compares as text."""
+    if not a or not b:
+        return a == b
+    try:
+        return parse_ts(a) == parse_ts(b)
+    except (ValueError, TypeError):
+        return a == b
+
+
 class Scope(BaseModel):
     """Memory scoping, mem0-compatible: any combination of user/agent/run.
 
@@ -103,16 +181,32 @@ class Scope(BaseModel):
 
 
 class Episode(BaseModel):
-    """An immutable raw event (one conversation message or ingested record)."""
+    """An immutable raw event (one conversation message or ingested record).
+
+    ``withheld_at`` is the episode's validity as evidence, as ``invalid_at`` is
+    a memory's: set when a memory resting on it was deleted for good. From then
+    on the episode is never shown as evidence of a memory, not even of another
+    memory resting on it, since it says what was deleted."""
 
     id: str = Field(default_factory=new_id)
     content: str
+    #: The message's role: a chat role ("user"), or a speaker's name.
     role: str = "user"
+    #: The speaker's name when the message gave one besides its role (a
+    #: ``name``), shown as the turn's speaker; the role still decides what a
+    #: role decides. None for an episode saved before names were kept.
+    name: str | None = None
     user_id: str | None = None
     agent_id: str | None = None
     run_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utcnow)
+    withheld_at: str | None = None
+
+    @property
+    def speaker(self) -> str:
+        """Who said it: the name given, else the role."""
+        return self.name or self.role
 
 
 class Memory(BaseModel):
@@ -144,6 +238,23 @@ class Memory(BaseModel):
         return Scope(user_id=self.user_id, agent_id=self.agent_id, run_id=self.run_id)
 
 
+#: What took a memory out of use, on its SUPERSEDE event (``MemoryEvent.kind``):
+#: a newer memory contradicting it (it was never true), a newer memory
+#: updating it (what it said changed, or a text merging a detail into it, or
+#: a newer memory adding to it with no merged text written), a merge of
+#: duplicates, or the distilling of a raw saved message.
+SUPERSEDE_KINDS: tuple[str, ...] = ("contradiction", "update", "consolidation", "distillation")
+
+#: The SUPERSEDE kinds after which a memory stays retrievable as history: an
+#: update ends what it said at the newer memory's date (``invalid_at``), and
+#: it held until then. Search returns it, after the memory that replaced it,
+#: with the source turns it rests on as evidence (``MemoryStore.evidence``),
+#: and shows that date (``context.until_note``). The other kinds leave search
+#: as before: a contradiction was never true, and a consolidated or distilled
+#: memory lives on in what replaced it.
+HISTORY_KINDS: tuple[str, ...] = ("update",)
+
+
 class MemoryEvent(BaseModel):
     """Audit-trail entry for a memory mutation."""
 
@@ -155,6 +266,10 @@ class MemoryEvent(BaseModel):
     reason: str | None = None
     actor: str = "system"  # "system" | "user" | "decay" | ...
     created_at: str = Field(default_factory=utcnow)
+    #: One of ``SUPERSEDE_KINDS`` on a SUPERSEDE event, recorded since the
+    #: kind was a column; None on other events and on older rows, whose kind
+    #: is read from ``reason`` (``store._is_contradiction``).
+    kind: str | None = None
 
 
 class CandidateFact(BaseModel):
@@ -173,6 +288,11 @@ class CandidateFact(BaseModel):
     # when extraction is deferred or skipped, so a managed worker or explicit
     # distillation can process the active verbatim memory later.
     metadata: dict[str, Any] = Field(default_factory=dict)
+    #: The numbers of the transcript lines the fact rests on (1 is the first
+    #: line that says something, ``extraction._transcript``). The store links
+    #: the memory to the episodes of those lines; with none, or a number no
+    #: line has, to every episode of the save.
+    sources: list[int] = Field(default_factory=list)
 
 
 class AddAction(BaseModel):
@@ -201,10 +321,31 @@ class AddResult(BaseModel):
         return counts
 
 
+class EvidenceTurn(BaseModel):
+    """A source episode of memories found, shown as their evidence: what was
+    said, by whom and when (``MemoryStore.evidence``)."""
+
+    episode_id: str
+    content: str
+    #: Who said it (``Episode.speaker``): the name the message gave, else its
+    #: role (a speaker's name, or a chat role such as "user").
+    speaker: str
+    #: When it was said: the episode's ``created_at``.
+    said_at: str
+    #: The memories found that rest on it, the best ranked first.
+    memory_ids: list[str] = Field(default_factory=list)
+    #: Its similarity to the query, by which it was chosen.
+    score: float = 0.0
+
+
 class SearchResult(BaseModel):
     memory: Memory
     score: float
     signals: dict[str, float] = Field(default_factory=dict)
+    #: The source turns chosen as evidence that this memory is the best
+    #: ranked of the results to rest on (``MemoryStore.evidence``), in the
+    #: order they were said. A turn is attached to one result only.
+    evidence: list[EvidenceTurn] = Field(default_factory=list)
 
 
 class Topic(BaseModel):
@@ -266,6 +407,15 @@ class EntityMention(BaseModel):
     memory_id: str
     surface: str
     created_at: str = Field(default_factory=utcnow)
+    #: What joined a name at save time to an entity the store had: a rule
+    #: (``reason``), or the judge's answer (``reason``, ``same``,
+    #: ``different`` and the funnel ``step``). None for a mention that made
+    #: its entity, or was attached otherwise.
+    decided: dict[str, Any] | None = None
+    #: The type extraction gave the name in this memory, when it gave one.
+    #: An entity's type is the one most of its mentions give
+    #: (``LocalBackend._settle_types_locked``).
+    entity_type: str | None = None
 
 
 ProposalStatus = Literal["proposed", "confirmed", "rejected"]
@@ -292,6 +442,12 @@ class MergeProposal(BaseModel):
     #: pair at 0.5 or more is ruled out as an option when a name with few
     #: memories is settled among several entities.
     different: float | None = None
+    #: The latest answer to whether one entity is a version or a part of the
+    #: other, averaged over both orders (or asked with the entity first only,
+    #: for a pair a save's check of a known name left) and keyed from A's side
+    #: (``identity.BELONGS_QUESTION``): "a_kind_of_b", "a_part_of_b",
+    #: "b_kind_of_a", "b_part_of_a", "neither". None before one was asked.
+    belongs: dict[str, float] | None = None
 
 
 class Relation(BaseModel):
@@ -333,3 +489,5 @@ class ContextResult(BaseModel):
     text: str
     memory_ids: list[str] = Field(default_factory=list)
     token_estimate: int = 0
+    #: The episodes shown as evidence under the memories.
+    episode_ids: list[str] = Field(default_factory=list)

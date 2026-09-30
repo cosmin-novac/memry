@@ -51,7 +51,9 @@ def test_existing_categories_backfill_once(tmp_path):
         assert [m.id for m in reopened.list_memories(
             Scope(user_id="ada"), categories=["OLD"]
         )] == [memory.id]
-        assert reopened.topic_counts(Scope(user_id="ada")) == [
+        # the legacy index is rebuilt, and the live counter agrees with it
+        assert [t.normalized for t in reopened.list_topics(Scope(user_id="ada"))] == ["old"]
+        assert reopened.topic_mention_counts(Scope(user_id="ada")) == [
             {"category": "old", "count": 1}
         ]
     finally:
@@ -88,7 +90,13 @@ def test_parent_topic_expands_at_query_time_without_copying(verbatim_store):
     matches = store.get_all(user_id="ada", categories=["health"], limit=20)
     assert {memory.content for memory in matches} == {"Ada runs", "Ada sleeps"}
     assert all("health" not in memory.categories for memory in matches)
-    assert {row["category"]: row["count"] for row in store.categories(user_id="ada")}["health"] == 2
+    # Tags are topic entities now, counted directly: a parent no longer rolls
+    # up the memories of its children in the histogram (synthetic parents are
+    # off), while the filter above still reaches them.
+    assert store.categories(user_id="ada") == [
+        {"category": "running", "count": 1},
+        {"category": "sleep", "count": 1},
+    ]
 
 
 def test_legacy_copied_synthetic_tags_migrate_to_edges(tmp_path):
@@ -278,7 +286,9 @@ def test_a_tag_pair_is_compared_when_found_and_once_more_at_10_memories(verbatim
     assert len(judge.states) == 4  # never after
 
 
-def test_the_suggest_merges_button_asks_the_judge_nothing(verbatim_store):
+def test_the_suggest_merges_button_only_suggests(verbatim_store):
+    """The button asks the tag question and returns the pair; the merge is the
+    person's, or the weekly pass's, which still compares the pair as its own."""
     from starlette.testclient import TestClient
 
     from memry.rest import create_app
@@ -292,9 +302,17 @@ def test_the_suggest_merges_button_asks_the_judge_nothing(verbatim_store):
     # Not entered as a context manager, so the upkeep scheduler, whose weekly
     # pass does judge tags, does not start.
     client = TestClient(create_app(verbatim_store))
-    assert client.get("/api/v1/tags/suggest-merges").status_code == 200
-    assert judge.states == []
+    response = client.get("/api/v1/tags/suggest-merges")
+    assert response.status_code == 200
+    assert response.json() == [{"canonical": "quality assurance",
+                                "variants": ["qa", "quality assurance"],
+                                "reason": "stub: same subject"}]
+    assert len(judge.states) == 2  # both orders
     assert len(verbatim_store.categories(user_id="default")) == 2
+    verbatim_store.merge_obvious_topics(user_id="default")
+    assert len(judge.states) == 4
+    assert verbatim_store.categories(user_id="default") == [
+        {"category": "quality assurance", "count": 6}]
 
 
 def test_tags_that_only_share_a_word_are_not_compared(verbatim_store):

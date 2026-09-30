@@ -99,6 +99,44 @@ def test_reindex_and_sweep(capsys):
     assert json.loads(out)["count"] == 0  # fresh memories survive a 0-threshold sweep
 
 
+def test_backfill_property_vectors_embeds_what_is_missing_in_every_namespace(capsys):
+    """The command fills the property vectors the linked search reads, one
+    namespace at a time or all of them, and a second run finds nothing to do."""
+    from memry.config import Config
+    from memry.models import Entity, EntityMention, Memory, Scope
+    from memry.store import MemoryStore, _text_hash
+
+    store = MemoryStore(Config.load())
+    saved = {}
+    for user, name, text in (("ada", "Quillon", "Quillon runs on Linux"),
+                             ("bo", "Tessel Works", "Tessel Works meets on Mondays")):
+        entity = store.backend.insert_entity(Entity(name=name, normalized=name.lower(),
+                                                    user_id=user))
+        memory = store.backend.insert_memory(Memory(content=text, user_id=user))
+        store.backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
+                                                surface=name))
+        saved[user] = memory.id
+    store.backend.insert_memory(Memory(content="The sprint review moved to Friday",
+                                       user_id="ada"))
+    label = store._property_label()
+    store.close()
+
+    code, out = run(capsys, "backfill-property-vectors", "-u", "ada")
+    assert code == 0 and json.loads(out) == [{"user": "ada", "embedded": 1}]
+    code, out = run(capsys, "backfill-property-vectors")
+    assert sorted(json.loads(out), key=lambda row: row["user"]) == [
+        {"user": "ada", "embedded": 0}, {"user": "bo", "embedded": 1}]
+    code, out = run(capsys, "backfill-property-vectors")
+    assert all(row["embedded"] == 0 for row in json.loads(out))
+
+    store = MemoryStore(Config.load())
+    assert store.backend.property_vector_hashes(list(saved.values())) == {
+        saved["ada"]: (_text_hash("it runs on Linux"), label),
+        saved["bo"]: (_text_hash("it meets on Mondays"), label)}
+    assert len(store.backend.list_memories(Scope(user_id="ada"))) == 2
+    store.close()
+
+
 def test_eval_command(capsys):
     code, out = run(capsys, "eval", "--dataset", "evals/datasets/synthetic_v1.jsonl",
                     "-k", "5", "--json")
