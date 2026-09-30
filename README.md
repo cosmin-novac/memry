@@ -157,13 +157,22 @@ troubleshooting: [docs/connect-chatgpt.md](docs/connect-chatgpt.md).
 The server exposes `save_memories`, `search_memories`, `get_memory_context`,
 `list_memories`, `list_categories`, `update_memory`, `delete_memory`,
 `memory_history`, and `memory_stats`. Agents are instructed to recall context
-at the start of a task and to batch related durable facts into one concise
-multiline `save_memories` call. If related facts arrive in separate calls, the
-client can repeat a semantic `context` label and `run_id`; up to three optional
-`tags` are treated as classification hints. With the default `infer=true`, the
-exact text is acknowledged immediately and remains searchable. The managed
-worker waits for two minutes of quiet, then distills each related group when an
-LLM is configured.
+at the start of a task and to send `save_memories` what was said in words close
+to the original, one statement per line, with the speaker named when it is
+someone other than the user ("Ada: I got the job"). Memry extracts the facts
+and keeps the saved text as the source turns it shows with each memory in later
+searches. If an agent sends a summary, those searches show the summary, and the
+details it dropped are lost. Related statements go in one call. If they arrive
+in separate calls, the client can repeat a semantic `context` label and
+`run_id`; up to three optional `tags` are treated as classification hints. For
+something said on another day, such as an imported chat, the client passes
+`said_at` (`YYYY-MM-DD`): the memories are dated that day, and "yesterday" or
+"next month" in the text counts from it. When a fact changes or the user
+corrects it, the agent saves the new statement, and Memry keeps the old value
+as dated history or retires it when it was wrong. With the default
+`infer=true`, the exact text is acknowledged immediately and remains
+searchable. The managed worker waits for two minutes of quiet, then distills
+each related group when an LLM is configured.
 
 ### As a Python library
 

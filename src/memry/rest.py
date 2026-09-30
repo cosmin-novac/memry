@@ -2823,6 +2823,19 @@ def create_app(
         content = body.get("messages") or body.get("content")
         if not content:
             return JSONResponse({"error": "content or messages required"}, status_code=400)
+        # `said_at`: the day the content was said, for content said on another
+        # day (an import, an earlier conversation). It is the save's time and
+        # the day extraction reads "yesterday" against; malformed or after
+        # today is refused (models.parse_said_at).
+        from .models import parse_said_at
+
+        try:
+            said = parse_said_at(body.get("said_at"))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        dated: dict[str, Any] = (
+            {"created_at": said.isoformat(timespec="seconds"), "now": said} if said else {}
+        )
         # Writes always land in a concrete namespace: an omitted user_id
         # defaults to config.default_user_id instead of storing NULL, which
         # no scoped read (dashboard, clients) would ever find again. Reads
@@ -2846,6 +2859,7 @@ def create_app(
                 metadata=body.get("metadata"),
                 importance=float(body.get("importance", 0.5)),
                 categories=body.get("categories"),
+                **dated,
             ))
             return JSONResponse(result.model_dump(), status_code=202)
         result = await run_in_threadpool(partial(
@@ -2859,6 +2873,7 @@ def create_app(
             memory_type=body.get("memory_type", "semantic"),
             importance=float(body.get("importance", 0.5)),
             categories=body.get("categories"),
+            **dated,
         ))
         return JSONResponse(result.model_dump(), status_code=201)
 

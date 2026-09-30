@@ -449,8 +449,10 @@ The default `save_memories(infer=true)` path is intentionally split at the safe 
 2. Mark that memory `pending_distillation` in its existing SQLite metadata and return the
    MCP acknowledgement. No LLM or embedding request runs before this response.
 3. Wake one in-process worker. It waits until a pending ingestion group has been quiet for
-   two minutes. Saves with the same user/agent/run scope and optional semantic `context`
-   label are then sent through one extraction pass, capped at eight raw records per pass.
+   two minutes. Saves with the same user/agent/run scope, optional semantic `context`
+   label and given day (`created_at`, a save's `said_at`; `store._said_day`) are then sent
+   through one extraction pass, capped at eight raw records per pass: a pass reads
+   relative times against one day.
    Optional client `tags` are prompt hints, not grouping identifiers.
 4. The extractor sees the whole related input while still producing small atomic facts.
    The group's episodes are embedded first, since the save made no provider call. Every
@@ -556,8 +558,12 @@ supersedes, a distilled raw memory included, and the time of the events the save
 the NONE event of a restatement included; a superseded memory keeps a later `updated_at`
 it has, so `repair_updated_at` reads the same times), `memory_metadata`
 (merged into every memory the save produces; a key Memry sets, such as "when", is kept)
-and `now` (the day extraction and the when-check read as today). They exist for replaying
-dated conversations (`evals/external_benchmarks.py`).
+and `now` (the day extraction and the when-check read as today). MCP `save_memories` and
+REST `POST /api/v1/memories` take `said_at`, the day content said on another day was said,
+and pass it as both `created_at` and `now` (`models.parse_said_at`: an ISO date or date and
+time, in UTC; a malformed value or a day after today is refused, a later time today is
+now). The benchmark runner replays dated conversations with them
+(`evals/external_benchmarks.py`).
 
 When existing memory text is edited manually, Memry analyzes the final text before
 committing the change and replaces that memory's entity-name snapshot and authoritative

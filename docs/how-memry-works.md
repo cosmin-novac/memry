@@ -28,7 +28,12 @@ Two important properties of a **Memory**:
   `memory_events` as an audit trail.
 - **Derived, with provenance.** A memory links back to the episode(s) it came
   from (`source_episode_ids`), so you can always re-run a better extraction over
-  the original text.
+  the original text. A search returns each memory with the episodes it rests on
+  (`evidence`: the day each was said, the speaker, the text), and the context
+  block lists them under "What was said".
+- **The day it was said.** A memory's `created_at` is the time it was saved,
+  or the `said_at` day a caller gives for content said on another day.
+  Relative times in the text ("last Friday", "next month") count from that day.
 - **A "when" is separate from the record's own dates.** A memory whose fact
   happens at a time carries `metadata["when"]` with a `start` (`YYYY-MM-DD`,
   `YYYY-MM-DDTHH:MM`, or `--MM-DD` for a yearly date), an optional `end`, and an
@@ -47,9 +52,9 @@ Two important properties of a **Memory**:
 
 ```
 message ─▶ episode (verbatim, immutable)
-        ─▶ extract_facts (LLM)  →  candidate facts
+        ─▶ extract_facts (LLM)  →  candidate facts, each naming the lines it rests on
         ─▶ for each fact: reconcile against similar existing memories
-                             ADD / UPDATE / DELETE / NONE
+                             NEW / SAME / MORE / CHANGED / WRONG
         ─▶ store the memory (with embedding + categories)
         ─▶ link entities  (resolve_mentions, conservative disambiguation)
         ─▶ extract relations between those entities  (typed edges)
@@ -57,23 +62,65 @@ message ─▶ episode (verbatim, immutable)
 ```
 
 **Reconciliation** is the step that keeps the store from bloating. Each new fact
-is compared to the most similar existing memories and the LLM decides:
+is compared to the most similar existing memories, each shown with the day it
+was said, and the decision model gives one of five answers:
 
-- **ADD** – genuinely new → a new memory.
-- **UPDATE** – refines/corrects an existing one → rewritten in place, and the
-  rewrite must preserve every concrete detail from both versions.
-- **DELETE** – the old statement is now false → the old memory is invalidated and
-  superseded by the new one.
-- **NONE** – already known → skipped.
+- **NEW**: new information, including a second event of the same kind (two yoga
+  classes stay two). Memry adds a new memory.
+- **SAME**: the memory already holds everything in the fact. Memry stores no
+  second copy and records the save as more evidence for the memory.
+- **MORE**: the fact has a detail the memory lacks, and the memory is still
+  true. Memry writes one text of both, dated at the save, and keeps the old
+  memory as history.
+- **CHANGED**: the old memory was true and no longer is. Memry adds the new one
+  and keeps the old one as history.
+- **WRONG**: the old memory was never true (a correction). Memry retires it.
+
+A memory kept as history is still found by search, shown with the day it was
+said and `[until <date>]`, the day it stopped holding. When the old memory is
+rated important or was said in two or more saves, or the decision model is
+unsure of a CHANGED or a WRONG, Memry keeps both memories in use and lists the
+pair under Upkeep for you to decide. Section 4 of
+[architecture.md](architecture.md) has the details.
 
 `infer=false` skips extraction and reconciliation entirely and stores the text
 verbatim as one memory (the "just save this exactly" path).
 
+### What a client should send when it saves
+
+Memry keeps the saved text as the source turns of the memories it extracts, and
+extraction only has what that text says. Clients should send what was said in
+words close to the original, one statement per line. If a client sends a
+summary, a later search shows that summary as the source, and the feelings,
+advice, event details or photo descriptions it dropped are lost.
+
+Over MCP, `save_memories` stores its `content` as one turn by the user, so a
+client writes the name of anyone else who spoke into the text ("Ada: I got the
+job"). Over REST, `POST /api/v1/memories` also takes a `messages` list, one turn
+each, where a `role` other than a chat role (`user`, `assistant` and the like)
+or a `name` field is the speaker's name. Extraction then names each person as
+the conversation does, and writes "the user" only for an unnamed speaker in the
+role `user`.
+
+For content said on another day, such as an import or an earlier conversation,
+the client passes `said_at` (`YYYY-MM-DD`, or an ISO date and time, read in
+UTC). Memry dates the save and its memories that day, and "yesterday" or "next
+month" in the text counts from it. A value that is not an ISO date, or a day
+after today, is refused.
+
+When something changes or the user corrects a fact, the client saves the new
+statement as it was said, and Memry keeps or retires the old memory.
+`update_memory` rewrites a memory in place and dates it today, which suits a
+memory Memry wrote wrong. `delete_memory` forgets a memory when the user asks
+for that.
+
 For MCP saves with `infer=true`, the raw text remains immediately searchable
 while enrichment waits for two minutes of quiet. Related calls in the same
-user/agent/run scope and with the same optional `context` label are extracted
-together. Clients should preferably send related facts in one concise multiline
-call; optional `tags` help classification but do not define the ingestion group.
+user/agent/run scope, with the same optional `context` label and given the same
+`said_at` day, are extracted together. Clients should send related statements in
+one call. Optional `tags` are classification hints, and each tag becomes a topic
+in the user's tag list. The `context` label is also shown to the decision model
+when it compares two names that may be one person or thing.
 
 ## The read path (what happens on `search`)
 
@@ -221,7 +268,7 @@ search is about.
 | Capability | Status |
 |---|---|
 | Episodes, memories, bi-temporal, audit trail | real |
-| Extraction + reconciliation (ADD/UPDATE/SUPERSEDE/NONE) | real |
+| Extraction + reconciliation (NEW/SAME/MORE/CHANGED/WRONG) | real |
 | Hybrid retrieval (vector + BM25 + recency/importance) | real |
 | Entity extraction + conservative disambiguation + merge proposals | real |
 | Typed relations + the linked search | real |

@@ -125,6 +125,35 @@ def later_ts(current: str | None, stamp: str) -> str:
         return max(current, stamp)
 
 
+def parse_said_at(value: Any, *, now: datetime | None = None) -> datetime | None:
+    """The time a save says its content was said (``said_at`` on MCP
+    ``save_memories`` and REST ``POST /api/v1/memories``), as the store keeps
+    times: UTC, to the second. A date alone is the start of that day, and a
+    time without a zone is UTC. None when nothing is given.
+
+    Raises ValueError for anything else, and for a day after today (``now``,
+    the clock by default): the words were said already, so a later day is
+    most likely the day what they tell happens, which the text carries. A
+    later time today is taken as ``now``, for a client clock a little ahead.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    shape = "an ISO 8601 date (2023-05-08) or date and time (2023-05-08T14:30:00Z)"
+    if not isinstance(value, str):
+        raise ValueError(f"said_at must be {shape}, not {value!r}")
+    try:
+        moment = parse_ts(value.strip()).astimezone(timezone.utc).replace(microsecond=0)
+    except (ValueError, OverflowError):
+        raise ValueError(f"said_at {value!r} is not {shape}") from None
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+    if moment.date() > now.date():
+        raise ValueError(
+            f"said_at {value!r} is after today ({now.date().isoformat()}): it is the day "
+            "the words were said, and a date they name belongs in the text. Leave it out "
+            "for what is said now.")
+    return min(moment, now)
+
+
 def same_ts(a: str | None, b: str | None) -> bool:
     """Whether two ISO 8601 times name the same instant, compared as times
     ("...T10:00:00Z" is "...T10:00:00+00:00"; a time without a zone is UTC).

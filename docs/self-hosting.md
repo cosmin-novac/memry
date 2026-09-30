@@ -466,6 +466,34 @@ drafts failed the labels and were changed: recurrence turned out to find topics 
 screened out source files and street addresses. `evals/entity_structure_benchmark.py` runs
 the same scoring on your own store.
 
+## The fields you can send to POST /api/v1/memories
+
+| Field | Meaning |
+|---|---|
+| `content` or `messages` | The text to save, or a list of `{"role": ..., "content": ...}` messages, one turn each. A `role` other than `user`, `assistant`, `system`, `developer`, `tool` or `function` is the speaker's name (`{"role": "Ada", "content": "I got the job"}`), and so is a `name` field. |
+| `user_id`, `agent_id`, `run_id` | The namespace, agent and run the memories belong to. Without `user_id`, Memry uses `MEMRY_DEFAULT_USER_ID`. |
+| `infer` | With `true` (the default), Memry extracts facts and reconciles them with what the store has. With `false`, Memry keeps the text as one memory. |
+| `defer` | With `infer` and `defer` both `true`, Memry stores the text at once, replies `202` and extracts the facts in the background after two minutes of quiet. A `messages` list is then saved as one text. |
+| `said_at` | The day the content was said, as `YYYY-MM-DD` or an ISO date and time (read in UTC). Leave it out for what is said now. |
+| `metadata` | Memry keeps it with the saved turns. `metadata.context` is the context label: Memry extracts related saves with one label together. |
+| `categories` | Memry passes up to three of these tags to extraction as hints. With `infer=false` they are the memory's tags. |
+| `memory_type`, `importance` | With `infer=false` they are the memory's type (`semantic` by default) and importance (0.5 by default). |
+
+Send what was said, close to the words used. Memry keeps the saved turns and
+shows them with each memory in later searches (`evidence`), so if you send a
+summary, those searches show the summary.
+
+Use `said_at` for content said on another day, such as an import or an earlier
+conversation. Memry dates the save and its memories that day, and "yesterday"
+or "last Friday" in the text counts from it. A value that is not an ISO date gets a `400` with the reason, and so
+does a day after today: a future date is most likely the day something will
+happen, and that date belongs in the text. A time later today is taken as now.
+MCP `save_memories` takes the same `said_at`.
+
+When a fact changes or someone corrects it, save the new statement and leave the
+old memory as it is. Memry keeps the old value as dated history, or retires it
+when it was wrong.
+
 ## Searching by tag and date
 
 Beyond relevance search, both `search_memories`/`POST /api/v1/search` and

@@ -167,6 +167,18 @@ def _queued_at(memory: Memory) -> datetime:
     return parse_ts(job.get("queued_at") or memory.created_at)
 
 
+def _said_day(memory: Memory) -> str | None:
+    """The day a pending save was given as its time (``add_deferred``'s
+    ``created_at``, in UTC), or None for a save dated when it is distilled."""
+    given = ((memory.metadata or {}).get(_ENRICHMENT_KEY) or {}).get("created_at")
+    if not given:
+        return None
+    try:
+        return parse_ts(str(given)).astimezone(timezone.utc).date().isoformat()
+    except (ValueError, OverflowError):
+        return str(given)[:10]
+
+
 def _ingestion_context(metadata: dict[str, Any] | None) -> str:
     return " ".join(str((metadata or {}).get("context") or "").split())[:200]
 
@@ -1344,8 +1356,9 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """Process one bounded batch of durable pending memories.
 
-        Related saves in the same scope and with the same optional ``context``
-        metadata are distilled together after the group has been quiet. Raw
+        Related saves in the same scope, with the same optional ``context``
+        metadata and given the same day (``_said_day``), are distilled
+        together after the group has been quiet. Raw
         records keep independent provenance and retry state, while extraction
         sees the complete thought instead of one client call at a time.
         """
@@ -1368,11 +1381,14 @@ class MemoryStore:
         )
         groups: dict[tuple[Any, ...], list[Memory]] = {}
         for memory in pending:
+            # A group is extracted with one date, so saves said on different
+            # days (a ``created_at`` given, or none) are never one group.
             key = (
                 memory.user_id,
                 memory.agent_id,
                 memory.run_id,
                 _ingestion_context(memory.metadata).casefold(),
+                _said_day(memory),
             )
             groups.setdefault(key, []).append(memory)
 
