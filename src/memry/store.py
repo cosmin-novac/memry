@@ -104,6 +104,7 @@ from .intelligence.extraction import (
     VOCABULARY_LIMIT,
     extract_facts,
     extract_relations,
+    speaker_name,
     speaks_with_the_user,
     verbatim_candidates,
     verify_coverage,
@@ -181,6 +182,75 @@ def _said_day(memory: Memory) -> str | None:
 
 def _ingestion_context(metadata: dict[str, Any] | None) -> str:
     return " ".join(str((metadata or {}).get("context") or "").split())[:200]
+
+
+def _as_messages(content: str | list[dict[str, str]]) -> list[dict[str, str]]:
+    """A save's content as messages: a text is one message, said by the user."""
+    return [{"role": "user", "content": content}] if isinstance(content, str) else content
+
+
+def _says_something(message: dict[str, str]) -> bool:
+    return bool((message.get("content") or "").strip())
+
+
+def _said_episodes(
+    messages: list[dict[str, str]],
+    *,
+    user_id: str | None,
+    agent_id: str | None,
+    run_id: str | None,
+    metadata: dict[str, Any] | None,
+    created_at: str,
+) -> list[Episode]:
+    """The turns a save keeps, a direct save's (``add``) and a deferred one's
+    (``add_deferred``) alike: one episode per message that says something, in
+    order, with its role and the speaker's name it gives (``name``), all at
+    the save's time. They are the lines extraction numbers
+    (``extraction._transcript``)."""
+    return [
+        Episode(
+            content=m.get("content", ""),
+            role=m.get("role", "user"),
+            name=speaker_name(m) or None,
+            user_id=user_id,
+            agent_id=agent_id,
+            run_id=run_id,
+            metadata=metadata or {},
+            created_at=created_at,
+        )
+        for m in messages
+        if _says_something(m)
+    ]
+
+
+def _speaker_lines(messages: list[dict[str, str]]) -> str:
+    """Messages as a person reads them, the text of a deferred save of
+    messages while it waits: one "Speaker: text" line per message that says
+    something, the speaker being its ``name``, else its role."""
+    lines = []
+    for m in messages:
+        if _says_something(m):
+            lines.append(f"{speaker_name(m) or m.get('role', 'user')}: "
+                         f"{str(m['content']).strip()}")
+    return "\n".join(lines)
+
+
+def _pending_lines(memory: Memory) -> tuple[list[dict[str, str]], list[list[str]]]:
+    """What a pending memory says, as the messages extraction reads, and the
+    episodes of each line. A deferred save of messages keeps them with its
+    work marker (``add_deferred``): one line each, resting on its own episode,
+    which are the memory's first sources in order (a restatement adds its
+    episodes after them). Any other pending memory, and one whose text was
+    edited while it waited, is one line, its text said by the user, resting
+    on all its episodes."""
+    job = (memory.metadata or {}).get(_ENRICHMENT_KEY) or {}
+    sources = list(memory.source_episode_ids or [])
+    said = [dict(m) for m in job.get("messages") or [] if _says_something(m)]
+    if said and memory.content == _speaker_lines(said):
+        return said, [[episode_id] for episode_id in sources[:len(said)]]
+    if not memory.content.strip():
+        return [], []
+    return [{"role": "user", "content": memory.content}], [sources]
 
 
 def _keep_context(candidates: list[CandidateFact], context: str) -> None:
@@ -616,26 +686,13 @@ class MemoryStore:
         conversations, as the benchmarks do.
         """
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        messages = (
-            [{"role": "user", "content": content}] if isinstance(content, str) else content
-        )
+        messages = _as_messages(content)
         # One time for every message of the save: a save is its run and its
         # time, which is how the saves stating a memory are counted
         # (``reconcile.saves_of``).
         saved_at = created_at or utcnow()
-        episodes = [
-            Episode(
-                content=m.get("content", ""),
-                role=m.get("role", "user"),
-                user_id=user_id,
-                agent_id=agent_id,
-                run_id=run_id,
-                metadata=metadata or {},
-                created_at=saved_at,
-            )
-            for m in messages
-            if (m.get("content") or "").strip()
-        ]
+        episodes = _said_episodes(messages, user_id=user_id, agent_id=agent_id,
+                                  run_id=run_id, metadata=metadata, created_at=saved_at)
         if not episodes:
             return AddResult()
         if episodes:
@@ -659,25 +716,13 @@ class MemoryStore:
             ]
         elif self.llm.available:
             try:
-                candidates = extract_facts(
-                    self.llm,
+                candidates = self._extract(
                     messages,
+                    scope,
                     now=now,
-                    vocabulary=self._tag_vocabulary(
-                        scope,
-                        text="\n".join(
-                            str(m.get("content") or "") for m in messages
-                        ),
-                    ),
                     context=_ingestion_context(metadata),
                     tag_hints=_client_tag_hints(metadata, categories),
-                    owner=self.owner_name(scope.user_id, messages),
-                    entity_names=self._entity_vocabulary(
-                        scope,
-                        "\n".join(str(m.get("content") or "") for m in messages),
-                    ),
                 )
-                self._confirm_candidate_whens(candidates, now=now)
             except Exception as exc:
                 # Provider outage / exhausted credits must not lose the save:
                 # degrade to verbatim, tell the caller, and flag the memories
@@ -716,9 +761,38 @@ class MemoryStore:
         except Exception:
             return []
 
+    def _extract(
+        self,
+        messages: list[dict[str, str]],
+        scope: Scope,
+        *,
+        now: datetime | None,
+        context: str,
+        tag_hints: list[str],
+    ) -> list[CandidateFact]:
+        """The facts extraction finds in a direct save's messages (``add``)
+        or a pending group's (``_distill_pending_group``), asked the same way:
+        offered the tags and entities their words may name and the owner as
+        these messages speak of them (``owner_name``), each fact's time then
+        checked against ``now``. A deferred save is extracted as it would have
+        been saved directly."""
+        said = "\n".join(str(m.get("content") or "") for m in messages)
+        candidates = extract_facts(
+            self.llm,
+            messages,
+            now=now,
+            vocabulary=self._tag_vocabulary(scope, text=said),
+            context=context,
+            tag_hints=tag_hints,
+            owner=self.owner_name(scope.user_id, messages),
+            entity_names=self._entity_vocabulary(scope, said),
+        )
+        self._confirm_candidate_whens(candidates, now=now)
+        return candidates
+
     def add_deferred(
         self,
-        content: str,
+        content: str | list[dict[str, str]],
         *,
         user_id: str | None = None,
         agent_id: str | None = None,
@@ -731,9 +805,18 @@ class MemoryStore:
         memory_metadata: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> AddResult:
-        """Durably save raw text for managed background enrichment.
+        """Durably save raw content for managed background enrichment.
 
-        This path performs no provider calls. The episode and searchable pending
+        ``content`` is a text or a list of messages, as for ``add``, and its
+        turns are kept as ``add`` keeps them: one episode per message that
+        says something, with its role (a text is one, said by the user). One
+        searchable pending memory holds the save: the text, or for messages
+        one "Speaker: text" line each (``_speaker_lines``). Messages are also
+        kept with the work marker, so the distillation reads them as a direct
+        save's extraction does: the same numbered lines and speakers, each
+        line resting on its own episode (``_pending_lines``).
+
+        This path performs no provider calls. The episodes and searchable pending
         memory are committed before the caller receives the result; the pending
         metadata is the restart-safe work marker consumed by the server worker.
         ``created_at``, ``memory_metadata`` and ``now`` mean what they mean for
@@ -741,23 +824,26 @@ class MemoryStore:
         marker for the distillation that follows. The quiet period counts from
         when the save was queued, whatever ``created_at`` says.
         """
-        text = content.strip()
-        if not text:
-            return AddResult()
+        if isinstance(content, str):
+            content = content.strip()
         queued_at = utcnow()
         stamp = created_at or queued_at
-        episode = Episode(
-            content=text,
-            role="user",
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-            metadata=metadata or {},
-            created_at=stamp,
-        )
+        episodes = _said_episodes(_as_messages(content), user_id=user_id, agent_id=agent_id,
+                                  run_id=run_id, metadata=metadata, created_at=stamp)
+        if not episodes:
+            return AddResult()
+        text = content if isinstance(content, str) else _speaker_lines(content)
         pending_metadata = {**(memory_metadata or {}), **(metadata or {})}
         pending_metadata["pending_distillation"] = True
         job: dict[str, Any] = {"status": "pending", "attempts": 0, "queued_at": queued_at}
+        if not isinstance(content, str):
+            # what extraction reads of each message (extraction._transcript)
+            job["messages"] = [
+                {"role": m.get("role", "user"), "content": m["content"],
+                 **({"name": m["name"]} if m.get("name") else {})}
+                for m in content
+                if _says_something(m)
+            ]
         if created_at:
             job["created_at"] = created_at
         if memory_metadata:
@@ -774,11 +860,11 @@ class MemoryStore:
             importance=importance,
             categories=clean_tags(categories),
             metadata=pending_metadata,
-            source_episode_ids=[episode.id],
+            source_episode_ids=[episode.id for episode in episodes],
             created_at=stamp,
             updated_at=stamp,
         )
-        self.backend.add_episodes([episode])
+        self.backend.add_episodes(episodes)
         self.backend.insert_memory(memory)
         self.backend.add_event(
             MemoryEvent(
@@ -789,7 +875,7 @@ class MemoryStore:
             )
         )
         return AddResult(
-            episode_ids=[episode.id],
+            episode_ids=[episode.id for episode in episodes],
             actions=[
                 AddAction(
                     event="ADD",
@@ -1509,9 +1595,14 @@ class MemoryStore:
         if not self.llm.available:
             raise ValueError("no LLM configured; distillation needs one")
 
-        messages = [
-            {"role": "user", "content": memory.content} for memory in active
-        ]
+        # one transcript line per raw text, and per message of a deferred
+        # save of messages, each with the episodes it rests on
+        messages: list[dict[str, str]] = []
+        line_episodes: list[list[str]] = []
+        for memory in active:
+            said, lines = _pending_lines(memory)
+            messages.extend(said)
+            line_episodes.extend(lines)
         contexts = list(
             dict.fromkeys(
                 value
@@ -1551,22 +1642,8 @@ class MemoryStore:
         memory_metadata: dict[str, Any] = {}
         for job in jobs:
             memory_metadata.update(job.get("memory_metadata") or {})
-        candidates = extract_facts(
-            self.llm,
-            messages,
-            now=now,
-            vocabulary=self._tag_vocabulary(
-                first_scope,
-                text="\n".join(memory.content for memory in active),
-            ),
-            context=context or None,
-            tag_hints=tag_hints,
-            owner=self.owner_name(first_scope.user_id),
-            entity_names=self._entity_vocabulary(
-                first_scope, "\n".join(memory.content for memory in active)
-            ),
-        )
-        self._confirm_candidate_whens(candidates, now=now)
+        candidates = self._extract(
+            messages, first_scope, now=now, context=context, tag_hints=tag_hints)
         if not candidates:
             for memory in active:
                 metadata = self._clear_enrichment_metadata(memory.metadata)
@@ -1586,9 +1663,8 @@ class MemoryStore:
             episode_ids,
             exclude_ids={memory.id for memory in active},
             created_at=created_at,
-            # one transcript line per raw memory: the episodes it rests on
-            line_episodes=[memory.source_episode_ids for memory in active
-                           if memory.content.strip()],
+            messages=messages,
+            line_episodes=line_episodes,
         )
         landed = sum(1 for action in actions if action.event != "NONE")
         new_id = next(
@@ -1908,7 +1984,7 @@ class MemoryStore:
             asked /= float(np.linalg.norm(asked)) or 1.0
         words = self.backend.episode_keyword_scores(query, [e.id for e in episodes])
         turns = [
-            EvidenceTurn(episode_id=e.id, content=e.content, speaker=e.role,
+            EvidenceTurn(episode_id=e.id, content=e.content, speaker=e.speaker,
                          said_at=e.created_at, memory_ids=resting[e.id],
                          score=round(_similarity(asked, vectors.get(e.id))
                                      if asked is not None else 0.0, 6))

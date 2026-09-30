@@ -205,6 +205,12 @@ CHAT_ROLES = frozenset({"user", "assistant", "system", "developer", "tool", "fun
 OWNER_PLACEHOLDER = "the user"
 
 
+def speaker_name(message: dict[str, str]) -> str:
+    """The name a message gives its speaker besides its role (``name``), on
+    one line and at most 80 characters, or "" when it gives none."""
+    return " ".join(str(message.get("name") or "").split())[:80]
+
+
 def _transcript(messages: list[dict[str, str]], *, numbered: bool = False) -> str:
     """One line per message that says something: its speaker, then what it
     says. A message with a ``name`` is spoken by "<name> (<role>)"; any other
@@ -218,7 +224,7 @@ def _transcript(messages: list[dict[str, str]], *, numbered: bool = False) -> st
         if not content:
             continue
         role = m.get("role", "user")
-        name = " ".join(str(m.get("name") or "").split())[:80]
+        name = speaker_name(m)
         speaker = f"{name} ({role})" if name else role
         number = f"[{len(lines) + 1}] " if numbered else ""
         lines.append(f"{number}{speaker}: {content}")

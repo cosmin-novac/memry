@@ -190,13 +190,23 @@ class Episode(BaseModel):
 
     id: str = Field(default_factory=new_id)
     content: str
+    #: The message's role: a chat role ("user"), or a speaker's name.
     role: str = "user"
+    #: The speaker's name when the message gave one besides its role (a
+    #: ``name``), shown as the turn's speaker; the role still decides what a
+    #: role decides. None for an episode saved before names were kept.
+    name: str | None = None
     user_id: str | None = None
     agent_id: str | None = None
     run_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utcnow)
     withheld_at: str | None = None
+
+    @property
+    def speaker(self) -> str:
+        """Who said it: the name given, else the role."""
+        return self.name or self.role
 
 
 class Memory(BaseModel):
@@ -317,7 +327,8 @@ class EvidenceTurn(BaseModel):
 
     episode_id: str
     content: str
-    #: The episode's role: a speaker's name, or a chat role ("user").
+    #: Who said it (``Episode.speaker``): the name the message gave, else its
+    #: role (a speaker's name, or a chat role such as "user").
     speaker: str
     #: When it was said: the episode's ``created_at``.
     said_at: str

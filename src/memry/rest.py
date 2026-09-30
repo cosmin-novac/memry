@@ -2823,6 +2823,11 @@ def create_app(
         content = body.get("messages") or body.get("content")
         if not content:
             return JSONResponse({"error": "content or messages required"}, status_code=400)
+        if not isinstance(content, str) and not (
+                isinstance(content, list) and all(isinstance(m, dict) for m in content)):
+            return JSONResponse(
+                {"error": "content is a text, messages a list of {role, content} objects"},
+                status_code=400)
         # `said_at`: the day the content was said, for content said on another
         # day (an import, an earlier conversation). It is the save's time and
         # the day extraction reads "yesterday" against; malformed or after
@@ -2849,10 +2854,11 @@ def create_app(
         # enrichment worker extract, reconcile and link afterwards. Extraction
         # is several provider round-trips, so a caller that waits for it sits
         # there for seconds to save one note. The text is searchable either way.
+        # Messages keep one turn each with its speaker, as without `defer`.
         if infer and bool(body.get("defer")) and store.llm.available:
             result = await run_in_threadpool(partial(
                 store.add_deferred,
-                content if isinstance(content, str) else json.dumps(content),
+                content,
                 user_id=user_id,
                 agent_id=body.get("agent_id"),
                 run_id=body.get("run_id"),

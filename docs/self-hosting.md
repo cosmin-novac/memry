@@ -470,10 +470,10 @@ the same scoring on your own store.
 
 | Field | Meaning |
 |---|---|
-| `content` or `messages` | The text to save, or a list of `{"role": ..., "content": ...}` messages, one turn each. A `role` other than `user`, `assistant`, `system`, `developer`, `tool` or `function` is the speaker's name (`{"role": "Ada", "content": "I got the job"}`), and so is a `name` field. |
+| `content` or `messages` | The text to save, or a list of `{"role": ..., "content": ...}` messages, one turn each. A `role` other than `user`, `assistant`, `system`, `developer`, `tool` or `function` is the speaker's name (`{"role": "Ada", "content": "I got the job"}`), and so is a `name` field. Memry shows each turn with that name as its speaker. Anything other than a text or a list of objects gets a `400`. |
 | `user_id`, `agent_id`, `run_id` | The namespace, agent and run the memories belong to. Without `user_id`, Memry uses `MEMRY_DEFAULT_USER_ID`. |
 | `infer` | With `true` (the default), Memry extracts facts and reconciles them with what the store has. With `false`, Memry keeps the text as one memory. |
-| `defer` | With `infer` and `defer` both `true`, Memry stores the text at once, replies `202` and extracts the facts in the background after two minutes of quiet. A `messages` list is then saved as one text. |
+| `defer` | With `infer` and `defer` both `true`, Memry stores what was said at once, replies `202` and extracts the facts in the background after two minutes of quiet. A `messages` list keeps one turn per message with its speaker, as without `defer`, and extraction reads it the same way. Until then it is searchable as one memory with a `Speaker: text` line per message. |
 | `said_at` | The day the content was said, as `YYYY-MM-DD` or an ISO date and time (read in UTC). Leave it out for what is said now. |
 | `metadata` | Memry keeps it with the saved turns. `metadata.context` is the context label: Memry extracts related saves with one label together. |
 | `categories` | Memry passes up to three of these tags to extraction as hints. With `infer=false` they are the memory's tags. |

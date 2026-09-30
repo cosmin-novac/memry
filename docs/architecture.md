@@ -106,7 +106,7 @@ environment variable, CLI flag, REST option, or server option that selects it.
 
 | Record | Purpose | Lifecycle |
 |---|---|---|
-| `Episode` | Raw input captured before derived processing, one per message | Append-only source evidence. Not searched on its own: it is shown as evidence of the memories found that rest on it (section 5). `withheld_at` ends that for good. |
+| `Episode` | Raw input captured before derived processing, one per message, with its role and the speaker's `name` when the message gives one | Append-only source evidence. Not searched on its own: it is shown as evidence of the memories found that rest on it (section 5). `withheld_at` ends that for good. |
 | `Memory` | One derived or verbatim claim | May be updated, invalidated, or superseded; hard deletion is explicit. |
 | `MemoryEvent` | Audit event for add/update/supersede/delete decisions | Append-only audit trail. |
 | Embedding and FTS row | Search representation of a memory, and of an episode for choosing it as evidence | Derived and rebuildable (`memry reindex` embeds episodes an older store has no vector for). |
@@ -443,11 +443,16 @@ edge only means something next to the thing it connects.
 
 ### Durable MCP save and managed enrichment
 
-The default `save_memories(infer=true)` path is intentionally split at the safe boundary:
+The default `save_memories(infer=true)` path, and REST `POST /api/v1/memories` with
+`defer`, are intentionally split at the safe boundary (`store.add_deferred`):
 
-1. Commit the exact input as both an immutable episode and an active, searchable memory.
+1. Commit the exact input as immutable episodes and one active, searchable memory. A text
+   is one episode, said by the user. A list of messages (REST only) is kept as a direct
+   save keeps it: one episode per message that says something, with its speaker. Its
+   memory reads one `Speaker: text` line per message, and the messages are kept with the
+   pending marker for step 4.
 2. Mark that memory `pending_distillation` in its existing SQLite metadata and return the
-   MCP acknowledgement. No LLM or embedding request runs before this response.
+   acknowledgement. No LLM or embedding request runs before this response.
 3. Wake one in-process worker. It waits until a pending ingestion group has been quiet for
    two minutes. Saves with the same user/agent/run scope, optional semantic `context`
    label and given day (`created_at`, a save's `said_at`; `store._said_day`) are then sent
@@ -455,6 +460,9 @@ The default `save_memories(infer=true)` path is intentionally split at the safe 
    relative times against one day.
    Optional client `tags` are prompt hints, not grouping identifiers.
 4. The extractor sees the whole related input while still producing small atomic facts.
+   Each text is one line said by the user, and each message of a saved list is its own
+   line with its speaker, so a conversation reaches the extractor as a direct save's
+   does: the same numbered lines, and the same instruction when the speakers are named.
    The group's episodes are embedded first, since the save made no provider call. Every
    derived fact keeps the source episode IDs of the saves whose lines it names (all of the
    group's when it names none) and the save's context
@@ -710,7 +718,9 @@ as history reads "<text> (said 8 May 2023) [until 15 July 2023]": said the day i
 hold (`valid_from`, since taking it out of use moved its `updated_at`), and held until the
 day the memory that replaced it was said, written as that memory's "said" date is. The
 memories are followed by their evidence turns in the order they were said, each "<said
-date>: <speaker>: <text>". The MCP `search_memories` rows carry the same as data: `said`,
+date>: <speaker>: <text>", the speaker being the message's `name` when it gave one, else
+its role (an episode saved before names were kept shows its role). The role still decides
+what a role decides, such as whether "the user" is the owner. The MCP `search_memories` rows carry the same as data: `said`,
 `happened`, `invalid_at` for a memory out of use, and `evidence` (said, speaker, text). The
 benchmark runner passes these lines, the descriptions first, as Mem0's memory list
 (`evals/mem0_judge.py` renders nothing of its own); `--no-descriptions` leaves the

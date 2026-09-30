@@ -49,12 +49,14 @@ from .base import MemoryBackend
 _SCHEMA = """
 -- withheld_at: when a memory resting on the episode was deleted for good; from
 -- then on the episode is never shown as evidence (``evidence_episodes``). The
--- embedding is what evidence is chosen by, stored as a memory's is. Each column
--- defaults to NULL, so a backup from before it restores.
+-- embedding is what evidence is chosen by, stored as a memory's is. name: the
+-- speaker's name a message gave besides its role (NULL: shown by its role). Each
+-- column defaults to NULL, so a backup from before it restores.
 CREATE TABLE IF NOT EXISTS episodes (
     id TEXT PRIMARY KEY,
     content TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'user',
+    name TEXT DEFAULT NULL,
     user_id TEXT,
     agent_id TEXT,
     run_id TEXT,
@@ -684,7 +686,7 @@ def _row_scope(row: sqlite3.Row) -> Scope:
 
 
 _EPISODE_COLS = (
-    "id, content, role, user_id, agent_id, run_id, metadata, created_at, withheld_at"
+    "id, content, role, name, user_id, agent_id, run_id, metadata, created_at, withheld_at"
 )
 
 
@@ -693,6 +695,7 @@ def _row_to_episode(row: sqlite3.Row) -> Episode:
         id=row["id"],
         content=row["content"],
         role=row["role"],
+        name=row["name"],
         user_id=row["user_id"],
         agent_id=row["agent_id"],
         run_id=row["run_id"],
@@ -739,7 +742,7 @@ class LocalBackend(MemoryBackend):
             row["name"] for row in self._db.execute("PRAGMA table_info(episodes)").fetchall()
         }
         for column, kind in (("withheld_at", "TEXT"), ("embedding", "BLOB"),
-                             ("embedding_model", "TEXT")):
+                             ("embedding_model", "TEXT"), ("name", "TEXT")):
             if episode_columns and column not in episode_columns:
                 self._db.execute(f"ALTER TABLE episodes ADD COLUMN {column} {kind} DEFAULT NULL")
         indexed = self._db.execute(
@@ -1133,13 +1136,14 @@ class LocalBackend(MemoryBackend):
     def add_episodes(self, episodes: list[Episode]) -> None:
         with self._lock:
             self._db.executemany(
-                "INSERT INTO episodes (id, content, role, user_id, agent_id, run_id, "
-                "metadata, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO episodes (id, content, role, name, user_id, agent_id, run_id, "
+                "metadata, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         e.id,
                         e.content,
                         e.role,
+                        e.name,
                         e.user_id,
                         e.agent_id,
                         e.run_id,
