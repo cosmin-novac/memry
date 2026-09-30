@@ -18,6 +18,7 @@ from typing import Iterable
 
 from ..backends.base import MemoryBackend
 from ..models import Scope
+from .identity import name_tokens
 
 _MIN_SURFACE = 3  # ignore 1-2 char "entities" that would match everything
 _POSSESSIVE_END = re.compile("['’]s$")
@@ -52,9 +53,12 @@ def detect_query_entities(
     backend: MemoryBackend, scope: Scope, query: str, *, cap: int = 128,
     longest: bool = False,
 ) -> list[str]:
-    """Resolve bounded query phrases through canonical and alias candidates.
+    """Resolve bounded query phrases through canonical and alias candidates,
+    then the words that name an entity on their own (``named_by_a_word``:
+    "Talkeetna" for "Mount Talkeetna").
 
-    Work scales with the query length, not the number of stored entities.
+    The phrases and the words are looked up by indexes, whatever the number
+    of stored entities.
     Longest phrases are tried first so multi-word names remain precise.
     ``longest`` keeps only the longest names found: "bildy v4" and not also
     "bildy", which it contains. A search that starts at "bildy" reaches every
@@ -82,7 +86,53 @@ def detect_query_entities(
     if not phrases:
         return []
     found = [entity.id for entity in backend.find_entities_by_aliases(phrases, scope, limit=50)]
+    found += named_by_a_word(backend, scope, query, found)
     return longest_names(backend, found) if longest else found
+
+
+def named_by_a_word(
+    backend: MemoryBackend, scope: Scope, query: str, found: Iterable[str] = ()
+) -> list[str]:
+    """The entities a question names by one word of a longer name:
+    "Talkeetna" for "Mount Talkeetna". A word names an entity when it is a
+    word of that entity's names alone (its name and aliases; no other
+    entity's carries it, the rare shared word of ``identity.NameIndex`` at
+    its rarest), and the store uses it for that entity more likely than
+    not: of the person's memories in use and turns saved that hold the word,
+    more than half are the entity's memories or the turns they rest on
+    (``MemoryBackend.word_use``). A word that one name carries but the store
+    says of other things too ("mom" in "Ada's mom", "city" in "New York
+    City") names nothing. Words of the names ``found`` already (the
+    question names those in full) and words of fewer than three letters are
+    not read, as the rare-word pairing reads none."""
+    found = list(found)
+    known = {word for entity_id in found for name in backend.entity_aliases(entity_id)
+             for word in name_tokens(name)}
+    # each word as written (lower case) and as the name index reads it, its
+    # accents folded: the names are looked for under both ("münchen", "munchen")
+    written: dict[str, set[str]] = {}
+    for form in re.findall(r"[^\W_]+", query.casefold()):
+        for word in name_tokens(form):
+            written.setdefault(word, {word}).add(form)
+    words = [word for word in written if len(word) >= _MIN_SURFACE and word not in known]
+    if not words:
+        return []
+    holders: dict[str, set[str]] = {}
+    forms = sorted({form for word in words for form in written[word]})
+    for entity_id, name in backend.entity_names_holding(forms, scope):
+        for word in set(name_tokens(name)).intersection(words):
+            holders.setdefault(word, set()).add(entity_id)
+    named: list[str] = []
+    for word in words:
+        if len(holders.get(word, ())) != 1:
+            continue
+        (entity_id,) = holders[word]
+        if entity_id in found or entity_id in named:
+            continue
+        texts, its = backend.word_use(word, entity_id, scope)
+        if 2 * its > texts:
+            named.append(entity_id)
+    return named
 
 
 def longest_names(backend: MemoryBackend, entity_ids: list[str]) -> list[str]:

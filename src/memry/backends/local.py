@@ -9,15 +9,17 @@ history. WAL mode + a process-wide lock make it safe for the MCP/REST servers.
 from __future__ import annotations
 
 import base64
+import heapq
 import json
+import math
 import re
 import sqlite3
 import threading
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -202,6 +204,9 @@ CREATE INDEX IF NOT EXISTS idx_entities_norm ON entities(
 CREATE INDEX IF NOT EXISTS idx_entities_type_user ON entities(
     entity_type, user_id, normalized
 );
+-- the names merged into an entity, read among its names (``entity_aliases``)
+CREATE INDEX IF NOT EXISTS idx_entities_merged ON entities(merged_into)
+    WHERE merged_into IS NOT NULL;
 
 -- decided: what joined a name to an entity the store had (JSON, see
 -- ``EntityMention.decided``); NULL for a mention that made its entity.
@@ -299,6 +304,122 @@ CREATE INDEX IF NOT EXISTS idx_relations_user ON relations(user_id);
 #: triggers.
 _TABLES = tuple(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _SCHEMA))
 
+# The names an entity gives (its own and each alias of its metadata), and
+# whether an ``entity_names`` row is still given by its entity or by one of
+# its mentions, for the triggers below.
+_GIVEN_BY = (
+    "SELECT {e}.name AS value UNION SELECT CAST(alias.value AS TEXT) FROM json_each("
+    "CASE WHEN json_valid({e}.metadata) THEN {e}.metadata END, '$.aliases') AS alias "
+    "WHERE alias.value IS NOT NULL"
+)
+_STILL_GIVEN = (
+    "EXISTS (SELECT 1 FROM entities e WHERE e.id = entity_names.entity_id "
+    "AND entity_names.name IN (" + _GIVEN_BY.format(e="e") + ")) OR EXISTS ("
+    "SELECT 1 FROM entity_mentions m WHERE lower(trim(m.surface)) = "
+    "lower(trim(entity_names.name)) AND m.entity_id = entity_names.entity_id "
+    "AND m.surface = entity_names.name)"
+)
+
+
+def _owner(entity: str) -> str:
+    """The owner of an entity's names: the user of the entity they are read
+    for (the one it was merged into, if it was), between unit separators so
+    that the trigram index finds it whole, however short (``_owned``)."""
+    return (f"(SELECT char(31, 31) || t.user_id || char(31) FROM entities x JOIN entities t "
+            f"ON t.id = IFNULL(x.merged_into, x.id) WHERE x.id = {entity})")
+
+
+def _owned(user_id: str) -> str:
+    """How ``_owner`` writes a user in the index of names."""
+    return "\x1f\x1f" + user_id + "\x1f"
+
+
+def _add_names(entity: str, values: str) -> str:
+    return (f"INSERT INTO entity_names (entity_id, name, owner) SELECT {entity}, value, "
+            f"{_owner(entity)} FROM ({values}) WHERE value IS NOT NULL AND value != '' "
+            f"AND NOT EXISTS (SELECT 1 FROM entity_names WHERE entity_id = {entity} "
+            "AND name = value);")
+
+
+def _drop_names(entity: str, values: str) -> str:
+    return (f"DELETE FROM entity_names WHERE entity_id = {entity} AND name IN ({values}) "
+            f"AND NOT ({_STILL_GIVEN});")
+
+
+def _own_names(entity: str) -> str:
+    """The names of ``entity`` and of the entities merged into it given
+    their owner again."""
+    return (f"UPDATE entity_names SET owner = {_owner('entity_names.entity_id')} "
+            f"WHERE entity_id IN (SELECT {entity} UNION SELECT id FROM entities "
+            f"WHERE merged_into = {entity});")
+
+
+# Every name an entity answers to, once per entity and name: its own, each
+# alias of its metadata and each wording its mentions use (an entity merged
+# into another keeps its own name here, read for the one it was merged into),
+# with the user it is read for. Derived, like memories_fts, and kept by the
+# triggers: a name comes in with what gives it and goes when nothing gives it
+# any more. entity_names_fts finds a name by any part of it three letters or
+# longer, of one user's names alone where the search has a user
+# (``LocalBackend.entity_names_holding``). Made where SQLite has the trigram
+# tokenizer (3.34 and later).
+_ENTITY_NAMES_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS entity_names (
+    id INTEGER PRIMARY KEY,
+    entity_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    owner TEXT,
+    UNIQUE (entity_id, name)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS entity_names_fts USING fts5(
+    name, owner, content='entity_names', content_rowid='id', tokenize='trigram'
+);
+CREATE INDEX IF NOT EXISTS idx_entity_names_folded
+    ON entity_names(lower(trim(name)), owner);
+CREATE TRIGGER IF NOT EXISTS entity_names_ai AFTER INSERT ON entity_names BEGIN
+    INSERT INTO entity_names_fts(rowid, name, owner) VALUES (new.id, new.name, new.owner);
+END;
+CREATE TRIGGER IF NOT EXISTS entity_names_au AFTER UPDATE OF owner ON entity_names
+WHEN old.owner IS NOT new.owner BEGIN
+    INSERT INTO entity_names_fts(entity_names_fts, rowid, name, owner)
+    VALUES ('delete', old.id, old.name, old.owner);
+    INSERT INTO entity_names_fts(rowid, name, owner) VALUES (new.id, new.name, new.owner);
+END;
+CREATE TRIGGER IF NOT EXISTS entity_names_ad AFTER DELETE ON entity_names BEGIN
+    INSERT INTO entity_names_fts(entity_names_fts, rowid, name, owner)
+    VALUES ('delete', old.id, old.name, old.owner);
+END;
+CREATE TRIGGER IF NOT EXISTS entities_names_ai AFTER INSERT ON entities BEGIN
+    {_own_names("new.id")}
+    {_add_names("new.id", _GIVEN_BY.format(e="new"))}
+END;
+CREATE TRIGGER IF NOT EXISTS entities_names_au AFTER UPDATE OF name, metadata ON entities BEGIN
+    {_drop_names("old.id", _GIVEN_BY.format(e="old"))}
+    {_add_names("new.id", _GIVEN_BY.format(e="new"))}
+END;
+CREATE TRIGGER IF NOT EXISTS entities_owner_au AFTER UPDATE OF user_id, merged_into ON entities
+BEGIN
+    {_own_names("new.id")}
+END;
+CREATE TRIGGER IF NOT EXISTS entities_names_ad AFTER DELETE ON entities BEGIN
+    {_drop_names("old.id", "SELECT name FROM entity_names WHERE entity_id = old.id")}
+    {_own_names("old.id")}
+END;
+CREATE TRIGGER IF NOT EXISTS entity_mentions_names_ai AFTER INSERT ON entity_mentions BEGIN
+    {_add_names("new.entity_id", "SELECT new.surface AS value")}
+END;
+CREATE TRIGGER IF NOT EXISTS entity_mentions_names_au
+AFTER UPDATE OF entity_id, surface ON entity_mentions BEGIN
+    {_drop_names("old.entity_id", "SELECT old.surface")}
+    {_add_names("new.entity_id", "SELECT new.surface AS value")}
+END;
+CREATE TRIGGER IF NOT EXISTS entity_mentions_names_ad AFTER DELETE ON entity_mentions BEGIN
+    {_drop_names("old.entity_id", "SELECT old.surface")}
+END;
+"""
+_ENTITY_NAMES_TRIGGERS = tuple(
+    re.findall(r"CREATE TRIGGER IF NOT EXISTS (\w+)", _ENTITY_NAMES_SCHEMA))
+
 _MEMORY_COLS = (
     "id, content, memory_type, user_id, agent_id, run_id, importance, categories, "
     "entities, metadata, created_at, updated_at, valid_from, invalid_at, superseded_by, "
@@ -340,7 +461,94 @@ _ACTIVE_TOPIC_MARKER = "schema:active-topic-ns:v1"
 #: its survivor, and their index and mentions follow.
 _TAG_SURVIVORS_MARKER = "schema:tag-survivors:v1"
 
-_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+#: Set once ``entity_names`` holds every name of the entities a database had
+#: before it (``LocalBackend._ensure_entity_names``); its triggers keep it from
+#: then on.
+_ENTITY_NAMES_MARKER = "schema:entity-names:v1"
+
+#: A word of a question as the full-text indexes read one (FTS5's unicode61):
+#: letters and digits of any script, "München" whole, and the accents written
+#: as marks after a letter kept with it (FTS5 drops them, so "Mu\u0308nchen"
+#: is "munchen" there too).
+_WORD_RE = re.compile(r"[^\W_](?:[^\W_]|[\u0300-\u036f])*")
+
+#: What one word adds to a memory's BM25 at most, over its inverse document
+#: frequency: FTS5's term part, f(k1 + 1) / (f + k1(1 - b + b·len/avglen)),
+#: stays below k1 + 1, with k1 = 1.2 (``LocalBackend._keyword_scores``).
+_BM25_TERM_BOUND = 2.2
+#: A word held by at most this many memories is scored in each of them; a
+#: commoner one only where it can still change the first ``limit``
+#: (``LocalBackend._keyword_scores``).
+_WHOLE_WORD_ROWS = 200
+#: The share by which a bound on a score is widened against rounding.
+_ROUNDING = 1e-9
+#: Of the floor under the k-th best keyword score, the share the common words
+#: set aside may add up to while others are read (``_keyword_scores``).
+_ASIDE_SHARE = 0.25
+
+
+def _bm25_idf(hits: int, rows: int) -> float:
+    """The inverse document frequency ``bm25()`` gives a term found in
+    ``hits`` of ``rows`` rows, as FTS5 computes it (a term in more than half
+    of them weighs next to nothing)."""
+    idf = math.log((rows - hits + 0.5) / (hits + 0.5))
+    return idf if idf > 0 else 1e-6
+
+
+class _WordCounts(NamedTuple):
+    """How many memories and turns the full-text indexes hold, and for each
+    word how many of each hold it."""
+    memories: int
+    turns: int
+    hits: dict[str, tuple[int, int]]
+
+
+def _summed(
+    words: list[str], factor: dict[str, float], ranks: dict[str, dict[int, float]],
+    ids: dict[int, str],
+) -> dict[str, float]:
+    """The keyword score of each memory of ``ids`` (rowid -> memory id): each
+    word's ``bm25()`` alone (``ranks``, lower is better) times its ``factor``,
+    summed in the question's order."""
+    scores: dict[str, float] = {}
+    for word in words:
+        for rowid, rank in ranks[word].items():
+            memory_id = ids.get(rowid)
+            if memory_id is not None:
+                scores[memory_id] = scores.get(memory_id, 0.0) - factor[word] * rank
+    return scores
+
+
+def _band_bounds(
+    words: list[tuple[float, float]],
+) -> tuple[Callable[[float], float], Callable[[float], float]]:
+    """For words read together, each as (weight, idf), once for each time
+    the question says it: the least and the most they give a memory whose
+    ``bm25()`` alone for each, flipped, sum to ``u``. Each is below its idf
+    times k1 + 1, so the least fills the words of the smallest weight first
+    and the most those of the largest, both widened against rounding."""
+    words = sorted((weight, idf * _BM25_TERM_BOUND) for weight, idf in words)
+
+    def filled(u: float, order: Iterable[tuple[float, float]]) -> tuple[float, float]:
+        total = 0.0
+        for weight, cap in order:
+            part = min(u, cap)
+            total += weight * part
+            u -= part
+            if u <= 0:
+                break
+        return total, max(u, 0.0)
+
+    def least(u: float) -> float:
+        return filled(u * (1 - _ROUNDING), words)[0] * (1 - _ROUNDING)
+
+    def most(u: float) -> float:
+        if not words:
+            return 0.0
+        total, left = filled(u * (1 + _ROUNDING), reversed(words))
+        return (total + left * words[-1][0]) * (1 + _ROUNDING)
+
+    return least, most
 
 
 def _scope_clause(scope: Scope, prefix: str = "") -> tuple[str, list[Any]]:
@@ -546,7 +754,13 @@ class LocalBackend(MemoryBackend):
         self._migrate_synthetic_topic_relations()
         self._migrate_tags_to_topic_entities()
         self._refile_merged_tags()
+        self._name_index = self._ensure_entity_names()
         self._db.commit()
+        # each full-text index's terms, with how many rows hold each
+        # (``_word_counts``); of this connection only
+        for table in ("memories_fts", "episodes_fts"):
+            self._db.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS temp.{table}_terms "
+                             f"USING fts5vocab(main, {table}, row)")
         self._has_metadata_aliases = self._db.execute(
             "SELECT 1 FROM entities WHERE metadata LIKE '%\"aliases\"%' LIMIT 1"
         ).fetchone() is not None
@@ -1690,29 +1904,224 @@ class LocalBackend(MemoryBackend):
         entity_id: str | None = None,
         history: bool = False,
     ) -> list[tuple[Memory, float]]:
+        """BM25 over the memories, each word of the question weighed by how
+        rare it is in everything the store holds: its memories and the turns
+        they were said in (``_word_weights``). In a store of third-person
+        facts "did" and "do" are rare among the memories and common in what
+        was said, so they no longer outweigh the name a question asks about.
+        Without turns a word weighs as ``bm25()`` weighs it.
+
+        A memory's score is the sum, over the words it holds, of the word's
+        ``bm25()`` alone times its weight and the times the question says it
+        (``_keyword_scores``, which finds the first ``limit`` without scoring
+        every memory a common word is in)."""
         tokens = _WORD_RE.findall(query)
         if not tokens:
             return []
-        match = " OR ".join(f'"{t}"' for t in tokens[:32])
+        # one term whatever its case, counted as often as the question says it,
+        # as an OR query of the words counts it
+        asked = Counter(token.lower() for token in tokens[:32])
         clause, params = _search_scope_clause(scope, "m")
         cat_clause, cat_params = _category_clause(categories, "m.id")
         entity_clause, entity_params = _entity_clause(entity_id, "m.id")
         if not include_invalid:
             clause += (f" AND (m.invalid_at IS NULL OR ({_history_clause('m')}))" if history
                        else " AND m.invalid_at IS NULL")
-        sql = (
-            f"SELECT {', '.join('m.' + c.strip() for c in _MEMORY_COLS.split(','))}, "
-            "bm25(memories_fts) AS rank_score "
-            "FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid "
-            f"WHERE memories_fts MATCH ? AND {clause} AND {cat_clause} "
-            f"AND {entity_clause} ORDER BY rank_score, m.id LIMIT ?"
-        )
         with self._lock:
-            rows = self._db.execute(
-                sql, (match, *params, *cat_params, *entity_params, limit)
-            ).fetchall()
-        # bm25() returns lower-is-better (negative); flip to higher-is-better.
-        return [(_row_to_memory(r), -float(r["rank_score"])) for r in rows]
+            scores = self._keyword_scores(
+                asked, limit, f"{clause} AND {cat_clause} AND {entity_clause}",
+                [*params, *cat_params, *entity_params])
+            best = sorted(scores, key=lambda memory_id: (-scores[memory_id], memory_id))[:limit]
+            rows = []
+            for start in range(0, len(best), 500):
+                chunk = best[start:start + 500]
+                rows += self._db.execute(
+                    f"SELECT {_MEMORY_COLS} FROM memories WHERE id IN "
+                    f"({','.join('?' * len(chunk))})", chunk,
+                ).fetchall()
+        found = {row["id"]: _row_to_memory(row) for row in rows}
+        return [(found[memory_id], scores[memory_id]) for memory_id in best]
+
+    def _keyword_scores(
+        self, asked: Counter[str], limit: int, kept: str, kept_params: list[Any]
+    ) -> dict[str, float]:
+        """The keyword score of each memory ``kept`` keeps (the search's scope
+        and filters, over ``memories m``) that can be among the first
+        ``limit``, as ``keyword_search`` scores it: so the first ``limit``
+        themselves, ties and all. Every read keeps to them in SQL, so another
+        account's memories are walked in the index and never scored; the
+        counts behind the weights are the whole index's, as ``bm25()``'s
+        are. Caller holds the lock.
+
+        A word held by at most ``_WHOLE_WORD_ROWS`` memories is scored in
+        each of them. A commoner one is not (the exact top-k of MaxScore):
+        a word adds less than its bound to any memory, its weight times the
+        times it is asked times its idf times k1 + 1 (``_BM25_TERM_BOUND``).
+        The k-th best of what the rarer words give is a floor under the k-th
+        best score. Common words whose bounds add up to less than it cannot
+        lift a memory that holds none of the others to it: they are set
+        aside, and scored only for the memories found otherwise. The other
+        common words are read in one query of all of them, the memories
+        ranked by the sum of their ``bm25()``, the first four times
+        ``limit`` of them; the floor rises with what is read. When the most
+        that sum can give a memory past those (``_band_bounds``) is below the
+        floor, none can reach it; where it is not, every word is scored in
+        every memory, as a question of common words alone needs. The words
+        set aside count at their bounds for every memory read, so all are set
+        aside where all can be, and otherwise only as many as add up to
+        ``_ASIDE_SHARE`` of the floor. Each memory that can still reach the
+        floor is then scored in every word it holds."""
+        counts = self._word_counts(list(asked))
+        weights = self._word_weights(list(asked), counts)
+        # a word in no memory adds nothing
+        words = [word for word in asked if counts.hits[word][0]]
+        factor = {word: asked[word] * weights[word] for word in words}
+        idf = {word: _bm25_idf(counts.hits[word][0], counts.memories) for word in words}
+        bound = {word: factor[word] * idf[word] * _BM25_TERM_BOUND * (1 + _ROUNDING)
+                 for word in words}
+        # word -> memory rowid -> the word's bm25() alone in that memory, and
+        # the id of each memory read
+        ranks: dict[str, dict[int, float]] = {word: {} for word in words}
+        ids: dict[int, str] = {}
+        scored: set[str] = set()
+        # Every read keeps to the search's scope and filters before bm25()
+        # reads a memory: the full-text index holds every account's memories.
+        # CROSS JOIN: the words' rows first, each then looked up by its rowid
+        # (the planner would otherwise read the scope's index for every
+        # memory in it).
+        kept_rows = ("FROM memories_fts CROSS JOIN memories m ON m.rowid = memories_fts.rowid "
+                     f"WHERE memories_fts MATCH ? AND {kept}")
+
+        def rows(sql: str, args: list[Any]) -> sqlite3.Cursor:
+            cursor = self._db.cursor()
+            cursor.row_factory = None
+            return cursor.execute(sql, args)
+
+        def score(word: str) -> None:
+            scored.add(word)
+            for rowid, memory_id, rank in rows(
+                    f"SELECT m.rowid, m.id, bm25(memories_fts) {kept_rows}",
+                    [f'"{word}"', *kept_params]):
+                ranks[word][rowid] = rank
+                ids[rowid] = memory_id
+
+        def score_among(word: str, among: list[int]) -> None:
+            # memories kept already, read along the word's rows between the
+            # first and the last of them (the + keeps SQLite from matching the
+            # word again for each memory; bm25() reads the same either way,
+            # its idf counted over the whole index)
+            if among:
+                ranks[word].update(rows(
+                    "SELECT rowid, bm25(memories_fts) FROM memories_fts WHERE memories_fts "
+                    "MATCH ? AND rowid BETWEEN ? AND ? "
+                    "AND +rowid IN (SELECT value FROM json_each(?))",
+                    [f'"{word}"', min(among), max(among), json.dumps(sorted(among))]))
+
+        def kth_best(values: Iterable[float]) -> float:
+            best = heapq.nlargest(limit, values)
+            return best[-1] if len(best) == limit else -math.inf
+
+        def everywhere() -> dict[str, float]:
+            for word in words:
+                if word not in scored:
+                    score(word)
+            return _summed(words, factor, ranks, ids)
+
+        common = [word for word in words if counts.hits[word][0] > _WHOLE_WORD_ROWS]
+        for word in words:
+            if word not in common:
+                score(word)
+        if limit < 1 or not common:
+            return everywhere()
+        # what the rarer words give each memory kept, and a floor under its score
+        given: dict[int, float] = {}
+        for word in words:
+            for rowid, rank in ranks[word].items():
+                given[rowid] = given.get(rowid, 0.0) - factor[word] * rank
+        floor = {rowid: part * (1 - _ROUNDING) for rowid, part in given.items()}
+        needed = kth_best(floor.values())
+        aside: list[str] = []
+        rest = 0.0
+        share = 1.0 if sum(bound[word] for word in common) < needed else _ASIDE_SHARE
+        for word in sorted(common, key=bound.__getitem__):
+            if rest + bound[word] >= needed * share:
+                break
+            aside.append(word)
+            rest += bound[word]
+        # each word as often as the question says it, so that its weight
+        # alone tells the words apart
+        read = [word for word in common if word not in aside for _ in range(asked[word])]
+        least, most = _band_bounds([(weights[word], idf[word]) for word in read])
+        summed: dict[int, float] = {}  # rowid -> the read words' bm25() summed, flipped
+        last = 0.0
+        if read:
+            size = 4 * max(limit, 16)
+            batch = list(rows(
+                f"SELECT m.rowid, m.id, bm25(memories_fts) {kept_rows} ORDER BY 3 LIMIT ?",
+                [" OR ".join(f'"{word}"' for word in read), *kept_params, size]))
+            for rowid, memory_id, rank in batch:
+                ids[rowid] = memory_id
+                summed[rowid] = -rank
+                floor[rowid] = given.get(rowid, 0.0) * (1 - _ROUNDING) + least(-rank)
+            needed = kth_best(floor.values())
+            # every memory kept and not read holds at most the last sum read,
+            # or none of the words
+            last = -batch[-1][2] if len(batch) == size else 0.0
+            if last and most(last) + rest >= needed:
+                # what the words can give does not tell the first apart from
+                # the rest: every word is scored in every memory
+                return everywhere()
+        within = [rowid for rowid in ids if given.get(rowid, 0.0) * (1 + _ROUNDING)
+                  + most(summed.get(rowid, last)) + rest >= needed]
+        for word in common:
+            score_among(word, within)
+        return _summed(words, factor, ranks, {rowid: ids[rowid] for rowid in within})
+
+    def _word_counts(self, words: list[str]) -> _WordCounts:
+        """How many memories and turns the full-text indexes hold, and how many
+        of each hold each word, of every account (as ``bm25()`` counts them).
+        A word written in ASCII is one term of the index, its letters lowered,
+        and is counted from the index's list of terms (``fts5vocab``) without
+        reading its rows; another is counted by matching it. Caller holds the
+        lock."""
+        def rows(table: str) -> int:
+            return int(self._db.execute(f"SELECT count(*) FROM {table}_docsize").fetchone()[0])
+
+        def hits(table: str, word: str) -> int:
+            if word.isascii():
+                row = self._db.execute(
+                    f"SELECT doc FROM temp.{table}_terms WHERE term = ?", (word.lower(),)
+                ).fetchone()
+                return int(row[0]) if row else 0
+            return int(self._db.execute(
+                f"SELECT count(*) FROM {table} WHERE {table} MATCH ?", (f'"{word}"',)
+            ).fetchone()[0])
+
+        memories, turns = rows("memories_fts"), rows("episodes_fts")
+        counts: dict[str, tuple[int, int]] = {}
+        for word in words:
+            in_memories = hits("memories_fts", word)
+            # a word in no memory weighs nothing that is read
+            counts[word] = (in_memories,
+                            hits("episodes_fts", word) if turns and in_memories else 0)
+        return _WordCounts(memories, turns, counts)
+
+    def _word_weights(
+        self, words: list[str], counts: _WordCounts | None = None
+    ) -> dict[str, float]:
+        """For each word, its inverse document frequency over the memories and
+        the turns together, as a factor on the one ``bm25()`` reads over the
+        memories alone (both as FTS5 computes it). A turn is what someone
+        said, in the words a question is asked in; a memory restates it as a
+        fact, with fewer of the words that only build a sentence. Caller
+        holds the lock."""
+        counts = counts or self._word_counts(words)
+        weights: dict[str, float] = {}
+        for word in words:
+            in_memories, in_turns = counts.hits[word]
+            weights[word] = (_bm25_idf(in_memories + in_turns, counts.memories + counts.turns)
+                             / _bm25_idf(in_memories, counts.memories))
+        return weights
 
     # -- events -----------------------------------------------------------
     def add_event(self, event: MemoryEvent) -> None:
@@ -2329,6 +2738,47 @@ class LocalBackend(MemoryBackend):
         )
         self._db.commit()
 
+    def _ensure_entity_names(self) -> bool:
+        """Make the index of the entities' names (``_ENTITY_NAMES_SCHEMA``) and
+        fill it once for a database from before it (``_ENTITY_NAMES_MARKER``).
+        Whether there is one: an SQLite without the trigram tokenizer cannot
+        write to it, so the triggers that would are dropped there, and the
+        next open that can fills it again."""
+        columns = {row["name"] for row in self._db.execute(
+            "PRAGMA table_info(entity_names)").fetchall()}
+        if sqlite3.sqlite_version_info < (3, 34, 0) or columns and "owner" not in columns:
+            for trigger in _ENTITY_NAMES_TRIGGERS:
+                self._db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            self._db.execute("DELETE FROM meta WHERE key = ?", (_ENTITY_NAMES_MARKER,))
+            if sqlite3.sqlite_version_info < (3, 34, 0):
+                return False
+            # an index made before the names kept their owner is made again
+            self._db.execute("DROP TABLE IF EXISTS entity_names_fts")
+            self._db.execute("DROP TABLE entity_names")
+        self._db.executescript(_ENTITY_NAMES_SCHEMA)
+        if self._db.execute(
+            "SELECT 1 FROM meta WHERE key = ?", (_ENTITY_NAMES_MARKER,)
+        ).fetchone():
+            return True
+        # what an open without the tokenizer left behind goes first
+        self._db.execute("DELETE FROM entity_names")
+        self._db.execute("INSERT INTO entity_names_fts(entity_names_fts) VALUES ('delete-all')")
+        self._db.execute(
+            "INSERT INTO entity_names (entity_id, name, owner) SELECT entity_id, value, "
+            f"{_owner('entity_id')} FROM ("
+            "SELECT id AS entity_id, name AS value FROM entities UNION "
+            "SELECT e.id, CAST(alias.value AS TEXT) FROM entities e, json_each("
+            "CASE WHEN json_valid(e.metadata) THEN e.metadata END, '$.aliases') AS alias "
+            "WHERE alias.value IS NOT NULL UNION "
+            "SELECT entity_id, surface FROM entity_mentions"
+            ") WHERE value != ''"
+        )
+        self._db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (_ENTITY_NAMES_MARKER, utcnow()),
+        )
+        return True
+
     def topic_entity(
         self, name: str, scope: Scope, *, create: bool = True, follow_merged: bool = False
     ) -> Entity | None:
@@ -2849,16 +3299,25 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
             # User aliases intentionally remain metadata until measurements earn
             # a separate table. Pay the JSON scan only when indexed identity
-            # evidence found nothing and this database actually has such aliases.
+            # evidence found nothing and this database actually has such aliases:
+            # of the entities that hold such a name, where the index of names
+            # tells which (an alias is one of them), else of every entity.
             if not rows and self._has_metadata_aliases:
+                owner = ([] if not self._name_index or scope.user_id is None
+                         else [_owned(scope.user_id)])
+                named = (f"e.id IN (SELECT entity_id FROM entity_names WHERE "
+                         f"lower(trim(name)) IN ({placeholders})"
+                         f"{' AND owner = ?' if owner else ''}) AND "
+                         if self._name_index else "")
                 rows = self._db.execute(
-                    "SELECT e.* FROM entities e "
-                    f"WHERE e.merged_into IS NULL AND {_kind_clause('named', 'e.')} "
+                    f"SELECT e.* FROM entities e WHERE {named}"
+                    f"e.merged_into IS NULL AND {_kind_clause('named', 'e.')} "
                     f"AND {scope_clause} AND EXISTS ("
                     "SELECT 1 FROM json_each(e.metadata, '$.aliases') alias "
                     f"WHERE lower(trim(CAST(alias.value AS TEXT))) IN ({placeholders})"
                     ") ORDER BY e.updated_at DESC, e.id LIMIT ?",
-                    (*scope_params, *names, limit),
+                    (*(names if self._name_index else ()), *owner, *scope_params, *names,
+                     limit),
                 ).fetchall()
         return [self._row_to_entity(row) for row in rows]
 
@@ -2871,6 +3330,97 @@ class LocalBackend(MemoryBackend):
         self, normalized: list[str], scope: Scope, *, limit: int = 50
     ) -> list[Entity]:
         return self._entity_candidates(normalized, scope, limit=limit)
+
+    def entity_names_holding(self, words: list[str], scope: Scope) -> list[tuple[str, str]]:
+        words = sorted({word.strip().lower() for word in words if word.strip()})
+        if not words:
+            return []
+        scope_clause, scope_params = _scope_clause(scope, prefix="e.")
+        live = f"e.merged_into IS NULL AND {_kind_clause('named', 'e.')} AND {scope_clause}"
+
+        def holds(value: str) -> str:
+            return "(" + " OR ".join(f"instr(lower({value}), ?) > 0" for _ in words) + ")"
+
+        # The names that may hold a word, each with the entity that gives it:
+        # found by the index of names (a word of three letters or more by its
+        # letter trigrams, a shorter one by reading every name in it), of the
+        # search's user alone where it has one, or without the index read
+        # where they are kept. What follows keeps those a
+        # live entity answers to, as ``entity_aliases`` gives them: its own,
+        # the wordings its mentions use, its aliases, the names of entities
+        # merged into it.
+        found = [word for word in words if len(word) >= 3]
+        short = [word for word in words if len(word) < 3]
+        if self._name_index:
+            # of the user's names alone, where the search has a user
+            owner = None if scope.user_id is None else _owned(scope.user_id)
+            match = "name : (" + " OR ".join(
+                '"' + word.replace('"', '""') + '"' for word in found) + ")"
+            if owner is not None:
+                match += ' AND owner : "' + owner.replace('"', '""') + '"'
+            parts = ([] if not found else [
+                "SELECT n.entity_id AS entity_id, n.name AS name FROM entity_names_fts "
+                "JOIN entity_names n ON n.id = entity_names_fts.rowid "
+                "WHERE entity_names_fts MATCH ?"])
+            parts += [] if not short else [
+                "SELECT entity_id, name FROM entity_names WHERE "
+                + ("owner = ? AND " if owner is not None else "") + "("
+                + " OR ".join("instr(lower(name), ?) > 0" for _ in short) + ")"]
+            params = (([match] if found else [])
+                      + ([owner] if short and owner is not None else []) + short)
+        else:
+            parts = ["SELECT id AS entity_id, name FROM entities WHERE " + holds("name"),
+                     "SELECT entity_id, surface FROM entity_mentions WHERE " + holds("surface")]
+            params = [*words, *words]
+            if self._has_metadata_aliases:
+                parts.append("SELECT e.id, CAST(alias.value AS TEXT) FROM entities e, "
+                             "json_each(e.metadata, '$.aliases') alias WHERE "
+                             + holds("CAST(alias.value AS TEXT)"))
+                params += words
+        alias = (" OR held.name IN (SELECT CAST(alias.value AS TEXT) "
+                 "FROM json_each(e.metadata, '$.aliases') alias)"
+                 if self._has_metadata_aliases else "")
+        # a name held by an entity merged away is read for the one it was
+        # merged into (its own name only, as ``entity_aliases`` reads it)
+        sql = (
+            f"SELECT DISTINCT e.id AS id, held.name AS name FROM ({' UNION '.join(parts)}) "
+            "AS held JOIN entities h ON h.id = held.entity_id "
+            "JOIN entities e ON e.id = IFNULL(h.merged_into, h.id) "
+            f"WHERE {live} AND {holds('held.name')} AND (h.merged_into IS NOT NULL "
+            "AND held.name = h.name OR h.merged_into IS NULL AND (held.name = e.name "
+            "OR EXISTS (SELECT 1 FROM entity_mentions em WHERE lower(trim(em.surface)) = "
+            "lower(trim(held.name)) AND em.entity_id = e.id AND em.surface = held.name)"
+            f"{alias})) ORDER BY 1, 2"
+        )
+        with self._lock:
+            rows = self._db.execute(sql, [*params, *scope_params, *words]).fetchall()
+        return [(row["id"], row["name"]) for row in rows if row["name"]]
+
+    def word_use(self, word: str, entity_id: str, scope: Scope) -> tuple[int, int]:
+        word = word.strip()
+        if not word:
+            return 0, 0
+        person = Scope(user_id=scope.user_id)
+        memory_clause, memory_params = _scope_clause(person, prefix="m.")
+        turn_clause, turn_params = _scope_clause(person, prefix="e.")
+        phrase = f'"{word}"'
+        with self._lock:
+            memories = self._db.execute(
+                "SELECT count(*), IFNULL(sum(m.id IN (SELECT memory_id FROM entity_mentions "
+                "WHERE entity_id = ?)), 0) FROM memories_fts CROSS JOIN memories m "
+                "ON m.rowid = memories_fts.rowid WHERE memories_fts MATCH ? "
+                f"AND m.invalid_at IS NULL AND {memory_clause}",
+                (entity_id, phrase, *memory_params),
+            ).fetchone()
+            turns = self._db.execute(
+                "SELECT count(*), IFNULL(sum(e.id IN (SELECT source.value FROM entity_mentions em "
+                "JOIN memories m ON m.id = em.memory_id, json_each(m.source_episode_ids) AS source "
+                "WHERE em.entity_id = ? AND m.invalid_at IS NULL)), 0) FROM episodes_fts "
+                "CROSS JOIN episodes e ON e.rowid = episodes_fts.rowid WHERE episodes_fts MATCH ? "
+                f"AND e.withheld_at IS NULL AND {turn_clause}",
+                (entity_id, phrase, *turn_params),
+            ).fetchone()
+        return int(memories[0]) + int(turns[0]), int(memories[1]) + int(turns[1])
 
     def entity_aliases(self, entity_id: str) -> list[str]:
         entity = self.get_entity(entity_id)

@@ -16,11 +16,13 @@ under the Apache License 2.0; the prompts are reproduced here under its terms:
 Answering (``answer_messages``) follows evaluation/src/memzero/search.py: the
 prompt is the system message, and the memories are a JSON list of strings,
 the model is called at temperature 0. Mem0 wrote each memory as
-"<timestamp>: <memory>"; here the strings are Memry's own, each memory as
-Memry's context builder renders it for a model ("[happened 2023-05-07] <memory>
-(said 8 May 2023)", and a memory search returns as history, which a later one
-updated, ending in "[until 15 July 2023]"), then the source turns shown as its
-evidence ("8 May 2023: <speaker>: <text>"): the runner passes that list
+"<timestamp>: <memory>"; here the strings are Memry's own, what its context
+builder gives an agent for the question: the descriptions of the entities the
+question names ("Caroline (person): <description>"), each memory as it renders
+it for a model ("[happened 2023-05-07] <memory> (said 8 May 2023)", and a
+memory search returns as history, which a later one updated, ending in "[until
+15 July 2023]"), then the source turns shown as its evidence ("8 May 2023:
+<speaker>: <text>"): the runner passes that list
 (``external_benchmarks.answer_with``), and the prompt's text is Mem0's,
 unchanged.
 
@@ -229,7 +231,7 @@ def locomo_time(stamp: Any) -> str:
 
 def memories_json(lines: list[str]) -> str:
     """The memory list as ``ANSWER_PROMPT`` shows it: a JSON list of the
-    lines Memry's context builder rendered (``memory_lines``), as given."""
+    lines Memry's context builder rendered (``context_lines``), as given."""
     return json.dumps(list(lines), indent=4)
 
 

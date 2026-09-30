@@ -45,10 +45,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import memry.intelligence.graph_retrieval as graph_retrieval
 import memry.store as store_module
+from memry.backends.local import LocalBackend
 from memry.config import Config
 from memry.intelligence.graph_retrieval import detect_query_entities
-from memry.models import Entity, EntityMention, Memory, Relation, Scope
+from memry.models import Entity, EntityMention, Episode, Memory, Relation, Scope
 from memry.providers.decisions import Answer, Answers
 from memry.providers.embeddings import Embedder
 from memry.providers.llm import NoneLLM
@@ -793,3 +795,208 @@ def test_a_projects_answer_joins_the_pool_by_what_it_says_at_scale_fails_without
     assert "about" in results[0].signals
     assert "it uses Postgres in production" not in judge.read
     assert answer.id not in _ids(results)
+
+
+# ================================================================== R-128
+# A question names an entity by one word of a longer name: "Arvel" for the
+# place stored as "Mount Arvel". The word seeds the search when it is a word
+# of that entity's names alone and the store uses it for that entity more
+# likely than not (``graph_retrieval.named_by_a_word``, stage 1). At
+# fe094fc a question named an entity only by a name or alias in full: the
+# person asked about was the one seed, the question read "When did it do yoga
+# at Arvel?", and the answer, whose names read "it" in its property vector
+# ("it did yoga on top of it"), lost to the person's other yoga memories.
+ARVEL_QUESTION = "When did Harlow do yoga at Arvel?"
+ARVEL_ANSWER = ("On 5 June Harlow did yoga on top of Mount Arvel in the morning and shared "
+                "a photo of the view")
+
+
+def _a_place_named_by_a_word(stores):
+    """Harlow did yoga in 40 parks; once on top of Mount Arvel, a place with
+    one other memory. One memory matches more of the question's words than
+    the answer does ("When Harlow has nothing to do, Harlow does yoga at
+    home"), and the store holds no turns that would weigh those words down
+    (R-129): it takes the keyword place. 30 notes name nobody: 73 memories.
+    A name's words weigh twice a word in the vectors: an embedder follows a
+    rare name."""
+    store = stores(_SenseEmbedder(names=["Harlow", "Mount Arvel"], name_weight=2.0))
+    harlow = _entity(store, "Harlow", "person")
+    arvel = _entity(store, "Mount Arvel", "place")
+    for i in range(40):
+        _remember(store, f"Harlow did yoga in {STREETS[i % 20]} park", [harlow], days_ago=i)
+    answer = _remember(store, ARVEL_ANSWER, [harlow, arvel], days_ago=100)
+    _remember(store, "Mount Arvel has a hut below the summit", [arvel], days_ago=100)
+    thief = _remember(store, "When Harlow has nothing to do, Harlow does yoga at home", [harlow])
+    for i in range(30):
+        _remember(store, f"Note {i}: renew the parking permit before the month ends")
+    store.refresh_property_vectors(user_id=USER)
+    scope = Scope(user_id=USER)
+    assert store.backend.keyword_search(ARVEL_QUESTION, scope, 1)[0][0].id == thief.id
+    return store, harlow, arvel, answer
+
+
+def _yoga_on_arvel(store, answer):
+    store.decider = judge = _Judge(scores={"photo of the view": 0.9}, rest=0.05)
+    return judge, store.search(ARVEL_QUESTION, user_id=USER, limit=5)
+
+
+def test_a_word_of_one_name_seeds_the_search_at_scale(stores):
+    """R-128. "Arvel" is a word of Mount Arvel's name alone, and both memories
+    that say it are Mount Arvel's: it seeds the search beside Harlow. Naming
+    two hubs, the question is read as written, the answer meets it on both
+    names, and judged, it comes first. It failed at fe094fc."""
+    store, harlow, arvel, answer = _a_place_named_by_a_word(stores)
+    judge, results = _yoga_on_arvel(store, answer)
+    assert judge.states == [f"QUESTION: {ARVEL_QUESTION}"]
+    assert answer.content in judge.read
+    assert results[0].memory.id == answer.id
+
+
+def test_a_word_of_one_name_seeds_the_search_at_scale_fails_without_the_rule(
+        stores, monkeypatch):
+    """Without the rule at the seeds, Harlow is the one seed, the question
+    reads "When did it do yoga at Arvel?", 40 parks come before the answer,
+    the keyword place holds another memory, and the answer is lost."""
+    store, _, _, answer = _a_place_named_by_a_word(stores)
+    monkeypatch.setattr(graph_retrieval, "named_by_a_word", lambda *args, **kwargs: [])
+    judge, results = _yoga_on_arvel(store, answer)
+    assert judge.states == ["QUESTION: When did it do yoga at Arvel?"]
+    assert answer.content not in judge.read
+    assert answer.id not in _ids(results)
+
+
+def test_the_seeds_hold_the_entity_a_word_names(stores):
+    """Stage 1: the seeds are Harlow, named in full, and Mount Arvel, named by
+    a word of its name."""
+    store, harlow, arvel, _ = _a_place_named_by_a_word(stores)
+    seeds, _ = store._seeds(ARVEL_QUESTION, Scope(user_id=USER))
+    assert set(seeds) == {harlow.id, arvel.id}
+
+
+def _words_that_name_nothing(stores):
+    """Harlow did yoga in 20 parks the store knows by name ("Linden Park",
+    ...), two memories each; Lotus Studio, where Harlow bought a class pass,
+    and six memories of the studio at home that do not name it: 47
+    memories."""
+    store = stores(_SenseEmbedder(names=["Harlow", "Lotus Studio",
+                                         *[f"{s} Park" for s in STREETS]]))
+    harlow = _entity(store, "Harlow", "person")
+    parks = {name: _entity(store, f"{name} Park", "place") for name in STREETS}
+    for name, park in parks.items():
+        _remember(store, f"Harlow did yoga in {name} Park at dawn", [harlow, park])
+        _remember(store, f"{name} Park has a pond and a cafe", [park])
+    lotus = _entity(store, "Lotus Studio", "organization")
+    _remember(store, "Harlow bought a class pass at Lotus Studio", [harlow, lotus])
+    for thing in ("a new mirror", "a heater", "cork blocks", "a speaker", "a plant", "a rug"):
+        _remember(store, f"Harlow's home studio got {thing}", [harlow])
+    return store, harlow, parks
+
+
+def test_a_word_many_names_share_seeds_nothing(stores):
+    """"park" is a word of 20 names: it names none of them, and Harlow alone
+    seeds the search. "Linden", a word of one name that the store says of
+    that park only, does seed it."""
+    store, harlow, parks = _words_that_name_nothing(stores)
+    scope = Scope(user_id=USER)
+    assert store._seeds("When did Harlow do yoga in the park?", scope) == ([harlow.id], False)
+    seeds, _ = store._seeds("When did Harlow do yoga in Linden?", scope)
+    assert set(seeds) == {harlow.id, parks["Linden"].id}
+
+
+def test_a_word_one_name_holds_that_the_store_says_of_other_things_seeds_nothing(stores):
+    """"studio" is a word of Lotus Studio's name alone, but of the seven
+    memories that say it, one is Lotus Studio's: the store says it of other
+    things, and it names nothing."""
+    store, harlow, _ = _words_that_name_nothing(stores)
+    scope = Scope(user_id=USER)
+    assert store._seeds("When did Harlow do yoga in the studio?", scope) == ([harlow.id], False)
+
+
+# ================================================================== R-129
+# The keyword search weighs each word of the question by how rare it is in
+# everything the store holds: its memories and the turns they were said in
+# (``LocalBackend.keyword_search``). At fe094fc it weighed a word by the
+# memories alone. In a store of third-person facts "did" and "we" are rare
+# there and common in what was said, and the one keyword match a search keeps
+# in its judged pool (R-21) went to a memory that shares only those words.
+PAID_QUESTION = "Did we pay invoice 2024-117?"
+
+
+def _invoices_and_turns(stores, *, turns=True):
+    """R-21's 66 invoices and bills (``_invoices``), and one memory more that
+    says "we did": "We did the quarterly tax filing with the accountant".
+    With ``turns``, each memory rests on the turn it was said in, in the
+    first person ("Did we pay invoice 2024-201? We did, by card."): 67
+    memories and 67 turns."""
+    store = stores(_SenseEmbedder())
+    said: list[tuple[str, str, float]] = []
+    for i in range(45):
+        said.append((f"Invoice 2024-{200 + i} was paid by card",
+                     f"Did we pay invoice 2024-{200 + i}? We did, by card.", i % 10))
+    for i, bill in enumerate(["electricity", "water", "phone", "internet", "rent"] * 4):
+        said.append((f"We paid the {bill} bill number {i}",
+                     f"Did we pay the {bill} bill? We did, number {i}.", i % 10))
+    said.append(("Invoice 2024-117 was settled by bank transfer on 3 March",
+                 "Invoice 2024-117 went out by bank transfer on 3 March.", 60))
+    said.append(("We did the quarterly tax filing with the accountant",
+                 "We did the quarterly tax filing with the accountant today.", 5))
+    memories = []
+    for fact, turn, days_ago in said:
+        memory = _remember(store, fact, days_ago=days_ago)
+        if turns:
+            episode = Episode(content=turn, user_id=USER, created_at=_stamp(days_ago))
+            store.backend.add_episodes([episode])
+            store.backend.update_memory(memory.id, source_episode_ids=[episode.id], touch=False)
+        memories.append(memory)
+    answer, thief = memories[-2], memories[-1]
+    return store, answer, thief
+
+
+def _paid(store, answer):
+    text = _text(store, PAID_QUESTION)
+    assert answer.id not in text[:20]  # below the judged pool in the text ranking
+    store.decider = judge = _Judge(scores={"2024-117": 0.9}, rest=0.05)
+    return judge, store.search(PAID_QUESTION, user_id=USER, limit=5)
+
+
+def test_the_keyword_place_weighs_words_by_what_was_said_at_scale(stores):
+    """R-129. "did" and "we" are in one memory and in most turns; the
+    identifier is in one memory and one turn. Weighed over both, the answer
+    is the keyword search's best match, keeps its place among the 20 judged,
+    and comes first. It failed at fe094fc."""
+    store, answer, thief = _invoices_and_turns(stores)
+    best = store.backend.keyword_search(PAID_QUESTION, Scope(user_id=USER), 1)
+    assert best[0][0].id == answer.id
+    judge, results = _paid(store, answer)
+    assert answer.content in judge.read
+    assert results[0].memory.id == answer.id
+
+
+def test_the_keyword_place_weighs_words_by_what_was_said_at_scale_fails_without_the_rule(
+        stores, monkeypatch):
+    """Weighed over the memories alone, as ``bm25()`` weighs them, "did" and
+    "we" outweigh the identifier: the keyword place goes to the tax filing,
+    and the answer is lost."""
+    store, answer, thief = _invoices_and_turns(stores)
+    monkeypatch.setattr(LocalBackend, "_word_weights",
+                        lambda self, words, counts=None: {word: 1.0 for word in words})
+    assert store.backend.keyword_search(PAID_QUESTION, Scope(user_id=USER), 1)[0][0].id == \
+        thief.id
+    judge, results = _paid(store, answer)
+    assert answer.content not in judge.read
+    assert answer.id not in _ids(results)
+
+
+def test_without_turns_a_word_weighs_as_bm25_weighs_it(stores):
+    """Stage 2: a store that holds no turns ranks as ``bm25()`` over the
+    memories: the same memories without their turns give the tax filing the
+    keyword search's first place, in the order of an OR query of the words."""
+    store, answer, thief = _invoices_and_turns(stores, turns=False)
+    scope = Scope(user_id=USER)
+    ranked = [m.id for m, _ in store.backend.keyword_search(PAID_QUESTION, scope, 40)]
+    assert ranked[0] == thief.id
+    match = " OR ".join(f'"{word}"' for word in re.findall(r"[A-Za-z0-9]+", PAID_QUESTION))
+    rows = store.backend._db.execute(
+        "SELECT m.id FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid "
+        "WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts), m.id LIMIT 40", (match,))
+    assert ranked == [row["id"] for row in rows]

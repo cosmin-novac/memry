@@ -948,7 +948,8 @@ def test_answering_with_mem0s_prompt_through_the_runner():
 
 
 from evals import api_usage  # noqa: E402
-from memry.intelligence.context import memory_lines  # noqa: E402
+from memry.intelligence.context import context_lines, memory_lines  # noqa: E402
+from memry.intelligence.entities import DESCRIPTION_SYSTEM  # noqa: E402
 
 
 def _mock_api(request: httpx.Request) -> httpx.Response:
@@ -1176,43 +1177,80 @@ def test_rows_keep_the_memories_shown_and_the_reference_date():
     assert row["context_tokens"] == tokens
 
 
-def test_the_runners_memory_list_is_memrys_rendering_with_the_evidence():
-    """The answer prompt's memory list is what Memry's context builder renders
-    for the top k: the memories with their dates, then their source turns that
-    best match the question, as ``MemoryStore.evidence`` chooses them."""
-    class SummaryLLM(RuleLLM):
-        """A fact keeps the first words of its line: the turn says more."""
+class DescribingLLM(RuleLLM):
+    """A fact keeps the first words of its line (the turn says more) and
+    names Maya where it says her name; an entity's description is its first
+    fact."""
 
-        def complete(self, system, user, *, json_schema=None):
-            raw = super().complete(system, user, json_schema=json_schema)
-            if not system.startswith("You are the long-term memory extraction system"):
-                return raw
-            facts = json.loads(raw)["facts"]
-            for fact in facts:
-                fact["content"] = " ".join(fact["content"].split()[:5])
-            return json.dumps({"facts": facts})
+    descriptions = 0
 
+    def complete(self, system, user, *, json_schema=None):
+        if system == DESCRIPTION_SYSTEM:
+            self.descriptions += 1
+            first = user.split("Active evidence:\n- ", 1)[1].split("\n", 1)[0]
+            return json.dumps({"description": f"Known for: {first}"})
+        raw = super().complete(system, user, json_schema=json_schema)
+        if not system.startswith("You are the long-term memory extraction system"):
+            return raw
+        facts = json.loads(raw)["facts"]
+        for fact in facts:
+            fact["content"] = " ".join(fact["content"].split()[:5])
+            if "Maya" in fact["content"]:
+                fact["entities"] = [{"name": "Maya", "type": "person"}]
+        return json.dumps({"facts": facts})
+
+
+def _described_run(descriptions=True):
     conv = xb.load_locomo(LOCOMO)[0]
     chat = ScriptedChat("Pepper")
-    store = MemoryStore(Config(db_path=":memory:"), llm=SummaryLLM(),
-                        embedder=HashEmbedder(128))
+    llm = DescribingLLM()
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(128))
     try:
         ingested = xb.ingest(store, conv, mode="extract", unit="session", dataset="locomo")
         question = conv.questions[0]
+        before = llm.descriptions
         row = xb.ask(ingested, question, k=3, answer_llm=chat,
-                     answer_prompt=mem0_judge.answer_messages)
+                     answer_prompt=mem0_judge.answer_messages, descriptions=descriptions)
+        row["descriptions built"] = llm.descriptions - before
         results = store.search(question.question, user_id=xb.BENCH_USER, limit=xb.DEPTH,
                                evidence=False)[:3]
         turns = store.evidence(question.question, results, user_id=xb.BENCH_USER)
-        expected = memory_lines([r.memory for r in results], turns)
+        described = store.described_entities(question.question, user_id=xb.BENCH_USER)
+        agent = store.reconstruct_context(question.question, user_id=xb.BENCH_USER,
+                                          limit=3, token_budget=4000)
     finally:
         store.close()
     ((messages, _),) = chat.sent
+    return question, row, messages, [r.memory for r in results], turns, described, agent, ingested
+
+
+def test_the_runners_memory_list_is_memrys_rendering_with_the_evidence():
+    """The answer prompt's memory list is what Memry's context builder gives
+    an agent for the question (``context_lines``): the description of Maya,
+    whom the question names, then the top k memories with their dates, then
+    their source turns that best match the question, as
+    ``MemoryStore.evidence`` chooses them. An agent's context
+    (``reconstruct_context``) holds the same lines."""
+    question, row, messages, memories, turns, described, agent, ingested = _described_run()
+    expected = context_lines(described, memories, turns)
     assert messages == mem0_judge.answer_messages(question.question, expected)
-    assert turns and len(expected) == 3 + len(turns)
+    assert [e.name for e in described] == row["described"] == ["Maya"]
+    assert row["descriptions built"] == 1  # built at the question, then kept
+    assert expected[0].startswith("Maya (person): Known for: Maya:")
+    assert turns and len(expected) == 1 + 3 + len(turns)
+    assert all(f"- {line}" in agent.text for line in expected)
     # the row names the turns shown
     assert row["answers"]["3"]["evidence"] == [
         ingested.turn_of_episode[t.episode_id] for t in turns]
+
+
+def test_no_descriptions_leaves_the_entities_out_of_the_memory_list():
+    """``descriptions=False`` (``--no-descriptions``, an ablation): the list
+    holds the memories and their turns only, and no description is built."""
+    question, row, messages, memories, turns, _, _, _ = _described_run(descriptions=False)
+    assert messages == mem0_judge.answer_messages(question.question,
+                                                  memory_lines(memories, turns))
+    assert row["described"] == [] and row["descriptions built"] == 0
 
 
 def test_compared_evidence_answers_come_from_the_same_search():

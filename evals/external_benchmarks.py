@@ -41,12 +41,16 @@ Every question is asked through ``MemoryStore.search`` (user "bench", the top
 
 With --answer the configured LLM answers each question from the top --k
 memories (--context: from ``MemoryStore.reconstruct_context``) and the
-answer is scored against the gold one. The memories are shown as Memry's
-context builder renders them for a model (``intelligence.context.
-memory_lines``): each with the date its event happened, where known, and the
-date it was said, then their source turns that best match the question
-(``MemoryStore.evidence``, within the store's ``retrieval.evidence_tokens``;
---evidence-tokens sets it, 0 shows none). --compare-evidence-tokens N answers
+answer is scored against the gold one. The model is shown what Memry's
+context builder gives an agent for the question (``intelligence.context.
+context_lines``): the descriptions of the entities the question names
+(``MemoryStore.described_entities``, built by the store's text model where
+stale and counted under the stage "describe"; --no-descriptions leaves them
+out), then the memories, each with the date its event happened, where known,
+and the date it was said, then their source turns that best match the
+question (``MemoryStore.evidence``, within the store's
+``retrieval.evidence_tokens``; --evidence-tokens sets it, 0 shows none).
+--compare-evidence-tokens N answers
 each question a second time from the same search, its turns chosen within N
 tokens (0: the memories alone), with no further search: those answers are
 scored and judged as the others, kept under the row's "answers_compared" and
@@ -167,7 +171,7 @@ sys.path.insert(0, str(HERE.parent))
 
 from evals import api_usage  # noqa: E402
 from memry.config import Config, DecisionConfig, EmbeddingConfig  # noqa: E402
-from memry.intelligence.context import memory_lines  # noqa: E402
+from memry.intelligence.context import context_lines  # noqa: E402
 from memry.intelligence.graph_retrieval import detect_query_entities  # noqa: E402
 from memry.models import Memory, Scope  # noqa: E402
 from memry.providers.decisions import (  # noqa: E402
@@ -1059,11 +1063,14 @@ def memory_record(result: Any, ingested: Ingested) -> dict[str, Any]:
 
 
 def answer_with(answer_llm: LLM, question: Question, memories: list[Memory],
-                answer_prompt: AnswerPrompt | None, evidence: list[Any] = ()) -> dict[str, Any]:
-    """One answering call from ``memories`` and their ``evidence`` turns, as
-    Memry's context builder renders them for a model (``memory_lines``):
-    that list is the memory list of the answer prompt (``answer_from``)."""
-    record = answer_from(answer_llm, question, memory_lines(memories, evidence),
+                answer_prompt: AnswerPrompt | None, evidence: list[Any] = (),
+                entities: list[Any] = ()) -> dict[str, Any]:
+    """One answering call from what Memry gives a model for the question:
+    the descriptions of the ``entities`` it names, then ``memories`` and
+    their ``evidence`` turns, as its context builder renders them
+    (``context_lines``). That list is the memory list of the answer prompt
+    (``answer_from``); ``k`` counts the memories."""
+    record = answer_from(answer_llm, question, context_lines(entities, memories, evidence),
                          answer_prompt)
     record["k"] = len(memories)
     return record
@@ -1155,10 +1162,14 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
         answer_prompt: AnswerPrompt | None = None, search_stage: str = "search",
         ks: list[int] | None = None, judge_runs: int = 1, pool: Any = None,
         correction: dict[str, Any] | None = None,
-        compare_evidence_tokens: int | None = None) -> dict[str, Any]:
+        compare_evidence_tokens: int | None = None,
+        descriptions: bool = True) -> dict[str, Any]:
     """Search for one question once, score what came back, and answer when
     asked: from the top k of that search for each k of ``ks`` (default
-    ``[k]``), each answer judged ``judge_runs`` times (``judge_answers``).
+    ``[k]``), after the descriptions of the entities the question names
+    (``MemoryStore.described_entities``, built where stale under the stage
+    "describe"; none with ``descriptions`` false), each answer judged
+    ``judge_runs`` times (``judge_answers``).
     The row carries the answer at ``k`` at its top level and every answer
     under "answers". The model calls are counted under ``search_stage``,
     "answer" and "judge"; with ``pool`` (a thread pool) a question's answer
@@ -1220,6 +1231,12 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
             answers[k] = record
     else:
         top = [r.memory for r in results]
+        # the entities the question names, described as an agent's context describes them
+        described: list[Any] = []
+        if descriptions:
+            with api_usage.stage("describe"):
+                described = store.described_entities(question.question, user_id=BENCH_USER)
+        row["described"] = [entity.name for entity in described]
         # each variant's evidence budget (None: the store's own), as its answer stage names it
         budgets = {"answer": None}
         if compare_evidence_tokens is not None:
@@ -1232,12 +1249,12 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
         if pool is not None and len(turns) > 1:
             futures = {key: pool.submit(contextvars.copy_context().run, staged, key[0],
                                         answer_with, answer_llm, question, top[:key[1]],
-                                        answer_prompt, shown)
+                                        answer_prompt, shown, described)
                        for key, shown in turns.items()}
             done = {key: future.result() for key, future in futures.items()}
         else:
             done = {key: staged(key[0], answer_with, answer_llm, question, top[:key[1]],
-                                answer_prompt, shown)
+                                answer_prompt, shown, described)
                     for key, shown in turns.items()}
         for key, record in done.items():
             record["evidence"] = [ingested.turn_of_episode.get(t.episode_id, t.episode_id)
@@ -1569,7 +1586,8 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                   decider: str = "config", store_dir: str | os.PathLike[str] | None = None,
                   full_context: bool = False,
                   evidence_tokens: int | None = None,
-                  compare_evidence_tokens: int | None = None) -> dict[str, Any]:
+                  compare_evidence_tokens: int | None = None,
+                  descriptions: bool = True) -> dict[str, Any]:
     """Ingest each conversation into a fresh store and ask its questions once
     per pass of ``search_deciders`` (name -> the decision provider the store
     asks with, given it once the conversation is loaded; default: the store's
@@ -1585,7 +1603,9 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
     store and no search. ``evidence_tokens`` sets each store's
     ``retrieval.evidence_tokens`` (None keeps its own);
     ``compare_evidence_tokens`` answers each k again from the same search
-    with the turns chosen within that many tokens (``ask``). Returns {config, stores, passes, tables (the first
+    with the turns chosen within that many tokens (``ask``); ``descriptions``
+    false leaves out the descriptions of the entities a question names, for
+    an ablation. Returns {config, stores, passes, tables (the first
     pass's), rows, warnings, notes, complete}. A call refused at a cap
     (``api_usage.CapReached``) ends the run where it is: what was done is
     kept, "complete" is false and "stopped" says where."""
@@ -1665,7 +1685,8 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                                 use_context=use_context, answer_prompt=answer_prompt,
                                 search_stage=f"search:{name}", ks=ks, judge_runs=judge_runs,
                                 pool=pool, correction=corrections.get(question.qid),
-                                compare_evidence_tokens=compare_evidence_tokens)})
+                                compare_evidence_tokens=compare_evidence_tokens,
+                                descriptions=descriptions)})
                     finally:
                         entry[f"seconds_{name}"] = round(time.perf_counter() - started, 2)
                         if decider is not None:
@@ -1710,6 +1731,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                    "search_deciders": names,
                    "context": use_context, "when": when, "evidence_tokens": evidence_tokens,
                    "compare_evidence_tokens": compare_evidence_tokens,
+                   "descriptions": descriptions,
                    "locomo_categories": LOCOMO_CATEGORIES if dataset == "locomo" else None},
         "stores": stores,
         "passes": tables,
@@ -1848,6 +1870,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="answer each question again from the same search with the "
                              "source turns within N tokens (0: the memories alone), "
                              "kept under the row's answers_compared; no further search")
+    parser.add_argument("--no-descriptions", action="store_true",
+                        help="leave out the descriptions of the entities a question names "
+                             "from the memory list (an ablation; default: shown, as an "
+                             "agent's context shows them)")
     parser.add_argument("--judge", default=None,
                         help="module:function(question, gold, prediction) -> bool "
                              "(default: containment)")
@@ -2133,7 +2159,8 @@ def main(argv: list[str] | None = None) -> int:
                         workers=args.workers, corrections=corrections, decider=args.decider,
                         store_dir=args.store_dir, full_context=args.full_context,
                         evidence_tokens=args.evidence_tokens,
-                        compare_evidence_tokens=args.compare_evidence_tokens)
+                        compare_evidence_tokens=args.compare_evidence_tokens,
+                        descriptions=not args.no_descriptions)
 
         def finish(part: dict[str, Any]) -> dict[str, Any]:
             part["file"] = str(path)

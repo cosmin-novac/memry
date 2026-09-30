@@ -110,6 +110,7 @@ environment variable, CLI flag, REST option, or server option that selects it.
 | `Memory` | One derived or verbatim claim | May be updated, invalidated, or superseded; hard deletion is explicit. |
 | `MemoryEvent` | Audit event for add/update/supersede/delete decisions | Append-only audit trail. |
 | Embedding and FTS row | Search representation of a memory, and of an episode for choosing it as evidence | Derived and rebuildable (`memry reindex` embeds episodes an older store has no vector for). |
+| Entity name row (`entity_names`) | Each name an entity answers to, once per entity and name: its own, each alias, each wording of its mentions, with the user it is read for; found by any three letters of it, among one user's names | Derived: kept by triggers on entities and mentions, filled once when an older database is opened. |
 
 A memory has content, one memory type, importance, public `categories`, compatibility
 `entities`, metadata, scope (`user_id`, `agent_id`, `run_id`), timestamps, source episode
@@ -310,8 +311,9 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    pass (`same_name_plan`) merges entities of one name only where nothing sets them
    apart: a pair kept apart (a rejected proposal, or P(different) of 0.5 or more) is
    never merged there, nor joined through a third.
-7. **Descriptions** are built from up to 50 memories when an entity is opened or recalled
-   into context, not on the save path.
+7. **Descriptions** are built from the entity's newest 40 memories in use
+   (`entities.DESCRIPTION_FACTS`) when an entity is opened or recalled into context, not
+   on the save path.
 
 Merge proposals never reach the Upkeep queue when a calibrated judge decides pairs.
 A merge keeps what decided it on its proposal: the two entities (the one merged away stays
@@ -523,26 +525,50 @@ entity or date filter, whether its question names anything, and with `relational
 (which has no seeds, so no linked pool).
 
 1. **Seeds** (`MemoryStore._seeds`). The query's phrases are resolved through canonical
-   and alias candidates, and only hubs are kept: a stray phrase stored as an entity does
-   not decide what a search is about. The longest-name rule then runs among the hubs:
-   "bildy v4" and not also "bildy", since a search from bildy reaches every version below
-   it. Because the hubs are kept first, a stray entity whose name holds a hub's ("bildy
-   sync", one memory, no type) does not hide the hub. A question naming no hub that speaks
-   in the first person ("Where do I live?") is about the store's owner, when the owner is
-   a hub.
-2. **Candidates**, as deep for every search (eight per result asked for, at least 40 and at
-   most 500). The text ranking: FTS5 BM25 keyword candidates and the configured embedder's
-   vector candidates (exact NumPy cosine scoring in small stores, the optional usearch
-   HNSW sidecar above its threshold), combined with Reciprocal Rank Fusion and blended with
-   recency and importance according to configuration. With seeds, the linked pool: the
-   links from the seeds are followed, directed and weighted by kind, direction and
-   probability (`relational_depth`, 1 by default; an open pair is a "same" link only on a
-   calibrated judge's answer), and each entity linked strongly enough adds the 10 of its
-   memories that best state the property asked, chosen among its newest 500. Every filter
-   is applied here, to both, before anything is ordered or judged: the user and agent,
-   the run (a run's memories are those said in it, section 4), history (the memories in
-   use and those kept as history, below; every memory with `include_invalid`), the tags,
-   the entity, and the date windows (`since`/`until` on when a memory was saved,
+   and alias candidates, and so is a word that names one entity on its own
+   (`graph_retrieval.named_by_a_word`): a word of that entity's names alone, no other
+   entity's name or alias carrying it (the rare shared word of the name index at its
+   rarest), which the store uses for that entity more likely than not: of the person's
+   memories in use and turns saved that hold it, more than half are the entity's memories
+   or the turns they rest on. "Arvel" finds the place stored as "Mount Arvel"; "park", a
+   word of twenty park names, finds none, nor does "city" in "New York City" where most of
+   what says "city" is about other places. The names that hold a word are found by its
+   letter trigrams in `entity_names` (FTS5), among the searched user's names alone, and a
+   phrase that is only an alias through the same table, so neither lookup reads every name
+   the store has, nor another account's. Only hubs are kept: a stray phrase stored as an
+   entity does not decide what a search is about. The longest-name rule then runs among
+   the hubs: "bildy v4" and not also "bildy", since a search from bildy reaches every
+   version below it. Because the hubs are kept first, a stray entity whose name holds a
+   hub's ("bildy sync", one memory, no type) does not hide the hub. A question naming no
+   hub that speaks in the first person ("Where do I live?") is about the store's owner,
+   when the owner is a hub.
+2. **Candidates**, as deep for every search (eight per result asked for, at least 40 and
+   at most 500). The text ranking: FTS5 BM25 keyword candidates, each word of the question
+   weighed by how rare it is in everything the store holds, its memories and the turns
+   they were said in (`LocalBackend.keyword_search`; the turns only weigh the words, they
+   are not searched): in a store of third-person facts "did" and "do" are rare among the
+   memories and common in what was said, and weighed by the memories alone they outweighed
+   the name a question asks about. Without turns a word weighs as `bm25()` weighs it. The
+   first candidates are found exactly, without scoring every memory a common word is in
+   (MaxScore, `LocalBackend._keyword_scores`): a word adds at most its weight times its
+   idf times 2.2 to a memory's score. The words held by few memories are scored in all of
+   them and set a floor under the score of the last candidate kept. The common words that
+   together cannot reach that floor are scored only for the memories found otherwise; the
+   others are read in one query, best first, until what they can still add falls below the
+   floor. Every read keeps to the search's scope and filters in SQL: a hosted memry keeps
+   every account in one file, and another account's memories are walked in the index,
+   never scored. Beside them, the configured embedder's vector candidates (exact NumPy
+   cosine scoring in small stores, the optional usearch HNSW sidecar above its threshold);
+   the two are combined with Reciprocal Rank Fusion and blended with recency and
+   importance according to configuration. With seeds, the linked pool: the links from the
+   seeds are followed, directed and weighted by kind, direction and probability
+   (`relational_depth`, 1 by default; an open pair is a "same" link only on a calibrated
+   judge's answer), and each entity linked strongly enough adds the 10 of its memories
+   that best state the property asked, chosen among its newest 500. Every filter is
+   applied here, to both, before anything is ordered or judged: the user and agent, the
+   run (a run's memories are those said in it, section 4), history (the memories in use
+   and those kept as history, below; every memory with `include_invalid`), the tags, the
+   entity, and the date windows (`since`/`until` on when a memory was saved,
    `when_since`/`when_until` on when what it tells happens). The tags, entity, run and
    history are kept to in SQL before any limit counts.
 3. **Order**. With seeds, the linked order: every candidate by how well it states the
@@ -610,12 +636,15 @@ entity or date filter, whether its question names anything, and with `relational
    is taken while it fits `retrieval.evidence_tokens` (600 by default; 0 shows none), and
    they are returned in the order they were said. A result carries the turns credited to
    it (`SearchResult.evidence`).
-Context reconstruction (`reconstruct_context`) runs a search and may prepend a bounded,
-lazily refreshed entity description. It then packs exact memories into the remaining token
+Context reconstruction (`reconstruct_context`) runs a search and puts first the
+descriptions of the entities the query names (`described_entities`: the first three it
+names, each description refreshed where stale, as many as fit a quarter of the budget,
+from 80 to 300 tokens). It then packs exact memories into the remaining token
 budget, leaving a share for their evidence (`retrieval.evidence_tokens`, at most half of
 what is left). The evidence of the memories that fit fills that share. One function
-renders memories for a model (`intelligence.context.memory_lines`), used by
-`reconstruct_context` and the benchmark runner alike. A memory reads "[happened
+renders a context for a model (`intelligence.context.context_lines`), used by
+`reconstruct_context` and the benchmark runner alike. An entity reads "Caroline
+(person): <description>". A memory reads "[happened
 2023-05-07] <text> (said 8 May 2023)": when the thing it tells happens (`metadata["when"]`,
 where known), and the day it was recorded (its last change). Both are labelled so that a
 model does not take the day a fact was written down for the day it happened. A memory kept
@@ -625,8 +654,9 @@ day the memory that replaced it was said, written as that memory's "said" date i
 memories are followed by their evidence turns in the order they were said, each "<said
 date>: <speaker>: <text>". The MCP `search_memories` rows carry the same as data: `said`,
 `happened`, `invalid_at` for a memory out of use, and `evidence` (said, speaker, text). The
-benchmark runner passes these lines as Mem0's memory list (`evals/mem0_judge.py` renders
-nothing of its own).
+benchmark runner passes these lines, the descriptions first, as Mem0's memory list
+(`evals/mem0_judge.py` renders nothing of its own); `--no-descriptions` leaves the
+descriptions out, for an ablation.
 
 Every ranked read breaks a tie by memory id (`ORDER BY updated_at DESC, id` and the like),
 so memories of one time (a bulk import, a restore) rank alike in every build of a store.
@@ -700,7 +730,7 @@ it.
 | Python 3.11+ | Yes | Application language, CLI, servers, intelligence, providers, and evals. The Docker image currently uses Python 3.12 slim. |
 | SQLite through Python `sqlite3` | Yes | Sole production persistence for memories; also the current runtime account/OAuth store. |
 | SQLite WAL | Yes for file databases | Permits reads while the single server process serializes writes. |
-| SQLite FTS5 | Yes | Content index and BM25 keyword retrieval. |
+| SQLite FTS5 | Yes | Content index and BM25 keyword retrieval; with the trigram tokenizer (SQLite 3.34 and later) the index of entity names. Without it every name is read. |
 | SQLite JSON1 | Yes | Reads the public `categories` projection and metadata aliases; normalized topic links are the indexed path. |
 | NumPy | Yes | Float32 embeddings, exact cosine scoring, clustering, and vector math. |
 | Pydantic 2 | Yes | Configuration and typed domain/API models. |
@@ -786,14 +816,12 @@ up as a red run within a week instead of in a user's terminal.
   a clean schema and synthetic benchmarks do not establish "best in class" quality.
 - Exact inline entity highlighting is deferred because mention surfaces do not provide
   unambiguous character spans. Reliable entity chips are the shipped navigation path.
-- The keyword search matches every word of the question, function words included, so in a
-  store of third-person facts a rare "did" or "do" can outweigh the name a question asks
-  about, and the one keyword match a search keeps in its judged pool (stage 4) is then the
-  wrong one.
-- A question names an entity only by one of its names or aliases in full: "Arvel" does
-  not find the place stored as "Mount Arvel", so a memory naming the place beside the
-  person the question names is compared through that person's links, with the place's name
-  read as "it".
+- The keyword search weighs a word by the turns only where the store holds them: in
+  memories imported without their turns a rare "did" or "do" can still outweigh the name a
+  question asks about, and the one keyword match a search keeps in its judged pool (stage
+  4) is then the wrong one.
+- A word of a longer name seeds a search only when no other entity's names carry it:
+  "Arvel" finds "Mount Arvel", but not while "Arvel Lodge" is also stored.
 
 ## 9. Decision record
 

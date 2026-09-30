@@ -104,6 +104,9 @@ def _gate(decider: Decider | None, llm: LLM | None = None) -> float:
 
 DESCRIPTION_MAX_CHARS = 1200
 DESCRIPTION_MAX_WORDS = 300
+#: The memories a description is built from: the entity's newest in use
+#: (``MemoryStore._refresh_entity_description``), each shown in the prompt.
+DESCRIPTION_FACTS = 40
 DESCRIPTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"description": {"type": "string"}},
@@ -141,7 +144,7 @@ def synthesize_entity_description(
     if not llm.available:
         return fallback
     aliases = aliases or [entity.name]
-    evidence = "\n".join(f"- {fact}" for fact in clean_facts[:40])
+    evidence = "\n".join(f"- {fact}" for fact in clean_facts[:DESCRIPTION_FACTS])
     prompt = (
         f"Entity: {entity.name}\n"
         f"Type: {entity.entity_type or 'unknown'}\n"

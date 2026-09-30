@@ -345,8 +345,10 @@ class MemoryBackend(ABC):
         entity_id: str | None = None,
         history: bool = False,
     ) -> list[tuple[Memory, float]]:
-        """Full-text (BM25) search. Higher score = better, a tie by memory id.
-        Reads what ``vector_search`` reads."""
+        """Full-text (BM25) search, each word of the question weighed by how
+        rare it is in what the store holds, its memories and, where the
+        backend keeps them, the turns they were said in. Higher score =
+        better, a tie by memory id. Reads what ``vector_search`` reads."""
 
     def native_search(
         self, query: str, scope: Scope, limit: int = 20
@@ -522,6 +524,20 @@ class MemoryBackend(ABC):
                     if len(matches) >= limit:
                         return matches
         return matches
+
+    def entity_names_holding(self, words: list[str], scope: Scope) -> list[tuple[str, str]]:
+        """(entity id, name) for each name of a named entity in ``scope``
+        (its own, a mention's wording, an entity merged into it, an alias)
+        whose text holds one of ``words``, lower case: the caller reads the
+        name's words. Empty where a backend cannot look."""
+        return []
+
+    def word_use(self, word: str, entity_id: str, scope: Scope) -> tuple[int, int]:
+        """How many texts of the person ``scope`` names hold ``word`` as a
+        word, their memories in use and the turns saved, and how many of
+        those are ``entity_id``'s: its memories in use and the turns they
+        rest on. (0, 0) where a backend cannot count."""
+        return 0, 0
 
     #: Called after a write changed which names read "it" in an entity's
     #: memories, with the ids of the entities concerned: by the backend for

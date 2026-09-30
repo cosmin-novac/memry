@@ -40,7 +40,16 @@ from .intelligence.clustering import (
     suggest_canonical_merges,
 )
 from .intelligence.consolidate import judge_group, representative, similarity_groups
-from .intelligence.context import build_context, estimate_tokens, fitting, turn_line
+from .intelligence.context import (
+    CONTEXT_TOKENS,
+    build_context,
+    description_budget,
+    entities_fitting,
+    entities_text,
+    estimate_tokens,
+    fitting,
+    turn_line,
+)
 from .intelligence.decay import (
     DURABILITY_KEY,
     decay_sweep,
@@ -49,6 +58,7 @@ from .intelligence.decay import (
 from .intelligence.entities import (
     _gate,
     classify_entity_types,
+    DESCRIPTION_FACTS,
     judge_entity_referents,
     non_referent_reason,
     screen_names,
@@ -2488,23 +2498,27 @@ class MemoryStore:
         user_id: str | None = None,
         agent_id: str | None = None,
         run_id: str | None = None,
-        token_budget: int = 1200,
+        token_budget: int = CONTEXT_TOKENS,
         limit: int = 20,
     ) -> ContextResult:
         """The memories found for ``query`` that fit ``token_budget``, rendered
-        for a model (``intelligence.context``), after a description of the
-        entities the query names. The memories that fit take the budget
+        for a model (``intelligence.context``), after the descriptions of the
+        entities the query names (``described_entities``, within
+        ``context.description_budget``). The memories that fit take the budget
         but a share for their evidence (``retrieval.evidence_tokens``, at most
         half of what is left), and their source turns that best match the
         query fill that share (``evidence``)."""
-        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         results = self.search(
             query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit,
             evidence=False,
         )
-        entity_text, entity_memory_ids = self._entity_context(
-            scope, query, token_budget=min(300, max(80, token_budget // 4))
+        entities = self.described_entities(
+            query, user_id=user_id, agent_id=agent_id, run_id=run_id,
+            token_budget=description_budget(token_budget),
         )
+        entity_text = entities_text(entities)
+        entity_memory_ids = [memory.id for entity in entities
+                             for memory in self.backend.entity_memories(entity.id, limit=20)]
         remaining = max(0, token_budget - estimate_tokens(entity_text))
         share = min(max(self.config.retrieval.evidence_tokens, 0), remaining // 2)
         shown = fitting(results, remaining - share)
@@ -2521,35 +2535,26 @@ class MemoryStore:
             episode_ids=memory_context.episode_ids,
         )
 
-    def _entity_context(
-        self, scope: Scope, query: str, *, token_budget: int
-    ) -> tuple[str, list[str]]:
-        entity_ids = detect_query_entities(self.backend, scope, query)[:3]
-        if not entity_ids:
-            return "", []
-        header = "## Known entities (memry)\n"
-        used = estimate_tokens(header)
-        lines: list[str] = []
-        memory_ids: list[str] = []
-        for entity_id in entity_ids:
-            entity = self._refresh_entity_description(entity_id)
-            if entity is None or not entity.description:
-                continue
-            label = entity.name
-            if entity.entity_type:
-                label += f" ({entity.entity_type})"
-            line = f"- {label}: {entity.description}"
-            cost = estimate_tokens(line) + 1
-            if used + cost > token_budget:
-                continue
-            lines.append(line)
-            used += cost
-            memory_ids.extend(
-                memory.id for memory in self.backend.entity_memories(entity.id, limit=20)
-            )
-        if not lines:
-            return "", []
-        return header + "\n".join(lines), list(dict.fromkeys(memory_ids))
+    def described_entities(
+        self,
+        query: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        token_budget: int = description_budget(CONTEXT_TOKENS),
+    ) -> list[Entity]:
+        """The entities ``query`` names (the first three
+        ``detect_query_entities`` finds), each with its description, built
+        or rebuilt where it is stale (``_refresh_entity_description``), as
+        many as fit ``token_budget`` (``context.entities_fitting``): what
+        ``reconstruct_context`` shows before the memories, and what the
+        benchmark runner shows before its memory list. The default budget
+        is ``reconstruct_context``'s at its default."""
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        described = [self._refresh_entity_description(entity_id)
+                     for entity_id in detect_query_entities(self.backend, scope, query)[:3]]
+        return entities_fitting([e for e in described if e is not None], token_budget)
 
     def _resolve_entity_filter(
         self, entity_id: str | list[str]
@@ -3450,7 +3455,7 @@ class MemoryStore:
             )
         ):
             return entity
-        memories = self.backend.entity_memories(entity_id, limit=50)
+        memories = self.backend.entity_memories(entity_id, limit=DESCRIPTION_FACTS)
         description = synthesize_entity_description(
             self.llm,
             entity,
