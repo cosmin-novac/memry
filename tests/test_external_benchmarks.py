@@ -1542,3 +1542,34 @@ def test_cli_asks_only_the_categories_given(monkeypatch, tmp_path, no_models):
     assert result["config"]["ks"] == [5, 10] and result["config"]["options"]["categories"]
     with pytest.raises(SystemExit):
         xb.parse_args(["--dataset", "locomo", "--ks", "0,5"])
+
+
+def test_ledgers_opened_at_the_same_moment_all_open(tmp_path):
+    """Worker processes open one usage ledger at the same moment. Switching a
+    new file to write-ahead mode can meet another opener's lock without the
+    busy timeout applying, and a worker failed with "database is locked". Each
+    opener now tries again until the file is in write-ahead mode."""
+    import threading
+
+    failures: list[str] = []
+    for attempt in range(40):
+        ledger = tmp_path / f"usage-{attempt}.sqlite"
+        barrier = threading.Barrier(4)
+        meters: list = []
+
+        def open_one() -> None:
+            barrier.wait()
+            try:
+                meters.append(api_usage.UsageMeter(str(ledger)))
+            except Exception as exc:  # noqa: BLE001 - the failure is the finding
+                failures.append(str(exc))
+
+        threads = [threading.Thread(target=open_one) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        for meter in meters:
+            assert meter._db.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+            meter.close()
+    assert failures == []

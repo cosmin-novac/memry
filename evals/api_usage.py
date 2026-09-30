@@ -142,6 +142,27 @@ _active: UsageMeter | None = None
 _original_send = httpx.Client.send
 
 
+#: How long a process waits for another one holding the ledger.
+_BUSY_SECONDS = 120
+
+
+def _write_ahead(db: sqlite3.Connection) -> None:
+    """Put the ledger in write-ahead mode, once per file (the mode is kept in
+    the file). Worker processes open one ledger at the same moment, and the
+    switch takes the file exclusively without waiting on the busy timeout, so
+    a worker that finds it taken tries again until ``_BUSY_SECONDS`` pass."""
+    deadline = time.monotonic() + _BUSY_SECONDS
+    while True:
+        try:
+            if db.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+                db.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
+
+
 class UsageMeter:
     """One process's view of the shared ledger.
 
@@ -159,9 +180,9 @@ class UsageMeter:
         self.refine = refine
         self.capped: str | None = None
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(self.path, timeout=120, isolation_level=None,
+        self._db = sqlite3.connect(self.path, timeout=_BUSY_SECONDS, isolation_level=None,
                                    check_same_thread=False)
-        self._db.execute("PRAGMA journal_mode=WAL")
+        _write_ahead(self._db)
         self._db.execute(_SCHEMA)
 
     # -- installing ---------------------------------------------------------
