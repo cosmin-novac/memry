@@ -801,3 +801,58 @@ def test_a_description_reads_the_memories_its_prompt_shows(store, fake_llm, monk
     many = [f"Marcus solved physics problem {i:03d}." for i in range(2 * DESCRIPTION_FACTS)]
     synthesize_entity_description(llm, marcus, many)
     assert shown(llm.calls[0][1]) == many[:DESCRIPTION_FACTS]
+
+
+def test_a_description_holds_the_lasting_picture_and_leaves_dated_events_to_the_memories():
+    """A description is shown before the memories a question finds, and each
+    of those is shown with the dates it happened and was said
+    (``context.memory_line``). The description is a cache, written once and
+    read later, so its writer is asked for the lasting picture of the entity:
+    what it is, its roles, relationships, preferences and the facts that stay
+    true. A one-off event, past or planned, is left to the memories: it is
+    mentioned only as far as it tells what the entity is, and without its
+    date. The writer is no longer asked to preserve every date: a description
+    that did put the date of one event before a question about another, and
+    the model answering took it for the date asked about."""
+    system = " ".join(DESCRIPTION_SYSTEM.split())
+    assert "the lasting picture of who or what it is" in system
+    assert "facts that stay true" in system
+    assert "one-off events, past or planned" in system
+    assert "without its date" in system
+    assert "Preserve concrete dates" not in system
+    # what the writer was asked before and still is
+    assert "Use only the supplied active memories" in system
+    assert "state the conflict instead of choosing a side" in system
+    assert "Do not infer missing facts" in system
+    assert DESCRIPTION_SYSTEM.startswith(
+        "Write a compact, evidence-grounded description of one entity\n")
+
+
+def test_a_description_writer_reads_each_memorys_own_text(store, fake_llm):
+    """The writer reads each memory's own text, not the line a model answering
+    from it reads (``context.memory_line``, with "[happened ...]" and "(said
+    ...)"): the description leaves one-off events and their dates to those
+    lines. Given the dates, the writer put more of them in the description
+    ("as of" the day a thing was said), and a model answering read those as
+    the date of what it was asked."""
+    from memry.intelligence.context import memory_line
+    from memry.models import Entity, EntityMention, Memory
+
+    backend = store.backend
+    ada = backend.insert_entity(Entity(name="Ada Wren", entity_type="person", user_id="ada"))
+    dated = Memory(content="Ada Wren ran the Leipzig half marathon.", user_id="ada",
+                   created_at="2023-05-08T10:00:00+00:00", updated_at="2023-05-08T10:00:00+00:00",
+                   metadata={"when": {"start": "2023-05-07"}})
+    plain = Memory(content="Ada Wren prefers trail running to road races.", user_id="ada",
+                   created_at="2023-06-01T10:00:00+00:00", updated_at="2023-06-01T10:00:00+00:00")
+    for memory in (dated, plain):
+        backend.insert_memory(memory)
+        backend.add_mention(EntityMention(entity_id=ada.id, memory_id=memory.id, surface="Ada Wren"))
+    assert memory_line(backend.get_memory(dated.id)).startswith("[happened 2023-05-07] ")
+
+    fake_llm.queue(json.dumps({"description": "Ada Wren is a runner who prefers trails."}))
+    store._refresh_entity_description(ada.id)
+    [(system, prompt)] = fake_llm.calls
+    evidence = prompt.split("Active evidence:\n", 1)[1].splitlines()
+    assert evidence == [f"- {plain.content}", f"- {dated.content}"]
+    assert "[happened" not in prompt and "(said" not in prompt

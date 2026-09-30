@@ -105,7 +105,8 @@ def _gate(decider: Decider | None, llm: LLM | None = None) -> float:
 DESCRIPTION_MAX_CHARS = 1200
 DESCRIPTION_MAX_WORDS = 300
 #: The memories a description is built from: the entity's newest in use
-#: (``MemoryStore._refresh_entity_description``), each shown in the prompt.
+#: (``MemoryStore._refresh_entity_description``), each shown in the prompt as
+#: its own text.
 DESCRIPTION_FACTS = 40
 DESCRIPTION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -113,11 +114,25 @@ DESCRIPTION_SCHEMA: dict[str, Any] = {
     "required": ["description"],
     "additionalProperties": False,
 }
-DESCRIPTION_SYSTEM = """Write a compact, evidence-grounded description of one entity
-for a long-term memory system. Use only the supplied active memories. Preserve
-concrete dates, numbers, preferences, constraints, and negations. If evidence
-conflicts, state the conflict instead of choosing a side. Do not infer missing
-facts. Aim for 100-300 tokens. Respond with JSON only: {"description": string}."""
+#: A description is shown before the memories a question finds
+#: (``context.context_lines``), and each of those carries the dates it happened
+#: and was said. The description is a cache, written once and read later, so it
+#: holds the lasting picture of the entity and leaves one-off events and their
+#: dates to the memories: a description that kept every date put the date of
+#: one event before a question about another.
+DESCRIPTION_SYSTEM = (
+    "Write a compact, evidence-grounded description of one entity\n"
+    "for a long-term memory system: the lasting picture of who or what it is. "
+    "Use only the supplied active memories. Say what the entity is, its roles, "
+    "relationships, preferences, habits, constraints, and other facts that stay true, "
+    "with their numbers and negations. The memories are shown with their dates "
+    "alongside the description, so leave one-off events, past or planned, to them: "
+    "mention such an event (a trip, a visit, a purchase, an accident, a meeting) only "
+    "as far as it tells what the entity is, and without its date. A lasting fact may "
+    "say since when it holds. If evidence conflicts, state the conflict instead of "
+    "choosing a side. Do not infer missing facts. Aim for 100-300 tokens. Respond with "
+    'JSON only: {"description": string}.'
+)
 
 
 def _bound_description(value: str) -> str:
@@ -136,7 +151,11 @@ def synthesize_entity_description(
     facts: list[str],
     aliases: list[str] | None = None,
 ) -> str:
-    """Build a bounded cache from active evidence; degrade to a factual excerpt."""
+    """Build a bounded cache from active evidence; degrade to a factual excerpt.
+
+    ``facts`` are the memories' own texts, not the lines a model answering
+    from them reads (``context.memory_line``): the description leaves
+    one-off events and their dates to those lines (``DESCRIPTION_SYSTEM``)."""
     clean_facts = [" ".join(fact.split()).strip() for fact in facts if fact.strip()]
     if not clean_facts:
         return ""

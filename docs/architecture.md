@@ -317,7 +317,11 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    never merged there, nor joined through a third.
 7. **Descriptions** are built from the entity's newest 40 memories in use
    (`entities.DESCRIPTION_FACTS`) when an entity is opened or recalled into context, not
-   on the save path.
+   on the save path. The writer reads each memory's own text and writes the lasting
+   picture of the entity: what it is, its roles, relationships, preferences and the facts
+   that stay true. It leaves one-off events, past or planned, to the memories, and
+   mentions one only as far as it tells what the entity is, without its date
+   (`entities.DESCRIPTION_SYSTEM`).
 
 Merge proposals never reach the Upkeep queue when a calibrated judge decides pairs.
 A merge keeps what decided it on its proposal: the two entities (the one merged away stays
@@ -392,6 +396,16 @@ The description is a cache, not a fact store. It is generated lazily when the en
 opened or selected for context, costs nothing on the normal write path, and is rebuilt
 when mentions, linked memory content, invalidation, deletion, type, alias, or merge state
 changes. Active linked memories remain the evidence returned with the hub.
+
+Time stays with the memories. Wherever a description is shown, memories are shown with
+it: in the context an agent gets and in the benchmark's memory list each memory carries
+the day it was said and, where known, the day its event happened, rendered when it is
+read; in the identity question each fact carries its date; on the entity page the
+entity's memories follow it. A description is text written once and read later, so it
+does not carry the dates of one-off events: placed first in a context, the date of one
+event there was read as the date of another event the question asked about. A lasting
+fact may still say since when it holds. The writer reads the memories' own texts: given
+their rendered lines, it wrote more dates into the description.
 
 ### Relations
 
