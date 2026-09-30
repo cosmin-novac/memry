@@ -82,6 +82,35 @@ def test_no_query_entity_means_no_expansion(store, graph):
     assert hits  # returns the noise notes, unaffected
 
 
+def test_a_filtered_search_starts_at_the_hub_it_names_and_keeps_its_filter(store, graph):
+    """A tag filter does not turn the linked search off: a question naming Ada
+    is searched from Ada, and the linked pool keeps to the tag as the text
+    ranking does. Helios's memory filed under it is found one relation away;
+    its memory filed under none is not read."""
+    scope = Scope(user_id="ada")
+    helios = store.backend.find_entities("helios", scope)[0]
+
+    def filed(content, mentions=()):
+        memory = store.backend.insert_memory(
+            Memory(content=content, user_id="ada", categories=["infra"],
+                   embedding_model=store.embedder.model_id),
+            embedding=store.embedder.embed([content])[0])
+        for entity in mentions:
+            store.backend.add_mention(EntityMention(entity_id=entity.id, memory_id=memory.id,
+                                                    surface=entity.name))
+        return memory
+
+    cache = filed("The Helios project keeps a Redis cache in front of the database.", [helios])
+    for i in range(5):
+        filed(f"Infra note {i}: rotate the deploy keys.")
+    results = store.search("What tool does Ada use for her work?", user_id="ada",
+                           categories=["infra"], limit=10)
+    found = {r.memory.id: r for r in results}
+    assert cache.id in found and found[cache.id].signals["about"] == 0.5  # through Helios
+    assert graph["m_uses"].id not in found
+    assert all("infra" in r.memory.categories for r in results)
+
+
 def test_relations_are_namespaced(store, graph):
     assert store.relations(user_id="ada")
     assert store.relations(user_id="someone-else") == []
@@ -1075,9 +1104,8 @@ def test_a_lone_answer_judged_low_still_ranks_first_among_non_answers(store):
     across wordings. At 0.16, with the other 19 memories of the call judged
     near zero (0.02), it still ranks first: through the linked search, where
     the planner's answer counts 0.16 x 0.98 x 0.72 against 0.02 x 1.0 for
-    v2's own, and through the re-rank blend of a question naming no hub,
-    where 0.16 clears the floor (``decision.rerank_floor`` 0.15) that pushes
-    the rest back."""
+    v2's own, and for a question naming no hub, ordered by the judgement
+    alone."""
     _planner(store)
     store.decider = judge = _Recording(specific=1.0, several=0.0,
                                        scores={"Windows only": 0.16})

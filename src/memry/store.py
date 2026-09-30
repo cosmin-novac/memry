@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -72,6 +73,7 @@ from .intelligence.graph_retrieval import (
     activation_paths,
     detect_query_entities,
     homes_of,
+    longest_names,
     mask_first_person,
     mask_names,
     parts_of,
@@ -402,6 +404,69 @@ def _when_within(
     return when_overlaps(
         (memory.metadata or {}).get(WHEN_KEY), when_since, when_until
     )
+
+
+@dataclass(frozen=True)
+class _Reads:
+    """What a search reads (stage 2 of ``MemoryStore.search``), kept to by
+    every candidate it gathers: the text ranking, the linked pool and the
+    set call's. In SQL, as ``MemoryBackend.keyword_search`` reads: the scope
+    searched (a run's memories are those said in it), the memories in use
+    and those kept as history (every memory with ``include_invalid``), the
+    tags and the entities asked for. Here, the date windows (``admits``)."""
+
+    scope: Scope
+    include_invalid: bool = False
+    categories: list[str] | None = None
+    entity_id: str | list[str] | None = None
+    since: str | None = None
+    until: str | None = None
+    when_since: str | None = None
+    when_until: str | None = None
+
+    def admits(self, memory: Memory) -> bool:
+        """Whether a memory was saved inside ``since``/``until`` and what it
+        tells happens inside ``when_since``/``when_until``."""
+        return ((not (self.since or self.until)
+                 or _within(memory.created_at, self.since, self.until))
+                and _when_within(memory, self.when_since, self.when_until))
+
+    def entity_memories(
+        self, backend: MemoryBackend, entity_id: str, limit: int
+    ) -> list[Memory]:
+        """The newest ``limit`` memories of an entity that the search reads,
+        its filters applied in SQL before ``limit`` counts."""
+        return [memory for memory in backend.entity_memories(
+                    entity_id, limit=limit, include_invalid=self.include_invalid,
+                    scope=self.scope, history=True, categories=self.categories,
+                    mentioning=self.entity_id)
+                if self.admits(memory)]
+
+
+@dataclass
+class _SearchPlan:
+    """One search as it goes through the stages of ``MemoryStore.search``:
+    what it reads and is about, and what each stage leaves the next."""
+
+    reads: _Reads
+    #: stage 1: the hubs the question is about, whether that is the owner of
+    #: a question in the first person, and the question as the order and
+    #: the judge read it ("it" for the one seed's names)
+    seeds: list[str] = field(default_factory=list)
+    first_person: bool = False
+    question: str = ""
+    #: whether the decision provider judges the search (stages 4 to 6)
+    judges: bool = False
+    #: stages 2 and 3 with seeds: how strongly the links reach each entity,
+    #: those reached by a step up, each memory's entities as read, and the
+    #: question's vector as the property comparison reads it
+    act: dict[str, float] = field(default_factory=dict)
+    above: set[str] = field(default_factory=set)
+    entities: dict[str, list[Entity]] = field(default_factory=dict)
+    asked: np.ndarray | None = None
+    #: stages 5 and 6: each memory judged (member of the set, score), in the
+    #: order judged
+    judged: dict[str, tuple[bool, float]] = field(default_factory=dict)
 
 
 def _cut(vector: list[float], keep: int | None) -> list[float]:
@@ -1569,10 +1634,36 @@ class MemoryStore:
         relational: bool = True,
         evidence: bool = True,
     ) -> list[SearchResult]:
-        """The memories that best answer ``query``, best first. With
-        ``evidence`` each result carries the source turns it is the best
-        ranked of the results to rest on, chosen within
-        ``retrieval.evidence_tokens`` (``evidence``)."""
+        """The memories that best answer ``query``, best first.
+
+        Every search runs one pipeline, its stages in this order, each rule
+        in one stage (docs/architecture.md, read path):
+
+        1. the seeds (``_seeds``): the hubs the question names, the longest
+           names among them, else the owner for a question in the first
+           person; none with ``relational=False``;
+        2. the candidates, as deep for every search: the text ranking
+           (``_text_ranking``) and, with seeds, the linked pool
+           (``_search_linked``), every filter (scope and run, history, tags,
+           entity, date windows: ``_Reads``) applied as they are gathered,
+           before anything is ordered or judged;
+        3. the order: the linked order with seeds, the text ranking's
+           without (``_search_linked``);
+        4. the judged pool: the first ``decision.rerank_pool`` of the order,
+           the keyword search's best match keeping a place in it on every
+           search, judged or not (``_with_the_keyword_place``);
+        5. the judge (``_judge_ranking``), in one wording
+           (``_judged_relevance``), names read "it" only for a single seed,
+           on every search where ``relevance_mode()`` is "jev" and none
+           elsewhere;
+        6. the set call and the set's members (``_set_pool``);
+        7. the final order (``_final_order``: judged, the members first and
+           then the judged score, a tie in the order judged, whose ties go by
+           memory id), the limit (a set question returns every member found,
+           up to ``SET_RESULT_CAP``), then the evidence: with ``evidence``
+           each result carries the source turns it is the best ranked of the
+           results to rest on, chosen within ``retrieval.evidence_tokens``
+           (``evidence``)."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         if entity_id:
             entity_id = self._resolve_entity_filter(entity_id)
@@ -1587,41 +1678,21 @@ class MemoryStore:
                 when_since=when_since, when_until=when_until,
             )
             return [SearchResult(memory=m, score=0.0) for m in memories]
-        # Over-fetch when we will post-filter or fuse, so a full page survives.
-        wide = (since or until or when_since or when_until) or (
-            relational and not categories and not entity_id
-        )
-        fetch = limit if not wide else min(max(limit * 8, 40), 500)
-        # embedded once: the ranking and the choice of evidence read it
-        query_vector = self._query_vector(query)
-        # what was true until an update replaced it is searchable too, for
-        # questions about the past (``_current_first`` orders it)
-        results = hybrid_search(
-            backend=self.backend,
-            embedder=self.embedder,
-            query=query,
-            scope=scope,
-            limit=fetch,
-            cfg=self.config.retrieval,
-            include_invalid=include_invalid,
-            categories=categories,
-            entity_id=entity_id,
-            history=True,
-            query_vector=query_vector,
-        )
-        # The linked search: the memories of the entities linked to the query's
-        # join the ranking (multi-hop answers hybrid alone scores at zero).
-        if relational and not categories and not entity_id:
-            results = self._search_linked(query, scope, results, include_invalid)
-        if since or until:
-            results = [r for r in results if _within(r.memory.created_at, since, until)]
-        if when_since or when_until:
-            results = [
-                r for r in results if _when_within(r.memory, when_since, when_until)
-            ]
-        # a question needing several memories returns every member found
-        members = sum(1 for r in results if r.signals.get("member"))
-        ranked = self._current_first(self._rerank(query, results))
+        reads = _Reads(scope, include_invalid, categories, entity_id, since, until,
+                       when_since, when_until)
+        # 1. the seeds, the question as it is read, and whether it is judged
+        plan = self._plan(query, reads, relational)
+        # 2. the candidates: the text ranking, as deep for every search
+        query_vector = self._query_vector(query)  # the ranking and the evidence read it
+        results = self._text_ranking(query, reads, limit, query_vector)
+        # 2 to 4. the linked pool, the order and the judged pool
+        ranked = self._search_linked(query, scope, results, include_invalid, plan=plan)
+        # 5 and 6. the judge and the set call
+        if plan.judges:
+            ranked = self._judge_ranking(plan.question, ranked, scope, include_invalid, plan)
+        # 7. the final order and the limit, then the evidence
+        ranked = self._final_order(ranked, plan)
+        members = sum(1 for r in ranked if r.signals.get("member"))
         found = ranked[:max(limit, min(members, SET_RESULT_CAP))]
         if evidence:
             by_id = {r.memory.id: r for r in found}
@@ -1629,6 +1700,66 @@ class MemoryStore:
                                       run_id=run_id, query_vector=query_vector):
                 by_id[turn.memory_ids[0]].evidence.append(turn)
         return found
+
+    def _text_ranking(
+        self, query: str, reads: _Reads, limit: int, query_vector: list[float] | None = None,
+    ) -> list[SearchResult]:
+        """Stage 2's text ranking: keyword and vector candidates fused
+        (``retrieval.hybrid_search``), as deep for every search (eight per
+        result asked for, at least 40 and at most 500), of what the search
+        reads (``reads``). What was true until an update replaced it is read
+        too, for questions about the past (``_final_order`` puts it after the
+        current value). ``query_vector`` None embeds the query."""
+        return [r for r in hybrid_search(
+            backend=self.backend, embedder=self.embedder, query=query, scope=reads.scope,
+            limit=min(max(limit * 8, 40), 500), cfg=self.config.retrieval,
+            include_invalid=reads.include_invalid, categories=reads.categories,
+            entity_id=reads.entity_id, history=True, query_vector=query_vector,
+        ) if reads.admits(r.memory)]
+
+    def _seeds(self, query: str, scope: Scope) -> tuple[list[str], bool]:
+        """Stage 1 of a search: the entities its question is about, and
+        whether that is the owner of a question in the first person.
+
+        Only a hub counts (``_is_hub``): a stray phrase stored as an entity
+        does not decide what a search is about. Of the hubs named, those
+        whose name another's holds are dropped ("bildy v4", not also
+        "bildy": a search from bildy reaches every version below it). The
+        hubs are kept first, so a stray name holding a hub's ("bildy sync")
+        does not hide it. A question naming no hub that speaks in the first
+        person ("Where do I live?") is about the store's owner, when the
+        owner is one."""
+        hubs = [e for e in detect_query_entities(self.backend, scope, query) if self._is_hub(e)]
+        seeds = longest_names(self.backend, hubs)
+        if seeds or not speaks_in_first_person(query):
+            return seeds, False
+        owner = self.owner_entity(scope.user_id)
+        if owner is not None and self._is_hub(owner.id):
+            return [owner.id], True
+        return [], False
+
+    def _plan(self, query: str, reads: _Reads, relational: bool) -> _SearchPlan:
+        """A search's seeds (stage 1, none with ``relational=False``), the
+        question as the linked order and the judge read it, and whether the
+        decision provider judges it.
+
+        With one seed its names read "it" ("Where does it live?", and "it"
+        for "I" when the seed is the owner); a question naming several hubs
+        is read as written ("Did it like it?" says nothing), and so is one
+        naming none.
+
+        The decision provider judges a search if and only if
+        ``relevance_mode()`` is "jev" ("auto" resolves from the provider and
+        ``decision.rerank``); with "vector" no search is judged."""
+        seeds, first_person = self._seeds(query, reads.scope) if relational else ([], False)
+        question = query
+        if len(seeds) == 1:
+            question = mask_names(query, self.backend.entity_aliases(seeds[0]))
+            if first_person:
+                question = mask_first_person(question)
+        judges = bool(self.decider.available) and self.relevance_mode() == "jev"
+        return _SearchPlan(reads=reads, seeds=seeds, first_person=first_person,
+                           question=question, judges=judges)
 
     def _current_first(self, results: list[SearchResult]) -> list[SearchResult]:
         """A memory kept as history (``models.HISTORY_KINDS``) comes right
@@ -1772,135 +1903,83 @@ class MemoryStore:
     def _reranks(self) -> bool:
         """Whether the decision provider re-ranks. The setting decides where it
         is set; otherwise the provider's default stands. Either way a provider
-        that was not measured to beat no re-ranking cannot be talked into it:
-        through gpt-5-mini the same work scored below the baseline at ten
-        seconds a search."""
+        that was not measured to beat no re-ranking cannot be talked into it
+        (``providers.decisions.MEASURED_RERANKERS``)."""
         cfg = self.config.decision
         wanted = cfg.rerank if cfg.rerank is not None else self.decider.reranks_by_default
         return bool(wanted and self.decider.may_rerank)
 
     def relevance_mode(self) -> str:
-        """What judges relevance in the linked search: ``retrieval.
+        """What judges whether a memory answers: ``retrieval.
         relational_relevance``, with "auto" read as "jev" where the decision
         provider re-ranks (``_reranks``: Jev by default, a text model measured
-        to help when ``decision.rerank`` is on) and as "vector" elsewhere."""
+        to help when ``decision.rerank`` is on) and as "vector" elsewhere.
+        "jev" has the provider judge every search; with "vector" none is
+        judged (``_plan``)."""
         mode = self.config.retrieval.relational_relevance
         if mode != "auto":
             return mode
         return "jev" if self._reranks() else "vector"
 
-    def _rerank(self, query: str, results: list[SearchResult]) -> list[SearchResult]:
-        """Let a relevance judgement adjust the hybrid order, not replace it.
-
-        Hybrid ranking matches wording and carries recency and decayed
-        importance with it. Ordering purely by "does this text answer the
-        question" measured worse than doing nothing, because it throws all of
-        that away. Blending keeps it and adds what wording alone cannot see,
-        and a floor lets an obvious non-answer be pushed back however well it
-        matched.
-
-        One call covers the whole shortlist. A provider that abstains or fails
-        leaves the order exactly as it found it. It runs only where the linked
-        search neither ordered nor judged the results (none carries "about" or
-        "judged"): after the linked search its own order stands.
-        """
-        cfg = self.config.decision
-        if not self._reranks():
-            return results
-        if not self.decider.available or len(results) < 2:
-            return results
-        if any("about" in r.signals or "judged" in r.signals for r in results):
-            return results  # the linked search ordered them, or already asked the same
-        pool = results[: max(cfg.rerank_pool, 2)]
-        answers = self.decider.decide(
-            f"QUESTION: {query}",
-            {f"m{i}": Noul(instructions="This memory helps answer the question. "
-                                        f"Memory: {r.memory.content}")
-             for i, r in enumerate(pool)},
-        )
-        judged = [answers[f"m{i}"].value if answers[f"m{i}"].available else None
-                  for i in range(len(pool))]
-        if all(value is None for value in judged):
-            return results
-        return self._blended(results, judged)
-
     def _search_linked(
         self, query: str, scope: Scope, results: list[SearchResult], include_invalid: bool,
+        *, plan: _SearchPlan,
     ) -> list[SearchResult]:
-        """Score each candidate by how well it states the property asked
-        (similarity of the question and the memory with the names of the
-        entities the links reach replaced by "it"; a question naming several
-        hubs is compared as written, with each memory's names kept) to the power
-        ``relational_sharpness``, times how strongly it is about the entity the
-        query names (``aboutness``), a tie by memory id. The
-        links are followed directed and weighted, ``relational_depth`` deep
-        (``graph_retrieval.activation_paths``). The candidates are the text
-        ranking's and, for every entity linked at ``FAMILY_MIN`` or more, the
-        ``FAMILY_TOP`` of its memories in the scope searched (its user, agent
-        and run, as the text ranking's) that best state the property. No link
-        reaches a tag (``links_of``), so a tag's memories are never such
-        candidates, as a tag is never a seed. A query naming no hub keeps the
-        text ranking; with "jev" it is judged, and one with one answer or
-        about everything is ordered by the re-rank blend of the judgement and
-        that ranking (``_judge_ranking``). The keyword search's best match
-        keeps a place among the first ``decision.rerank_pool``, whatever its
-        score: an identifier the question names is seen by the words alone.
+        """Stages 2 to 4 of a search, after its text ranking (``results``,
+        what the search reads of it): the linked pool and the order, then the
+        judged pool.
 
-        With ``relational_relevance = "jev"`` (or "auto" with a provider that
-        re-ranks, ``relevance_mode``) the decision provider then judges
-        whether each of the first ``decision.rerank_pool`` answers the
-        question, and that replaces the similarity for them
-        (``_judge_ranking``). An answer from a thing the query's entity
-        belongs to then counts only as far as none of the entity's own
-        memories answers, nor one of a thing between them (a version's own
-        change wins, and so does the change of the version it builds on).
-        Both count to the power of P(the question asks for one property): on
-        "Show everything about it" aboutness alone orders the list."""
+        With seeds (``plan.seeds``), the candidates are the text ranking's
+        and, for every entity the links reach at ``FAMILY_MIN`` or more, the
+        ``FAMILY_TOP`` of its memories that the search reads (``_Reads``:
+        its scope and run, history, tags, entity and date windows, applied
+        before they are chosen) that best state the property asked. The
+        links are followed directed and weighted, ``relational_depth`` deep
+        (``graph_retrieval.activation_paths``). No link reaches a tag
+        (``links_of``), so a tag's memories are never such candidates, as a
+        tag is never a seed. Each candidate is ordered by how well it states
+        the property asked (similarity of the question and the memory with
+        the names of the entities the links reach replaced by "it"; a
+        question naming several hubs is compared as written, with each
+        memory's names kept) to the power ``relational_sharpness``, times how
+        strongly it is about the entity the query names (``aboutness``), a
+        tie by memory id. Without seeds the order is the text ranking's.
+
+        The judged pool is the first ``decision.rerank_pool`` of the order,
+        where the keyword search's best match keeps a place on every search,
+        judged or not (``_with_the_keyword_place``)."""
+        ranked = self._linked_order(results, plan) if plan.seeds else results
+        return self._with_the_keyword_place(ranked, results)
+
+    def _linked_order(self, results: list[SearchResult], plan: _SearchPlan) -> list[SearchResult]:
+        """The linked pool and the linked order of a search with seeds
+        (``_search_linked``); what the judge needs of them is left in
+        ``plan``."""
         cfg = self.config.retrieval
-        seeds = [e for e in detect_query_entities(self.backend, scope, query, longest=True)
-                 if self._is_hub(e)]
-        first_person = False
-        if not seeds and speaks_in_first_person(query):
-            # "Where do I live?" names nobody: it is about the store's owner
-            owner = self.owner_entity(scope.user_id)
-            if owner is not None and self._is_hub(owner.id):
-                seeds, first_person = [owner.id], True
-        judges = self.relevance_mode() == "jev"
-        if not seeds:
-            if judges:
-                return self._judge_ranking(query, results, scope, include_invalid)
-            return results
+        seeds = plan.seeds
         act, above = activation_paths(self.backend, seeds, depth=cfg.relational_depth)
-        names = [n for seed in seeds for n in self.backend.entity_aliases(seed)]
         # With several hubs named, "it" could stand for any of them: masked,
         # "Why do Ada and Kai find Mira inspiring?" reads "Why do it and it
         # find it inspiring?", which says nothing about which of their
         # memories answers. So the names stay, as the judge reads them
-        # (``_judge_ranking``), and every memory is compared by its ordinary
-        # vector, names kept: those naming more of the things asked about
-        # come first.
+        # (``_plan``), and every memory is compared by its ordinary vector,
+        # names kept: those naming more of the things asked about come first.
         several = len(seeds) > 1
-        question = query if several else mask_names(query, names)
-        if first_person:
-            question = mask_first_person(question)
-        asked = self._asked_vector(question)
-
+        asked = self._asked_vector(plan.question)
         pool: dict[str, SearchResult] = {r.memory.id: r for r in results}
         for entity_id, strength in act.items():
             if strength < FAMILY_MIN:
                 continue
-            # an entity's memories span runs: only those of the scope
-            # searched, kept to in SQL before the newest FAMILY_SCAN are taken
-            members = self.backend.entity_memories(
-                entity_id, limit=FAMILY_SCAN, include_invalid=include_invalid, scope=scope)
+            # what the search reads of an entity's memories is kept to in
+            # SQL before the newest FAMILY_SCAN are taken
+            members = plan.reads.entity_memories(self.backend, entity_id, FAMILY_SCAN)
             vectors = (self.backend.vectors_of([m.id for m in members], self.embedder.model_id)
                        if several else self._property_vectors([m.id for m in members]))
             # a tie keeps the order read: the newest first, then by memory id
             for memory in sorted(members,
                                  key=lambda m: -_similarity(asked, vectors.get(m.id)))[:FAMILY_TOP]:
                 pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
-        entities: dict[str, list[Entity]] = {}
-        scores = self._linked_scores(asked, list(pool), act, entities, names_kept=several)
+        scores = self._linked_scores(asked, list(pool), act, plan.entities, names_kept=several)
         scored = []
         for mid, result in pool.items():
             relevance, about = scores[mid]
@@ -1909,29 +1988,34 @@ class MemoryStore:
             scored.append((relevance ** cfg.relational_sharpness * about, result.score, result))
         # a tie in both scores by memory id, not by the order the pool was filled in
         scored.sort(key=lambda item: (-item[0], -item[1], item[2].memory.id))
-        ranked = [result for _, _, result in scored]
-        # Only the keyword search sees an identifier ("invoice 2024-117") the
-        # question shares with a memory linked to nothing: the vectors, and so
-        # the property similarity, cannot tell 2024-117 from 2024-118, and
-        # aboutness counts the memory as about something else (0.3). So the
-        # best keyword match keeps a place among the first
-        # ``decision.rerank_pool``, which the decision provider reads; judged,
-        # an answer about something else (0.8 x 0.3) ranks above the entity's
-        # non-answers (0.05 x 1.0).
+        plan.act, plan.above, plan.asked = act, above, asked
+        return [result for _, _, result in scored]
+
+    def _with_the_keyword_place(
+        self, ranked: list[SearchResult], results: list[SearchResult]
+    ) -> list[SearchResult]:
+        """Stage 4, the judged pool, on every search: the keyword search's
+        best match among ``results`` (the text ranking) keeps a place among
+        the first ``decision.rerank_pool`` of ``ranked``, which the decision
+        provider reads where it judges. Only the keyword search sees an
+        identifier ("invoice
+        2024-117") the question shares with a memory: the vectors, and so the
+        property similarity, cannot tell 2024-117 from 2024-118, a memory
+        linked to nothing counts as about something else (0.3), and in the
+        text ranking newer memories matching more of the question's other
+        words fill the first places. Judged, the answer ranks above the
+        non-answers."""
         size = max(self.config.decision.rerank_pool, 2)
         worded = [r for r in results if "keyword" in r.signals]
-        if worded:
-            best = max(worded, key=lambda r: r.signals["keyword"]).memory.id
-            place = next(i for i, r in enumerate(ranked) if r.memory.id == best)
-            if place >= size:
-                ranked.insert(size - 1, ranked.pop(place))
-        if not judges:
+        if not worded:
             return ranked
-        return self._judge_ranking(question if len(seeds) == 1 else query, ranked, scope,
-                                   include_invalid, link={"act": act, "above": above,
-                                                          "seeds": set(seeds),
-                                                          "entities": entities,
-                                                          "asked": asked})
+        best = max(worded, key=lambda r: r.signals["keyword"]).memory.id
+        place = next(i for i, r in enumerate(ranked) if r.memory.id == best)
+        if place < size:
+            return ranked
+        ranked = list(ranked)
+        ranked.insert(size - 1, ranked.pop(place))
+        return ranked
 
     def _asked_vector(self, question: str) -> np.ndarray:
         """The question's vector as the property comparison reads it: cut to
@@ -1968,33 +2052,32 @@ class MemoryStore:
 
     def _judge_ranking(
         self, question: str, ranked: list[SearchResult], scope: Scope, include_invalid: bool,
-        link: dict | None = None,
+        plan: _SearchPlan,
     ) -> list[SearchResult]:
-        """The decision provider judges the first ``decision.rerank_pool`` of
-        the ranking, and with them what kind of question it is, in one call:
+        """Stages 5 and 6 of a search: the decision provider judges the
+        judged pool (the first ``decision.rerank_pool`` of ``ranked``), and
+        with them what kind of question it is, in one call:
         - about everything ("Show everything about X") or with one answer
           ("Where does Ada live?"): that is all;
         - several ("Which car is the cheapest?", "How much did I spend on
           groceries?"): one more call judges up to ``retrieval.set_pool``
-          memories more (``_set_pool``), and the members of the set
-          (``set_members`` over both calls' scores) come first.
+          memories more that the search reads (``_set_pool``), and the
+          members of the set are found over both calls' scores
+          (``set_members``).
         The "calls" signal says how many calls were made (1 or 2), "pool" how
         many memories the second judged.
-        ``link`` carries the linked search's activation: then "it" stands for
-        each memory's own entity, aboutness weighs the order and a thing's
-        answer yields to its version's own, and the judgement orders. Without
-        it (a question naming no hub) memories are read as written, and a
-        question with one answer or about everything is ordered by the blend
-        of ``_rerank`` (``decision.rerank_weight`` of the judged score, the
-        rest the text ranking's position, a score under ``decision.
-        rerank_floor`` pushed back): the judgement alone measured worse there
-        (R-117: recall@3 0.844 against 0.933 on distractors_v1). A set
-        question keeps its members first either way."""
+
+        With one seed, "it" stands for each memory's own entity (the one the
+        links reach most strongly, a tie by entity id) in the question and
+        the memories; with several or none, both are read as written. With
+        seeds aboutness weighs each score, and a thing's answer yields to
+        its version's own. Each memory judged, with whether it is a member
+        and its score, is left in ``plan.judged`` for the final order
+        (``_final_order``); ``ranked`` is returned with the memories the
+        second call added after it."""
         size = max(self.config.decision.rerank_pool, 2)
-        act = link["act"] if link else {}
-        above = link["above"] if link else set()
-        seeds = link["seeds"] if link else set()
-        entities: dict = link["entities"] if link else {}
+        act, above, entities = plan.act, plan.above, plan.entities
+        seeds = set(plan.seeds)
         homes: dict[str, set[str]] = {}
         aliases: dict[str, list[str]] = {}
 
@@ -2004,13 +2087,15 @@ class MemoryStore:
             return entities[mid]
 
         def subject(mid: str) -> str | None:
-            linked = [e.id for e in ents(mid) if e.id in act]
+            # the strongest reached, a tie by entity id: not by which of the
+            # memory's mentions was written first
+            linked = sorted(e.id for e in ents(mid) if e.id in act)
             return max(linked, key=act.get) if linked else None
 
         # With one entity named, "it" stands for it in the question and the
         # memories; with several ("Did Ilva like Olive Kitchen?") the names
         # stay, or the question would read "Did it like it?".
-        masking = bool(link) and len(seeds) == 1
+        masking = len(seeds) == 1
 
         def text_of(result: SearchResult) -> str:
             # "it" stands for the entity a memory's aboutness comes from and
@@ -2030,7 +2115,7 @@ class MemoryStore:
                 keep=[e.name for e in ents(result.memory.id) if e.id not in it])
 
         def judge(batch: list[SearchResult], meta: bool):
-            if link:
+            if seeds:
                 unread = [r.memory.id for r in batch if r.memory.id not in entities]
                 if unread:  # read at once, not one memory at a time
                     entities.update(self.backend.entities_of_memories(unread))
@@ -2047,16 +2132,17 @@ class MemoryStore:
         calls, pooled = 1, 0
 
         members: set[str] = set()
-        several_asked = specific >= 0.5 and several >= SET_BAR
-        if several_asked:
-            try:
-                asked = link["asked"] if link else self._asked_vector(question)
-            except Exception:  # embedding service down: the batch keeps its order
-                asked = None
+        if specific >= 0.5 and several >= SET_BAR:
+            asked = plan.asked
+            if asked is None:
+                try:
+                    asked = self._asked_vector(question)
+                except Exception:  # embedding service down: the batch keeps its order
+                    asked = None
             batch = self._set_pool(ranked, size, judged, scope, include_invalid,
                                    asked=asked, act=act, entities=entities,
-                                   members=set_members(judged),
-                                   names_kept=bool(link) and not masking)
+                                   members=set_members(judged), names_kept=len(seeds) > 1,
+                                   reads=plan.reads)
             if batch:
                 for result in batch:
                     if result.memory.id not in found:
@@ -2079,7 +2165,7 @@ class MemoryStore:
         own = max((value for mid, value in judged.items()
                    if seeds and any(e.id in seeds for e in ents(mid))), default=0.0)
         best: dict[str | None, float] = defaultdict(float)  # the best answer about each entity
-        if link:
+        if seeds:
             homes.update(homes_of(self.backend, sorted(seeds - homes.keys())))
             for mid, value in judged.items():
                 best[subject(mid)] = max(best[subject(mid)], value)
@@ -2089,62 +2175,50 @@ class MemoryStore:
                        if x != thing and thing in homes.get(x, ())}
             return max([own] + [best[x] for x in between])
 
-        order = []
         for mid, value in judged.items():
             result = found[mid]
-            if link and subject(mid) in above:
+            if seeds and subject(mid) in above:
                 discount = overridden(subject(mid))
                 value *= 1.0 - discount
                 result.signals = {**result.signals, "overridden": round(discount, 4)}
             about = 1.0
-            if link:
+            if seeds:
                 about = result.signals.get("about") or aboutness([act.get(e.id) for e in ents(mid)])
                 result.signals = {**result.signals, "about": round(about, 3)}
             result.signals = {**result.signals, "judged": round(value ** specific, 4),
                               "specific": round(specific, 4), "several": round(several, 4),
                               "calls": calls, "pool": pooled,
                               **({"member": True} if mid in members else {})}
-            order.append((mid not in members, -(value ** specific) * about, result))
-        if not link and not several_asked:
-            return self._blended(ranked, [
-                judged[r.memory.id] ** specific if r.memory.id in judged else None
-                for r in ranked[:size]])
-        order.sort(key=lambda item: (item[0], item[1]))
-        return [result for *_, result in order] + [
-            r for r in ranked + extra if r.memory.id not in judged]
+            plan.judged[mid] = (mid in members, value ** specific * about)
+        return ranked + extra
 
-    def _blended(
-        self, ranked: list[SearchResult], judged: list[float | None]
-    ) -> list[SearchResult]:
-        """The first of the ranking, one per judged score (None where the
-        provider did not answer), in the re-rank blend (``_rerank``):
-        ``decision.rerank_weight`` of the judged score and the rest of the
-        position in the ranking (1 first, 0 last), a judged score under
-        ``decision.rerank_floor`` pushed back past the others and a memory
-        not answered for kept at its position. The rest of the ranking
-        follows as it was."""
-        cfg = self.config.decision
-        pool = ranked[:len(judged)]
-        span = max(len(pool) - 1, 1)
-        ordered = []
-        for i, result in enumerate(pool):
-            position = 1.0 - i / span
-            relevance = judged[i]
-            demoted = relevance is not None and relevance < cfg.rerank_floor
-            if relevance is None:
-                relevance = position
-            blended = cfg.rerank_weight * relevance + (1 - cfg.rerank_weight) * position
-            ordered.append((demoted, -blended, i, result))
-        ordered.sort(key=lambda item: item[:3])
-        return [result for *_, result in ordered] + ranked[len(pool):]
+    def _final_order(self, ranked: list[SearchResult], plan: _SearchPlan) -> list[SearchResult]:
+        """Stage 7 of a search, the final order, before the limit. A judged
+        search puts the members of a set first, then every memory judged by
+        its judged score (times aboutness with seeds), a tie in the order
+        judged (the order's, whose ties went by memory id), and the rest
+        after, as they were; a search not judged keeps its order. A memory
+        kept as history then comes right after the memory in use that
+        replaced it (``_current_first``)."""
+        judged = plan.judged
+        if judged:
+            turn = {mid: i for i, mid in enumerate(judged)}
+            first = sorted((r for r in ranked if r.memory.id in judged),
+                           key=lambda r: (not judged[r.memory.id][0],
+                                          -judged[r.memory.id][1], turn[r.memory.id]))
+            ranked = first + [r for r in ranked if r.memory.id not in judged]
+        return self._current_first(ranked)
 
     def _set_pool(
         self, ranked: list[SearchResult], size: int, judged: dict[str, float], scope: Scope,
         include_invalid: bool, *, asked: np.ndarray | None, act: dict[str, float],
         entities: dict[str, list[Entity]], members: set[str], names_kept: bool = False,
+        reads: _Reads | None = None,
     ) -> list[SearchResult]:
         """What the second call of a question needing several memories judges:
-        at most ``retrieval.set_pool`` memories not judged yet.
+        at most ``retrieval.set_pool`` memories not judged yet, of those the
+        search reads (``reads``: its scope and run, history, tags, entity and
+        date windows, as the first call's).
 
         The members of a set are the same kind of fact and filed under the same
         topics (tags). So the topics that at least ``SET_SHARED`` of the first
@@ -2172,6 +2246,7 @@ class MemoryStore:
         budget = max(self.config.retrieval.set_pool, 0)
         if not budget:
             return []
+        reads = reads or _Reads(scope, include_invalid)
         sharpness = self.config.retrieval.relational_sharpness
 
         def linked_order(memory_ids: list[str]) -> dict[str, float]:
@@ -2188,13 +2263,14 @@ class MemoryStore:
         carried = Counter(topic.id for mid in first for topic in topics.get(mid, []))
         shared = [topic_id for topic_id, count in carried.items() if count >= SET_SHARED]
         # how many memories each has where the search looks, as ``filed`` is read
-        sizes = self.backend.entity_memory_counts(shared, scope=scope) if shared else {}
+        sizes = self.backend.entity_memory_counts(
+            shared, scope=reads.scope, history=True, categories=reads.categories,
+            mentioning=reads.entity_id) if shared else {}
         walk: dict[str, float] = defaultdict(float)
         memories: dict[str, Memory] = {}
         for topic_id in shared:
-            # the scope searched is kept to in SQL, before the newest SET_SCAN
-            filed = self.backend.entity_memories(topic_id, limit=SET_SCAN,
-                                                 include_invalid=include_invalid, scope=scope)
+            # what the search reads is kept to in SQL, before the newest SET_SCAN
+            filed = reads.entity_memories(self.backend, topic_id, SET_SCAN)
             share = carried[topic_id] / max(sizes.get(topic_id, 0), len(filed), 1)
             for memory in filed:
                 if memory.id in done:
@@ -2227,7 +2303,7 @@ class MemoryStore:
             taken = done | {r.memory.id for r in batch}
             rest = [known.get(m.id) or SearchResult(memory=m, score=0.0)
                     for m in self._nearest_unjudged(members, taken, scope, include_invalid,
-                                                    budget - len(batch))]
+                                                    budget - len(batch), reads=reads)]
             if not batch and not rest:  # no member to start from
                 rest = [r for r in ranked[size:] if r.memory.id not in done][:budget]
             order.update(linked_order([r.memory.id for r in rest]))
@@ -2236,13 +2312,14 @@ class MemoryStore:
 
     def _nearest_unjudged(
         self, members: set[str], taken: set[str], scope: Scope, include_invalid: bool,
-        count: int,
+        count: int, reads: _Reads | None = None,
     ) -> list[Memory]:
-        """The ``count`` memories of the scope searched nearest the members of
-        a set found so far, none of ``taken``: half by memory vector (the
-        store's vector search from the centroid of the members' vectors), half
-        by property vector (the rest of the ``SET_NEAREST`` nearest, ordered by
-        their property similarity to the centroid of the members'). Members of
+        """The ``count`` memories the search reads (``reads``, by default the
+        scope searched) nearest the members of a set found so far, none of
+        ``taken``: half by memory vector (the store's vector search from the
+        centroid of the members' vectors), half by property vector (the rest
+        of the ``SET_NEAREST`` nearest, ordered by their property similarity
+        to the centroid of the members'). Members of
         a set are the same kind of fact ("It costs 21,000 euros"), so they sit
         closer to each other than to the question. A memory vector also
         follows the names in the text, and where the names weigh most the
@@ -2255,10 +2332,14 @@ class MemoryStore:
         centre = _centre(list(self.backend.vectors_of(sorted(members), model).values()))
         if centre is None:
             return []
-        hits = self.backend.vector_search(centre.tolist(), model, scope,
+        reads = reads or _Reads(scope, include_invalid)
+        hits = self.backend.vector_search(centre.tolist(), model, reads.scope,
                                           limit=max(count, SET_NEAREST) + len(taken),
-                                          include_invalid=include_invalid)
-        near = [memory for memory, _ in hits if memory.id not in taken]
+                                          include_invalid=reads.include_invalid,
+                                          categories=reads.categories,
+                                          entity_id=reads.entity_id, history=True)
+        near = [memory for memory, _ in hits
+                if memory.id not in taken and reads.admits(memory)]
         picked, rest = near[: count // 2], near[count // 2:]
         keep = self.config.retrieval.property_dimensions
         alike = _centre([v[: keep or len(v)]
@@ -2764,13 +2845,19 @@ class MemoryStore:
     def delete(
         self, memory_id: str, *, hard: bool = False, owner_prefix: str | None = None
     ) -> bool:
+        """Forget a memory (with ``hard``, delete it for good). A memory kept
+        as history (``models.HISTORY_KINDS``), which search still reads, is
+        forgotten as one in use is: search reads it no more, and it is listed
+        as forgotten, where it can be brought back or purged."""
         memory = self.backend.get_memory(memory_id)
         if not _owned(memory, owner_prefix):
             return False
         if hard:
             ok = self._delete_for_good(memory_id)
-        else:
+        elif memory.invalid_at is None:
             ok = self.backend.invalidate_memory(memory_id) is not None
+        else:
+            ok = self.backend.forget_history(memory_id) is not None
         if ok:
             self.backend.add_event(
                 MemoryEvent(

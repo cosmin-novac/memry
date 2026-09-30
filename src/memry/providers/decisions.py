@@ -136,12 +136,12 @@ MEASURED_MERGE_GATES: dict[str, float] = {
     "gpt-5-mini": 0.95,
 }
 
-#: Text models measured to make search re-ranking better than no re-ranking.
-#: gpt-5-mini scored below the baseline, so it is not here and cannot be turned
-#: on; gpt-5.6-luna scored above it (recall@3 0.933 -> 0.956, MRR 0.828 ->
-#: 0.933 over 90 questions) at 1.7 s a search, so it may be turned on but is
-#: not on by default.
-MEASURED_RERANKERS: frozenset[str] = frozenset({"gpt-5.6-luna"})
+#: Text models measured to make search better by judging it than without a
+#: judge, in the wording every search asks in (registry R-118, measured again
+#: after the pipeline was unified): both may be turned on (``decision.rerank``)
+#: and neither is on by default, since each waits seconds a call where Jev
+#: waits a fraction of one. A model not measured cannot be turned on.
+MEASURED_RERANKERS: frozenset[str] = frozenset({"gpt-5.6-luna", "gpt-5-mini"})
 
 
 def merge_gate_for(model: str | None) -> float:
@@ -220,9 +220,8 @@ class Decider(ABC):
         return self.pair_merge_by_step[max(reached)] if reached else self.pair_merge_probability
 
     #: Whether re-ranking may be turned on at all. A provider that was not
-    #: measured to beat no re-ranking cannot be talked into it: through
-    #: gpt-5-mini the same work scored below the baseline at ten seconds a
-    #: search.
+    #: measured to beat no re-ranking cannot be talked into it
+    #: (``MEASURED_RERANKERS``).
     may_rerank: bool = False
 
     @abstractmethod
@@ -361,8 +360,9 @@ class JevDecider(Decider):
     # of headroom over the worst observed mistake and still merges 20 of 22
     # correct pairs without asking.
     auto_confirm_confidence = 0.7
-    # recall@3 0.933 -> 0.967 and MRR 0.828 -> 0.917 over a 228-memory store,
-    # at 190 ms against the 9.7 s gpt-5-mini takes to score below the baseline.
+    # Judging every search, it put an answer first on every question of
+    # distractors_v1, better than either text model measured, at a fraction
+    # of their wait (registry R-117, R-118).
     reranks_by_default = True
     may_rerank = True
     # An identity question took a median 211 ms, against 2.5 s through a text

@@ -109,6 +109,32 @@ def test_a_changed_value_supersedes_the_old_one_which_stays_as_history(layout):
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
+def test_a_memory_kept_as_history_is_forgotten_by_a_normal_delete(layout):
+    """Kept as history, the old value is still searchable, so a person who
+    deletes it expects it gone as any memory goes: search, the answer context
+    and the archive of replacements no longer show it, it is listed as
+    forgotten, and from there it can be purged."""
+    store = _store(Judge("CHANGED", 0.9))
+    old = _save(store, "Tom's gym membership costs $40 a month", layout, 0, FIRST)
+    new = _save(store, "Tom's gym membership costs $55 a month", layout, 1, LATER)
+    question = "How much does Tom's gym membership cost?"
+    assert [r.memory.id for r in store.search(question, user_id=USER, limit=5)] == \
+        [new.memory_id, old.memory_id]
+
+    assert store.delete(old.memory_id)
+    assert [r.memory.id for r in store.search(question, user_id=USER, limit=5)] == \
+        [new.memory_id]
+    assert "$40" not in store.reconstruct_context("gym membership price", user_id=USER).text
+    assert old.memory_id not in {row["memory"].id for row in store.replaced(user_id=USER)}
+    [gone] = store.forgotten(user_id=USER)
+    assert (gone["memory"].id, gone["trigger"]) == (old.memory_id, "You deleted it.")
+    assert [e.event for e in store.history(old.memory_id)][-1] == "DELETE"
+    assert _live(store) == [new.memory_id]
+    assert store.purge(old.memory_id) and store.get(old.memory_id) is None
+    store.close()
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
 def test_a_doubtful_change_keeps_both_and_asks(layout):
     store = _store(Judge("CHANGED", 0.4))
     old = _save(store, "Tom's gym membership costs $40 a month", layout, 0, FIRST)

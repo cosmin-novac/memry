@@ -1318,8 +1318,8 @@ MODES = [
     ("linked k1", True, 1, 1.0),
     ("linked k2", True, 1, 2.0),
     ("linked k3", True, 1, 3.0),
-    # the same, with the decision provider judging relevance (--rerank off,
-    # --jev on): its answer is a probability, so no sharpening
+    # the same, with the decision provider judging relevance (--jev): its
+    # answer is a probability, so no sharpening
     ("linked jev", True, 1, 1.0, "jev"),
 ]
 #: Modes this benchmark measured before Memry removed them: the linked search
@@ -1349,24 +1349,11 @@ def select_modes(labels: list[str] | None) -> list[tuple]:
     return [m for m in MODES if m[0] in labels]
 
 
-def _asks_decider(store: MemoryStore, relational: bool, results: list | None = None) -> bool:
-    """Whether a search asked the decision provider (Jev), as ``MemoryStore``
-    decides it. With links and ``relevance_mode()`` "jev" it judges every
-    search (in the linked search's order, or the text ranking's for a question
-    naming no hub). Otherwise only the re-rank asks (``_reranks``), and it
-    runs only after no linked route (``_rerank``): always without links, and
-    with them only where the search's ``results`` carry no "about" (the
-    question named no hub). Without ``results`` a linked search counts as not
-    asking."""
-    if not getattr(store.decider, "available", False):
-        return False
-    if relational and store.relevance_mode() == "jev":
-        return True
-    if not store._reranks():
-        return False
-    if not relational:
-        return True
-    return results is not None and not any("about" in r.signals for r in results)
+def _asks_decider(store: MemoryStore) -> bool:
+    """Whether a search asks the decision provider (Jev), as ``MemoryStore``
+    decides it (``_plan``): every search where ``relevance_mode()`` is "jev",
+    none elsewhere."""
+    return bool(getattr(store.decider, "available", False)) and store.relevance_mode() == "jev"
 
 
 def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dict:
@@ -1383,11 +1370,11 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
       results marked "member" that are gold (None where no result is marked;
       only a judged set question marks them), with ``set_n`` such questions.
 
-    The full ranking is what ``MemoryStore._search_linked`` returned on a
-    second search at limit 100 (its text ranking 500 deep), or where the
-    linked search did not run that search's own results. A search that asks
-    the decision provider is not run a second time (it would be judged again):
-    its ranking is the limit-10 search's own."""
+    The full ranking is the search's final order before its limit
+    (``MemoryStore._final_order``) on a second search at limit 100 (its text
+    ranking 500 deep). A search that asks the decision provider is not run a
+    second time (it would be judged again): its ranking is the limit-10
+    search's own."""
     _, relational, depth = mode[:3]
     cfg = store.config.retrieval
     cfg.relational_depth = depth
@@ -1396,13 +1383,13 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
     cfg.relational_relevance = mode[4] if len(mode) > 4 else "vector"
     index = {mid: k for k, mid in enumerate(memory_ids)}
     seen: dict[str, list] = {}
-    inner = store._search_linked
+    inner = store._final_order
 
     def capture(*args, **kwargs):
         seen["ranked"] = inner(*args, **kwargs)
         return seen["ranked"]
 
-    store._search_linked = capture
+    store._final_order = capture
     out: dict[str, dict[str, float]] = {}
     try:
         for family, items in queries.items():
@@ -1424,7 +1411,7 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
                     wrong_first.append(first_wrong is not None and (
                         first_gold is None or first_wrong < first_gold))
                 # the full ranking, unless this search asked the provider
-                if not _asks_decider(store, relational, results):
+                if not _asks_decider(store):
                     seen.clear()
                     results = store.search(query, user_id=USER, limit=100, relational=relational)
                 ranked = seen.get("ranked") or results
@@ -1449,7 +1436,7 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
                        for i, k in enumerate((20, 40, 100))},
                     "precision": statistics.mean(precision) if precision else None})
     finally:
-        del store._search_linked  # the method again
+        del store._final_order  # the method again
     return out
 
 
@@ -1491,15 +1478,12 @@ def main() -> None:
                         help="give the store Jev as its decision provider without re-ranking "
                              "(TYPESAFE_API_KEY), for the linked jev mode")
     parser.add_argument("--per-family", type=int, default=25,
-                        help="questions a family with --jev or --rerank (a Jev call each)")
+                        help="questions a family with --jev (a Jev call each)")
     parser.add_argument("--links", nargs="*", default=["none", "oracle", "measured"],
                         help="which compared pairs to build stores with")
     parser.add_argument("--says", default=None,
                         help="JSON object memory index -> says (the statement with its "
                              "subject taken out): property vectors from it, not the masked text")
-    parser.add_argument("--rerank", action="store_true",
-                        help="Jev re-ranks each search the linked search did not order "
-                             "(TYPESAFE_API_KEY), hybrid and linked k1 only")
     parser.add_argument("--tags", action="store_true",
                         help="tag every memory as an agent does when it saves (tag_world); "
                              "the store keeps the tags as the memories' categories")
@@ -1545,13 +1529,6 @@ def main() -> None:
 
         judge.decide = counted
         return judge
-    if args.rerank:
-        from memry.config import DecisionConfig
-        from memry.providers.decisions import JevDecider
-
-        decider = JevDecider(DecisionConfig(provider="jev", rerank=True,
-                                            api_key=os.environ["TYPESAFE_API_KEY"]))
-        modes = select_modes(["hybrid", "linked k1"])
     key = os.environ.get("OPENAI_API_KEY", "").strip()
     if key:
         base: Embedder = OpenAIEmbedder(EmbeddingConfig(provider="openai", api_key=key))
@@ -1578,7 +1555,7 @@ def main() -> None:
             texts += [text for k, text in says.items() if text != texts[int(k)]]
         texts += [q for items in world["queries"].values() for q, _, _ in items]
         embedder.warm(texts)
-        if args.rerank or args.jev:  # a Jev call a question
+        if args.jev:  # a Jev call a question
             world["queries"] = {f: q[:args.per_family] for f, q in world["queries"].items()}
         if args.families:
             unknown = sorted(set(args.families) - set(world["queries"]))

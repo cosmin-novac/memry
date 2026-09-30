@@ -39,8 +39,8 @@ DecisionProvider = Literal["none", "llm", "jev"]
 #: The OpenAI default is gpt-6-luna, at half the price of gpt-5.6-luna. As the
 #: extraction model it matched gpt-5.6-luna on every measure (details kept,
 #: entities listed, same-name naming, coverage audit; two runs each on 118
-#: saves) and listed fewer ordinary nouns as entities. gpt-5.6-luna stays the
-#: only text model measured for re-ranking. Nobody has calibrated a text
+#: saves) and listed fewer ordinary nouns as entities. gpt-6-luna has not been
+#: measured for re-ranking (``MEASURED_RERANKERS``). Nobody has calibrated a text
 #: model's confidence, so Memry never merges entities on it alone (see
 #: providers/decisions.py); it sends those questions to the decision model.
 DEFAULT_LLM_MODELS: dict[str, str] = {
@@ -100,20 +100,14 @@ class DecisionConfig(BaseModel):
     pair_merge_probability: float | None = None
     #: Turn re-ranking on or off. Unset leaves it as the provider has it: on
     #: with Jev, off otherwise. Turning it on only works for a provider that
-    #: was measured to beat no re-ranking (Jev, and gpt-5.6-luna as the text
-    #: model); gpt-5-mini scored below the baseline, so for it and for any
-    #: unmeasured model the setting is refused.
+    #: was measured to beat no re-ranking (Jev, and gpt-5.6-luna or
+    #: gpt-5-mini as the text model); for any unmeasured model the setting is
+    #: refused. It decides only what "auto" relevance resolves to
+    #: (``MemoryStore.relevance_mode``).
     rerank: bool | None = None
-    #: How many of the first candidates to judge: the linked search's order,
-    #: or the text ranking's where it did not run.
+    #: How many of the first candidates to judge: the first of the linked
+    #: order with seeds, of the text ranking without (``MemoryStore.search``).
     rerank_pool: int = 20
-    #: How much the relevance judgement counts against the hybrid rank. The
-    #: hybrid rank carries recency and decay, so replacing it outright loses
-    #: more than the judgement adds.
-    rerank_weight: float = 0.35
-    #: Below this, a candidate is treated as a clear non-answer and pushed to
-    #: the back whatever its hybrid rank.
-    rerank_floor: float = 0.15
 
 
 class EmbeddingConfig(BaseModel):
@@ -166,12 +160,13 @@ class RetrievalConfig(BaseModel):
     #: it is multiplied by how strongly the memory is about the query's entity.
     #: 1 measured best: 2 and 3 lost the versions whose change is worded as one.
     relational_sharpness: float = 1.0
-    #: "linked" fusion: what judges whether a memory states the property asked.
-    #: "vector": the property vectors, compared in memory. "jev": the decision
-    #: provider judges the first ``decision.rerank_pool`` in one call. "auto"
-    #: (the default): "jev" where the decision provider re-ranks (Jev, unless
-    #: ``decision.rerank`` is false, or a text model measured to help with
-    #: ``decision.rerank`` true), else "vector" (``MemoryStore.relevance_mode``).
+    #: What judges whether a memory answers. "jev": the decision provider
+    #: judges the first ``decision.rerank_pool`` of every search in one call.
+    #: "vector": no search is judged; the property vectors order a search
+    #: whose question names a hub. "auto" (the default): "jev" where the
+    #: decision provider re-ranks (Jev, unless ``decision.rerank`` is false,
+    #: or a text model measured to help with ``decision.rerank`` true), else
+    #: "vector" (``MemoryStore.relevance_mode``).
     relational_relevance: Literal["auto", "vector", "jev"] = "auto"
     #: "linked" fusion: how many leading numbers of each vector the property
     #: comparison keeps (None: all). The v3 OpenAI models are trained so a

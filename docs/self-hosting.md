@@ -233,7 +233,7 @@ merge-proposal review under **Upkeep** matters as much as it did before.
 | How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. Off unless `MEMRY_DURABILITY=1` (`decay.durability`), for the scheduler and "run now" alike; the score does not move a memory's `updated_at`. |
 | Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. Word-for-word duplicates merge on their own; a merge the model proposed waits under Upkeep, because that judgement has not been measured. |
 | Tag drift | Two tags merge on their own when the provider, shown each with its 10 most recent memories and asked in both orders, puts P(same subject) at 0.55 or more (measured for Jev on 379 tag pairs of a real store; a text model is not asked). **Suggest merges** on the **Tags** tab asks the same question at the same bar about the tags nothing else flagged, when at most 20 are left, and only suggests: a tag changes when you apply the suggestion. |
-| Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna), and is refused for one that was not. Where it is on, `retrieval.relational_relevance` "auto" (the default) has the provider judge the first 20 of a search without a tag or entity filter, in the linked search's order when the question names a hub and in the text ranking's otherwise. A question naming no hub with one answer, or about everything, is then ordered by the 0.35 blend of that judgement and the text ranking, not by the judgement alone (measured worse: recall@3 0.844 against 0.933); a filtered search is re-ranked by the same blend. `"vector"` leaves the linked search to the property vectors and the blend to every search it did not order. |
+| Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna, gpt-5-mini), and is refused for one that was not. Where it is on, `retrieval.relational_relevance` "auto" (the default) has the provider judge the first 20 of every search, filtered or not, in the linked search's order when the question names a hub and in the text ranking's otherwise, and the results are ordered by that judgement. `"vector"` judges no search: a question naming a hub is ordered by the property vectors, and one naming none by the text ranking. |
 
 ### The settings, and where they came from
 
@@ -270,22 +270,27 @@ go ahead is listed under **Upkeep > Archive > Replaced by a newer memory** and c
 undone there. The three thresholds are `MEMRY_SUPERSEDE_PROTECT_IMPORTANCE`,
 `MEMRY_SUPERSEDE_PROTECT_SOURCES` and `MEMRY_SUPERSEDE_CONFIDENCE`.
 
-**Re-ranking** blends the relevance judgement with the hybrid rank at 0.35 rather than
-replacing it, and pushes anything under 0.15 to the back. Replacing the hybrid rank
-outright measured worse than not re-ranking at all, because that rank already carries
-recency and decayed importance. A question naming something Memry knows is ordered by
-the linked search instead (see `docs/architecture.md`, read path), which
-follows the links from it directed and weighted, one link deep; that is the only link
-mode (`retrieval.relational_mode` "directed", `relational_fusion` "linked"), and a config
-naming a removed one ("typed", "undirected", "rescue", "weighted", "inherit", "gated") is
-refused at startup. Its order is not re-ranked; where re-ranking is on, the provider
-judges its first 20 instead (`retrieval.relational_relevance` "auto", see the table).
+**Re-ranking** has the decision provider judge the first 20 of a search in one call and
+orders the results by that judgement. When it first asked whether a memory "helps answer
+the question", the judgement alone measured worse than not re-ranking at all, and it was
+blended with the hybrid rank instead. Every search now asks one question, whether someone
+who reads only the memory can answer it, and measured again on the same 228 memories and
+90 questions (`evals/datasets/distractors_v1.jsonl`, the `memry eval` protocol) the
+judgement alone did as well as any blend, so the blend is gone. A question naming
+something Memry knows is ordered by the linked search first (see `docs/architecture.md`,
+read path), which follows the links from it directed and weighted, one link deep; that is
+the only link mode (`retrieval.relational_mode` "directed", `relational_fusion` "linked"),
+and a config naming a removed one ("typed", "undirected", "rescue", "weighted", "inherit",
+"gated") is refused at startup. Where re-ranking is on, the provider judges its first 20
+(`retrieval.relational_relevance` "auto", see the table).
 
 It is on by default with Jev. With a text model it depends on which one, measured over
-the same 228 memories and 90 questions: gpt-5.6-luna lifted recall@3 from 0.933 to 0.956
-and MRR from 0.828 to 0.933 at 1.7 seconds a search, so `MEMRY_DECISION_RERANK=1` turns
-it on; gpt-5-mini scored below not re-ranking at all at nearly ten seconds a search, so
-for it, and for any model not measured, the setting is refused.
+the same 228 memories and 90 questions in the wording every search now asks in: judging
+every search, gpt-5.6-luna and gpt-5-mini both put the answer higher than no judging at
+all, and both below Jev, gpt-5.6-luna at about 2.6 seconds a call and gpt-5-mini at about
+9. So `MEMRY_DECISION_RERANK=1` turns either on, neither is on by default, and for any
+model not measured the setting is refused. (In the wording re-ranking first asked in,
+gpt-5-mini had scored below no re-ranking and was refused.)
 
 ### A trap worth remembering
 
@@ -331,7 +336,7 @@ For local single-machine use, prefer stdio (`memry mcp`) - no port, no auth surf
 | Default Anthropic extraction | `ANTHROPIC_API_KEY` + `pip install "memry[anthropic]"` (defaults to the fast, lower-cost `claude-haiku-4-5`) |
 | Larger Anthropic model | `MEMRY_LLM_MODEL=claude-opus-4-8` (explicitly trades more latency and cost for extraction quality) |
 | OpenAI end-to-end | `OPENAI_API_KEY` (LLM `gpt-6-luna`, embeddings `text-embedding-3-small`) |
-| Previous OpenAI default | `MEMRY_LLM_MODEL=gpt-5.6-luna` (the only text model measured for re-ranking) |
+| Previous OpenAI default | `MEMRY_LLM_MODEL=gpt-5.6-luna` (measured for re-ranking, with gpt-5-mini) |
 | Fully offline | `MEMRY_LLM_PROVIDER=ollama` + `MEMRY_EMBEDDING_PROVIDER=ollama` (e.g. `llama3.1`, `nomic-embed-text`) + `MEMRY_DECISION_PROVIDER=llm` |
 
 You also need a decision model for every server (see

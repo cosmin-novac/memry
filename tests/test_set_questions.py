@@ -465,8 +465,9 @@ class _BatchReranker(_Batches):
 
 def test_the_provider_reads_the_first_twenty_in_one_call(store):
     """``decision.rerank_pool`` is 20: one call judges the first 20 of the
-    linked search's order, or of the text ranking where it did not run, and
-    the re-rank reads 20 as well."""
+    linked search's order, or of the text ranking where it did not run,
+    whichever setting has the provider judge ("jev", or "auto" with a
+    provider that re-ranks)."""
     assert Config().decision.rerank_pool == 20
     _prices(store)
     harlow = _entity(store, "Harlow")
@@ -477,7 +478,7 @@ def test_the_provider_reads_the_first_twenty_in_one_call(store):
     text = store.search(QUESTION, user_id="ada", limit=5)
     assert "about" in linked[0].signals and "about" not in text[0].signals
     assert [len(batch) for batch in judge.batches] == [20, 20]
-    store.config.retrieval.relational_relevance = "vector"
+    store.config.retrieval.relational_relevance = "auto"
     store.decider = reranker = _BatchReranker(specific=0.9, several=0.1, scores={})
     store.search(QUESTION, user_id="ada", limit=5)
     assert [len(batch) for batch in reranker.batches] == [20]
@@ -527,15 +528,15 @@ def _parking(store, entities=()):
                  entities=entities) for i in range(30)]
 
 
-def test_a_question_naming_no_hub_blends_the_judgement_with_the_text_ranking(store):
-    """R-117. With the judging call on by default, a question naming no hub
-    was ordered by the judged score alone, which measured worse than the
-    0.35 blend of ``_rerank`` (recall@3 0.933 against 0.844 on
-    distractors_v1). A one-answer question naming no hub is now ordered by
-    that blend of the judged score and the text ranking's position: the
-    memory judged 0.6 at the bottom of the first 20, against 0.5 for the
-    rest, stays below the top hits and is not moved to first. One call is
-    made; its meta questions still decide the set path."""
+def test_a_question_naming_no_hub_is_ordered_by_the_judgement_as_one_naming_a_hub_is(store):
+    """R-117. A one-answer question naming no hub was ordered by a blend of
+    the judged score and the text ranking's position, because the judgement
+    alone measured worse in the re-rank's wording. Judged in the wording
+    every search now asks in, the judgement alone did as well as any blend,
+    so every judged search is ordered by it: the memory judged 0.6 at the
+    bottom of the first 20, against 0.5 for the rest, comes first, and the
+    rest keep the text ranking's order. One call is made; its meta
+    questions still decide the set path."""
     _parking(store)
     question = "Where did Ada park the car?"
     ranking = [r.memory.id for r in store.search(question, user_id="ada", limit=40,
@@ -546,11 +547,10 @@ def test_a_question_naming_no_hub_blends_the_judgement_with_the_text_ranking(sto
     store.decider = judge = _Batches(specific=0.9, several=0.1,
                                      scores={marker: 0.6, "marker": 0.5})
     results = store.search(question, user_id="ada", limit=20)
-    assert judge.calls == 1
+    assert judge.calls == 1 and "about" not in results[0].signals
     order = [r.memory.id for r in results]
-    assert order[0] == ranking[0] and order[:5] == ranking[:5]
-    assert order.index(bottom.id) > 5
-    assert results[order.index(bottom.id)].signals["judged"] > results[0].signals["judged"]
+    assert order[0] == bottom.id
+    assert order[1:] == [mid for mid in ranking[:20] if mid != bottom.id]
 
     # a set question naming no hub still gets its second call
     store.decider = judge = _Batches(specific=0.9, several=0.9,
@@ -560,9 +560,8 @@ def test_a_question_naming_no_hub_blends_the_judgement_with_the_text_ranking(sto
 
 
 def test_a_question_naming_a_hub_is_ordered_by_the_judgement_as_before(store):
-    """The blend is for questions naming no hub: after the linked search the
-    judged score times aboutness orders, so the memory judged 0.6 comes
-    first wherever the ranking had it."""
+    """After the linked search the judged score times aboutness orders, so
+    the memory judged 0.6 comes first wherever the ranking had it."""
     harlow = _entity(store, "Harlow")
     memories = [_add(store, f"Harlow parked the car at garage marker{i:02d} today.",
                      entities=[harlow]) for i in range(30)]
@@ -594,11 +593,12 @@ class _Reranker(_CallJudge):
         return super().decide(state, questions)
 
 
-def test_rerank_does_not_run_after_the_linked_search(store):
+def test_vector_relevance_judges_no_search(store):
     """With the property vectors alone (``relational_relevance = "vector"``)
-    the linked order stands: the provider is not asked to re-rank it. A search
-    the linked search did not order (no hub named, or ``relational=False``)
-    is re-ranked as before."""
+    no search is judged, a provider that re-ranks or not: the linked order
+    stands, and a question naming no hub, or searched with
+    ``relational=False``, keeps the text ranking's order. "auto" with that
+    provider judges them all."""
     store.config.retrieval.relational_relevance = "vector"
     harlow = _entity(store, "Harlow")
     for text in ("Harlow runs on Linux", "Harlow stores its data in SQLite",
@@ -606,26 +606,28 @@ def test_rerank_does_not_run_after_the_linked_search(store):
         _add(store, text, entities=[harlow])
     for i in range(5):
         _add(store, f"Unrelated note {i} about Linux")
-    linked = [r.memory.id for r in store.search("What does Harlow run on?", user_id="ada",
-                                                limit=5)]
+    searches = [("What does Harlow run on?", {}), ("Which notes mention Linux?", {}),
+                ("What does Harlow run on?", {"relational": False})]
+    before = [[r.memory.id for r in store.search(q, user_id="ada", limit=5, **kw)]
+              for q, kw in searches]
     store.decider = reranker = _Reranker()
-    results = store.search("What does Harlow run on?", user_id="ada", limit=5)
-    assert all("about" in r.signals for r in results)
-    assert reranker.states == []
-    assert [r.memory.id for r in results] == linked  # the linked order stands
-    store.search("Which notes mention Linux?", user_id="ada", limit=5)
-    assert reranker.states == ["QUESTION: Which notes mention Linux?"]
-    store.search("What does Harlow run on?", user_id="ada", limit=5, relational=False)
-    assert len(reranker.states) == 2
+    after = [[r.memory.id for r in store.search(q, user_id="ada", limit=5, **kw)]
+             for q, kw in searches]
+    assert reranker.states == [] and after == before
+    store.config.retrieval.relational_relevance = "auto"
+    for q, kw in searches:
+        store.search(q, user_id="ada", limit=5, **kw)
+    assert reranker.states == ["QUESTION: What does it run on?",  # one seed: "it"
+                               "QUESTION: Which notes mention Linux?",
+                               "QUESTION: What does Harlow run on?"]  # no seeds
 
 
 def test_the_benchmark_searches_deep_where_the_first_search_asked_no_decider(monkeypatch):
     """``relative_retrieval_benchmark.score`` reads a question's full ranking
     from a second search at limit 100, except where the first search asked
-    the decision provider (it would be asked again). Under --rerank a linked
-    search that ran is not re-ranked, so it is searched again; a question
-    naming no hub is re-ranked, as is a search without links, and the linked
-    search judging relevance asks on every search."""
+    the decision provider (it would be asked again). A mode whose relevance
+    is "vector" asks nothing, a provider that re-ranks or not, so every
+    question is searched again; the "linked jev" mode asks on every search."""
     sys.path.insert(0, str(ROOT))
     from evals import relative_retrieval_benchmark as bench
     from memry.models import Entity
@@ -658,13 +660,13 @@ def test_the_benchmark_searches_deep_where_the_first_search_asked_no_decider(mon
     assert (reranker.states, limits) == ([], [10, 100])
     limits.clear()
     bench.score(store, ids, {"direct": [("Which notes mention Linux?", [3], [])]}, linked)
-    assert (len(reranker.states), limits) == (1, [10])
+    assert (reranker.states, limits) == ([], [10, 100])
     limits.clear()
     bench.score(store, ids, hub, next(mode for mode in bench.MODES if mode[0] == "hybrid"))
-    assert (len(reranker.states), limits) == (2, [10])
+    assert (reranker.states, limits) == ([], [10, 100])
     limits.clear()
     bench.score(store, ids, hub, next(mode for mode in bench.MODES if mode[0] == "linked jev"))
-    assert (len(reranker.states), limits) == (3, [10])
+    assert (len(reranker.states), limits) == (1, [10])
     store.close()
 
 

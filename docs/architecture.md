@@ -515,58 +515,86 @@ keeps ingestion latency and provider cost bounded.
 
 ## 5. Read path
 
-For a normal text query:
+Every search with a text query runs one pipeline (`MemoryStore.search`), its stages in a
+fixed order. Each rule lives in one stage and applies to every search, whether it has a tag,
+entity or date filter, whether its question names anything, and with `relational=False`
+(which has no seeds, so no linked pool).
 
-1. FTS5 produces BM25 keyword candidates.
-2. The configured embedder produces vector candidates. Small stores use exact NumPy cosine
-   scoring; the optional usearch HNSW sidecar supplies candidates above its threshold.
-3. Reciprocal Rank Fusion combines the candidate lists.
-4. Relevance is blended with recency and importance according to configuration.
-5. If canonical or alias candidate lookup resolves a query entity that is a hub (or the
-   question speaks in the first person and the owner is one), the linked search runs: it
-   follows the links from that entity, directed and weighted by kind, direction and
+1. **Seeds** (`MemoryStore._seeds`). The query's phrases are resolved through canonical
+   and alias candidates, and only hubs are kept: a stray phrase stored as an entity does
+   not decide what a search is about. The longest-name rule then runs among the hubs:
+   "bildy v4" and not also "bildy", since a search from bildy reaches every version below
+   it. Because the hubs are kept first, a stray entity whose name holds a hub's ("bildy
+   sync", one memory, no type) does not hide the hub. A question naming no hub that speaks
+   in the first person ("Where do I live?") is about the store's owner, when the owner is
+   a hub.
+2. **Candidates**, as deep for every search (eight per result asked for, at least 40 and at
+   most 500). The text ranking: FTS5 BM25 keyword candidates and the configured embedder's
+   vector candidates (exact NumPy cosine scoring in small stores, the optional usearch
+   HNSW sidecar above its threshold), combined with Reciprocal Rank Fusion and blended with
+   recency and importance according to configuration. With seeds, the linked pool: the
+   links from the seeds are followed, directed and weighted by kind, direction and
    probability (`relational_depth`, 1 by default; an open pair is a "same" link only on a
-   calibrated judge's answer), adds the best memories of each entity
-   linked strongly enough (read within the user, agent and run searched before the newest
-   500 are taken, as the set pool's topic scan is), and orders every candidate by how well
-   it states the property asked (its property vector, entity names read as "it") times how
-   strongly it is about the entity named. A question naming several hubs is compared as
-   written with each memory's ordinary vector, names kept, as the judge reads it: masked,
-   "Why do Ada and Kai find Mira inspiring?" reads "Why do it and it find it
-   inspiring?", which cannot tell the memories about Mira from anything one of them finds
-   inspiring. The keyword search's best match keeps a place
-   among the first 20 (`decision.rerank_pool`) whatever its score: an identifier the
-   question names ("invoice 2024-117") is seen by the words alone. This is the only link
-   mode; the earlier "typed"
-   and "undirected" walks and the "rescue", "weighted", "inherit" and "gated" fusions were
-   removed, and a config naming one is refused.
-6. With `relational_relevance = "jev"` (the default "auto" is "jev" where the decision
-   provider re-ranks: Jev unless `decision.rerank` is off, or a text model measured to help
-   with it on; "vector" elsewhere), the decision model judges the first 20 of that
-   order in one call and says whether the question asks for one property and whether it
-   needs several memories. A question with one answer, or about everything, is answered
-   from that call. A question needing several (a list, a total, a comparison) gets one more
-   call on up to `set_pool` (80) memories not judged yet: those filed under the topics
-   (tags) the first 20 share, a small topic most of them carry counting most (its size
-   counted in the scope searched; of a tie at the cut, the newest are scored, as many as
-   places are left and 20 more), and, where those are fewer (an untagged store, or
-   they share none), the memories nearest to the members the first call found, half by
-   memory vector and half by property vector (with the names read "it", one car's price
-   is nearest other prices, not that car's other facts). Only with no member to start
-   from is it the order past the first 20. The set's
-   members from both calls come first and are returned past the limit, up to 100. In
-   this mode a question naming no hub is judged the same way, the text ranking's first
-   20 in one call whose two meta questions decide the set path: a set question is
-   answered as above, and a question with one answer or about everything is ordered by
-   the 0.35 blend of the judged score with the text ranking's position (a judged score
-   under 0.15 pushed back), not by the judged score alone, which measured worse there
-   (R-117: recall@3 0.844 against 0.933 on distractors_v1). A question naming a hub is
-   ordered by the judged score times aboutness; an answer from a thing the named entity
-   belongs to counts as far as none of the entity's own memories answers, nor one of a
-   thing between them (the version it builds on). The same blend, with a call of its own,
-   re-ranks a search that was neither ordered by the linked search nor judged (a tag or
-   entity filter, or `relational=False`).
-7. The memories found are returned with their evidence (`MemoryStore.evidence`). This is
+   calibrated judge's answer), and each entity linked strongly enough adds the 10 of its
+   memories that best state the property asked, chosen among its newest 500. Every filter
+   is applied here, to both, before anything is ordered or judged: the user and agent,
+   the run (a run's memories are those said in it, section 4), history (the memories in
+   use and those kept as history, below; every memory with `include_invalid`), the tags,
+   the entity, and the date windows (`since`/`until` on when a memory was saved,
+   `when_since`/`when_until` on when what it tells happens). The tags, entity, run and
+   history are kept to in SQL before any limit counts.
+3. **Order**. With seeds, the linked order: every candidate by how well it states the
+   property asked (its property vector, the names of the entities the links reach read
+   "it") times how strongly it is about the entity named (aboutness), a tie by memory id.
+   A question naming several hubs is compared as written with each memory's ordinary
+   vector, names kept: masked, "Why do Ada and Kai find Mira inspiring?" reads "Why do it
+   and it find it inspiring?", which cannot tell the memories about Mira from anything one
+   of them finds inspiring. Without seeds, the text ranking's order.
+4. **Judged pool**: the first 20 of the order (`decision.rerank_pool`), which the decision
+   model reads where it judges. The keyword search's best match keeps a place among them
+   whatever its score, on every search, judged or not: an identifier the question names
+   ("invoice 2024-117") is seen by the words alone, while the vectors cannot tell it from
+   another number and newer memories matching more of the question's other words fill the
+   text ranking's first places.
+5. **Judge**. The decision model judges the pool in one call, in one wording
+   (`MemoryStore._judged_relevance`: whether someone who reads only the memory can answer
+   the question), and says whether the question asks for one property and whether it
+   needs several memories. With one seed, "it" stands for the seed in the question, and in
+   each memory for the entity the links reach most strongly (a tie by entity id, not by
+   which mention was written first) and the things that entity more likely than not
+   belongs to; with several seeds or none, the question and the memories are read as
+   written. A search is judged if and only if `relational_relevance` is "jev"; the
+   default "auto" is "jev" where the decision provider re-ranks (Jev unless
+   `decision.rerank` is off, or a text model measured to help with it on), and
+   `decision.rerank` does nothing else. With "vector" no search is judged.
+6. **Set call**. A question with one answer, or about everything, is answered from the
+   first call. A question needing several (a list, a total, a comparison) gets one more
+   call on up to `set_pool` (80) memories not judged yet, read as stage 2 reads (the same
+   scope, history, tags, entity and date windows): those filed under the topics (tags) the
+   first 20 share, a small topic most of them carry counting most (its size counted where
+   the search looks; of a tie at the cut, the newest are scored, as many as places are
+   left and 20 more), and, where those are fewer (an untagged store, or they share none),
+   the memories nearest to the members the first call found, half by memory vector and
+   half by property vector (with the names read "it", one car's price is nearest other
+   prices, not that car's other facts). Only with no member to start from is it the order
+   past the first 20. The set's members are found over both calls' scores.
+7. **Final order, limit, evidence**. A judged search is ordered by the judged score, times
+   aboutness with seeds, the set's members first; they are returned past the limit, up to
+   100. With seeds, an answer from a thing the named entity belongs to counts as far as
+   none of the entity's own memories answers, nor one of a thing between them (the
+   version it builds on). The judged score counts to the power of P(the question asks for
+   one property), so on "Show everything about it" aboutness alone orders the list. A tie
+   keeps the order judged, whose ties go by memory id; the
+   memories not judged follow in their order. A search not judged keeps its order. A
+   question naming no hub was once ordered by a blend of the judged score and the text
+   ranking's position, because the judgement alone measured worse in the wording the
+   re-rank then asked in; measured again on `distractors_v1` in the one wording every
+   search now asks in, the judgement alone put an answer first on every question, as well
+   as any blend did, and the blend was removed (R-117). A memory kept as history then
+   comes right after the memory in use that replaced it (below), and the results are cut
+   to the limit.
+
+   The memories found are returned with their evidence (`MemoryStore.evidence`). This is
    provenance, not a second search. The candidates are the source episodes of the results
    in use or kept as history (below), each once, credited to the best ranked memory
    resting on it. A memory kept as history shows its turns under the same rules as any
@@ -580,23 +608,23 @@ For a normal text query:
    is taken while it fits `retrieval.evidence_tokens` (600 by default; 0 shows none), and
    they are returned in the order they were said. A result carries the turns credited to
    it (`SearchResult.evidence`).
-8. Context reconstruction may prepend a bounded, lazily refreshed entity description. It
-   then packs exact memories into the remaining token budget, leaving a share for their
-   evidence (`retrieval.evidence_tokens`, at most half of what is left). The evidence of
-   the memories that fit fills that share. One function renders memories for a model
-   (`intelligence.context.memory_lines`), used by `reconstruct_context` and the
-   benchmark runner alike. A memory reads "[happened 2023-05-07] <text> (said 8 May
-   2023)": when the thing it tells happens (`metadata["when"]`, where known), and the day
-   it was recorded (its last change). Both are labelled so that a model does not take the
-   day a fact was written down for the day it happened. A memory kept as history reads
-   "<text> (said 8 May 2023) [until 15 July 2023]": said the day it began to hold
-   (`valid_from`, since taking it out of use moved its `updated_at`), and held until the
-   day the memory that replaced it was said, written as that memory's "said" date is. The
-   memories are followed by their evidence turns in the order they were said, each "<said
-   date>: <speaker>: <text>". The MCP `search_memories` rows carry the same as data:
-   `said`, `happened`, `invalid_at` for a memory out of use, and `evidence` (said,
-   speaker, text). The benchmark runner passes these lines as Mem0's memory list
-   (`evals/mem0_judge.py` renders nothing of its own).
+Context reconstruction (`reconstruct_context`) runs a search and may prepend a bounded,
+lazily refreshed entity description. It then packs exact memories into the remaining token
+budget, leaving a share for their evidence (`retrieval.evidence_tokens`, at most half of
+what is left). The evidence of the memories that fit fills that share. One function
+renders memories for a model (`intelligence.context.memory_lines`), used by
+`reconstruct_context` and the benchmark runner alike. A memory reads "[happened
+2023-05-07] <text> (said 8 May 2023)": when the thing it tells happens (`metadata["when"]`,
+where known), and the day it was recorded (its last change). Both are labelled so that a
+model does not take the day a fact was written down for the day it happened. A memory kept
+as history reads "<text> (said 8 May 2023) [until 15 July 2023]": said the day it began to
+hold (`valid_from`, since taking it out of use moved its `updated_at`), and held until the
+day the memory that replaced it was said, written as that memory's "said" date is. The
+memories are followed by their evidence turns in the order they were said, each "<said
+date>: <speaker>: <text>". The MCP `search_memories` rows carry the same as data: `said`,
+`happened`, `invalid_at` for a memory out of use, and `evidence` (said, speaker, text). The
+benchmark runner passes these lines as Mem0's memory list (`evals/mem0_judge.py` renders
+nothing of its own).
 
 Every ranked read breaks a tie by memory id (`ORDER BY updated_at DESC, id` and the like),
 so memories of one time (a bulk import, a restore) rank alike in every build of a store.
@@ -611,12 +639,14 @@ and few, so the vector search scans them exactly beside it. When the memory in u
 replaced one (followed through a chain of updates) is among the results, it is moved up to
 just before it, so for one question the current value comes first and a question about the
 past keeps its answer where it ranked. It is rendered with the date it was said and
-"[until <date>]" (step 8), its source turns are shown as its evidence under the same rules
-as any memory's (step 7), and MCP rows carry its `invalid_at`. Hiding them lost LoCoMo
-questions about the past. A memory superseded otherwise (a
-contradiction, a consolidation, a distillation) or deleted is excluded unless a caller
-explicitly requests every memory (`include_invalid`). Reconcile's candidates are memories
-in use only.
+"[until <date>]" (context reconstruction, above), its source turns are shown as its
+evidence under the same rules as any memory's (stage 7), and MCP rows carry its
+`invalid_at`. Hiding them lost LoCoMo questions about the past. Deleting one forgets it as
+deleting a memory in use does: it no longer records what replaced it, search reads it no
+more, and it is listed as forgotten, where it can be brought back or purged. A memory
+superseded otherwise (a contradiction, a consolidation, a distillation) or deleted is
+excluded unless a caller explicitly requests every memory (`include_invalid`). Reconcile's
+candidates are memories in use only.
 
 ## 6. Product surfaces and security
 
@@ -756,8 +786,8 @@ up as a red run within a week instead of in a user's terminal.
   unambiguous character spans. Reliable entity chips are the shipped navigation path.
 - The keyword search matches every word of the question, function words included, so in a
   store of third-person facts a rare "did" or "do" can outweigh the name a question asks
-  about, and the one keyword match the linked search keeps in its first 20 is then the wrong
-  one.
+  about, and the one keyword match a search keeps in its judged pool (stage 4) is then the
+  wrong one.
 - A question names an entity only by one of its names or aliases in full: "Arvel" does
   not find the place stored as "Mount Arvel", so a memory naming the place beside the
   person the question names is compared through that person's links, with the place's name

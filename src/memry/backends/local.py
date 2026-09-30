@@ -425,6 +425,25 @@ def _entity_clause(
     )
 
 
+def _entity_reads_clause(
+    *, include_invalid: bool, scope: Scope | None, history: bool,
+    categories: list[str] | None, mentioning: str | list[str] | None,
+) -> tuple[str, list[Any]]:
+    """Which of an entity's memories (``m``) a lookup reads, as a search reads
+    its text ranking (``keyword_search``): those in use, with ``history`` also
+    those kept as history, every one with ``include_invalid``; of ``scope``,
+    a run's being those said in it (``_search_scope_clause``); filed under
+    one of ``categories``; mentioning ``mentioning`` (or any of several)."""
+    clause, params = _search_scope_clause(scope or Scope(), "m")
+    if not include_invalid:
+        clause += (f" AND (m.invalid_at IS NULL OR ({_history_clause('m')}))" if history
+                   else " AND m.invalid_at IS NULL")
+    cat_clause, cat_params = _category_clause(categories, "m.id")
+    entity_clause, entity_params = _entity_clause(mentioning, "m.id")
+    return (f"{clause} AND {cat_clause} AND {entity_clause}",
+            [*params, *cat_params, *entity_params])
+
+
 def _kind_clause(kind: str, prefix: str = "") -> str:
     """Which entities a lookup reads: "named" (people, products, ... every
     type but ``TOPIC_TYPE``), "topic" (tags) or "any"."""
@@ -1309,6 +1328,25 @@ class LocalBackend(MemoryBackend):
         if cur.rowcount == 0:
             return None
         return self.get_memory(memory_id)
+
+    def forget_history(self, memory_id: str) -> Memory | None:
+        from ..models import utcnow
+
+        stamp = utcnow()
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE memories SET superseded_by = NULL, invalid_at = ?, updated_at = ? "
+                f"WHERE id = ? AND {_history_clause('memories')}",
+                (stamp, stamp, memory_id),
+            )
+            if cur.rowcount:
+                self._db.execute(
+                    "UPDATE entities SET updated_at = ?, description_updated_at = NULL "
+                    "WHERE id IN (SELECT entity_id FROM entity_mentions WHERE memory_id = ?)",
+                    (stamp, memory_id),
+                )
+            self._db.commit()
+        return self.get_memory(memory_id) if cur.rowcount else None
 
     def delete_memory(self, memory_id: str) -> bool:
         with self._lock:
@@ -3074,17 +3112,19 @@ class LocalBackend(MemoryBackend):
 
     def entity_memories(
         self, entity_id: str, limit: int = 10, *, include_invalid: bool = False,
-        scope: Scope | None = None,
+        scope: Scope | None = None, history: bool = False,
+        categories: list[str] | None = None, mentioning: str | list[str] | None = None,
     ) -> list[Memory]:
-        active_clause = "" if include_invalid else " AND m.invalid_at IS NULL"
-        scope_clause, scope_params = _scope_clause(scope or Scope(), prefix="m.")
+        clause, params = _entity_reads_clause(
+            include_invalid=include_invalid, scope=scope, history=history,
+            categories=categories, mentioning=mentioning)
         with self._lock:
             rows = self._db.execute(
                 f"SELECT DISTINCT {', '.join('m.' + c.strip() for c in _MEMORY_COLS.split(','))} "
                 "FROM entity_mentions em JOIN memories m ON m.id = em.memory_id "
-                f"WHERE em.entity_id = ?{active_clause} AND {scope_clause} "
+                f"WHERE em.entity_id = ? AND {clause} "
                 "ORDER BY m.updated_at DESC, m.id LIMIT ?",
-                (entity_id, *scope_params, limit),
+                (entity_id, *params, limit),
             ).fetchall()
         return [_row_to_memory(r) for r in rows]
 
@@ -3172,11 +3212,14 @@ class LocalBackend(MemoryBackend):
         return out
 
     def entity_memory_counts(
-        self, entity_ids: list[str], *, scope: Scope | None = None
+        self, entity_ids: list[str], *, scope: Scope | None = None, history: bool = False,
+        categories: list[str] | None = None, mentioning: str | list[str] | None = None,
     ) -> dict[str, int]:
         out = dict.fromkeys(entity_ids, 0)
         ids = list(out)
-        scope_clause, scope_params = _scope_clause(scope or Scope(), prefix="m.")
+        clause, params = _entity_reads_clause(
+            include_invalid=False, scope=scope, history=history, categories=categories,
+            mentioning=mentioning)
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
             with self._lock:
@@ -3184,8 +3227,8 @@ class LocalBackend(MemoryBackend):
                     "SELECT em.entity_id AS entity_id, COUNT(DISTINCT m.id) AS n "
                     "FROM entity_mentions em JOIN memories m ON m.id = em.memory_id "
                     f"WHERE em.entity_id IN ({','.join('?' * len(chunk))}) "
-                    f"AND m.invalid_at IS NULL AND {scope_clause} GROUP BY em.entity_id",
-                    (*chunk, *scope_params),
+                    f"AND {clause} GROUP BY em.entity_id",
+                    (*chunk, *params),
                 ).fetchall()
             out.update((r["entity_id"], int(r["n"])) for r in rows)
         return out

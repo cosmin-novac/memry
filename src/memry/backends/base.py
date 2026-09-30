@@ -134,6 +134,14 @@ class MemoryBackend(ABC):
         """Undo an invalidation: the memory is believed true again."""
         return None
 
+    def forget_history(self, memory_id: str) -> "Memory | None":
+        """Forget a memory kept as history (``history_ids``), as deleting a
+        memory in use forgets it: what replaced it is no longer recorded on it
+        and its ``invalid_at`` is now, so search reads it no more and it is
+        listed as forgotten (``MemoryStore.forgotten``). None when it is not
+        kept as history. A backend that keeps no history has none to forget."""
+        return None
+
     @abstractmethod
     def delete_memory(self, memory_id: str) -> bool:
         """Hard delete (rarely what you want; prefer invalidate). The
@@ -578,14 +586,19 @@ class MemoryBackend(ABC):
 
     def entity_memories(
         self, entity_id: str, limit: int = 10, *, include_invalid: bool = False,
-        scope: Scope | None = None,
+        scope: Scope | None = None, history: bool = False,
+        categories: list[str] | None = None, mentioning: str | list[str] | None = None,
     ) -> list[Memory]:
         """Memories that mention this entity, newest first (``updated_at``, a
         tie by memory id, so memories of one time read alike in every build of
-        a store). Active evidence is the default. ``scope`` keeps to the
-        memories of that user, agent and run (a field None matches any) before
-        ``limit`` counts, so a run's memories of an entity other runs mention
-        far more are still read."""
+        a store). Active evidence is the default; with ``history`` also the
+        memories kept as history, as ``vector_search`` reads them. What a
+        search reads is kept to before ``limit`` counts, as the text ranking
+        keeps to it: ``scope`` (its user and agent, a field None matching any,
+        and a run's memories as ``vector_search`` reads them, so a run's
+        memories of an entity other runs mention far more are still read),
+        ``categories`` (filed under one of them) and ``mentioning`` (a memory
+        that also mentions this entity, or any of several)."""
         return []
 
     def count_entity_memories(self, entity_id: str) -> int:
@@ -606,12 +619,16 @@ class MemoryBackend(ABC):
         return {mid: self.entities_of_memory(mid, kind=kind) for mid in memory_ids}
 
     def entity_memory_counts(
-        self, entity_ids: list[str], *, scope: Scope | None = None
+        self, entity_ids: list[str], *, scope: Scope | None = None, history: bool = False,
+        categories: list[str] | None = None, mentioning: str | list[str] | None = None,
     ) -> dict[str, int]:
-        """How many active memories mention each of these entities, counting
-        only those of ``scope`` (its user, agent and run; a field None matches
-        any) when given; read at once where the backend can."""
-        return {entity_id: len(self.entity_memories(entity_id, limit=100_000, scope=scope))
+        """How many active memories mention each of these entities (with
+        ``history`` also those kept as history), counting only those a search
+        reads as ``entity_memories`` keeps to them; read at once where the
+        backend can."""
+        return {entity_id: len(self.entity_memories(
+                    entity_id, limit=100_000, scope=scope, history=history,
+                    categories=categories, mentioning=mentioning))
                 for entity_id in entity_ids}
 
     def topic_ids(self, entity_ids: Iterable[str]) -> set[str]:

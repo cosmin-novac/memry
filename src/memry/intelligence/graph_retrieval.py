@@ -81,13 +81,21 @@ def detect_query_entities(
             break
     if not phrases:
         return []
-    found = backend.find_entities_by_aliases(phrases, scope, limit=50)
-    if longest:
-        names = {entity.id: (entity.normalized or entity.name.lower()) for entity in found}
-        found = [entity for entity in found if not any(
-            names[entity.id] != other and names[entity.id] in other
-            for other in names.values())]
-    return [entity.id for entity in found]
+    found = [entity.id for entity in backend.find_entities_by_aliases(phrases, scope, limit=50)]
+    return longest_names(backend, found) if longest else found
+
+
+def longest_names(backend: MemoryBackend, entity_ids: list[str]) -> list[str]:
+    """Of these entities, those whose name no other one's holds: "bildy v4"
+    and not also "bildy". Search chooses among the hubs a question names
+    (``MemoryStore._seeds``), so a stray name holding a hub's ("bildy sync")
+    does not hide the hub."""
+    names: dict[str, str] = {}
+    for entity_id in entity_ids:
+        entity = backend.get_entity(entity_id)
+        names[entity_id] = (entity.normalized or entity.name.lower()) if entity else ""
+    return [entity_id for entity_id in entity_ids if not any(
+        names[entity_id] != other and names[entity_id] in other for other in names.values())]
 
 
 # -- links of every kind, weighted --------------------------------------------

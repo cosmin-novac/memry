@@ -98,11 +98,14 @@ question:
    default), and every candidate, the text ranking's and the linked entities'
    best, is ordered by how well it states the property asked times how strongly
    it is about the entity named. With Jev, the decision model then judges the
-   first 20 in one call, and a question whose answer is a set gets one more call
-   (see architecture.md, read path).
+   first 20 of every search in one call, whether it names anything or not, and a
+   question whose answer is a set gets one more call (see architecture.md, read
+   path, for the stages every search runs in order).
 
-3. **Filters** — an optional `categories` (tag) filter and a `since`/`until` date
-   window. An empty query with just a tag or date *browses* instead of ranking.
+3. **Filters** — an optional `categories` (tag) or entity filter and a
+   `since`/`until` date window, applied to every candidate before anything is
+   ordered or judged. An empty query with just a tag or date *browses* instead
+   of ranking.
 
 ## Memory types: semantic / episodic / procedural / working
 
@@ -117,9 +120,11 @@ fades** (via `half_life_by_type` in `DecayConfig`):
 - **working** — short-lived scratch; fades fastest.
 
 So over time an old dated event decays out of retrieval sooner than a standing
-rule, even at equal starting importance. The type is also shown in the context
-block label (`[procedural · 2026-…]`). It does not (yet) change ranking within a
-single query, only how importance decays with age.
+rule, even at equal starting importance. The type is not shown in the context
+block: a memory reads `[happened 2023-05-07] <text> (said 8 May 2023)`, with the
+day its event happens where known and the day it was said
+(`context.memory_lines`). It does not (yet) change ranking within a single
+query, only how importance decays with age.
 
 ## Entities and their types
 

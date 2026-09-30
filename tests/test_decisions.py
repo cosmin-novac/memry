@@ -9,6 +9,7 @@ back as "no answer" so a save still completes.
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 import pytest
@@ -29,6 +30,7 @@ from memry.providers.decisions import (
     build_decider,
     merge_gate_for,
 )
+from memry.models import Memory
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
 from memry.store import MemoryStore
@@ -660,45 +662,95 @@ def _store_with(decider, **decision):
     return MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64), decider=decider)
 
 
-def test_rerank_blends_with_the_hybrid_order_rather_than_replacing_it():
-    """Ordering purely by relevance measured worse than doing nothing: the
-    hybrid rank carries recency and decayed importance with it."""
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
-               for i in range(4)]
-    # the model mildly prefers the last candidate; a 35% blend should not be
-    # enough to drag it past the top of the hybrid order
+SHED = "Where does the garden shed key hang?"
+
+
+def _shed(i):
+    return f"memory {i}: the garden shed key hangs by door {i}"
+
+
+def _with_memories(store, n):
+    """``n`` memories the question's words find, naming nothing the store
+    knows, and their order as a search that is not judged returns them."""
+    for i in range(n):
+        store.backend.insert_memory(
+            Memory(content=_shed(i), user_id="u", embedding_model=store.embedder.model_id),
+            embedding=store.embedder.embed([_shed(i)])[0])
+    judge, store.decider = store.decider, NoneDecider()
+    ranking = _contents(store.search(SHED, user_id="u", limit=n))
+    store.decider = judge
+    return ranking
+
+
+def _judging(score):
+    """A stub that scores ``memory i`` ``score(i)``, reads the question as
+    asking for one property with one answer, and counts its calls."""
+    def answer(key, question):
+        if key == "property":
+            return Answer(1.0, {}, 0.9, True)
+        if key == "several":
+            return Answer(0.0, {}, 0.9, True)
+        i = int(re.search(r"Memory: memory (\d+):", question.instructions).group(1))
+        return Answer(score(i), {}, 0.9, True)
+    stub = _stub(answer)
+    stub.calls = 0
+    decide = stub.decide
+
+    def counted(state, questions):
+        stub.calls += 1
+        return decide(state, questions)
+    stub.decide = counted
+    return stub
+
+
+def _contents(results):
+    return [r.memory.content for r in results]
+
+
+def _searched(store):
+    return _contents(store.search(SHED, user_id="u", limit=10))
+
+
+def test_rerank_orders_by_the_judgement_a_tie_keeping_the_ranking():
+    """A search is ordered by the judgement, whether its question names
+    anything or not: measured again in the wording every search now asks in
+    (R-117), the judgement alone put an answer first on every question, and
+    the blend with the text ranking's position no longer earned a rule of
+    its own. A tie keeps the ranking's order."""
     rel = {0: 0.55, 1: 0.50, 2: 0.50, 3: 0.75}
-    stub = _stub(lambda k, q: Answer(rel[int(k[1:])], {}, 0.9, True))
+    stub = _judging(rel.get)
     store = _store_with(stub)
-    order = [r.memory.content for r in store._rerank("q", results)]
-    assert len(stub.last_questions) == 4          # the judgement did run
-    assert order == ["memory 0", "memory 1", "memory 2", "memory 3"]
+    ranking = _with_memories(store, 4)
+    assert _searched(store) == \
+        [_shed(3), _shed(0)] + [text for text in ranking if text in (_shed(1), _shed(2))]
+    assert stub.calls == 1 and sum(key.startswith("m") for key in stub.last_questions) == 4
     store.close()
 
 
 def test_rerank_pushes_a_clear_non_answer_to_the_back():
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
-               for i in range(3)]
-    stub = _stub(lambda k, q: Answer(0.02 if k == "m0" else 0.9, {}, 0.9, True))
+    stub = _judging(lambda i: 0.9)
     store = _store_with(stub)
-    order = [r.memory.content for r in store._rerank("q", results)]
-    assert order[-1] == "memory 0"      # top of the hybrid order, but not an answer
+    ranking = _with_memories(store, 3)
+    top = int(ranking[0].split(":")[0].split()[1])
+    stub = _judging(lambda i: 0.02 if i == top else 0.9)
+    store.decider = stub
+    stub.reranks_by_default = stub.may_rerank = True
+    assert _searched(store)[-1] == ranking[0]  # first in the text ranking, not an answer
     store.close()
 
 
 def test_rerank_leaves_the_order_alone_when_the_provider_cannot_answer():
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
-               for i in range(3)]
     for decider in (NoneDecider(), _stub(lambda k, q: Answer())):
         store = _store_with(decider)
-        assert [r.memory.content for r in store._rerank("q", results)] == \
-               ["memory 0", "memory 1", "memory 2"]
+        ranking = _with_memories(store, 3)
+        assert _searched(store) == ranking
         store.close()
 
 
 def test_rerank_follows_the_provider_unless_configured():
     """Re-ranking through a text model measured below not re-ranking at all, so
-    it is on for the provider that earned it and off for the rest."""
+    it is on for the provider that earned it and off for the rest: a search
+    asks the provider nothing and keeps its order."""
     from memry.config import Config
     from memry.providers.decisions import JevDecider
 
@@ -706,11 +758,12 @@ def test_rerank_follows_the_provider_unless_configured():
     assert NoneDecider().reranks_by_default is False
     assert LLMDecider(FakeLLM()).reranks_by_default is False
     assert JevDecider(DecisionConfig(provider="jev", api_key="k")).reranks_by_default is True
+    stub = _judging(lambda i: 0.01)
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64),
-                        decider=_stub(lambda k, q: Answer(0.01, {}, 0.9, True)))
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
-               for i in range(3)]
-    assert store._rerank("q", results) == results
+                        decider=stub)
+    ranking = _with_memories(store, 3)
+    assert store.relevance_mode() == "vector"
+    assert _searched(store) == ranking and stub.calls == 0
     store.close()
 
 
@@ -1004,14 +1057,11 @@ def test_the_suggest_button_keeps_apart_two_subjects_the_names_alone_would_join(
 
 
 def test_rerank_cannot_be_forced_onto_a_provider_that_did_not_earn_it():
-    """Through gpt-5-mini the same re-ranking scored below no re-ranking at all,
-    at ten seconds a query. For a provider that was not measured to beat the
-    baseline the setting is refused."""
+    """For a provider that was not measured to beat no re-ranking the
+    setting is refused (R-118): no search asks it."""
     from memry.config import Config
 
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
-               for i in range(3)]
-    reversing = _stub(lambda k, q: Answer(int(k[1:]) / 10.0, {}, 0.9, True))
+    reversing = _judging(lambda i: i / 10.0)
 
     for provider, explicit in (("llm", True), ("llm", None), ("none", True)):
         cfg = Config(db_path=":memory:")
@@ -1019,46 +1069,48 @@ def test_rerank_cannot_be_forced_onto_a_provider_that_did_not_earn_it():
         store = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64),
                             decider=reversing)
         reversing.reranks_by_default = False
-        assert store._rerank("q", results) == results, (provider, explicit)
+        ranking = _with_memories(store, 3)
+        assert _searched(store) == ranking, (provider, explicit)
+        assert reversing.calls == 0, (provider, explicit)
         store.close()
 
 
 def test_rerank_can_be_turned_off_where_it_is_on():
     from memry.config import Config
 
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
-               for i in range(3)]
-    stub = _stub(lambda k, q: Answer(int(k[1:]) / 10.0, {}, 0.9, True))
+    stub = _judging(lambda i: i / 10.0)
     stub.reranks_by_default = True
     stub.may_rerank = True
 
     cfg = Config(db_path=":memory:")
     cfg.decision = DecisionConfig(provider="jev", api_key="k", rerank=False)
     off = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64), decider=stub)
-    assert off._rerank("q", results) == results
+    ranking = _with_memories(off, 3)
+    assert _searched(off) == ranking and stub.calls == 0
     off.close()
 
     cfg2 = Config(db_path=":memory:")
     cfg2.decision = DecisionConfig(provider="jev", api_key="k")
     on = MemoryStore(cfg2, llm=NoneLLM(), embedder=HashEmbedder(64), decider=stub)
-    assert on._rerank("q", results) != results
+    _with_memories(on, 3)
+    assert _searched(on) == [_shed(2), _shed(1), _shed(0)] and stub.calls == 1
     on.close()
 
 
 def test_rerank_may_be_turned_on_for_a_text_model_measured_to_help():
-    """gpt-5.6-luna lifted recall@3 0.933 -> 0.956 and MRR 0.828 -> 0.933 at
-    1.7 s a search, so the setting may turn it on; it is not on by default at
-    that speed. gpt-5-mini scored below the baseline and stays refused."""
+    """A text model measured to help (R-118, measured again in the wording
+    every search asks in: gpt-5.6-luna and gpt-5-mini) may be turned on by
+    the setting; neither is on by default. A model not measured is refused."""
     from memry.config import Config
 
-    luna = FakeLLM(); luna.model = "gpt-5.6-luna"
-    mini = FakeLLM(); mini.model = "gpt-5-mini"
-    assert LLMDecider(luna).may_rerank and not LLMDecider(luna).reranks_by_default
-    assert not LLMDecider(mini).may_rerank
+    for model in ("gpt-5.6-luna", "gpt-5-mini"):
+        measured = FakeLLM(); measured.model = model
+        assert LLMDecider(measured).may_rerank and not LLMDecider(measured).reranks_by_default
+    unmeasured = FakeLLM(); unmeasured.model = "gpt-6-luna"
+    assert not LLMDecider(unmeasured).may_rerank
 
-    results = [type("R", (), {"memory": type("M", (), {"content": f"memory {i}"})(), "signals": {}})()
-               for i in range(3)]
-    reversing = _stub(lambda k, q: Answer(int(k[1:]) / 10.0, {}, 0.9, True))
+    scores: dict[int, float] = {}
+    reversing = _judging(scores.get)  # prefers the last of the text ranking
     reversing.may_rerank = True                     # measured to help...
     reversing.reranks_by_default = False            # ...but not on by itself
 
@@ -1066,7 +1118,12 @@ def test_rerank_may_be_turned_on_for_a_text_model_measured_to_help():
         cfg = Config(db_path=":memory:")
         cfg.decision = DecisionConfig(provider="llm", rerank=explicit)
         store = MemoryStore(cfg, llm=NoneLLM(), embedder=HashEmbedder(64), decider=reversing)
-        assert (store._rerank("q", results) != results) is expect_reranked, explicit
+        reversing.calls = 0
+        ranking = _with_memories(store, 3)
+        scores.update({int(text.split(":")[0].split()[1]): (k + 1) / 10
+                       for k, text in enumerate(ranking)})
+        assert (_searched(store) == ranking[::-1]) is expect_reranked, explicit
+        assert reversing.calls == int(expect_reranked), explicit
         store.close()
 
 
