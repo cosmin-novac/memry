@@ -67,9 +67,9 @@ from .intelligence.entities import (
     synthesize_entity_description,
 )
 from .intelligence.graph_retrieval import (
-    FAMILY_MIN,
     FAMILY_SCAN,
     FAMILY_TOP,
+    LOW,
     SET_BAR,
     SET_NEAREST,
     SET_RESULT_CAP,
@@ -2021,7 +2021,7 @@ class MemoryStore:
         judged pool.
 
         With seeds (``plan.seeds``), the candidates are the text ranking's
-        and, for every entity the links reach at ``FAMILY_MIN`` or more, the
+        and, for every entity the links reach, however weakly, the
         ``FAMILY_TOP`` of its memories that the search reads (``_Reads``:
         its scope and run, history, tags, entity and date windows, applied
         before they are chosen) that best state the property asked. The
@@ -2058,9 +2058,7 @@ class MemoryStore:
         several = len(seeds) > 1
         asked = self._asked_vector(plan.question)
         pool: dict[str, SearchResult] = {r.memory.id: r for r in results}
-        for entity_id, strength in act.items():
-            if strength < FAMILY_MIN:
-                continue
+        for entity_id in act:
             # what the search reads of an entity's memories is kept to in
             # SQL before the newest FAMILY_SCAN are taken
             members = plan.reads.entity_memories(self.backend, entity_id, FAMILY_SCAN)
@@ -2162,10 +2160,11 @@ class MemoryStore:
         links reach most strongly, a tie by entity id) in the question and
         the memories; with several or none, both are read as written. With
         seeds aboutness weighs each score, and a thing's answer yields to
-        its version's own. Each memory judged, with whether it is a member
-        and its score, is left in ``plan.judged`` for the final order
-        (``_final_order``); ``ranked`` is returned with the memories the
-        second call added after it."""
+        its version's own, never below an answer about something else
+        judged the same (``aboutness``). Each memory judged, with whether it
+        is a member and its score, is left in ``plan.judged`` for the final
+        order (``_final_order``); ``ranked`` is returned with the memories
+        the second call added after it."""
         size = max(self.config.decision.rerank_pool, 2)
         act, above, entities = plan.act, plan.above, plan.entities
         seeds = set(plan.seeds)
@@ -2268,19 +2267,26 @@ class MemoryStore:
 
         for mid, value in judged.items():
             result = found[mid]
+            held = 1.0  # what the override leaves of the answer
             if seeds and subject(mid) in above:
                 discount = overridden(subject(mid))
-                value *= 1.0 - discount
+                held = (1.0 - discount) ** specific
                 result.signals = {**result.signals, "overridden": round(discount, 4)}
             about = 1.0
             if seeds:
                 about = result.signals.get("about") or aboutness([act.get(e.id) for e in ents(mid)])
                 result.signals = {**result.signals, "about": round(about, 3)}
-            result.signals = {**result.signals, "judged": round(value ** specific, 4),
+            result.signals = {**result.signals, "judged": round(value ** specific * held, 4),
                               "specific": round(specific, 4), "several": round(several, 4),
                               "calls": calls, "pool": pooled,
                               **({"member": True} if mid in members else {})}
-            plan.judged[mid] = (mid in members, value ** specific * about)
+            # The override comes after aboutness's floor, so what it leaves is
+            # floored again: an answer from a thing the entity belongs to,
+            # however weak its link and however much of it the entity's own
+            # memories replace, counts at least as much as an answer about
+            # something else judged the same (``aboutness``: a link never
+            # ranks below no link).
+            plan.judged[mid] = (mid in members, value ** specific * max(held * about, LOW))
         return ranked + extra
 
     def _final_order(self, ranked: list[SearchResult], plan: _SearchPlan) -> list[SearchResult]:

@@ -30,9 +30,10 @@ state was missing on one of them or at the wrong stage. Each has a companion
 that tests the rule at its stage, running the stages as ``search`` runs them
 (``_through_the_judged_pool``) or reading what the judge read; the filtered set
 question's companion runs the same question unfiltered on the same store. The
-other tests passed at ce2b49f too, and each has a companion
-(``*_fails_without_the_rule``) that takes the rule away at its stage and shows
-the answer lost, so they are tests that can fail. The judges are stubs, the
+other tests passed at ce2b49f too (but the weak-link tests, which failed at
+a5eecd8), and each has a companion (``*_fails_without_the_rule``) that takes
+the rule away at its stage and shows the answer lost, so they are tests that
+can fail. The judges are stubs, the
 vectors ``_SenseEmbedder``: what a real embedder or Jev does with these texts
 is the benchmark's to measure.
 """
@@ -1197,23 +1198,24 @@ TOPICS = ["open data", "edge computing", "soil health", "typography", "accessibi
           "robotics", "urban farming", "privacy", "energy", "maps"]
 
 
-def _an_event_series(stores):
-    """Tovel Forum (21 memories) and its editions 2019 to 2025 (10 memories
-    each), each an occurrence of the series. 2025 moved to Graz; the other
-    editions say where their parts took place ("The Tovel Forum 2023
-    opening took place in Turin", shorter than the series' city); every
-    edition but 2023 says "had N attendees", and 2023 says it in more
-    words. 30 notes: 121 memories."""
+def _an_event_series(stores, *, p=0.9, city=SERIES_CITY,
+                     parts=("opening", "party", "workshop day")):
+    """Tovel Forum (21 memories, ``city`` among them) and its editions 2019
+    to 2025 (10 memories each), each an occurrence of the series at ``p``.
+    2025 moved to Graz; the other editions say where their ``parts`` took
+    place ("The Tovel Forum 2023 opening took place in Turin", shorter than
+    the series' city); every edition but 2023 says "had N attendees", and
+    2023 says it in more words. 30 notes: 121 memories."""
     names = ["Tovel Forum", *[f"Tovel Forum {year}" for year in range(2019, 2026)]]
     store = stores(_ReleaseEmbedder(names=names))
     series = _entity(store, "Tovel Forum", "event")
-    found = {"city": _remember(store, SERIES_CITY, [series])}
+    found = {"city": _remember(store, city, [series])}
     for i in range(20):
         _remember(store, f"Tovel Forum has a track on {TOPICS[i % 10]} number {i}", [series])
     cities = ["Turin", "Porto", "Graz", "Riga", "Brno", "Ghent"]
     for year in range(2019, 2026):
         edition = _entity(store, f"Tovel Forum {year}", "event")
-        _belongs(store, edition, series)
+        _belongs(store, edition, series, p)
         o = f"Tovel Forum {year}"
         if year == 2023:
             found["attended"] = _remember(store, ATTENDED, [edition])
@@ -1222,7 +1224,7 @@ def _an_event_series(stores):
         if year == 2025:
             found["moved"] = _remember(store, MOVED, [edition])
         elif year != 2024:
-            for part in ("opening", "party", "workshop day"):
+            for part in parts:
                 _remember(store, f"The {o} {part} took place in {cities[year % 6]}", [edition])
         while store.backend.count_entity_memories(edition.id) < 10:
             k = store.backend.count_entity_memories(edition.id)
@@ -1290,6 +1292,91 @@ def test_an_occurrence_is_told_from_its_series_and_siblings_fails_without_the_ru
     _links_weigh_nothing(monkeypatch, store)
     _, results = _asked(store, question, scores)
     assert results[0].memory.id != found[answer].id
+
+
+# ------------------------------------------ an edition linked weakly to its series
+# A link, however weak, never ranks below no link (``aboutness``). An edition
+# Jev linked to its series at 0.3 or 0.2 reaches the series at 0.24 or 0.16
+# (UP_KIND x p), under ``LOW``: the series' memories count as much as a
+# sibling edition's, which the links do not reach, and no less. Both tests
+# failed at a5eecd8, each at its own stage: the order put the series' answer
+# below the siblings' (the override's discount came after the floor), and
+# the candidates left it out (only an entity reached at 0.3 or more added
+# its best memories).
+WEAK = [0.3, 0.2]
+HOSTED = "Tovel Forum is hosted in Lyon"
+NINE_PARTS = ("opening", "party", "workshop day", "gala", "hackathon", "closing",
+              "poster session", "panel", "career fair")
+
+
+@pytest.mark.parametrize("p", WEAK)
+def test_an_occurrence_linked_weakly_takes_its_series_fact_over_a_siblings_own_at_scale(
+        stores, p):
+    """R-52's store with each edition linked to the forum at ``p``. The
+    judge reads the series' city and scores it and the other editions'
+    "took place" alike (0.9). The city yields to 2024's own memories, none
+    of which answers (0.03 off), and what the override leaves is floored
+    as the link is: at 0.3, 0.9 x max(0.97 x 0.24, 0.3) = 0.27, as much as
+    an unreached edition's 0.9 x 0.3. The tie keeps the order judged, where
+    the city ("it takes place in Lyon each year") states the property
+    better than a sibling's, read with its names. At a5eecd8 the discount
+    came after the floor, 0.9 x 0.97 x 0.3 = 0.26, and every sibling's
+    "took place" the judge read came first."""
+    store, found = _an_event_series(stores, p=p)
+    judge, results = _asked(store, "Where did Tovel Forum 2024 take place?", WHERE)
+    assert "it takes place in Lyon each year" in judge.read
+    assert results[0].memory.id == found["city"].id
+    assert results[0].signals["overridden"] == pytest.approx(0.03)
+
+
+def test_an_occurrence_linked_weakly_takes_its_series_fact_fails_without_the_rule(
+        stores, monkeypatch):
+    """With the floor taken off what the override leaves (``LOW`` 0 in the
+    final order), the series' city counts 0.9 x 0.97 x 0.3 against a
+    sibling's 0.9 x 0.3: another edition's "took place" comes first, and
+    the city is not among the first five."""
+    store, found = _an_event_series(stores, p=0.3)
+    monkeypatch.setattr(store_module, "LOW", 0.0)
+    judge, results = _asked(store, "Where did Tovel Forum 2024 take place?", WHERE)
+    assert "it takes place in Lyon each year" in judge.read
+    assert "took place" in results[0].memory.content
+    assert found["city"].id not in _ids(results)
+
+
+def _hosted(store, found):
+    question = "Where did Tovel Forum 2024 take place?"
+    # not in the text ranking the linked search starts from
+    assert found["city"].id not in _text(store, question)
+    return _asked(store, question, {"place": 0.9, "hosted": 0.9})
+
+
+@pytest.mark.parametrize("p", WEAK)
+def test_a_weakly_linked_series_answer_joins_the_pool_by_what_it_says_at_scale(stores, p):
+    """The series' city worded "Tovel Forum is hosted in Lyon", and each
+    edition 2019 to 2023 saying where nine of its parts took place: 45
+    memories say "place" and a year, and the city is not in the text
+    ranking. It joins the pool as the series' memory that best states the
+    property ("it is hosted in Lyon"), as a linked entity's best memories
+    do however weak the link, and comes first in the linked order (0.3 x
+    0.77 against 1.0 x 0.22 for 2024's own and 0.3 x 0.60 for a sibling's
+    "took place"); judged alike with the siblings', it stays first. At
+    a5eecd8 an entity reached under 0.3 added no candidates, and the city
+    never reached the judge."""
+    store, found = _an_event_series(stores, p=p, city=HOSTED, parts=NINE_PARTS)
+    judge, results = _hosted(store, found)
+    assert "it is hosted in Lyon" in judge.read
+    assert results[0].memory.id == found["city"].id
+
+
+def test_a_weakly_linked_series_answer_joins_the_pool_fails_without_the_rule(
+        stores, monkeypatch):
+    """Without the linked entities' best memories in the pool, the city
+    never reaches the judge, and an edition's "took place" comes first."""
+    store, found = _an_event_series(stores, p=0.3, city=HOSTED, parts=NINE_PARTS)
+    monkeypatch.setattr(store_module, "FAMILY_TOP", 0)
+    judge, results = _hosted(store, found)
+    assert "it is hosted in Lyon" not in judge.read
+    assert found["city"].id not in _ids(results)
 
 
 # ------------------------------------------- a thing's answer and a version

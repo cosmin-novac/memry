@@ -638,9 +638,9 @@ entity or date filter, whether its question names anything, and with `relational
    importance according to configuration. With seeds, the linked pool: the links from the
    seeds are followed, directed and weighted by kind, direction and probability
    (`relational_depth`, 1 by default; an open pair is a "same" link only on a calibrated
-   judge's answer), and each entity linked strongly enough adds the 10 of its memories
-   that best state the property asked, chosen among its newest 500. Every filter is
-   applied here, to both, before anything is ordered or judged: the user and agent, the
+   judge's answer), and every entity they reach, however weakly, adds the 10 of its
+   memories that best state the property asked, chosen among its newest 500. Every filter
+   is applied here, to both, before anything is ordered or judged: the user and agent, the
    run (a run's memories are those said in it, section 4), history (the memories in use
    and those kept as history, below; every memory with `include_invalid`), the tags, the
    entity, and the date windows (`since`/`until` on when a memory was saved,
@@ -649,6 +649,8 @@ entity or date filter, whether its question names anything, and with `relational
 3. **Order**. With seeds, the linked order: every candidate by how well it states the
    property asked (its property vector, the names of the entities the links reach read
    "it") times how strongly it is about the entity named (aboutness), a tie by memory id.
+   A memory of an entity the links reach counts at least as much as one of an entity they
+   do not reach or one naming none: a link, however weak, never ranks below no link.
    A question naming several hubs is compared as written with each memory's ordinary
    vector, names kept: masked, "Why do Ada and Kai find Mira inspiring?" reads "Why do it
    and it find it inspiring?", which cannot tell the memories about Mira from anything one
@@ -685,9 +687,10 @@ entity or date filter, whether its question names anything, and with `relational
    aboutness with seeds, the set's members first; they are returned past the limit, up to
    100. With seeds, an answer from a thing the named entity belongs to counts as far as
    none of the entity's own memories answers, nor one of a thing between them (the
-   version it builds on). The judged score counts to the power of P(the question asks for
-   one property), so on "Show everything about it" aboutness alone orders the list. A tie
-   keeps the order judged, whose ties go by memory id; the
+   version it builds on), and never less than an answer about something else judged the
+   same, as for any weak link. The judged score counts to the power of P(the question
+   asks for one property), so on "Show everything about it" aboutness alone orders the
+   list. A tie keeps the order judged, whose ties go by memory id; the
    memories not judged follow in their order. A search not judged keeps its order. A
    question naming no hub was once ordered by a blend of the judged score and the text
    ranking's position, because the judgement alone measured worse in the wording the
