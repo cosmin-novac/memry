@@ -98,13 +98,15 @@ input,button,textarea,select{font:inherit;color:inherit;background:var(--panel);
 .qwrap input{flex:1;padding-right:1.9rem}
 #qclear{position:absolute;right:.3rem;top:50%;transform:translateY(-50%);border:none;background:none;color:var(--dim);padding:.2rem .4rem;font-size:.9rem;line-height:1;display:none}
 #qclear:hover{color:var(--accent)}
-.search-filters{display:grid;grid-template-columns:minmax(12rem,1fr) minmax(10rem,1fr) minmax(12rem,1.4fr);gap:.5rem;margin:-.45rem 0 1rem}
+.search-filters{display:grid;grid-template-columns:minmax(12rem,1fr) minmax(14rem,2fr);gap:.5rem;margin:-.45rem 0 1rem}
 /* `display:grid` above beats the UA rule behind the `hidden` attribute, so the
    panel has to be hidden explicitly or it is never actually collapsed. */
 .search-filters[hidden]{display:none}
 .search-filters .range{display:flex;gap:.35rem;align-items:center}
 .search-filters .range input{min-width:0}
-.search-filters select[multiple]{height:5.2rem;padding:.15rem}
+.search-filters select[multiple]{height:9.5rem;padding:.15rem}
+.search-filters optgroup{color:var(--dim);font-style:normal;font-weight:600}
+.search-filters option{color:var(--text);font-weight:400}
 .search-filters .picked{color:var(--accent)}
 .search-filters label{display:flex;flex-direction:column;gap:.2rem;color:var(--dim);font-size:.72rem}
 .search-filters input,.search-filters select{width:100%;min-width:0;color:var(--text)}
@@ -147,11 +149,21 @@ html.knowledge-open,body.knowledge-open{overflow:hidden}
 .tagrow .cnt{color:var(--dim);font-size:.78rem}
 .tagrow .badge{display:inline-block;min-width:1.15rem;padding:0 .35rem;margin-left:.35rem;border-radius:999px;background:var(--warn);color:var(--bg);font-size:.68rem;font-weight:700;line-height:1.15rem;text-align:center;vertical-align:middle}
 .syn{border:1px solid var(--accent);color:var(--accent);border-radius:999px;padding:0 .45rem;font-size:.68rem}
-.tagrow .entity-type{flex:0 0 6.5rem;text-align:center;white-space:nowrap}
 .tagrow .act{border:none;background:none;color:var(--dim);cursor:pointer;padding:.15rem .35rem;font-size:.8rem}
 .tagrow .act:hover{color:var(--accent)}.tagrow .act.del:hover{color:var(--warn)}
 .tagbar{display:flex;gap:.5rem;flex-wrap:wrap;margin:.8rem 0;align-items:center}
 .tagbar .sel{color:var(--dim);font-size:.82rem;margin-right:auto}
+/* Entities: one list of people, things and tags, a chip per type. */
+.type-chips{display:flex;gap:.35rem;flex-wrap:wrap;margin:.1rem 0 .55rem}
+.type-chips button{padding:.18rem .6rem;font-size:.78rem;border-radius:999px}
+.type-chips button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+.type-chips .cnt{margin-left:.3rem;color:var(--dim);font-size:.72rem}
+.ent-count{color:var(--dim);font-size:.8rem;margin:0 0 .4rem}
+.ent-group{display:flex;align-items:baseline;gap:.45rem;margin:.95rem 0 0;padding:0 .1rem .25rem;border-bottom:1px solid var(--line);color:var(--dim);font-size:.72rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+.ent-group .cnt{font-weight:400;letter-spacing:0}
+.ent-combine{border:1px solid var(--accent);border-radius:8px;padding:.6rem .7rem;margin:.2rem 0 .8rem}
+.ent-combine[hidden]{display:none}
+.ent-combine .entity-duplicate{margin:.5rem 0 0}
 input:focus,textarea:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
 button{cursor:pointer}button.primary{background:var(--accent);color:#04211c;border-color:transparent;font-weight:600}
 button.toggle[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
@@ -205,7 +217,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-ctrl{position:absolute;top:.6rem;right:.6rem;display:flex;gap:.4rem;align-items:flex-start;z-index:3}
 .gx-ctrl button,.gx-types summary{background:color-mix(in srgb,var(--panel) 68%,transparent);border:1px solid var(--line);color:var(--dim);border-radius:7px;padding:.3rem .5rem;font-size:.72rem;cursor:pointer;backdrop-filter:blur(5px);line-height:1;list-style:none}
 .gx-ctrl button:hover,.gx-types summary:hover{color:var(--accent);border-color:var(--accent)}
-.gx-ctrl button[aria-pressed="true"],.gx-types summary[aria-pressed="true"],.gx-types[open] summary{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
+.gx-types[open] summary{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
 .gx-types{position:relative}.gx-types summary::-webkit-details-marker{display:none}
 .gx-type-menu{position:absolute;right:0;top:1.9rem;width:15rem;max-height:min(25rem,70vh);overflow:auto;background:color-mix(in srgb,var(--panel) 96%,transparent);border:1px solid var(--line);border-radius:9px;padding:.55rem;box-shadow:0 .7rem 2rem rgba(0,0,0,.28);backdrop-filter:blur(8px)}
 .gx-type-option{display:flex;align-items:center;gap:.45rem;padding:.22rem .1rem;color:var(--text);font-size:.75rem;white-space:nowrap}.gx-type-option input{width:auto;margin:0}.gx-type-option .cnt{margin-left:auto}
@@ -259,13 +271,13 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
 @media(max-width:44rem){.timeline .tl-row{grid-template-columns:1fr}}
 </style></head><body><main>
 <h1><svg viewBox="0 0 64 64" width="22" height="22" aria-hidden="true" style="color:var(--accent);vertical-align:-3px;margin-right:.35rem"><path d="M12,50 L12,30 Q12,20 21,20 Q30,20 30,30 L30,50 M30,30 Q30,20 39,20 Q48,20 48,30 L48,50" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"/><circle cx="47" cy="10.5" r="4.5" fill="currentColor"/><circle cx="56" cy="20" r="3.2" fill="currentColor" opacity=".85"/><circle cx="57.5" cy="30" r="2.2" fill="currentColor" opacity=".7"/></svg><span>Mem</span>ry <small style="color:var(--dim);font-weight:400">Dashboard</small>
-<span class="datalinks"><a class="knowledge-link" href="#" onclick="openKnowledge();return false" title="What needs you, plus entities, tags and the archive of what was removed.">Upkeep<span class="badge" id="upkeepbadge" hidden></span></a> <a class="knowledge-link" href="#" onclick="openTimeline();return false" title="Every memory that carries a time, in date order around today.">Timeline</a> <span class="menuwrap"><button class="menubtn" id="usermenubtn" aria-haspopup="menu" aria-expanded="false" onclick="toggleUserMenu();return false" title="Your account, and what you can do with this store.">@__WHOAMI__</button><div class="menu" id="usermenu" role="menu" hidden><button role="menuitem" onclick="menuExport()" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</button><button role="menuitem" id="importbtn" onclick="chooseImportFile()" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</button><button role="menuitem" onclick="menuAbout()" title="What Memry does with what you tell it, in plain words.">about</button><span class="account-links" id="accountlinks" data-account="__WHOAMI__"><a role="menuitem" href="/logout" title="Sign out of this Memry dashboard.">sign out</a></span></div></span></span></h1>
+<span class="datalinks"><a class="knowledge-link" href="#" onclick="openKnowledge();return false" title="What needs you, plus entities (the people, things and tags your memories are about) and the archive of what was removed.">Upkeep<span class="badge" id="upkeepbadge" hidden></span></a> <a class="knowledge-link" href="#" onclick="openTimeline();return false" title="Every memory that carries a time, in date order around today.">Timeline</a> <span class="menuwrap"><button class="menubtn" id="usermenubtn" aria-haspopup="menu" aria-expanded="false" onclick="toggleUserMenu();return false" title="Your account, and what you can do with this store.">@__WHOAMI__</button><div class="menu" id="usermenu" role="menu" hidden><button role="menuitem" onclick="menuExport()" title="Download a lossless Memry backup containing memories, entity links, provenance, relations, timestamps, IDs, and history for this account.">export</button><button role="menuitem" id="importbtn" onclick="chooseImportFile()" title="Restore a lossless Memry backup exactly. Legacy memory-only JSON and JSONL files remain supported as additive imports.">import</button><button role="menuitem" onclick="menuAbout()" title="What Memry does with what you tell it, in plain words.">about</button><span class="account-links" id="accountlinks" data-account="__WHOAMI__"><a role="menuitem" href="/logout" title="Sign out of this Memry dashboard.">sign out</a></span></div></span></span></h1>
 <div id="stats">loading…</div>
 <div class="bar">
   <span class="qwrap"><input id="q" placeholder="search memories…" oninput="toggleClear()">
     <button id="qclear" type="button" title="clear search and show all" onclick="clearSearch()">✕</button></span>
   <button class="primary" onclick="search()" title="Search memories using the text and filters above.">Search</button>
-  <button class="toggle" id="filterbtn" onclick="togglePanel('filters')" title="Filter by date, tag, or person/thing." aria-label="Filters"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1 2.5A.5.5 0 0 1 1.5 2h13a.5.5 0 0 1 .38.82L10 8.7V13a.5.5 0 0 1-.72.45l-3-1.5A.5.5 0 0 1 6 11.5V8.7L1.12 2.82A.5.5 0 0 1 1 2.5Z"/></svg><span id="filterdot" hidden>•</span></button>
+  <button class="toggle" id="filterbtn" onclick="togglePanel('filters')" title="Filter by date, or by what the memories are about: a person, a thing or a tag." aria-label="Filters"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1 2.5A.5.5 0 0 1 1.5 2h13a.5.5 0 0 1 .38.82L10 8.7V13a.5.5 0 0 1-.72.45l-3-1.5A.5.5 0 0 1 6 11.5V8.7L1.12 2.82A.5.5 0 0 1 1 2.5Z"/></svg><span id="filterdot" hidden>•</span></button>
   <button class="toggle" id="addbtn" onclick="togglePanel('add')" title="Add a memory." aria-label="Add a memory">+</button>
   <button class="toggle" id="mapbtn" onclick="togglePanel('map')" title="Show or hide the memory map.">Map</button>
 </div>
@@ -275,10 +287,8 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <span class="cnt">to</span>
     <input id="filter-date-to" type="date" title="to" onchange="toggleClear()">
   </span></label>
-  <label>Tags <span class="picked" id="topiccount"></span>
-    <select id="filter-topic" multiple size="4" title="ctrl/cmd-click for several" onchange="toggleClear()"></select></label>
-  <label>People or things <span class="picked" id="entitycount"></span>
-    <select id="filter-entity" multiple size="4" title="ctrl/cmd-click for several" onchange="toggleClear()"></select></label>
+  <label><span>About <span class="picked" id="aboutcount"></span></span>
+    <select id="filter-about" multiple size="8" title="Show only the memories about what you pick. Ctrl or cmd click picks several. Two tags match either tag, two people or things match either one, and a tag with a person or thing matches the memories that have both." onchange="toggleClear()"></select></label>
 </div>
 <input type="file" id="importfile" accept=".json,.jsonl,.txt,application/json" hidden onchange="importMemories(this.files[0]);this.value=''">
 <div id="addpanel" hidden>
@@ -291,17 +301,16 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
 </div>
 <div id="mapwrap" hidden><canvas id="map"></canvas>
 <div class="gx-ctrl">
-  <button id="mapTagsBtn" onclick="setMapMode('tags')" title="Group every active memory by tag.">Tags</button>
   <details class="gx-types" id="mapEntityFilter">
-    <summary id="mapEntitiesBtn" onclick="setMapMode('entities')" title="Group memories by entity and choose which entity types appear.">Entities</summary>
+    <summary id="mapEntitiesBtn" title="Choose which types of entity the map shows. Tags are one of the types, off until you turn them on.">Entities</summary>
     <div class="gx-type-menu">
       <div class="gx-type-head"><span>Entity types</span>
         <button type="button" class="x" onclick="closeMapEntityFilter()" title="close">x</button></div>
       <div id="mapEntityTypeOptions"></div>
       <div class="gx-type-actions">
-        <button type="button" onclick="setMapEntityTypes('defaults')" title="Show all entity types except concept and other.">defaults</button>
-        <button type="button" onclick="setMapEntityTypes('all')" title="Show every entity type.">all</button>
-        <button type="button" onclick="setMapEntityTypes('none')" title="Hide every entity type.">none</button>
+        <button type="button" onclick="setMapEntityTypes('defaults')" title="Show every type except concept, other and tag.">defaults</button>
+        <button type="button" onclick="setMapEntityTypes('all')" title="Show every type, tags included.">all</button>
+        <button type="button" onclick="setMapEntityTypes('none')" title="Hide every type.">none</button>
       </div>
     </div>
   </details>
@@ -362,8 +371,8 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <dt>Memory</dt><dd>One fact, kept on its own. The thing everything else here is about.</dd>
     <dt>Episode</dt><dd>The raw message you originally sent, stored word for word and never edited. Memories are worked out from episodes; if extraction ever needs redoing, this is what it is redone from. One message can produce several memories, which is why the two numbers differ.</dd>
     <dt>Tag</dt><dd>A subject a memory is filed under, like <i>2026 taxes</i>. A memory can have a few. Clicking one filters to everything under it.</dd>
-    <dt>Entity (a "person or thing")</dt><dd>Someone or something that keeps coming up, with its own page collecting what is known about it.</dd>
-    <dt>Entity type</dt><dd>What kind of thing it is: person, organization, project, product, place, event, document, code, concept, or topic. Used to keep unrelated things with the same name apart, and to group the list - it does not change search ranking. A topic is a tag: every tag is an entity of its own, which the memories filed under it mention.</dd>
+    <dt>Entity</dt><dd>A person, a thing or a tag your memories are about, with its own page collecting what is known about it. Upkeep &gt; Entities lists them all.</dd>
+    <dt>Entity type</dt><dd>What an entity is: a person, a tag, or a kind of thing (organization, project, product, place, event, document, code, concept or other). Every tag is an entity of its own, which the memories filed under it mention. The type keeps unrelated things with the same name apart and filters the Entities list and the map. It does not change search ranking.</dd>
     <dt>Relation</dt><dd>A link between two entities, like "Ada works on Helios". Search follows these to reach answers that share no words with your question.</dd>
     <dt>Invalidated</dt><dd>A memory that is no longer treated as true, but is still on file. Happens when you delete it, or when something you said later contradicted it. It stops appearing in search; it does not stop existing.</dd>
     <dt>Superseded</dt><dd>An invalidated memory that was replaced by a specific newer one - the old version of a fact you updated. It stays attached to its replacement as history. When the replacement came from a contradiction or an update (a value that changed, or a detail merged in), it is listed under Archive, where you can undo it. An old version an update replaced is still found by search, after the current one, with the date it held until. Memry never replaces an important memory without asking you first.</dd>
@@ -384,28 +393,27 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
 </div></div>
 <div class="modal" id="knowmodal"><div class="sheet">
 <h2><button class="x" onclick="closeKnowledge()" title="close">x</button>Upkeep</h2>
-<p class="hint">What needs a yes or a no from you, the entities your memories are about, the tags they are filed under, and the archive of what was removed.</p>
+<p class="hint">What needs a yes or a no from you, the people, things and tags your memories are about, and the archive of what was removed.</p>
 <div class="knowledge-tabs">
   <button id="ktab-maintenance" onclick="showKnowledge('maintenance')">Upkeep</button>
   <button id="ktab-entities" onclick="showKnowledge('entities')">Entities</button>
-  <button id="ktab-topics" onclick="showKnowledge('topics')">Tags</button>
   <button id="ktab-forgotten" onclick="showKnowledge('forgotten')">Archive</button>
 </div>
-<section class="kpanel" id="kpanel-topics">
-  <div class="tagbar">
-    <span class="sel" id="tagsel">none selected</span>
-    <button onclick="suggestMerges()" title="let the LLM propose duplicate or variant tags to merge">Suggest merges</button>
-    <button onclick="mergeTags()" title="combine the checked tags into one">Combine selected...</button>
-    <input id="tagsearch" type="search" placeholder="filter tags..." oninput="renderTags()"
-           title="show only tags whose name contains this" style="flex:1;min-width:7rem">
-  </div>
-  <div id="tagsuggest"></div><div id="taglist"></div>
-</section>
 <section class="kpanel" id="kpanel-entities" hidden>
   <div class="entity-split">
     <div class="entity-main">
-      <div class="tagbar"><span class="sel" id="entcount"></span>
-        <button onclick="backfillTypes()" title="classify entities that have no type yet">Backfill types</button></div>
+      <div class="tagbar">
+        <span class="sel" id="entsel">none selected</span>
+        <button onclick="suggestMerges()" title="Look for tags that name one subject twice, and list them below to apply or dismiss. This covers tags only: people and things that may be one are under Merge proposals.">Suggest merges</button>
+        <button onclick="combineSelected()" title="Make the checked entries one: pick the one to keep and the rest go into it. With a person or thing checked, only a person or thing can be kept.">Combine selected...</button>
+        <button onclick="backfillTypes()" title="Ask the language model for the type of every person or thing that has none yet.">Backfill types</button>
+        <input id="entsearch" type="search" placeholder="filter by name..." oninput="renderEntityList()"
+               title="Show only the names that contain this." style="flex:1;min-width:7rem">
+      </div>
+      <div class="type-chips" id="enttypes" role="group" aria-label="Filter by type"></div>
+      <div class="ent-count" id="entcount"></div>
+      <div class="ent-combine" id="entcombine" hidden></div>
+      <div id="tagsuggest"></div>
       <div id="entlist"></div>
       <h2 style="font-size:.95rem;margin-top:1.1rem">Merge proposals</h2><div id="proplist"></div>
     </div>
@@ -452,6 +460,8 @@ async function api(path, opts={}){
   return r.json();
 }
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+// The word the page uses for an entity type: a tag is stored as a "topic" entity.
+function typeLabel(type){return type==='topic'?'tag':(type||'untyped')}
 // A value passed to a handler inside a single-quoted onclick='...'.
 // JSON.stringify alone is not enough there: an apostrophe in a tag like
 // "mum's health" ended the attribute, so the button did nothing and threw.
@@ -465,7 +475,6 @@ function syncPanels(){
   document.getElementById('addpanel').hidden=!panels.add;
   document.getElementById('addbtn').setAttribute('aria-pressed',panels.add);
   document.getElementById('mapbtn').setAttribute('aria-pressed',panels.map);
-  syncMapModeButtons();
   // Filters are collapsed by default; an active one is still shown as a dot on
   // the button, so a filter can never be silently applied behind a closed panel.
   document.getElementById('filterpanel').hidden=!panels.filters;
@@ -480,7 +489,6 @@ function togglePanel(name){
 let current=[],activeMapKey=null,haveMore=false,editingId=null,hoverMapKey=null,searchActive=false;
 let hoverFocusTag=null,hoverFocusMix=0,hoverFadeStarted=0;
 const HOVER_FADE_MS=500;
-const cats=m=>((m.categories&&m.categories.length)?m.categories:['(untagged)']).map(c=>String(c).toLowerCase());
 const moreBar=()=>haveMore
   ? '<div class="bar" id="morebar"><button onclick="loadAll(true)">Load more</button></div>' : '';
 // `appendFrom` renders only the newly arrived tail. Rebuilding the whole list
@@ -563,14 +571,14 @@ function editCard(m){
    </div></div>`;
 }
 
-// ---- galaxy map: memories grouped as tag or entity planets ----------------
-// Planet size reflects how many loaded memories belong to a group. The small
-// orbiting markers are those memories: circle = semantic, square = procedural,
-// triangle = episodic, diamond = working. Links connect groups that co-occur.
+// ---- galaxy map: memories grouped as entity planets ------------------------
+// Planet size reflects how many memories mention an entity: a person, a thing,
+// or, once its type is turned on, a tag. The small orbiting markers are those
+// memories: circle = semantic, square = procedural, triangle = episodic,
+// diamond = working. Links connect entities that the same memories mention.
 const hashCode=s=>{let h=0;for(let i=0;i<s.length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;return Math.abs(h)};
 const mulberry=a=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
 const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
-let mapMode=localStorage.getItem('memry_map_mode')==='entities'?'entities':'tags';
 let mapVisible=true;
 if('IntersectionObserver'in window){
   new IntersectionObserver(entries=>{
@@ -602,37 +610,50 @@ const LOD_NODES=400,LOD_FRAME_MS=32;
 // widest ring, so it takes the most.
 const PACK={core:4,belt:16,rim:22};
 const gSprites=new Map();let gBackdrop=null,gLastFrame=0;
-let mapData=null,mapEntityTypes=null;
+// Tags are the entity type "topic". The map reads them from the server only
+// while their type is on, so a map without tags costs what it always did.
+const TAG_TYPE='topic';
+let mapData=null,mapEntityTypes=null,mapLoadSeq=0;
 function knownEntityTypes(){
-  if(!mapData)return[];
-  return [...new Set(mapData.entities.map(node=>node.entity_type||'untyped'))].sort();
+  const types=new Set(mapData?mapData.entities.map(node=>node.entity_type||'untyped'):[]);
+  types.add(TAG_TYPE);  // offered before any tag is loaded, so tags can be turned on
+  return [...types].sort((a,b)=>typeLabel(a).localeCompare(typeLabel(b)));
 }
 function defaultEntityTypes(){
-  return knownEntityTypes().filter(type=>type!=='concept'&&type!=='other');
+  return knownEntityTypes().filter(type=>type!=='concept'&&type!=='other'&&type!==TAG_TYPE);
 }
 function saveMapEntityTypes(){
   localStorage.setItem('memry_map_entity_types',JSON.stringify([...mapEntityTypes].sort()));
 }
+function savedMapEntityTypes(){
+  try{
+    const saved=JSON.parse(localStorage.getItem('memry_map_entity_types')||'null');
+    return Array.isArray(saved)?saved:null;
+  }catch(error){return null}
+}
 function initializeMapEntityTypes(){
   if(mapEntityTypes!==null)return;
-  let saved=null;
-  try{saved=JSON.parse(localStorage.getItem('memry_map_entity_types')||'null')}catch(error){}
-  mapEntityTypes=new Set(Array.isArray(saved)?saved:defaultEntityTypes());
+  mapEntityTypes=new Set(savedMapEntityTypes()||defaultEntityTypes());
 }
+function mapWantsTags(){
+  return mapEntityTypes!==null?mapEntityTypes.has(TAG_TYPE):(savedMapEntityTypes()||[]).includes(TAG_TYPE);
+}
+function mapDataPath(tags){return '/api/v1/map?kind='+(tags?'any':'named')}
 function renderMapEntityTypes(){
-  const filter=document.getElementById('mapEntityFilter');
-  if(mapMode!=='entities')filter.open=false;
   if(!mapData)return;
   initializeMapEntityTypes();
   const counts={};
   mapData.entities.forEach(node=>{
     const type=node.entity_type||'untyped';counts[type]=(counts[type]||0)+1;
   });
+  // Until the tags are read their count is unknown, so none is shown.
+  const count=type=>type===TAG_TYPE&&!mapData.withTags?'':(counts[type]||0);
   document.getElementById('mapEntityTypeOptions').innerHTML=knownEntityTypes().map(type=>
-    '<label class="gx-type-option"><input type="checkbox" data-entity-type="'+esc(type)+'"'
+    '<label class="gx-type-option"'+(type===TAG_TYPE?' title="Draw each tag as a planet, linked to the people, things and tags its memories also mention."':'')+'>'
+      +'<input type="checkbox" data-entity-type="'+esc(type)+'"'
       +(mapEntityTypes.has(type)?' checked':'')+'>'
-      +'<span>'+esc(type)+'</span><span class="cnt">'+counts[type]+'</span></label>'
-  ).join('')||'<div class="hint">No entity types yet.</div>';
+      +'<span>'+esc(typeLabel(type))+'</span><span class="cnt">'+count(type)+'</span></label>'
+  ).join('');
 }
 function toggleMapEntityType(type,checked){
   if(checked)mapEntityTypes.add(type);else mapEntityTypes.delete(type);
@@ -640,6 +661,8 @@ function toggleMapEntityType(type,checked){
     activeMapKey=null;clearMapEntityDetail();
   }
   saveMapEntityTypes();drawMap();
+  // a load on its way without tags is overtaken by this one (``mapLoadSeq``)
+  if(checked&&type===TAG_TYPE&&!mapData?.withTags)loadMapData();
 }
 function handleMapEntityTypeChange(event){
   const input=event.target;
@@ -653,28 +676,21 @@ function setMapEntityTypes(mode){
   const types=mode==='all'?knownEntityTypes():(mode==='none'?[]:defaultEntityTypes());
   mapEntityTypes=new Set(types);activeMapKey=null;clearMapEntityDetail();saveMapEntityTypes();
   renderMapEntityTypes();drawMap();
+  if(mapEntityTypes.has(TAG_TYPE)&&!mapData?.withTags)loadMapData();
 }
 async function loadMapData(){
   if(knowledgeMapSuspended){mapData=null;return}
-  const data=await api('/api/v1/map');
+  const tags=mapWantsTags(),request=++mapLoadSeq;
+  const data=await api(mapDataPath(tags));
   if(knowledgeMapSuspended){mapData=null;return}
-  mapData=data;
+  if(request!==mapLoadSeq)return;  // a later load answers for this one
+  data.withTags=tags;mapData=data;
   if(mapEntityTypes===null)initializeMapEntityTypes();
   if(activeMapKey){
-    const keys=new Set([...data.tags,...data.entities].map(node=>node.key));
+    const keys=new Set(data.entities.map(node=>node.key));
     if(!keys.has(activeMapKey)){activeMapKey=null;clearMapEntityDetail()}
   }
   renderMapEntityTypes();drawMap();
-}
-function syncMapModeButtons(){
-  document.getElementById('mapTagsBtn').setAttribute('aria-pressed',mapMode==='tags');
-  document.getElementById('mapEntitiesBtn').setAttribute('aria-pressed',mapMode==='entities');
-  renderMapEntityTypes();
-}
-function setMapMode(mode){
-  if(mode!=='tags'&&mode!=='entities')return;
-  mapMode=mode;localStorage.setItem('memry_map_mode',mode);
-  activeMapKey=null;clearMapEntityDetail();updateHover(null);syncMapModeButtons();drawMap();
 }
 function memoryMarkerTypes(typeCounts,limit){
   const order=['semantic','procedural','episodic','working'];
@@ -713,13 +729,10 @@ function galaxyRimPromotions(source,isCore,start,degree){
   return new Set(movable.slice(0,room).map(node=>node.key));
 }
 function buildGalaxy(data){
-  let source=mapMode==='entities'?data.entities:data.tags;
-  if(mapMode==='entities'){
-    initializeMapEntityTypes();
-    source=source.filter(node=>mapEntityTypes.has(node.entity_type||'untyped'));
-  }
+  initializeMapEntityTypes();
+  const source=data.entities.filter(node=>mapEntityTypes.has(node.entity_type||'untyped'));
   if(!source.length)return null;
-  const rawEdges=mapMode==='entities'?data.entity_edges:data.tag_edges;
+  const rawEdges=data.entity_edges;
   // The rim needs to know how linked each node is before the zones are handed
   // out, so the degrees are counted here rather than off the drawn edges.
   const present=new Set(source.map(node=>node.key)),degree={};
@@ -773,8 +786,7 @@ function buildGalaxy(data){
   return{
     nodes,edges,neigh,edgesByNode,idleEdges:edges.slice(0,MAX_IDLE_EDGES),
     byKey:Object.fromEntries(nodes.map(node=>[node.key,node])),fb,
-    total:mapMode==='entities'?(data.entity_memories??data.memories):data.memories,
-    mode:mapMode,lod:nodes.length>LOD_NODES,
+    total:data.entity_memories??data.memories,lod:nodes.length>LOD_NODES,
   };
 }
 function displayedGalaxyEdges(graph,selected,hovered){
@@ -791,12 +803,10 @@ function drawMap(){
   const visible=panels.map&&!knowledgeMapSuspended&&mapData&&mapData.memories;
   wrap.hidden=!visible;syncMapEntityDetailVisibility();
   if(!visible){G=null;empty.hidden=true;if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return}
-  G=buildGalaxy(mapData);sizeGalaxy();syncMapModeButtons();
+  G=buildGalaxy(mapData);sizeGalaxy();renderMapEntityTypes();
   empty.hidden=!!G;
   if(!G){
-    empty.textContent=mapMode==='entities'
-      ?'No entities match the selected types.'
-      :'No tags are available.';
+    empty.textContent='No entities match the selected types.';
     const canvas=document.getElementById('map'),ctx=canvas.getContext('2d');
     ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
     if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return;
@@ -823,18 +833,17 @@ function galaxyRead(){
   const node=activeMapKey?G.byKey[activeMapKey]:(hoverMapKey?G.byKey[hoverMapKey]:null);
   if(node){
     const types=Object.entries(node.typeCounts).map(([type,count])=>count+' '+type).join(', ');
-    const heading=node.kind==='tag'?'#'+node.label:node.label+' · '+node.entityType;
+    const heading=node.label+' · '+typeLabel(node.entityType);
     readEl.innerHTML='<b>'+esc(heading)+'</b> · '+node.count+' memor'+(node.count===1?'y':'ies')
       +(types?' · '+types:'')+(node.part_count?' · '+node.part_count+' part'+(node.part_count===1?'':'s'):'')
       +(activeMapKey===node.key?' · filtering':'');
     readEl.classList.add('on');
   }else readEl.classList.remove('on');
-  const noun=G.mode==='entities'?'entities':'tags',linked=G.mode==='entities'?' linked':'';
   const selectedNode=activeMapKey?G.byKey[activeMapKey]:null;
   const hoveredNode=!selectedNode&&hoverMapKey?G.byKey[hoverMapKey]:null;
   const shownLinks=displayedGalaxyEdges(G,selectedNode,hoveredNode).length;
   const linkNote=G.edges.length?' · '+shownLinks+'/'+G.edges.length+' links shown':'';
-  statEl.textContent=G.nodes.length+' '+noun+' · '+G.total+linked+' memories'+linkNote
+  statEl.textContent=G.nodes.length+(G.nodes.length===1?' entity':' entities')+' · '+G.total+' linked memories'+linkNote
     +(G.fb?' · core = largest':'');
 }
 // The static part of the scene (ground, nebulae, sun, dust band) is rendered
@@ -1138,7 +1147,7 @@ function hitNode(event){
 let mapEntityDetailRequest=0;
 function syncMapEntityDetailVisibility(){
   const panel=document.getElementById('mapentitydetail');
-  panel.hidden=!(panels.map&&!knowledgeMapSuspended&&mapMode==='entities'&&panel.dataset.entityId
+  panel.hidden=!(panels.map&&!knowledgeMapSuspended&&panel.dataset.entityId
     &&activeMapKey==='entity:'+panel.dataset.entityId);
 }
 function clearMapEntityDetail(){
@@ -1150,7 +1159,7 @@ function mapEntityTargetOptions(entityId){
   return (mapData?.entities||[])
     .filter(node=>node.entity_id&&node.entity_id!==entityId)
     .sort((a,b)=>a.label.localeCompare(b.label))
-    .map(node=>`<option value="${esc(node.entity_id)}">${esc(node.label)} · ${esc(node.entity_type||'untyped')}</option>`)
+    .map(node=>`<option value="${esc(node.entity_id)}">${esc(node.label)} · ${esc(typeLabel(node.entity_type))}</option>`)
     .join('');
 }
 async function showMapEntityDetail(entityId){
@@ -1160,14 +1169,16 @@ async function showMapEntityDetail(entityId){
   try{
     const detail=await api('/api/v1/entities/'+encodeURIComponent(entityId));
     if(request!==mapEntityDetailRequest||activeMapKey!=='entity:'+entityId)return;
-    const entity=detail.entity,aliases=detail.aliases||[];
-    panel.innerHTML=`<h3><span id="mapentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
+    const entity=detail.entity,aliases=detail.aliases||[],tag=entity.entity_type===TAG_TYPE;
+    if(tag)rememberTag(entity);
+    panel.innerHTML=`<h3><span id="mapentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(typeLabel(entity.entity_type))}</span>`:''}</h3>
       <div id="mapentityidentity">${entityIdentityBlock(entity,aliases)}</div>
       <div class="entity-actions">
-        <button class="act" onclick='renameEntity(${JSON.stringify(entityId)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button>
-        <button class="act" onclick='addMapAlias(${JSON.stringify(entityId)})' title="Add another name for this entity.">add alias</button>
-        <button class="act" onclick="toggleDuplicatePicker(this)" title="Say this is the same thing as another entity, and combine the two.">is duplicate of...</button>
-        <button class="act danger" onclick='removeMapEntity(${JSON.stringify(entityId)})' title="Remove this name; if more than one memory mentions it, it is kept as a tag on them.">not an entity</button>
+        <button class="act" onclick='renameEntity(${JSON.stringify(entityId)})' title="${renameTitle(tag)}">rename</button>
+        ${tag?'':`<button class="act" onclick='addMapAlias(${JSON.stringify(entityId)})' title="Add another name for this entity.">add alias</button>`}
+        <button class="act" onclick="toggleDuplicatePicker(this)" title="Say this is the same as another entity, and combine the two.">is duplicate of...</button>
+        ${tag?`<button class="act danger" onclick='deleteTagEntity(${JSON.stringify(entityId)})' title="${DELETE_TAG_TITLE}">delete tag</button>`
+          :`<button class="act danger" onclick='removeMapEntity(${JSON.stringify(entityId)})' title="Remove this name. If more than one memory mentions it, it is kept as a tag on them.">not an entity</button>`}
       </div>
       <div class="entity-duplicate" id="mapduplicatepicker" hidden>
         <select id="mapduplicatetarget" onchange="document.getElementById('mapduplicatebtn').disabled=!this.value" title="Choose the entity this is a duplicate of.">
@@ -1205,27 +1216,34 @@ function syncEntityIdentity(entityId,result){
   const mapNode=(mapData?.entities||[]).find(node=>node.entity_id===entityId);
   if(mapNode)mapNode.label=entity.name;
   const graphNode=G&&G.byKey['entity:'+entityId];if(graphNode)graphNode.label=entity.name;
-  const options=[...document.getElementById('filter-entity').options];
+  const options=[...document.getElementById('filter-about').options];
   const filterOption=options.find(option=>option.value===entityId);
   if(filterOption){
     filterOption.textContent=entity.name;
+    // a tag is filtered by its name, which the rename just changed
+    if(filterOption.dataset&&filterOption.dataset.tag)filterOption.dataset.tag=tagKey(entity);
     if(moved){
       const kept=options.find(option=>option.value===id);
       if(kept){kept.selected=kept.selected||filterOption.selected;filterOption.remove()}
       else filterOption.value=id;
     }
   }
+  if(entity.entity_type===TAG_TYPE)rememberTag({...entity,id});
   knowledgeNames[id]=entity.name;galaxyRead();
   return moved;
 }
+// A tag is renamed on every memory filed under it, so the memory list and
+// the About filter are read again after it.
 async function renameEntity(entityId){
   const current=(mapData?.entities||[]).find(node=>node.entity_id===entityId)?.label||knowledgeNames[entityId]||'';
-  const entered=prompt(`Rename "${current}" to:`,current);
+  const tag=entityId in tagNames;
+  const entered=prompt(tag?`Rename tag "${current}" on every memory to:`:`Rename "${current}" to:`,current);
   const name=(entered||'').trim();if(!name||name===current)return;
   const result=await api('/api/v1/entities/'+encodeURIComponent(entityId),{method:'PATCH',body:JSON.stringify({name})});
   if(result.error){alert(result.error);return}
   const moved=syncEntityIdentity(entityId,result);
   await (moved?Promise.all([loadEntities(),loadMapData()]):loadEntities());
+  if(tag){await loadSearchFilters();await search()}
 }
 async function addMapAlias(entityId){
   const current=(mapData?.entities||[]).find(node=>node.entity_id===entityId)?.label
@@ -1247,7 +1265,7 @@ function toggleDuplicatePicker(button,panel='map'){
 }
 async function refreshAfterMapEntityCleanup(){
   clearMapEntityDetail();activeMapKey=null;
-  [...document.getElementById('filter-entity').options].forEach(option=>option.selected=false);
+  [...document.getElementById('filter-about').options].forEach(option=>option.selected=false);
   toggleClear();
   await Promise.all([loadMapData(),loadSearchFilters(),loadEntities()]);
   await search();
@@ -1265,21 +1283,23 @@ async function removeMapEntity(entityId){
   if(!await confirmNotAnEntity(entityId,node?.label||'this entity',node?.count||0))return;
   await refreshAfterMapEntityCleanup();
 }
+// A click on a planet makes it the one pick of the About filter; a second
+// click on it clears the filter again.
 async function applyMapNodeFilter(node){
   const same=activeMapKey===node.key;
-  for(const id of['filter-topic','filter-entity'])
-    [...document.getElementById(id).options].forEach(option=>option.selected=false);
+  const select=document.getElementById('filter-about');
+  [...select.options].forEach(option=>option.selected=false);
   if(same){
     activeMapKey=null;clearMapEntityDetail();toggleClear();await search();return;
   }
-  const selectId=node.kind==='tag'?'filter-topic':'filter-entity';
-  const value=node.kind==='tag'?node.label:node.entity_id;
-  const select=document.getElementById(selectId);
-  let option=[...select.options].find(candidate=>candidate.value===value);
-  if(!option){option=new Option(node.label,value);select.add(option)}
+  let option=[...select.options].find(candidate=>candidate.value===node.entity_id);
+  if(!option){
+    option=new Option(node.label,node.entity_id);
+    if(node.entity_type===TAG_TYPE)option.dataset.tag=tagKey({name:node.label});
+    select.add(option);
+  }
   option.selected=true;activeMapKey=node.key;
-  if(node.kind==='entity')showMapEntityDetail(node.entity_id);
-  else clearMapEntityDetail();
+  showMapEntityDetail(node.entity_id);
   // Keep the filter panel in its current state; the active dot still shows it.
   toggleClear();await search();galaxyRead();
 }
@@ -1328,10 +1348,7 @@ const PAGE=100; let offset=0;
 // the whole store is searched rather than the page already loaded. Tag filtering
 // is where the measured retrieval gain actually is: the user supplies the tag.
 function filterByTag(tag){
-  const select=document.getElementById('filter-topic');
-  const value=String(tag).toLowerCase();
-  let option=[...select.options].find(o=>o.value===value);
-  if(!option){option=new Option(value,value);select.add(option)}
+  const option=aboutTagOption(String(tag).toLowerCase());
   option.selected=!option.selected;  // clicking an active tag removes it again
   // Reveal the panel, so a filter set from a chip is visible and clearable
   // rather than applied behind a collapsed row.
@@ -1340,31 +1357,66 @@ function filterByTag(tag){
   activeMapKey=null;clearMapEntityDetail();
   search();
 }
-const picked=id=>[...document.getElementById(id).selectedOptions]
-  .map(o=>o.value).filter(Boolean);
+// -- the About filter: one list of people, things and tags -----------------
+// A picked tag goes to the tag filter (``categories``): that filter also finds
+// the memories under the tags a broader one holds, which the entity filter
+// does not. Everything else goes to the entity filter. As the two filters
+// always did, several picks of one kind match any of them, and a tag with a
+// person or thing matches the memories that have both.
+function aboutParams(options){
+  const categories=[],entities=[];
+  for(const option of options){
+    if(option.dataset&&option.dataset.tag)categories.push(option.dataset.tag);
+    else if(option.value)entities.push(option.value);
+  }
+  return {categories,entities};
+}
+const aboutPicks=()=>[...document.getElementById('filter-about').selectedOptions];
 function searchFilters(){
+  const about=aboutParams(aboutPicks());
   return {
     since:document.getElementById('filter-date').value,
     until:document.getElementById('filter-date-to').value,
-    topics:picked('filter-topic'),
-    entities:picked('filter-entity')
+    topics:about.categories,
+    entities:about.entities
   };
 }
 function anyFilter(f){return !!(f.since||f.until||f.topics.length||f.entities.length)}
+// The options, grouped by type with tags labelled "tag", names A to Z, and
+// only what at least one memory is about. ``keep`` holds the ids picked.
+function aboutOptions(entities,keep){
+  const byType={};
+  for(const entity of entities){
+    if(entity.merged_into||!(entity.memories>0))continue;
+    (byType[entity.entity_type||'untyped']??=[]).push(entity);
+  }
+  return Object.keys(byType).sort((a,b)=>typeLabel(a).localeCompare(typeLabel(b)))
+    .map(type=>`<optgroup label="${esc(typeLabel(type))}" data-type="${esc(type)}">`
+      +byType[type].sort((a,b)=>a.name.localeCompare(b.name)).map(entity=>
+        `<option value="${esc(entity.id)}"${type===TAG_TYPE?` data-tag="${esc(tagKey(entity))}"`:''}`
+        +`${keep.has(entity.id)?' selected':''}>${esc(entity.name)} (${entity.memories})</option>`).join('')
+      +'</optgroup>').join('');
+}
+// A tag picked from a memory card, found by its name; one the list does not
+// hold yet gets an option of its own.
+function aboutTagOption(tag){
+  const select=document.getElementById('filter-about');
+  let option=[...select.options].find(o=>o.dataset.tag===tag);
+  if(!option){
+    option=new Option(tag,'tag:'+tag);option.dataset.tag=tag;
+    (select.querySelector('optgroup[data-type="'+TAG_TYPE+'"]')||select).appendChild(option);
+  }
+  return option;
+}
 async function loadSearchFilters(){
-  const topicSelect=document.getElementById('filter-topic');
-  const entitySelect=document.getElementById('filter-entity');
+  const select=document.getElementById('filter-about');
   // multi-select: keep every current choice across a reload, not just one
-  const keepTopics=new Set(picked('filter-topic'));
-  const keepEntities=new Set(picked('filter-entity'));
-  const [topics,entities]=await Promise.all([
-    api('/api/v1/categories'),api('/api/v1/entities?limit=10000')]);
-  topicSelect.innerHTML=topics
-    .sort((a,b)=>a.category.localeCompare(b.category))
-    .map(topic=>`<option value="${esc(topic.category)}"${keepTopics.has(topic.category)?' selected':''}>${esc(topic.category)} (${topic.count})</option>`).join('');
-  entitySelect.innerHTML=entities
-    .sort((a,b)=>a.name.localeCompare(b.name))
-    .map(entity=>`<option value="${esc(entity.id)}"${keepEntities.has(entity.id)?' selected':''}>${esc(entity.name)}${entity.entity_type?' · '+esc(entity.entity_type):''}</option>`).join('');
+  const keep=new Set(aboutPicks().map(o=>o.value));
+  const loose=aboutPicks().filter(o=>o.value.startsWith('tag:')).map(o=>o.dataset.tag);
+  const entities=await api('/api/v1/entities?limit=100000&kind=any');
+  entities.forEach(rememberTag);
+  select.innerHTML=aboutOptions(entities,keep);
+  loose.forEach(tag=>{aboutTagOption(tag).selected=true});
   toggleClear();
 }
 async function loadAll(more){
@@ -1393,20 +1445,18 @@ function toggleClear(){
     document.getElementById('q').value||on ? 'block' : 'none';
   document.getElementById('filterdot').hidden=!on;
   document.getElementById('filterbtn').classList.toggle('active',on);
-  const label=n=>n?`(${n})`:'';
-  document.getElementById('topiccount').textContent=label(f.topics.length);
-  document.getElementById('entitycount').textContent=label(f.entities.length);
+  const picks=f.topics.length+f.entities.length;
+  document.getElementById('aboutcount').textContent=picks?`(${picks})`:'';
 }
 function clearSearch(){
   document.getElementById('q').value='';
   for(const id of['filter-date','filter-date-to'])document.getElementById(id).value='';
-  for(const id of['filter-topic','filter-entity'])
-    [...document.getElementById(id).options].forEach(o=>o.selected=false);
+  [...document.getElementById('filter-about').options].forEach(o=>o.selected=false);
   activeMapKey=null;clearMapEntityDetail();toggleClear();loadAll();
 }
 
 // -- unified knowledge area -------------------------------------------------
-let knowledgeTab='topics',knowledgeNames={},allTags=[];
+let knowledgeNames={};
 let knowledgeMapSuspended=false,knowledgeMapWasOpen=false;
 function suspendMapForKnowledge(){
   knowledgeMapWasOpen=panels.map;knowledgeMapSuspended=knowledgeMapWasOpen;
@@ -1434,7 +1484,7 @@ function setKnowledgeOpen(open){
 async function openKnowledge(tab='maintenance'){
   setKnowledgeOpen(true);
   showKnowledge(tab);
-  await Promise.all([loadTags(),loadEntities()]);
+  await loadEntities();
 }
 function closeKnowledge(){setKnowledgeOpen(false)}
 function openAbout(){
@@ -1470,14 +1520,11 @@ function renderServerInfo(){
   document.getElementById('serverinfo').innerHTML=rows
     .filter(r=>r[1]!==undefined&&r[1]!==null&&r[1]!=='')
     .map(([k,v,note])=>`<div class="tagrow"><span class="name"><b>${esc(k)}</b>
-      <div class="hint">${esc(String(v))}${note?' — '+esc(note):''}</div></span></div>`)
+      <div class="hint">${esc(String(v))}${note?'. '+esc(note):''}</div></span></div>`)
     .join('')||'<div class="empty">No server details available.</div>';
 }
-function openTags(){return openKnowledge('topics')}
-function openEntities(){return openKnowledge('entities')}
 function showKnowledge(tab){
-  knowledgeTab=tab;
-  for(const name of['topics','entities','forgotten','maintenance']){
+  for(const name of['entities','forgotten','maintenance']){
     document.getElementById('kpanel-'+name).hidden=name!==tab;
     document.getElementById('ktab-'+name).setAttribute('aria-pressed',name===tab);
   }
@@ -1543,7 +1590,7 @@ async function loadRetiredEntities(){
   if(!rows.length){el.innerHTML='<div class="empty">No removed names.</div>';return}
   el.innerHTML=rows.map(row=>`<div class="tagrow"><span class="name">
     ${esc(row.name)}
-    <div class="hint">${esc(row.entity_type||'no type')}
+    <div class="hint">${esc(row.entity_type?typeLabel(row.entity_type):'no type')}
       · removed ${esc((row.retired_at||'').slice(0,10))}${row.reason?' · '+esc(row.reason):''}</div></span>
     <button class="act" title="bring this name back, with the evidence that still exists"
       onclick='restoreEntity(${JSON.stringify(row.entity_id)})'>restore</button></div>`).join('');
@@ -1711,7 +1758,7 @@ async function decideUpkeep(kind,id,decision,button){
   lastQueue=lastQueue.filter(item=>!(item.kind===kind&&item.id===id));
   renderUpkeepQueue(lastQueue);
   // merges and removals show up elsewhere without a reload
-  await Promise.all([loadTags(),loadEntities(),loadStats(),loadMapData()]);
+  await Promise.all([loadEntities(),loadSearchFilters(),loadStats(),loadMapData()]);
   if(kind==='conflict')loadAll();
 }
 async function decideFolded(kind,button){
@@ -1726,7 +1773,7 @@ async function decideFolded(kind,button){
   }catch(error){
     alert('Some of those could not be applied. The list has been refreshed.');
   }
-  await Promise.all([loadUpkeep(),loadTags(),loadEntities(),loadStats(),loadMapData()]);
+  await Promise.all([loadUpkeep(),loadEntities(),loadSearchFilters(),loadStats(),loadMapData()]);
 }
 function renderUpkeepPasses(info){
   const el=document.getElementById('upkeeplist');
@@ -1787,93 +1834,180 @@ async function runPass(url,button,key){
   finally{ button.disabled=false;button.textContent=original; }
   const when=new Date().toLocaleTimeString();
   const line=failed?`${when} - failed: ${failed}`:`${when} - ${describePass(result)}`;
-  await Promise.all([loadUpkeep(),loadTags(),loadEntities(),loadStats(),loadMapData()]);
+  await Promise.all([loadUpkeep(),loadEntities(),loadSearchFilters(),loadStats(),loadMapData()]);
   const after=document.getElementById('passlog-'+key);
   if(after){ after.textContent=line; after.classList.add(failed?'err':'ran'); }
 }
-function tagSel(){return[...document.querySelectorAll('.tagrow input:checked')].map(c=>c.value)}
-function updateSel(){
-  const n=tagSel().length;
-  document.getElementById('tagsel').textContent=n?`${n} selected`:'none selected';
-}
-async function loadTags(){
-  allTags=(await api('/api/v1/categories'))
-    .sort((a,b)=>a.category.localeCompare(b.category));
-  renderTags();
-}
-// Filtering redraws from the cached list: a store with hundreds of tags is
-// unusable as one long scroll, and refetching on every keystroke is wasteful.
-function renderTags(){
-  const el=document.getElementById('taglist');
-  const needle=(document.getElementById('tagsearch')?.value||'').trim().toLowerCase();
-  if(!allTags.length){el.innerHTML='<div class="empty">No tags yet.</div>';return}
-  const shown=needle?allTags.filter(t=>t.category.toLowerCase().includes(needle)):allTags;
-  if(!shown.length){
-    el.innerHTML=`<div class="empty">No tag matches "${esc(needle)}".</div>`;return;
-  }
-  el.innerHTML=(needle?`<div class="hint">${shown.length} of ${allTags.length} tags</div>`:'')
-   +shown.map(topic=>`<div class="tagrow">
-    <input type="checkbox" value="${esc(topic.category)}" onchange="updateSel()">
-    <span class="name"><b>${esc(topic.category)}</b> <span class="cnt">${topic.count}</span>
-      ${topic.synthetic?'<span class="syn">synthetic parent</span>':''}</span>
-    <button class="act" title="rename this tag everywhere" onclick='renameTag(${jsArg(topic.category)})'>rename</button>
-    <button class="act del" title="delete this tag from all memories" onclick='deleteTag(${jsArg(topic.category)})'>delete</button>
-  </div>`).join('');
-  updateSel();
-}
+// -- tags: deleted, and merged as suggested, on every memory filed under them
 async function tagOp(body){
-  const result=await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(body)});
-  await Promise.all([loadTags(),loadSearchFilters(),loadMapData()]);activeMapKey=null;clearMapEntityDetail();loadAll();return result;
+  await api('/api/v1/tags/edit',{method:'POST',body:JSON.stringify(body)});
+  activeMapKey=null;clearMapEntityDetail();
+  await Promise.all([loadEntities(),loadSearchFilters(),loadMapData()]);
+  await search();
 }
-async function renameTag(tag){
-  const to=prompt('Rename tag "'+tag+'" to:',tag);if(!to||to.trim()===tag)return;
-  await tagOp({op:'rename',tag,to:to.trim()});
-}
-async function deleteTag(tag){
-  if(!confirm('Delete tag "'+tag+'" from all memories? The memories stay.'))return;
+async function deleteTagEntity(id){
+  const tag=tagNames[id];
+  if(!tag||!confirm('Delete tag "'+tag+'" from all memories? The memories stay.'))return;
   await tagOp({op:'delete',tag});
-}
-async function mergeTags(){
-  const selected=tagSel();if(selected.length<2)return alert('Check at least two tags to combine.');
-  const to=prompt('Combine '+selected.length+' tags into one named:',selected[0]);
-  if(!to||!to.trim())return;
-  await tagOp({op:'merge',tags:selected,to:to.trim()});
+  if(document.getElementById('entitydetail').dataset.entityId===id)closeEntity();
 }
 async function suggestMerges(){
-  const box=document.getElementById('tagsuggest');box.innerHTML='<div class="hint">thinking...</div>';
+  const box=document.getElementById('tagsuggest');
+  box.innerHTML='<div class="hint">Looking for tags that name one subject...</div>';
   const groups=await api('/api/v1/tags/suggest-merges');
-  await loadTags();
-  if(!groups.length){box.innerHTML='<div class="hint">Obvious plural/format duplicates were merged automatically. No other variants found.</div>';return}
-  box.innerHTML=groups.map((group,index)=>`<div class="tagrow" id="sg${index}">
-    <span class="name">merge <b>${group.variants.map(esc).join('</b>, <b>')}</b> into <b>${esc(group.canonical)}</b></span>
-    <button class="act" onclick='applyMerge(${jsArg(group)},${index})'>apply</button>
-    <button class="act del" onclick="document.getElementById('sg${index}').remove()">dismiss</button>
+  await Promise.all([loadEntities(),loadSearchFilters()]);
+  if(!groups.length){box.innerHTML='<div class="hint">Tags that differed only in format or plural were combined. No other tags look like one subject. People and things are compared on their own: see Merge proposals below.</div>';return}
+  box.innerHTML='<div class="hint">These cover tags only. People and things that may be one are under Merge proposals below.</div>'
+    +groups.map((group,index)=>`<div class="tagrow" id="sg${index}">
+    <span class="name">combine <b>${group.variants.map(esc).join('</b>, <b>')}</b> into <b>${esc(group.canonical)}</b></span>
+    <button class="act" onclick='applyMerge(${jsArg(group)},${index})' title="File every memory of these tags under the last one.">apply</button>
+    <button class="act del" onclick="document.getElementById('sg${index}').remove()" title="Hide this suggestion. Nothing changes.">dismiss</button>
   </div>`).join('');
 }
 async function applyMerge(group,index){
   await tagOp({op:'merge',tags:group.variants,to:group.canonical});
   const row=document.getElementById('sg'+index);if(row)row.remove();
 }
+
+// -- the Entities tab: people, things and tags in one list ------------------
+// A tag is an entity of the type "topic", shown as "tag". The list is drawn
+// again from what was loaded, so a type chip or the name filter costs no
+// request. A type can hold hundreds of names, so each is capped until asked.
+const ENTITY_ROW_CAP=12,ENTITY_TYPE_CAP=200;
+const DELETE_TAG_TITLE='Take this tag off every memory filed under it. The memories stay.';
+const HUB_TITLE='Hide the people and things that are not hubs. A name is a hub when the name screen called it a named thing, or it is a person, organization, project, product or place, or, without a verdict from the screen, two memories mention it. A name the screen called a value or a role is not. Tags stay listed.';
+function renameTitle(tag){
+  return tag?'Rename this tag on every memory filed under it.':'Change the name. The old name stays as an alias.';
+}
+let entityRows=[],entityRelations=0,entityType='all',entitySelected=new Set(),
+  entityExpanded=new Set(),hubsOnly=false,syntheticTags=new Set();
+// Tag names by entity id: a tag is deleted, and filtered on, by its name.
+const tagNames={};
+function tagKey(entity){return String(entity.normalized||entity.name||'').trim().toLowerCase()}
+function rememberTag(entity){if(entity&&entity.entity_type===TAG_TYPE)tagNames[entity.id]=tagKey(entity)}
 async function loadEntities(){
-  const [entities,relations,proposals]=await Promise.all([
+  const [entities,relations,proposals,synthetic]=await Promise.all([
     api('/api/v1/entities?limit=100000&include_merged=true&kind=any'),
     api('/api/v1/relations?limit=2000'),
-    api('/api/v1/entities/proposals?asked=true')]);
-  knowledgeNames={};entities.forEach(entity=>knowledgeNames[entity.id]=entity.name);
-  const names=entities.filter(entity=>!entity.merged_into);
-  const active=showAllNames?names:names.filter(entity=>entity.hub);
-  document.getElementById('entcount').innerHTML=esc(active.length+(showAllNames?' names':' hubs')
-    +' of '+names.length+' names, '+relations.length+' relations')
-    +' <button class="act" onclick="toggleAllNames()" title="A name is a hub when the name screen called it a named thing, or it is a person, organization, project, product or place, or, without a verdict from the screen, two memories mention it. A name the screen called a value or a role is not.">'
-    +(showAllNames?'hubs only':'show every name')+'</button>';
-  const byType={};
-  active.forEach(entity=>(byType[entity.entity_type||'untyped']??=[]).push(entity));
-  entityGroups=byType;
-  renderEntityGroups();
+    api('/api/v1/entities/proposals?asked=true'),
+    api('/api/v1/tags/synthetic').catch(()=>[])]);
+  knowledgeNames={};
+  entities.forEach(entity=>{knowledgeNames[entity.id]=entity.name;rememberTag(entity)});
+  entityRows=entities.filter(entity=>!entity.merged_into);
+  entityRelations=relations.length;
+  syntheticTags=new Set((Array.isArray(synthetic)?synthetic:[]).map(tag=>String(tag.tag).toLowerCase()));
+  const live=new Set(entityRows.map(entity=>entity.id));
+  entitySelected=new Set([...entitySelected].filter(id=>live.has(id)));
+  renderEntityList();
   document.getElementById('proplist').innerHTML=proposals.length?proposals.map(proposal=>`<div class="tagrow"><span class="name">
     <b>${esc(knowledgeNames[proposal.entity_a]||proposal.entity_a)}</b> and <b>${esc(knowledgeNames[proposal.entity_b]||proposal.entity_b)}</b></span>
     <button class="act" onclick='decideProposal(${JSON.stringify(proposal.id)},"confirm",this)'>merge</button>
     <button class="act del" onclick='decideProposal(${JSON.stringify(proposal.id)},"reject",this)'>keep separate</button></div>`).join(''):'<div class="empty">Nothing to decide. Memry compares a waiting pair again once one of its two entities has more memories.</div>';
+}
+// What the tab shows of ``rows``: those whose name holds ``needle`` and, with
+// ``hubs``, only the people and things that are hubs (a tag is never one, and
+// stays). One chip per type counts them; the groups hold the rows of the type
+// picked, or of every type, each capped until it is expanded.
+function entityListView(rows,{type='all',needle='',hubs=false,expanded=new Set()}={}){
+  const q=String(needle).trim().toLowerCase();
+  const shown=rows.filter(entity=>!entity.merged_into
+    &&(!hubs||entity.hub||entity.entity_type===TAG_TYPE)
+    &&(!q||String(entity.name).toLowerCase().includes(q)));
+  const byType={};
+  shown.forEach(entity=>(byType[entity.entity_type||'untyped']??=[]).push(entity));
+  const order=Object.keys(byType).sort((a,b)=>typeLabel(a).localeCompare(typeLabel(b)));
+  const chips=[{type:'all',label:'all',count:shown.length},
+    ...order.map(key=>({type:key,label:typeLabel(key),count:byType[key].length}))];
+  if(type!=='all'&&!byType[type])chips.push({type,label:typeLabel(type),count:0});
+  const cap=type==='all'?ENTITY_ROW_CAP:ENTITY_TYPE_CAP;
+  const groups=(type==='all'?order:[type]).map(key=>{
+    const all=(byType[key]||[]).slice().sort((a,b)=>a.name.localeCompare(b.name));
+    const listed=expanded.has(key)?all:all.slice(0,cap);
+    return {type:key,label:typeLabel(key),rows:listed,total:all.length,hidden:all.length-listed.length,cap};
+  });
+  return {chips,groups,total:shown.length};
+}
+function entityRow(entity){
+  const tag=entity.entity_type===TAG_TYPE,id=entity.id,count=entity.memories||0;
+  const synthetic=tag&&syntheticTags.has(tagKey(entity))?' <span class="syn">synthetic parent</span>':'';
+  return `<div class="tagrow">
+    <input type="checkbox" value="${esc(id)}"${entitySelected.has(id)?' checked':''} onchange='pickEntity(${jsArg(id)},this.checked)' title="Check to combine it with the other checked entries.">
+    <span class="name"><button class="entity-link" onclick='openEntity(${jsArg(id)})' title="Open it: what is known, its memories, and what you can change.">${entity.home?`<span class="cnt">${esc(entity.home.name)} / </span>`:''}${esc(entity.name)}</button>
+      <span class="cnt" title="${count} memor${count===1?'y':'ies'}">${count}</span>${synthetic}</span>
+    <button class="act" onclick='renameEntity(${jsArg(id)})' title="${renameTitle(tag)}">rename</button>
+    ${tag?`<button class="act del" onclick='deleteTagEntity(${jsArg(id)})' title="${DELETE_TAG_TITLE}">delete</button>`:''}
+  </div>`;
+}
+function renderEntityList(){
+  const needle=document.getElementById('entsearch')?.value||'';
+  const view=entityListView(entityRows,{type:entityType,needle,hubs:hubsOnly,expanded:entityExpanded});
+  document.getElementById('enttypes').innerHTML=view.chips.map(chip=>
+    `<button aria-pressed="${chip.type===entityType}" onclick='setEntityType(${jsArg(chip.type)})' title="${chip.type==='all'?'Show every type.':'Show only the entries of this type.'}">${esc(chip.label)}<span class="cnt">${chip.count}</span></button>`).join('');
+  const all=entityRows.length;
+  document.getElementById('entcount').innerHTML=esc((view.total===all?all+' names':view.total+' of '+all+' names')
+    +', '+entityRelations+' relations')
+    +` <button class="act" onclick="toggleHubsOnly()" aria-pressed="${hubsOnly}" title="${hubsOnly?'List every name again.':HUB_TITLE}">${hubsOnly?'every name':'hubs only'}</button>`;
+  updateEntitySel();
+  const el=document.getElementById('entlist');
+  if(!all){el.innerHTML='<div class="empty">No entities yet.</div>';return}
+  if(!view.groups.some(group=>group.total)){
+    el.innerHTML=`<div class="empty">${needle.trim()?`No name matches "${esc(needle.trim())}".`:'Nothing of this type.'}</div>`;return;
+  }
+  el.innerHTML=view.groups.filter(group=>group.total).map(group=>{
+    let more='';
+    if(group.hidden>0)more=`<div class="tagrow"><button class="act" onclick='toggleEntityType(${jsArg(group.type)})'>show ${group.hidden} more</button></div>`;
+    else if(entityExpanded.has(group.type)&&group.total>group.cap)more=`<div class="tagrow"><button class="act" onclick='toggleEntityType(${jsArg(group.type)})'>show less</button></div>`;
+    return `<div class="ent-group"><span>${esc(group.label)}</span><span class="cnt">${group.total}</span></div>`
+      +group.rows.map(entityRow).join('')+more;
+  }).join('');
+}
+function setEntityType(type){entityType=type;renderEntityList()}
+function toggleEntityType(type){
+  entityExpanded.has(type)?entityExpanded.delete(type):entityExpanded.add(type);
+  renderEntityList();
+}
+function toggleHubsOnly(){hubsOnly=!hubsOnly;renderEntityList()}
+// The combine panel offers what was checked when it opened, so a change closes it.
+function pickEntity(id,on){on?entitySelected.add(id):entitySelected.delete(id);closeCombine();updateEntitySel()}
+function updateEntitySel(){
+  const n=entitySelected.size;
+  document.getElementById('entsel').textContent=n?`${n} selected`:'none selected';
+}
+// One is kept and the rest go into it (``/entities/merge``), tags too. The
+// store always files a tag combined with a person or thing under that one, so
+// with one among the checked only a person or thing is offered to keep.
+function combineKeepOptions(picked){
+  const things=picked.filter(entity=>entity.entity_type!==TAG_TYPE);
+  return things.length?things:picked;
+}
+async function combineSelected(){
+  const picked=entityRows.filter(entity=>entitySelected.has(entity.id));
+  if(picked.length<2){alert('Check at least two to combine.');return}
+  const memories=n=>`${n} memor${n===1?'y':'ies'}`;
+  const box=document.getElementById('entcombine');
+  box.innerHTML=`<div class="hint" style="margin:0">Combine ${picked.length} into one. Pick the one to keep: the others go into it with their memories. With a person or thing checked, a tag goes into it. To give the result a new name, rename it afterwards. Archive, Merged names can undo a merge into a person or thing; two tags combined stay one.</div>
+    <div class="entity-duplicate"><select id="entcombinekeep" title="The one that stays. The others go into it.">${combineKeepOptions(picked).map(entity=>`<option value="${esc(entity.id)}">${esc(entity.name)} · ${esc(typeLabel(entity.entity_type))} · ${memories(entity.memories||0)}</option>`).join('')}</select>
+      <button class="primary" onclick="applyCombine()" title="Combine the checked entries into the one picked here.">Combine</button>
+      <button onclick="closeCombine()" title="Close this and change nothing.">Cancel</button></div>`;
+  box.hidden=false;
+}
+function closeCombine(){const box=document.getElementById('entcombine');box.hidden=true;box.innerHTML=''}
+async function applyCombine(){
+  const keepId=document.getElementById('entcombinekeep').value;
+  const picked=entityRows.filter(entity=>entitySelected.has(entity.id));
+  const keep=picked.find(entity=>entity.id===keepId);if(!keep)return;
+  const others=picked.filter(entity=>entity.id!==keepId);
+  if(!confirm(`Combine ${others.map(entity=>entity.name).join(', ')} into ${keep.name}? Memories and names are kept.`))return;
+  const refused=[];
+  for(const other of others){
+    const result=await api('/api/v1/entities/merge',{method:'POST',body:JSON.stringify({keep_id:keepId,merge_id:other.id})});
+    if(result.error)refused.push(other.name+': '+result.error);
+  }
+  if(refused.length)alert('Not combined: '+refused.join('; '));
+  closeCombine();entitySelected.clear();
+  await Promise.all([loadEntities(),loadStats(),loadMapData(),loadSearchFilters()]);
+  await search();
+  await openEntity(keepId);
 }
 // Where this entity belongs and what belongs to it. Both are worked out from
 // the memories, so there is nothing here to file by hand.
@@ -1884,7 +2018,7 @@ function placeBlock(detail){
   if(detail.parts&&detail.parts.length)lines.push(`${detail.parts.length} part${detail.parts.length===1?'':'s'}: `
     +detail.parts.slice(0,40).map(part=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(part.id)})'>${esc(part.name)}</button>`).join(', ')
     +(detail.parts.length>40?` <span class="cnt">and ${detail.parts.length-40} more</span>`:''));
-  if(detail.entity&&detail.entity.entity_type==='topic')lines.push('<span class="cnt">A tag: the memories below are filed under it. Rename it here or on the Tags page; delete it there.</span>');
+  if(detail.entity&&detail.entity.entity_type==='topic')lines.push('<span class="cnt">A tag: the memories below are filed under it.</span>');
   else if(!detail.hub)lines.push('<span class="cnt">Not on the map: so far this is a phrase on its memories. That changes when the evidence does.</span>');
   return lines.length?`<div class="hint">${lines.join('<br>')}</div>`:'';
 }
@@ -1899,14 +2033,16 @@ async function openEntity(id){
   // Clicking one entity and then another before the first had loaded let the
   // slower reply win, so the panel showed the one you had moved away from.
   if(box.dataset.entityId!==id)return;
-  const entity=detail.entity,aliases=detail.aliases||[];
-  box.innerHTML=`<div class="detail"><h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button><span id="knowledgeentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(entity.entity_type)}</span>`:''}</h3>
+  const entity=detail.entity,aliases=detail.aliases||[],tag=entity.entity_type==='topic';
+  if(tag)rememberTag(entity);
+  box.innerHTML=`<div class="detail"><h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button><span id="knowledgeentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(typeLabel(entity.entity_type))}</span>`:''}</h3>
     <div id="knowledgeentityidentity">${entityIdentityBlock(entity,aliases)}</div>
     <div class="entity-actions">
-      <button class="act" onclick='renameEntity(${JSON.stringify(id)})' title="Change this entity's canonical name; the old name remains an alias.">rename</button>
-      <button class="act" onclick='addAlias(${JSON.stringify(id)})' title="Add another name for this entity.">add alias</button>
-      <button class="act" onclick='toggleKnowledgeDuplicatePicker(this,${JSON.stringify(id)})' title="Say this is the same thing as another entity, and combine the two.">is duplicate of...</button>
-      ${entity.entity_type==='topic'?'':`<button class="act danger" onclick='removeEntity(${JSON.stringify(id)},${detail.memories.length})' title="Remove this name; if more than one memory mentions it, it is kept as a tag on them.">not an entity</button>`}
+      <button class="act" onclick='renameEntity(${JSON.stringify(id)})' title="${renameTitle(tag)}">rename</button>
+      ${tag?'':`<button class="act" onclick='addAlias(${JSON.stringify(id)})' title="Add another name for this entity.">add alias</button>`}
+      <button class="act" onclick='toggleKnowledgeDuplicatePicker(this,${JSON.stringify(id)})' title="Say this is the same as another entity, and combine the two.">is duplicate of...</button>
+      ${tag?`<button class="act danger" onclick='deleteTagEntity(${JSON.stringify(id)})' title="${DELETE_TAG_TITLE}">delete tag</button>`
+        :`<button class="act danger" onclick='removeEntity(${JSON.stringify(id)},${detail.memories.length})' title="Remove this name. If more than one memory mentions it, it is kept as a tag on them.">not an entity</button>`}
     </div>
     <div class="entity-duplicate" id="knowledgeduplicatepicker" data-memories="${detail.memories.length}" hidden>
       <select id="knowledgeduplicatetarget" onchange="document.getElementById('knowledgeduplicatebtn').disabled=!this.value" title="Choose the entity this is a duplicate of.">
@@ -1948,7 +2084,7 @@ function knowledgeEntityTargetOptions(entities,entityId){
     .sort((a,b)=>a.name.localeCompare(b.name)||(b.memories||0)-(a.memories||0))
     .map(entity=>{
       const count=entity.memories||0;
-      return `<option value="${esc(entity.id)}" data-name="${esc(entity.name)}" data-memories="${count}">${esc(entity.name)} · ${esc(entity.entity_type||'untyped')} · ${count} memor${count===1?'y':'ies'}</option>`;
+      return `<option value="${esc(entity.id)}" data-name="${esc(entity.name)}" data-memories="${count}">${esc(entity.name)} · ${esc(typeLabel(entity.entity_type))} · ${count} memor${count===1?'y':'ies'}</option>`;
     })
     .join('');
 }
@@ -1979,37 +2115,8 @@ async function mergeKnowledgeEntity(entityId){
   if(!confirm(`Combine ${name} (${memories(own)}) into ${target.name} (${memories(target.memories)})? Memories and aliases will be preserved.`))return;
   const result=await api('/api/v1/entities/merge',{method:'POST',body:JSON.stringify({keep_id:targetId,merge_id:entityId})});
   if(result.error){alert(result.error);return}
-  await Promise.all([loadEntities(),loadStats(),loadMapData()]);
+  await Promise.all([loadEntities(),loadStats(),loadMapData(),loadSearchFilters()]);
   await openEntity(result.kept_id||targetId);
-}
-// A type like "concept" can hold hundreds of entities. Listing them all turns
-// the tab into one long scroll, so each type is capped until asked to expand.
-const ENTITY_ROW_CAP=12;
-let entityGroups={},entityExpanded=new Set();
-function toggleEntityType(type){
-  entityExpanded.has(type)?entityExpanded.delete(type):entityExpanded.add(type);
-  renderEntityGroups();
-}
-let showAllNames=false;
-function toggleAllNames(){showAllNames=!showAllNames;loadEntities()}
-function renderEntityGroups(){
-  const el=document.getElementById('entlist');
-  const types=Object.keys(entityGroups).sort();
-  if(!types.length){el.innerHTML='<div class="empty">No entities yet.</div>';return}
-  el.innerHTML=types.map(type=>{
-    const all=entityGroups[type].slice().sort((a,b)=>a.name.localeCompare(b.name));
-    const open=entityExpanded.has(type);
-    const shown=open?all:all.slice(0,ENTITY_ROW_CAP);
-    const hidden=all.length-shown.length;
-    const links=shown.map(e=>`<button class="entity-link" onclick='openEntity(${JSON.stringify(e.id)})'>${e.home?`<span class="cnt">${esc(e.home.name)} / </span>`:''}${esc(e.name)}</button>`).join(', ');
-    let more='';
-    if(hidden>0)more=` <button class="act" onclick='toggleEntityType(${jsArg(type)})'>show ${hidden} more</button>`;
-    else if(open&&all.length>ENTITY_ROW_CAP)more=` <button class="act" onclick='toggleEntityType(${jsArg(type)})'>show less</button>`;
-    return `<div class="tagrow">
-      <span class="syn entity-type">${esc(type)}</span>
-      <span class="name">${links}${more}</span>
-      <span class="cnt">${all.length}</span></div>`;
-  }).join('');
 }
 // A button rather than a field, so rename, add alias and not an entity read as
 // the three things you can do to a name. Rename asks the same way.
@@ -2904,13 +3011,18 @@ def create_app(
         return JSONResponse(cats)
 
     async def knowledge_map_route(request: Request) -> Response:
-        """All active map aggregates, without memory text or card pagination."""
+        """All active map aggregates, without memory text or card pagination.
+        ``kind=any`` draws tags too, as entities of the type "topic"."""
         q = request.query_params
+        kind = q.get("kind") or "named"
+        if kind not in ("named", "any"):
+            return JSONResponse({"error": "kind is named or any"}, status_code=400)
         data = await run_in_threadpool(partial(
             store.knowledge_map,
             user_id=_p(request).namespace(q.get("user_id")),
             agent_id=q.get("agent_id"),
             run_id=q.get("run_id"),
+            kind=kind,
         ))
         return JSONResponse(data)
 

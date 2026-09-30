@@ -232,7 +232,7 @@ merge-proposal review under **Upkeep** matters as much as it did before.
 | Reconcile | The action and its target. The text model writes the merged sentence for an UPDATE; without one, the old memory is kept and superseded by the new one, so no text is lost. A contradiction only replaces a memory on its own where little is at stake; see below. |
 | How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. Off unless `MEMRY_DURABILITY=1` (`decay.durability`), for the scheduler and "run now" alike; the score does not move a memory's `updated_at`. |
 | Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. Word-for-word duplicates merge on their own; a merge the model proposed waits under Upkeep, because that judgement has not been measured. |
-| Tag drift | Two tags merge on their own when the provider, shown each with its 10 most recent memories and asked in both orders, puts P(same subject) at 0.55 or more (measured for Jev on 379 tag pairs of a real store; a text model is not asked). **Suggest merges** on the **Tags** tab asks the same question at the same bar about the tags nothing else flagged, when at most 20 are left, and only suggests: a tag changes when you apply the suggestion. |
+| Tag drift | Two tags merge on their own when the provider, shown each with its 10 most recent memories and asked in both orders, puts P(same subject) at 0.55 or more (measured for Jev on 379 tag pairs of a real store; a text model is not asked). **Suggest merges** on the **Entities** tab of Upkeep asks the same question at the same bar about the tags nothing else flagged, when at most 20 are left, and only suggests: a tag changes when you apply the suggestion. |
 | Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna, gpt-5-mini), and is refused for one that was not. Where it is on, `retrieval.relational_relevance` "auto" (the default) has the provider judge the first 20 of every search, filtered or not, in the linked search's order when the question names a hub and in the text ranking's otherwise, and the results are ordered by that judgement. `"vector"` judges no search: a question naming a hub is ordered by the property vectors, and one naming none by the text ranking. |
 
 ### The settings, and where they came from
@@ -362,7 +362,7 @@ memry tags-to-things --dry-run   # tags to topic entities (done at first open): 
 Tags are entities of type `topic`. A database or backup from before that change keeps its
 tags in the `categories` column and the legacy `topics`/`memory_topics` tables, which every
 filter still reads. The first open of such a database gives each tag its topic entity and
-each tagged memory its mention, so the Tags page and the tag counts see them, committing
+each tagged memory its mention, so the Entities list and the tag counts see them, committing
 user by user and recording that it did so after the last (an open stopped midway picks up
 where it stopped); `memry tags-to-things [--user USER]` runs the same migration by hand. It
 only reads the legacy tables, and a second run changes nothing.
@@ -375,11 +375,13 @@ are invalidated (auditable, recoverable), never destroyed.
 
 ## Managing topics and entities
 
-The dashboard's **Upkeep** button opens four tabs: Upkeep (what needs you), Entities, Tags, and
+The dashboard's **Upkeep** button opens three tabs: Upkeep (what needs you), Entities, and
 Archive (what was removed). A badge on the button counts what is waiting.
-Tags show memory counts, can be filtered by name, and can be renamed, combined, or deleted
-under the current user filter. The same topic operations remain available at
-`POST /api/v1/tags/edit` for API compatibility.
+Entities lists people, things and tags together, with a filter per type (tags are the type
+"tag") and by name. Each shows its memory count; a tag can be renamed, combined, or
+deleted under the current user filter, and checked entries of any type can be combined.
+The same topic operations remain available at `POST /api/v1/tags/edit` for API
+compatibility.
 
 An optional, off-by-default LLM pass proposes higher-level parents for browsing, such as
 `health` over `liver health` and `weekly gym`. Leave it off unless you want that navigation
@@ -388,8 +390,8 @@ adds candidates without adding coverage (`MEMRY_TAG_ABSTRACTION=on`,
 `MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7`, or `memry abstract-tags`; the config switch is the
 only way into the upkeep cycle). Memry stores hierarchy edges and expands a parent filter at
 query time; it does not copy the parent label onto each memory. Tag counts
-(`/api/v1/categories`, the Tags page) are direct and do not roll a parent up; recorded
-parents are listed at `GET /api/v1/tags/synthetic`.
+(`/api/v1/categories`, the tags in the Entities list) are direct and do not roll a parent
+up; recorded parents are listed at `GET /api/v1/tags/synthetic`.
 
 Entities open as hubs with aliases, a bounded description, and active
 supporting memories. Relations are listed under the entity they describe and can open their

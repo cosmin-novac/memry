@@ -961,10 +961,11 @@ def test_the_dashboard_lists_tags_as_topic_entities():
         store.close()
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node renders the tag page")
-def test_the_dashboard_tag_page_renders_from_topic_entities():
-    """The tag page draws the counts of the topic entities: a tag with no
-    legacy index row is listed, a synthetic parent adds no rolled-up row."""
+@pytest.mark.skipif(shutil.which("node") is None, reason="node renders the entity list")
+def test_the_dashboard_entity_list_draws_tags_from_topic_entities():
+    """The Entities list draws each tag from its topic entity, with its
+    count: a tag with no legacy index row is listed, a synthetic parent adds
+    no rolled-up row, and a tag reads "tag"."""
     import re
 
     from memry.models import SyntheticTag
@@ -981,33 +982,99 @@ def test_the_dashboard_tag_page_renders_from_topic_entities():
             store.backend._db.commit()
         with TestClient(create_app(store)) as client:
             html = client.get("/").text
-            categories = client.get("/api/v1/categories").json()
+            replies = {path: client.get(path).json() for path in (
+                "/api/v1/entities?limit=100000&include_merged=true&kind=any",
+                "/api/v1/relations?limit=2000",
+                "/api/v1/entities/proposals?asked=true",
+                "/api/v1/tags/synthetic")}
     finally:
         store.close()
     source = "\n".join(re.findall(r"<script>(.*?)</script>", html, re.S))
     helpers = "\n".join(source[source.index(start):source.index("\n", source.index(start))]
-                        for start in ("function esc(s)", "function jsArg(v)"))
-    page = source[source.index("function tagSel()"):source.index("async function tagOp(")]
-    contract = helpers + "\nlet allTags=[];\n" + r"""
-const nodes={taglist:{innerHTML:''},tagsearch:{value:''},tagsel:{textContent:''}};
-const document={getElementById:id=>nodes[id],querySelectorAll:()=>[]};
-let asked=null;
-const api=async path=>{asked=path;return JSON.parse(process.argv[2])};
+                        for start in ("function esc(s)", "function typeLabel(",
+                                      "function jsArg(v)", "const TAG_TYPE="))
+    page = source[source.index("const ENTITY_ROW_CAP="):source.index("// One is kept and the rest go into it")]
+    contract = helpers + "\nlet knowledgeNames={};\n" + r"""
+const nodes={};
+const document={getElementById:id=>(nodes[id]??={innerHTML:'',textContent:'',value:''})};
+const replies=JSON.parse(process.argv[2]);
+const api=async path=>replies[path];
 """ + page + r"""
 function check(condition,message){if(!condition)throw new Error(message)}
 (async()=>{
-  await loadTags();
-  const html=nodes.taglist.innerHTML;
-  check(asked==='/api/v1/categories','the page reads the categories endpoint');
-  const rows=[...html.matchAll(/<b>([^<]+)<\/b> <span class="cnt">(\d+)<\/span>/g)]
+  await loadEntities();
+  const html=nodes.entlist.innerHTML;
+  const rows=[...html.matchAll(/\)'[^>]*>([^<]+)<\/button>\s*<span class="cnt"[^>]*>(\d+)<\/span>/g)]
     .map(m=>m[1]+'='+m[2]);
   check(rows.join()==='diet=1,work=2','rows: '+rows.join());
-  check(!html.includes('synthetic parent'),'no parent row');
+  check(html.includes('<div class="ent-group"><span>tag</span>'),'tags read "tag"');
+  check(!html.includes('>topic<'),'never "topic"');
+  check(!html.includes('synthetic parent')&&!html.includes('life'),'no parent row');
 })().catch(e=>{console.error(e.message);process.exit(1)});
 """
-    result = subprocess.run(["node", "-", json.dumps(categories)], input=contract,
+    result = subprocess.run(["node", "-", json.dumps(replies)], input=contract,
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_tags_combined_through_the_entity_merge_are_filed_as_the_tag_merge_files_them():
+    """The Entities list combines tags as it combines anything, by id into the
+    one kept (``/entities/merge``). Every memory ends with the tags the tag
+    endpoint's merge gives it, and the counts, the topic entities and the
+    filters agree; the one difference is order: the tag endpoint moves a kept
+    tag to the end of a memory's list, the entity merge leaves it in place."""
+    from memry.rest import create_app
+
+    rows = [["Trips", "packing"], ["family", "trips"], ["family"],
+            ["cooking", "Family", "home"], ["home"], ["trips", "family", "home"]]
+
+    def build():
+        store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+        for index, tags in enumerate(rows):
+            store.add(f"memory {index}", user_id="default", infer=False, categories=tags)
+        return store
+
+    def state(store, client):
+        columns = [memory.categories for memory in sorted(
+            store.get_all(user_id="default", limit=100, include_invalid=True),
+            key=lambda memory: memory.content)]
+        counts = client.get("/api/v1/categories").json()
+        topics = sorted((row["name"], row["memories"]) for row in client.get(
+            "/api/v1/entities", params={"kind": "topic", "limit": 100}).json())
+        found = {tag: sorted(row["memory"]["content"] for row in client.post(
+                     "/api/v1/search", json={"query": "", "categories": [tag]}).json())
+                 for tag in ("trips", "family", "home")}
+        return columns, counts, topics, found
+
+    by_tag, by_entity = build(), build()
+    try:
+        with TestClient(create_app(by_tag)) as tag_client, \
+                TestClient(create_app(by_entity)) as entity_client:
+            tag_client.post("/api/v1/tags/edit", json={
+                "op": "merge", "tags": ["trips", "family", "home"], "to": "trips"})
+            scope = Scope(user_id="default")
+            keep = by_entity.backend.topic_entity("trips", scope, create=False).id
+            for name in ("family", "home"):
+                other = by_entity.backend.topic_entity(name, scope, create=False).id
+                merged = entity_client.post("/api/v1/entities/merge",
+                                            json={"keep_id": keep, "merge_id": other})
+                assert merged.json() == {"merged": True, "keep_id": keep, "merge_id": other}
+            columns, counts, topics, found = state(by_tag, tag_client)
+            columns_e, counts_e, topics_e, found_e = state(by_entity, entity_client)
+    finally:
+        by_tag.close()
+        by_entity.close()
+
+    assert [sorted(column) for column in columns_e] == [sorted(column) for column in columns]
+    assert all(len(column) == len(set(column)) for column in columns_e)
+    assert columns_e == [["trips", "packing"], ["trips"], ["trips"], ["cooking", "trips"],
+                         ["trips"], ["trips"]]
+    assert counts_e == counts == [{"category": "trips", "count": 6},
+                                  {"category": "cooking", "count": 1},
+                                  {"category": "packing", "count": 1}]
+    assert topics_e == topics
+    assert found_e == found == {"trips": [f"memory {i}" for i in range(6)],
+                                "family": [], "home": []}
 
 
 # ------------------------------------------------------------------- upkeep

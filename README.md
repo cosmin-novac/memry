@@ -199,17 +199,19 @@ memry serve --host 0.0.0.0 --port 8787
 
 The dashboard shows your memories with inline editing, filtered search, lossless JSON
 backup/restore, a unified Upkeep area, and a galaxy map aggregated over every active
-memory independently of the paginated detail list. The map groups by tag or entity, and on
-the entity side it shows hubs, with the parts of a project or product as moons on it;
-concept and other entity types are hidden by default and the type menu controls what is
-shown. Heavily-used groups gravitate to the gold core, the working set orbits in the teal
-belt, and one-off groups drift at the violet rim. Orbit-marker shapes distinguish semantic,
-procedural, episodic, and working memories. Idle link and orbit rendering is bounded for
-large stores (above 400 groups, orbit markers stay on the core and on whatever you hover
-or select); selecting a planet reveals its complete visible neighborhood and filters the
-detail list through the server. Selecting an entity also surfaces its summary, aliases, and
-rename control, with explicit controls to merge a duplicate or remove a mistaken entity without
-deleting memories. When a mistaken entity occurs in multiple memories, its name is retained as a tag.
+memory independently of the paginated detail list. The map groups by entity: it shows
+hubs, with the parts of a project or product as moons on it, and tags once their type is
+turned on; concept, other and tag are hidden by default and the type menu controls what is
+shown. Upkeep > Entities lists people, things and tags in one list filtered by type, and
+the memory list's About filter picks any of them. Heavily-used groups gravitate to the gold
+core, the working set orbits in the teal belt, and one-off groups drift at the violet rim.
+Orbit-marker shapes distinguish semantic, procedural, episodic, and working memories. Idle
+link and orbit rendering is bounded for large stores (above 400 groups, orbit markers stay
+on the core and on whatever you hover or select); selecting a planet reveals its complete
+visible neighborhood and filters the detail list through the server. Selecting an entity
+also surfaces its summary, aliases, and rename control, with explicit controls to merge a
+duplicate or remove a mistaken entity without deleting memories. When a mistaken entity
+occurs in multiple memories, its name is retained as a tag.
 Opening Upkeep temporarily unloads the map and restores it on close to avoid holding both views in memory.
 ![Memry dashboard: galaxy tag map and memory list](docs/assets/dashboard.png)
 

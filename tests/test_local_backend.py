@@ -59,22 +59,25 @@ def test_knowledge_map_aggregates_all_memories_without_content():
         )
 
     data = backend.knowledge_map(Scope(user_id="ada"))
+    tagged = backend.knowledge_map(Scope(user_id="ada"), kind="any")
 
     assert data["memories"] == 2
     assert data["entity_memories"] == 2
-    assert {node["label"]: node["count"] for node in data["tags"]} == {
-        "ai": 1,
-        "work": 2,
-    }
+    assert "tags" not in data and "tag_edges" not in data
+    # tags are drawn as the entities they are, only when asked for
+    assert {node["label"] for node in data["entities"]} == {"Ada", "RAG"}
+    assert {node["label"]: (node["entity_type"], node["count"])
+            for node in tagged["entities"] if node["entity_type"] == "topic"} == {
+        "ai": ("topic", 1), "work": ("topic", 2)}
     entities = {node["label"]: node for node in data["entities"]}
     assert entities["Ada"]["count"] == 2
     assert entities["Ada"]["type_counts"] == {"semantic": 1, "procedural": 1}
     assert entities["RAG"]["entity_type"] == "concept"
-    assert len(data["tag_edges"]) == 1
-    assert {data["tag_edges"][0]["a"], data["tag_edges"][0]["b"]} == {
-        "tag:ai", "tag:work"
-    }
-    assert data["tag_edges"][0]["weight"] == 1
+    key = {node["label"]: node["key"] for node in tagged["entities"]}
+    tag_edges = {frozenset((edge["a"], edge["b"])): edge["weight"]
+                 for edge in tagged["entity_edges"]}
+    assert tag_edges[frozenset((key["ai"], key["work"]))] == 1
+    assert tag_edges[frozenset((key["work"], key["Ada"]))] == 2
     assert data["entity_edges"][0]["weight"] == 1
     serialized = str(data)
     assert "sensitive" not in serialized

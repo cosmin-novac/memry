@@ -141,6 +141,4 @@ def test_rest_search_accepts_date_and_tag_filters():
             "/api/v1/search", json={"query": "", "entity_id": "missing"}
         ).status_code == 404
         page = client.get("/").text
-        assert all(marker in page for marker in (
-            'id="filter-date"', 'id="filter-topic"', 'id="filter-entity"'
-        ))
+        assert all(marker in page for marker in ('id="filter-date"', 'id="filter-about"'))

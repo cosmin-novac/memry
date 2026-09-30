@@ -182,6 +182,27 @@ the tag of its name included); a tag and a named thing of the same name are comp
 the entity identity funnel (without a calibrated judge the tag folds into the thing by
 rule), two tags by the tag question.
 
+The dashboard shows tags where it shows people and things. Upkeep > Entities lists every
+live entity, tags included, with one chip per type and its count (a topic reads "tag" on
+the page), a name filter and a checkbox per row. A tag is renamed there on every memory
+filed under it (`PATCH /api/v1/entities/{id}`) and deleted as the tag endpoint deletes it
+(`POST /api/v1/tags/edit`, op `delete`: the memories stay). "Combine selected..." keeps the
+one picked and merges each other entry into it (`POST /api/v1/entities/merge`); with a
+person or thing among them only a person or thing is offered to keep, since a tag combined
+with one goes into it. Two tags merged so file every memory under the tag kept, as the tag
+endpoint's merge does, except that the kept tag keeps its place in a memory's list. Suggest
+merges asks the tag question and covers tags only. The map is the entity map: tags are one
+of its types, off at first (the choice kept per browser with the other types), drawn as
+the nodes of their topic entities and linked by co-mentions like any node; the planet and
+part rules stay for named things. `GET /api/v1/map?kind=any` reads them, and `kind=named`,
+the default, reads none. On a sample store of 4,000 memories, 399 tags and 800 named things
+the map took a median of 257 ms before this change (with the old tag graph, which is gone),
+191 ms after without tags and 307 ms with them. The memory list has one About filter over
+every entity with a memory, grouped by type: a tag picked goes to `categories`, which
+reaches the tags under a broader one, and anything else to `entity_id`, as the two filters
+did before. Several picks of one kind match any of them, and a tag with a person or thing
+matches the memories that have both.
+
 Mechanical separator and singular/plural duplicates are merged deterministically once two
 real stored labels map to the same form. Semantic synonym merges remain reviewable.
 Synthetic umbrella topics are hierarchy edges, for example `health` broader than
@@ -217,7 +238,9 @@ An `entity_id` filter selects specific entities, never a type. Three things do u
    the type extraction gives a name is not evidence of another thing: it comes from one
    sentence (a shop is a `project` in most, a `product` in its listing's), so a name the
    store has joins its entity whatever type the mention gives it.
-2. **Browsing.** Upkeep > Entities groups by type, capped per group.
+2. **Browsing.** Upkeep > Entities lists every live entity, tags included, filtered by
+   type; with every type shown, each type's rows are capped until expanded. The map's type
+   menu chooses the types it draws.
 3. **Cleanup triage.** Only `concept`, `other` and `event` entities are offered to the
    non-referent review, because those are where extraction puts style instructions and
    task descriptions. A `person` is never proposed for removal.
@@ -376,12 +399,12 @@ no "same" link.
 Tags follow the same pattern (`judged_tag_merges`): candidate pairs from the name index
 (no shared-word signal for tags), judged in both orders with the 10 most recent memories
 per tag, merged from P(same subject) 0.55, compared when found and once more when both
-tags are on 10 memories. The dashboard's suggest button asks the same question through the
-same function: its last pass, when at most 20 tags are left that nothing else flagged, hands
-`judged_tag_merges` every pair of them and only suggests the groups that reach 0.55. It
-neither reads nor writes the pass's record of compared pairs, so a click never keeps the
-weekly pass from comparing a pair of its own. No tag question is asked on the names alone:
-judged on their names, "memry" read as a typo of "memory" (0.98).
+tags are on 10 memories. The Suggest merges button of Upkeep > Entities asks the same
+question through the same function: its last pass, when at most 20 tags are left that
+nothing else flagged, hands `judged_tag_merges` every pair of them and only suggests the
+groups that reach 0.55. It neither reads nor writes the pass's record of compared pairs,
+so a click never keeps the weekly pass from comparing a pair of its own. No tag question is
+asked on the names alone: judged on their names, "memry" read as a typo of "memory" (0.98).
 
 The measurements behind these numbers are in the PhD repository,
 `papers/memry-field-studies/findings/identity-obvious-merges.md` and
@@ -780,7 +803,7 @@ it.
 | MCP stdio | Optional surface | Zero-port local agent connection. |
 | MCP streamable HTTP | Optional surface | Remote agents and multiple client devices connecting to one Memry server. |
 | OAuth 2.1-style flows, DCR, and PKCE | Optional | Account sign-in for OAuth-capable MCP clients when `MEMRY_PUBLIC_URL` is configured. |
-| HTML5, CSS, vanilla JavaScript, Canvas 2D | Yes for dashboard | Server-embedded dashboard and the topic galaxy visualization; no frontend build tool or framework. |
+| HTML5, CSS, vanilla JavaScript, Canvas 2D | Yes for dashboard | Server-embedded dashboard and the galaxy map of entities (tags among them); no frontend build tool or framework. |
 
 ### Provider integrations and optional accelerators
 
@@ -865,7 +888,7 @@ up as a red run within a week instead of in a user's terminal.
 | Knowledge and login data remain in `memry.db` and `auth.db` | Knowledge restore/reset cannot overwrite credentials; a complete server backup must capture both files together. | Yes |
 | Local MCP uses `memry mcp`; remote MCP uses `/mcp` from `memry serve` | This preserves local zero-port use and one network server where configured authentication is applied. The separate unauthenticated HTTP launcher added risk without a used product case. | Yes |
 | Edited memory text is re-analyzed for entity links | Entity chips and entity filters must describe the current text, not names left behind by an older version. | Yes |
-| The UI says tags; the public backend field remains `categories`; a tag is a topic entity, and `topics`/`memory_topics` remain the filter index | Users get one familiar word without a breaking API/schema rename, and tags merge by the same machinery as names. | Yes |
+| The UI says tags; the public backend field remains `categories`; a tag is a topic entity, listed, combined and drawn with people and things in one Entities view filtered by type, and picked in one About filter that sends it to `categories`; `topics`/`memory_topics` remain the filter index | Users get one familiar word without a breaking API/schema rename, and tags merge by the same machinery as names, so one view holds every entity that machinery merges. The tag filter still reaches the tags under a broader one, which the entity filter does not. | Yes |
 | MCP saves persist raw text before acknowledgement and enrich it in one managed worker | Agent calls return after a cheap SQLite commit instead of waiting on several provider calls, while the active pending row prevents data loss and enables restart recovery without another queue system. | Yes |
 | Background work uses bounded database batches but separate prompts per memory | Bounded draining improves throughput; separate prompts preserve each user scope, provenance, retry, and failure boundary. | Yes |
 | Anthropic defaults to claude-haiku-4-5 | Memory extraction is frequent background work, so the lower-cost, lower-latency model is the useful default; operators can explicitly select a larger model when quality justifies the extra cost. | Yes |

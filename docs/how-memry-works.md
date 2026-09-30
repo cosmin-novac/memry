@@ -158,8 +158,10 @@ its 10 most recent memories); a tag and a named thing of the same name ("bildy" 
 product Bildy) through the entity pair question. A tag is never a hub and never what a
 search is about.
 
-- The **Tags** tab in the dashboard's Upkeep area lists topics A-to-Z with counts and
-  supports rename, combine, and delete operations.
+- The dashboard's Upkeep > Entities lists tags with the people and things, filtered by
+  type (a tag reads "tag"), with counts, and supports rename, combine, and delete; the map
+  draws tags once their type is turned on, and the memory list's About filter picks any
+  of them.
 - Separator and conservative singular/plural duplicates such as `food`/`foods` merge
   automatically. "Suggest merges" proposes semantic synonyms for review; distinct related
   topics remain separate.

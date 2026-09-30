@@ -9,7 +9,7 @@ from starlette.testclient import TestClient
 
 from memry.config import Config
 from memry.mcp_server import create_server
-from memry.models import Entity, EntityMention, Memory
+from memry.models import Entity, EntityMention, Memory, Scope
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
 from memry.rest import create_app
@@ -175,7 +175,8 @@ def test_rest_health_and_dashboard(client):
     assert "function setKnowledgeOpen(open)" in dashboard
     assert 'id="user"' not in dashboard
     assert dashboard.index('id="entlist"') < dashboard.index('id="entitydetail"')
-    assert ".tagrow .entity-type{flex:0 0 6.5rem" in dashboard
+    # the Entities tab heads each type's rows with the type, tags as "tag"
+    assert ".ent-group{display:flex" in dashboard
 
 
 def test_rest_crud_and_search(client):
@@ -269,7 +270,6 @@ def test_rest_map_is_complete_content_free_and_not_card_paginated():
     data = response.json()
     assert len(cards) == 100
     assert data["memories"] == 105
-    assert len(data["tags"]) == 105
     assert {node["entity_type"] for node in data["entities"]} == {
         "person",
         "concept",
@@ -277,6 +277,59 @@ def test_rest_map_is_complete_content_free_and_not_card_paginated():
     serialized = response.text
     assert "sensitive memory" not in serialized
     assert "content" not in serialized
+
+
+def test_rest_map_gives_tag_nodes_and_their_edges_only_when_asked():
+    """``kind=any`` adds each tag as the node of its topic entity, linked by
+    co-mentions like any other node; the default draws people and things
+    only, exactly as before. The old tag graph is gone."""
+    store = make_store()
+    backend = store.backend
+    ada = backend.insert_entity(Entity(name="Ada", entity_type="person", user_id="ada"))
+    lisbon = backend.insert_entity(Entity(name="Lisbon", entity_type="place", user_id="ada"))
+    rows = [(["travel", "family"], [ada]), (["travel"], [ada, lisbon]), (["work"], [lisbon])]
+    for index, (tags, mentioned) in enumerate(rows):
+        memory = backend.insert_memory(
+            Memory(content=f"memory {index}", categories=tags, user_id="ada"))
+        for entity in mentioned:
+            backend.add_mention(EntityMention(
+                entity_id=entity.id, memory_id=memory.id, surface=entity.name))
+    topic = {tag: backend.topic_entity(tag, Scope(user_id="ada"), create=False).id
+             for tag in ("travel", "family", "work")}
+
+    with TestClient(create_app(store)) as client:
+        plain = client.get("/api/v1/map", params={"user_id": "ada"}).json()
+        tagged = client.get("/api/v1/map", params={"user_id": "ada", "kind": "any"}).json()
+        refused = client.get("/api/v1/map", params={"kind": "topic"})
+
+    def edges(data):
+        return {frozenset((edge["a"], edge["b"])): edge["weight"]
+                for edge in data["entity_edges"]}
+
+    key = {name: f"entity:{entity_id}" for name, entity_id in
+           (("Ada", ada.id), ("Lisbon", lisbon.id), *topic.items())}
+    # without tags: people and things only, as before
+    assert {node["label"] for node in plain["entities"]} == {"Ada", "Lisbon"}
+    assert edges(plain) == {frozenset((key["Ada"], key["Lisbon"])): 1}
+    assert plain["entity_memories"] == 3
+    # with tags: each tag a node, and its co-mentions its edges
+    nodes = {node["label"]: node for node in tagged["entities"]}
+    assert {label: (node["entity_type"], node["count"]) for label, node in nodes.items()} == {
+        "Ada": ("person", 2), "Lisbon": ("place", 2),
+        "travel": ("topic", 2), "family": ("topic", 1), "work": ("topic", 1)}
+    assert nodes["travel"]["entity_id"] == topic["travel"]
+    assert nodes["travel"]["parts"] == []
+    assert edges(tagged) == {
+        frozenset((key["Ada"], key["Lisbon"])): 1,
+        frozenset((key["travel"], key["Ada"])): 2,
+        frozenset((key["travel"], key["family"])): 1,
+        frozenset((key["travel"], key["Lisbon"])): 1,
+        frozenset((key["family"], key["Ada"])): 1,
+        frozenset((key["work"], key["Lisbon"])): 1,
+    }
+    for data in (plain, tagged):
+        assert "tags" not in data and "tag_edges" not in data
+    assert refused.status_code == 400
 
 
 def test_rest_user_can_merge_or_remove_derived_entities_without_losing_memory():

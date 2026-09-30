@@ -2579,6 +2579,7 @@ class MemoryStore:
         user_id: str | None = None,
         agent_id: str | None = None,
         run_id: str | None = None,
+        kind: str = "named",
     ) -> dict[str, Any]:
         """Content-free aggregate graph over every active memory in scope.
 
@@ -2589,10 +2590,13 @@ class MemoryStore:
         that has a home is not a planet of its own: it rides along on its home
         as one of its ``parts``. Nothing is hidden for good, since all of this
         is recomputed from the memories each time.
+
+        With ``kind`` "any" every tag with an active memory is a planet too
+        (its topic entity): a tag is never a hub nor a home, so the rules
+        above are for named things only.
         """
         data = self.backend.knowledge_map(
-            Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        )
+            Scope(user_id=user_id, agent_id=agent_id, run_id=run_id), kind=kind)
         structure = self.entity_structure(user_id=user_id)
         nodes = data.get("entities") or []
         by_id = {node.get("entity_id"): node for node in nodes}
@@ -2604,6 +2608,9 @@ class MemoryStore:
                 info["memories"] >= 2 or entity_type == "person"))
 
         for node in nodes:
+            if node.get("entity_type") == TOPIC_TYPE:
+                planets.append(node)
+                continue
             info = structure.get(node.get("entity_id"))
             if not info or info.get("screened_out"):
                 continue
@@ -2626,7 +2633,8 @@ class MemoryStore:
             node["parts"] = mine[:24]
             node["part_count"] = len(mine)
         shown = {node["key"] for node in planets}
-        data["entity_names"] = len(nodes)
+        data["entity_names"] = sum(1 for node in nodes
+                                   if node.get("entity_type") != TOPIC_TYPE)
         data["entities"] = planets
         data["entity_edges"] = [
             edge for edge in data.get("entity_edges") or []

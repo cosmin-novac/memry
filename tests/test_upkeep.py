@@ -426,7 +426,7 @@ def test_the_button_is_upkeep_and_the_tabs_open_on_what_needs_you(client):
     page = client.get("/").text
     assert '>Upkeep<span class="badge" id="upkeepbadge" hidden></span></a>' in page
     order = [page.index(f'id="ktab-{name}"') for name in
-             ("maintenance", "entities", "topics", "forgotten")]
-    assert order == sorted(order), "Upkeep, Entities, Tags, Archive"
+             ("maintenance", "entities", "forgotten")]
+    assert order == sorted(order), "Upkeep, Entities, Archive"
     assert ">Entities</button>" in page and ">Archive</button>" in page
     assert "async function openKnowledge(tab='maintenance')" in page
