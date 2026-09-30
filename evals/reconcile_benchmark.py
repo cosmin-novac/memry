@@ -1,11 +1,14 @@
 """Reconcile on updates: does a later save retire, merge or keep what an earlier
 one said, whichever run each save belongs to?
 
-**The cases.** 47 synthetic cases (``CASES``) of 2 or 3 saves by two invented
+**The cases.** 55 synthetic cases (``CASES``) of 2 or 3 saves by two invented
 speakers, Maria and Tom: a value that changes, a correction, the same fact
 reworded, an exact restatement, a contradiction nobody announces, an added
 detail, a plan that happened, a time-bound fact, a recurring event, a
-preference that changes, a project's status. Each case runs twice on fresh
+preference that changes, a project's status, two events or things of one
+kind (two trips, injuries, deals, paintings, games), and a relative time in a
+fact that is merged (with LoCoMo conv-41's two road trips in fictional form,
+R1). Each case runs twice on fresh
 in-memory stores through ``MemoryStore.add(infer=True)``, saved as the LoCoMo
 runner saves a session: one message whose role is the speaker, with the
 context "conversation between Maria and Tom, <date>" and the save's date as
@@ -30,7 +33,12 @@ value, by rule:
 
 ``stale`` names a present-tense wording of an older value that a merged text
 must not keep; ``dated_ok`` lets a live older memory that carries its own
-date count as history (an event that stays true on its date).
+date count as history (an event that stays true on its date). ``misdated``
+names a time that a memory holding both facts and written at a later save
+must not state, unless ``anchored`` finds the date it names beside it: such a
+memory is dated at its own save, so "this week" or "the previous year" there
+reads as another time. It is checked first, whatever the rule, and fails the
+case as "misdated".
 
 **Labelled answers.** Each case also names the reconcile answers that fit each
 later save (``ok``), and a set of labelled pairs from a conversation
@@ -47,13 +55,19 @@ group, ``--jev-cap`` and ``--chat-cap``):
     python evals/reconcile_benchmark.py cases OUT.json --ledger L [--only A1,B2] [--layouts same,diff]
     python evals/reconcile_benchmark.py replay CASES.json OUT.json --ledger L
     python evals/reconcile_benchmark.py pairs PAIRS.json OUT.json --ledger L
+    python evals/reconcile_benchmark.py merges OUT.json --ledger L [--runs 3]
+    python evals/reconcile_benchmark.py merge-table OUT.json [OUT.json ...]
     python evals/reconcile_benchmark.py table CASES.json [CASES.json ...]
     python evals/reconcile_benchmark.py bars ANSWERS.json [ANSWERS.json ...]
 
 ``replay`` asks the reconcile question alone, with the current wording, on
 every state a ``cases`` run logged, for measuring a wording without saving
 anything. It and ``pairs`` write answers; ``cases`` writes stores, grades and
-the answers given on the way.
+the answers given on the way. ``merges`` asks the installed memry's merge
+writer (the text model, ``OPENAI_API_KEY``) to join each fixed pair of
+``MERGE_PAIRS`` (texts as extraction wrote them, with their dates), and
+grades the text it writes: two things of one kind must not be joined, and
+no time may move (``misdated``). LoCoMo conv-41 is P1.
 """
 
 from __future__ import annotations
@@ -349,9 +363,163 @@ CASES: list[dict[str, Any]] = [
         (42, "Maria", "The Science Fund rejected my grant proposal.")],
         new=r"reject", old=r"submitted", topic=r"grant|science fund",
         query="What happened to Maria's Science Fund grant proposal?", ok=[("CHANGED", "MORE")]),
+    # -- two events or things of one kind (must stay separate) -------------------
+    # Each pair is two trips, injuries, deals, paintings or games, the second
+    # told later and often about an earlier time. In the LoCoMo stores Jev
+    # answered such pairs MORE at 0.80 to 0.97 and one text of both was
+    # written, the second event taking the first one's date.
+    case("L1", "two of one kind", "separate", [
+        (0, "Maria", "We took the kids camping at Lake Arden last weekend; they loved the canoe."),
+        (40, "Maria", "I'll never forget our camping trip last summer, when we watched the "
+                      "northern lights from the tent.")],
+        n=2, topic=r"camp", new=r"northern lights", query="When did Maria see the northern lights?",
+        ok=[()]),
+    case("L2", "two of one kind", "separate", [
+        (0, "Tom", "I sprained my wrist playing volleyball yesterday; the doctor says it's not "
+                   "serious."),
+        (5, "Tom", "Last season I broke my ankle and needed six weeks of physical therapy before "
+                   "I could play again.")],
+        n=2, topic=r"wrist|ankle|injur|sprain", new=r"ankle",
+        query="When did Tom break his ankle?", ok=[()]),
+    case("L3", "two of one kind", "separate", [
+        (0, "Tom", "I just signed a sponsorship deal with Arvo Sports for running shoes."),
+        (150, "Tom", "Last week I signed a deal with Pinecrest, an outdoor gear company; they sent "
+                     "me a tent and hiking boots.")],
+        n=2, topic=r"deal|sponsor|arvo|pinecrest", new=r"pinecrest",
+        query="When did Tom sign with Pinecrest?", ok=[()]),
+    case("L4", "two of one kind", "separate", [
+        (0, "Maria", "I finished a painting of the harbor at sunset for the art fair."),
+        (30, "Maria", "Here's another painting I made, 'Quiet Morning': a woman reading by a "
+                      "window.")],
+        n=2, topic=r"paint", new=r"quiet morning", query="What paintings has Maria made?",
+        ok=[()]),
+    case("L5", "two of one kind", "separate", [
+        (0, "Tom", "Last night I scored 30 points, my career high, and we beat the Hawks."),
+        (150, "Tom", "Friday's game against our rivals was a memorable night: I had twelve "
+                     "assists and the arena was electric.")],
+        n=2, topic=r"game|points|assists|hawks|rival", new=r"assists",
+        query="When did Tom have twelve assists?", ok=[()]),
+    # -- a relative time in a merged fact ----------------------------------------
+    # One thing with a detail added later (MORE is right), where one text
+    # carries a time relative to the day it was said. The merged memory is
+    # dated at the later save, so a memory written then may keep the older
+    # text's relative time (``misdated``) only beside the date it names
+    # (``anchored``).
+    case("M1", "relative time", "merge", [
+        (0, "Maria", "I just started aerial yoga this week, it's great!"),
+        (180, "Maria", "My favorite part of aerial yoga is the upside-down poses; they make me "
+                       "feel free and light.")],
+        new=r"upside|free and light", old=r"aerial yoga", topic=r"aerial yoga",
+        misdated=r"\b(this week|recently|just started)\b",
+        anchored=r"\bmarch 2026\b|\b2026-03|\b2 march\b|\bmarch 2\b",
+        query="When did Maria start aerial yoga?", ok=[("MORE",)]),
+    case("M2", "relative time", "merge", [
+        (0, "Tom", "I'm getting ready for the Riverside chess tournament next month."),
+        (30, "Tom", "For the Riverside chess tournament I've been practicing endgames every "
+                    "night.")],
+        new=r"endgame", old=r"riverside|tournament", topic=r"chess|riverside",
+        misdated=r"\bnext month\b", anchored=r"\bapril\b|\b2026-04",
+        query="When is the Riverside chess tournament?", ok=[("MORE",)]),
+    # -- regression: LoCoMo conv-41 in fictional form ----------------------------
+    # A family road trip that ended the day before a December save, then, in
+    # April, "a road trip we took last year" up the coast. Jev answered MORE at
+    # 0.96 and the merged text read "returned from a family road trip on
+    # 2022-12-16 ... the previous year's road trip explored the coast", so a
+    # model dated the coast trip a year too early. Whatever the answer, a
+    # memory written in April that holds both trips must give the coast trip
+    # its year, 2026, and not a year relative to the December trip.
+    case("R1", "relative time", "keep", [
+        (290, "Tom", "Hey Maria! Just got back from a family road trip yesterday, it was fun!"),
+        (404, "Tom", "This photo reminds me of a road trip we took last year; we explored the "
+                     "coast up north and hit some cool national parks.")],
+        new=r"coast", old=r"family road trip", topic=r"road trip|coast",
+        misdated=r"\b(previous|prior|last) year\b|\byear before\b|\b2025\b|\byesterday\b",
+        anchored=r"(?<![\d-])2026(?![\d-])",
+        query="When did Tom take the road trip up the coast?", ok=[()]),
 ]
 KINDS = list(dict.fromkeys(c["kind"] for c in CASES))
 LAYOUTS = ("same", "diff")
+
+
+def merge_pair(id: str, kind: str, expect: str, old: tuple, new: tuple,
+               **fields: Any) -> dict[str, Any]:
+    """A fixed pair for the merge writer: (day said, text, when or None) of
+    the old memory and of the new fact, as extraction wrote them."""
+    return {"id": id, "kind": kind, "expect": expect, "old": old, "new": new, **fields}
+
+
+#: Pairs for the merge writer alone (``merges``), the texts fixed as the
+#: extraction wrote them, so that a run tests the writer whatever extraction
+#: does that day. "merge": one thing, the writer must write one text, and a
+#: time must not move (``misdated``, unless ``anchored`` finds its date);
+#: "apart": two events or things of one kind, which the writer should not
+#: join. P1 is LoCoMo conv-41 in fictional form: extraction kept "the
+#: previous year", and the merged text put it after the December date.
+MERGE_PAIRS: list[dict[str, Any]] = [
+    merge_pair("P1", "relative time", "apart",
+               (290, "Tom returned from a family road trip on 2026-12-16 and said it was fun.",
+                {"start": "2026-12-16"}),
+               (404, "Tom shared a photo of a mountain at sunset; it reminded him of a road trip "
+                     "from the previous year, when they explored the coast up north and visited "
+                     "some national parks.", None),
+               misdated=r"\b(previous|prior|last) year\b|\byear before\b|\b2025\b",
+               anchored=r"(?<![\d-])2026(?![\d-])"),
+    merge_pair("P2", "relative time", "merge",
+               (0, "Maria keeps fit and recently started doing aerial yoga; she says it is great.",
+                None),
+               (180, "Maria said she really enjoys the upside-down poses in aerial yoga because "
+                     "they make her feel free and light.", None),
+               misdated=r"\b(recently|just) started\b|\bthis week\b",
+               anchored=r"\bmarch 2026\b|\b2026-03|\b2 march\b|\bmarch 2\b"),
+    merge_pair("P3", "relative time", "merge",
+               (0, "Dave went to a classic car show last weekend and said the restored cars were "
+                   "amazing.", {"start": "2026-02-28", "end": "2026-03-01"}),
+               (11, "Dave said the best car at the classic car show was a restored 1967 Mustang.",
+                None),
+               misdated=r"\blast weekend\b",
+               anchored=r"\bfebruary 28\b|\b28 february\b|\bmarch 1\b|\b1 march\b|\b2026-02-28\b"
+                        r"|\b2026-03-01\b"),
+    merge_pair("P4", "relative time", "merge",
+               (0, "Tom is getting ready for the Riverside chess tournament next month.", None),
+               (30, "Tom has been practicing endgames every night for the Riverside chess "
+                    "tournament.", None),
+               misdated=r"\bnext month\b", anchored=r"\bapril\b|\b2026-04"),
+    merge_pair("P5", "two of one kind", "apart",
+               (119, "Audrey had a doggy playdate with her dogs on Friday, 2026-06-26; it was a "
+                     "bit crazy but lots of fun.", {"start": "2026-06-26"}),
+               (187, "Audrey recently organized a doggy playdate with the neighbors' dogs; their "
+                     "joy made her heart feel so full.", None)),
+    merge_pair("P6", "two of one kind", "apart",
+               (100, "Tom has a leg injury; he said it is rough, but the doctor says it is not "
+                     "serious.", None),
+               (105, "Last season, Tom hurt his ankle and needed physical therapy before he could "
+                     "play again.", None)),
+    merge_pair("P7", "two of one kind", "apart",
+               (133, "Tom scored his career-high 40 points in a win during the week of "
+                     "2026-07-06.", {"start": "2026-07-06", "end": "2026-07-12"}),
+               (283, "Last Friday, Tom had a career high in assists in a big game against his "
+                     "rivals; the arena was electric.", {"start": "2026-12-04"})),
+    merge_pair("P8", "two of one kind", "apart",
+               (0, "Tom signed a basketball shoe deal with Arvo Sports.", None),
+               (150, "Last week, Tom got a deal with an outdoor gear company and received top "
+                     "hiking gear.", {"start": "2026-07-20", "end": "2026-07-26"})),
+    merge_pair("P9", "two of one kind", "apart",
+               (112, "Melanie took her family camping in the mountains during the week of "
+                     "2026-06-15.", {"start": "2026-06-15", "end": "2026-06-21"}),
+               (135, "Melanie will always remember the family camping trip last year when they "
+                     "saw the Perseid meteor shower.", None)),
+    merge_pair("P10", "added detail", "merge",
+               (0, "Tom has a dog named Rex.", None),
+               (42, "Tom's dog Rex is a three-year-old German shepherd.", None)),
+    merge_pair("P11", "added detail", "merge",
+               (0, "Maria is writing a novel.", None),
+               (42, "Maria's novel is a mystery set in 1920s Lisbon.", None)),
+    merge_pair("P12", "plan happened", "merge",
+               (95, "Nate planned a gaming party for the weekend of 2026-06-20, inviting his "
+                    "tournament friends.", {"start": "2026-06-20", "end": "2026-06-21"}),
+               (116, "Seven people came to Nate's gaming party, and six said they want to do it "
+                     "again next month.", None)),
+]
 
 _DATED = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b(january|february|march|april|may|june|july|"
                     r"august|september|october|november|december) \d{1,2}\b", re.I)
@@ -366,6 +534,31 @@ def _says(pattern: str | None, text: str) -> bool:
 _PAST = re.compile(r"\b(previously|used to|formerly|former|no longer|sold|left|quit|stopped)\b", re.I)
 
 
+def _moment(stamp: Any) -> datetime:
+    moment = datetime.fromisoformat(str(stamp))
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def misdated(case: dict[str, Any], result: dict[str, Any]) -> str | None:
+    """The text of a live memory that holds both facts (it matches ``old``
+    and ``new``), was written at a later save than the first, and states a
+    time wrong: ``misdated`` finds it and ``anchored`` (the date that time
+    names) does not. Such a memory is dated at its own save, so a time
+    relative to an earlier day, or to the other fact's date, now reads as
+    another one. None when the case sets no ``misdated`` or none does."""
+    if not case.get("misdated"):
+        return None
+    first = _moment(result["saves"][0]["at"])
+    for row in result["final"]:
+        text = row["content"]
+        if (row["invalid_at"] or _moment(row["created_at"]) <= first
+                or not (_says(case.get("old"), text) and _says(case.get("new"), text))):
+            continue
+        if _says(case["misdated"], text) and not _says(case.get("anchored"), text):
+            return text
+    return None
+
+
 def grade(case: dict[str, Any], result: dict[str, Any]) -> tuple[str, str]:
     """(verdict, note) of one case's final store: "right", "held" (both live,
     the new one waiting for a person), or what went wrong: "stale" (a live
@@ -374,8 +567,12 @@ def grade(case: dict[str, Any], result: dict[str, Any]) -> tuple[str, str]:
     refines), "merged" (recurring events became one), "lost" (the new fact is
     not live), "retracted" (a memory that stays true was taken out of
     search), "not found" (not among the search's first five), "misranked" (an
-    older value ranks above the current one)."""
+    older value ranks above the current one), "misdated" (a memory written
+    later states one fact's time wrong, ``misdated``)."""
     rows, search = result["final"], result["search"]
+    wrong_time = misdated(case, result)
+    if wrong_time:
+        return "misdated", wrong_time
     topic = [r for r in rows if _says(case["topic"], r["content"])]
     live = [r for r in topic if not r["invalid_at"]]
     history = [r for r in topic if r["invalid_at"] and r.get("history")]
@@ -617,6 +814,71 @@ def pair_answers(pairs: list[dict[str, Any]], decider: Any) -> list[dict[str, An
     return out
 
 
+# ------------------------------------------------------ the merge writer
+def _day_stamp(day: int) -> str:
+    return (BASE + timedelta(days=day)).isoformat(timespec="seconds")
+
+
+def write_pair(llm: Any, pair: dict[str, Any]) -> dict[str, Any]:
+    """The installed memry's merge writer on one fixed pair (``MERGE_PAIRS``),
+    asked as that memry asks it: with both facts dated where it shows the
+    dates (``reconcile.merge_state``), with the two texts alone before. The
+    answer is "merged" (with its text), "apart" (the writer read two things)
+    or "none" (it wrote nothing)."""
+    from memry.intelligence import reconcile
+    from memry.models import Memory
+
+    (old_day, old_text, old_when), (new_day, new_text, new_when) = pair["old"], pair["new"]
+    if hasattr(reconcile, "merge_state"):
+        target = Memory(content=old_text, created_at=_day_stamp(old_day),
+                        updated_at=_day_stamp(old_day),
+                        metadata={"when": old_when} if old_when else {})
+        written = reconcile.write_merged(llm, target, new_text, said=_day_stamp(new_day),
+                                         when=new_when)
+        text, apart = written.content, written.apart
+    else:
+        text, apart = reconcile.write_merged(llm, old_text, new_text), False
+    return {"id": pair["id"], "kind": pair["kind"], "expect": pair["expect"],
+            "answer": "merged" if text else "apart" if apart else "none", "text": text}
+
+
+def grade_merge(pair: dict[str, Any], written: dict[str, Any]) -> str:
+    """"right", or what went wrong: "misdated" (the merged text states a time
+    wrong, ``misdated`` without ``anchored``), "joined" (two things of one
+    kind became one text), "apart" (one thing kept apart: the fact would be
+    stored beside the memory it adds to), "none" (nothing written)."""
+    if written["answer"] == "none":
+        return "none"
+    if written["answer"] == "apart":
+        return "right" if pair["expect"] == "apart" else "apart"
+    text = written["text"] or ""
+    if _says(pair.get("misdated"), text) and not _says(pair.get("anchored"), text):
+        return "misdated"
+    return "right" if pair["expect"] == "merge" else "joined"
+
+
+def merge_table(results: list[dict[str, Any]]) -> str:
+    pairs = {p["id"]: p for p in MERGE_PAIRS}
+    runs = sorted({r["run"] for r in results})
+    kinds = list(dict.fromkeys(p["kind"] for p in MERGE_PAIRS))
+    lines = ["| kind | pairs | " + " | ".join(f"run {n}: right / other" for n in runs) + " |",
+             "|---|---|" + "---|" * len(runs)]
+    for kind in kinds + ["all"]:
+        ids = [p["id"] for p in MERGE_PAIRS if kind in ("all", p["kind"])]
+        cells = []
+        for n in runs:
+            verdicts = collections.Counter(grade_merge(pairs[r["id"]], r) for r in results
+                                           if r["run"] == n and r["id"] in ids)
+            other = ", ".join(f"{c} {v}" for v, c in sorted(verdicts.items()) if v != "right")
+            cells.append(f"{verdicts['right']} / {other or '-'}")
+        lines.append(f"| {kind} | {len(ids)} | " + " | ".join(cells) + " |")
+    lines.append("")
+    for r in results:
+        lines.append(f"{r['id']} run {r['run']}: {grade_merge(pairs[r['id']], r)} "
+                     f"({r['answer']}) {r['text'] or ''}")
+    return "\n".join(lines)
+
+
 def bars(answers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """For each acting answer, the lowest confidence from which none of that
     answer was wrong (outside its ``ok``, or aimed at a memory off the
@@ -715,6 +977,17 @@ def _store_factory() -> Any:
     return make
 
 
+def _text_model() -> Any:
+    from evals.external_benchmarks import RetryingLLM
+    from memry.config import Config
+    from memry.providers.llm import build_llm
+
+    llm = build_llm(Config.load(db_path=":memory:").llm)
+    if not llm.available:
+        raise SystemExit("needs a text model (OPENAI_API_KEY)")
+    return RetryingLLM(llm)
+
+
 def _jev() -> Any:
     from evals.external_benchmarks import retrying_decider
     from memry.config import DecisionConfig
@@ -746,7 +1019,8 @@ def _dump(path: str, data: Any) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("cases", "replay", "pairs", "table", "bars"))
+    parser.add_argument("command", choices=("cases", "replay", "pairs", "merges", "table", "bars",
+                                            "merge-table"))
     parser.add_argument("paths", nargs="+")
     parser.add_argument("--only", default="", help="case ids, comma-separated")
     parser.add_argument("--layouts", default="same,diff")
@@ -755,6 +1029,7 @@ def main(argv: list[str] | None = None) -> None:
                         "needed by cases, replay and pairs")
     parser.add_argument("--jev-cap", type=int, default=3000)
     parser.add_argument("--chat-cap", type=int, default=5000)
+    parser.add_argument("--runs", type=int, default=1, help="merges: runs over the pairs")
     args = parser.parse_args(argv)
 
     if args.command == "table":
@@ -766,6 +1041,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "bars":
         answers = [a for path in args.paths for a in _load(path)]
         print(json.dumps(bars(answers), indent=1))
+        return
+    if args.command == "merge-table":
+        print(merge_table([r for path in args.paths for r in _load(path)]))
         return
 
     if not args.ledger:
@@ -779,6 +1057,16 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "replay":
             decider = _jev()
             _dump(args.paths[1], replay_answers(_load(args.paths[0]), decider))
+        elif args.command == "merges":
+            from evals import api_usage
+
+            llm = _text_model()
+            with api_usage.stage("ingest"), ThreadPoolExecutor(max_workers=args.workers) as pool:
+                written = list(pool.map(lambda job: {**write_pair(llm, job[1]), "run": job[0]},
+                                        [(n + 1, pair) for n in range(args.runs)
+                                         for pair in MERGE_PAIRS]))
+            _dump(args.paths[0], written)
+            print(merge_table(written))
         else:
             out_path = args.paths[0]
             wanted = {i for i in args.only.split(",") if i}

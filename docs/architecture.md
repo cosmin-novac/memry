@@ -460,8 +460,19 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    - MORE: it adds detail to a memory that stays true. The text model writes one text of
      both, stored as a new memory dated at the save (in the save's run, with the old one's
      tags and sources), which supersedes the old one as an update. Its names are read as an
-     edit of the old memory's. With no merged text written, the new fact itself supersedes
-     the old one as an update.
+     edit of the old memory's. Because the merged text is dated at the save, the writer
+     reads both facts as Memry shows any memory to a model, with the date each was said and
+     the date it happened where that is known, and is told to write every time as the date
+     or period it names, reading "last year" or "yesterday" against the day its own text
+     was said, and to keep each date with its own event. Without the dates, "a road trip
+     last year", said in April, was merged beside a trip of the December before as "the
+     previous year's road trip", and read as a year too early. The writer may also answer
+     that the new fact is about another event or thing of the same kind (another trip,
+     another game, another deal): then nothing is merged and the fact is added as NEW. The
+     decision provider's MORE on such a pair is often as confident as on a real added
+     detail, so no bar can tell them apart, while the writer, reading both texts with their
+     dates, often can. With no merged text written and no such answer, the new fact itself
+     supersedes the old one as an update.
    - CHANGED: the memory was true and is no longer. The new memory is added and the old
      one's validity ends at its date (`invalid_at`, `superseded_by`), superseded as an
      update. The decision provider's question gives two examples of it, a plan that then
@@ -826,6 +837,10 @@ up as a red run within a week instead of in a user's terminal.
   4) is then the wrong one.
 - A word of a longer name seeds a search only when no other entity's names carry it:
   "Arvel" finds "Mount Arvel", but not while "Arvel Lodge" is also stored.
+- Two events or things of one kind can still become one memory: the merge writer tells
+  many such pairs apart, not all (two injuries, two paintings, two bowls told by the same
+  person). The merged text then usually says each fact with its own date, but a writer
+  that takes the two for one event can still give that event one date.
 
 ## 9. Decision record
 

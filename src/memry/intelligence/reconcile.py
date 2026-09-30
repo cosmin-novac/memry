@@ -18,7 +18,12 @@ stored.
            scope). Nothing but the memory's evidence records it.
 - MORE     it adds detail to a memory that stays true: the text model writes
            one text of both (``write_merged``), stored as a new memory dated
-           at the save, which supersedes the old one as an update. With no
+           at the save, which supersedes the old one as an update. The writer
+           reads both facts with the dates they were said (and happened,
+           where known) and writes each time as the date it names, since the
+           merged text is dated at the save. When it reads the new fact as
+           another event or thing of the same kind (another trip, another
+           game), nothing is merged and the fact is added as NEW. With no
            merged text written, the new fact itself supersedes the old one as
            an update, held back as a CHANGED is.
 - CHANGED  the memory was true and is no longer: the new memory is added, and
@@ -54,6 +59,7 @@ with no model asked, unless it is an event said on another day
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import timezone
 from typing import Any, Callable
 
@@ -73,6 +79,7 @@ from ..models import (
 from ..providers.embeddings import Embedder
 from ..providers.llm import LLM
 from ..providers.decisions import Choice, Decider
+from .context import memory_line
 from .extraction import parse_lenient_json
 
 #: The five answers, in the order the questions list them.
@@ -111,7 +118,11 @@ was said, decide what the NEW fact is:
 
 When writing MORE content, the text must preserve EVERY concrete detail from
 both texts - numbers, dates, prices, names, versions, file formats, tool names,
-constraints and their reasons. Never drop a detail to make it shorter.
+constraints and their reasons. Never drop a detail to make it shorter. The
+merged text is stored as said on the NEW fact's date. Write each time in it as
+the date or period it names, reading a relative time ("yesterday", "last
+year") against the date its own text was said, and keep each date with the
+event it belongs to.
 Respond with JSON only:
 {"action": "NEW"|"SAME"|"MORE"|"CHANGED"|"WRONG", "target": int|null,
  "content": str|null, "reason": short str}"""
@@ -137,6 +148,11 @@ def _normalize(text: str) -> str:
 #: "was accepted, starting in the fall", then "started"), which MORE merged at
 #: 0.46 to 0.90, is MORE at 0.24 to 0.69 and stays beside the plan. An example
 #: in MORE as well lowered MORE on real added details, so MORE has none.
+#: MORE worded as "about the same event or thing", with NEW as "another event
+#: or thing of the same kind, before or after it", was asked of the MORE
+#: merges of the LoCoMo stores (two runs): it left the merges of two trips or
+#: games where they were and stopped a few right ones, so the question stays
+#: and the merge writer keeps such pairs apart (``MERGE_REQUEST``).
 ACTION_QUESTION = Choice(
     instructions=("Each EXISTING memory was said on the date shown; the NEW fact was just "
                   "said, on its date. What is the NEW fact, compared with the existing "
@@ -224,25 +240,67 @@ def _decide_action(
 
 
 #: Appended to the reconcile prompt when a decision provider has already
-#: answered MORE: the text model only writes the merged text.
-MERGE_REQUEST = ('The answer is decided: MORE of memory [0]. Reply with action "MORE", '
-                 "target 0 and, as content, the merged text.")
+#: answered MORE: the text model writes the merged text, or says that the new
+#: fact is about another event or thing of the same kind, which is then
+#: stored as NEW (``Merged.apart``). Jev's MORE on two different trips,
+#: games or injuries is as sure as on a detail added to one, so no bar tells
+#: them apart; the writer, reading both texts with their dates, tells many of
+#: them apart (PhD notes, reconcile-more).
+MERGE_REQUEST = ('The answer is MORE of memory [0]: reply with action "MORE", target 0 and, as '
+                 "content, the merged text. If the NEW fact is about another event or thing "
+                 "than memory [0], of the same kind (another trip, game, purchase or photo), do "
+                 'not merge: reply with action "NEW", target null and no content.')
 
 
-def write_merged(llm: LLM, existing: str, new: str) -> str | None:
-    """The merged text of a MORE a decision provider chose, written by the
-    text model with the prompt the no-provider path uses. None when there is
-    no text model, it failed, or it wrote nothing."""
+@dataclass(frozen=True)
+class Merged:
+    """What the merge writer answered for a MORE: the merged text, or
+    ``apart`` when it read the new fact as another event or thing of the same
+    kind. Neither when there is no text model, it failed, or it wrote
+    nothing."""
+
+    content: str | None = None
+    apart: bool = False
+
+
+def merge_state(target: Memory, new: str, said: str | None = None, when: Any = None) -> str:
+    """What the merge writer reads: the memory and the new fact each as Memry
+    renders a memory for a model (``context.memory_line``: when it happened,
+    where known, and when it was said, the new fact at the save's time
+    ``said``), then ``MERGE_REQUEST``. The merged text is dated at the save,
+    so the writer needs both dates to keep a relative time ("last year") with
+    the day it was said and the event it belongs to; without them "a road
+    trip last year" said in April became "the previous year's road trip"
+    beside a trip of the December before."""
+    said = said or utcnow()
+    moment = parse_ts(said)
+    fact = Memory(content=new, created_at=said, updated_at=said,
+                  metadata={"when": when} if when else {})
+    return (f"EXISTING memories:\n[0] {memory_line(target, moment)}\n\n"
+            f"NEW fact:\n{memory_line(fact, moment)}\n\n{MERGE_REQUEST}")
+
+
+def write_merged(llm: LLM, target: Memory, new: str, *, said: str | None = None,
+                 when: Any = None) -> Merged:
+    """The text model's answer to a MORE a decision provider chose, asked with
+    the prompt the no-provider path uses and both facts dated
+    (``merge_state``): the merged text, or that the two are apart."""
     if not llm.available:
-        return None
-    state = f"EXISTING memories:\n[0] {existing}\n\nNEW fact:\n{new}\n\n{MERGE_REQUEST}"
+        return Merged()
     try:
-        raw = llm.complete(RECONCILE_SYSTEM, state, json_schema=RECONCILE_SCHEMA)
+        raw = llm.complete(RECONCILE_SYSTEM, merge_state(target, new, said, when),
+                           json_schema=RECONCILE_SCHEMA)
     except Exception:  # a provider hiccup must not cost the save its text
-        return None
+        return Merged()
     parsed = parse_lenient_json(raw)
-    content = parsed.get("content") if isinstance(parsed, dict) else None
-    return content.strip() if isinstance(content, str) and content.strip() else None
+    if not isinstance(parsed, dict):
+        return Merged()
+    if parsed.get("action") == "NEW":
+        return Merged(apart=True)
+    content = parsed.get("content")
+    if isinstance(content, str) and content.strip():
+        return Merged(content=content.strip())
+    return Merged()
 
 
 #: Metadata key on a memory that was kept beside the one it would replace.
@@ -443,14 +501,23 @@ def reconcile_candidate(
 
     if action == "MORE" and target is not None:
         merged = str(decision.get("content") or "").strip()
+        apart = False
         if not merged:
-            merged = write_merged(llm, target.content, candidate.content) or ""
+            written = write_merged(llm, target, candidate.content, said=said,
+                                   when=(candidate.metadata or {}).get("when"))
+            merged, apart = written.content or "", written.apart
         if merged:
             return _merged(backend, embedder, target, candidate, merged, scope, episode_ids,
                            said, stamped, reason, prepare_update)
-        # Nothing wrote the merged text. Overwriting the old memory with the
-        # new fact alone would lose what only the old one said, so the new
-        # memory supersedes it instead, held back as a change would be.
+        if apart:
+            # The writer read the new fact as another event or thing of the
+            # same kind: nothing is merged, and it is stored as a NEW is.
+            reason = (f"MORE of memory {target.id}, but the merge writer read it as another "
+                      f"event or thing: added as new. {reason}").strip()
+            action, target = "NEW", None
+        # Otherwise nothing wrote the merged text. Overwriting the old memory
+        # with the new fact alone would lose what only the old one said, so
+        # the new memory supersedes it instead, held back as a change would be.
 
     kind = SUPERSEDE_KIND.get(action) if target is not None else None
     held = (held_back(target, decision, cfg, bar=bar, saves=saves_of(backend, target))

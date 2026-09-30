@@ -291,6 +291,72 @@ def test_an_added_detail_leaves_one_merged_memory_dated_at_the_save(layout):
     store.close()
 
 
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_the_merge_writer_reads_each_fact_with_its_dates_and_keeps_each_time_with_it(layout):
+    """The merged text is stored as said on the new fact's date, so a
+    relative time in either text would be read against that date and next to
+    the other fact's dates. The writer therefore reads both as Memry renders
+    a memory for a model (``context.memory_line``: when it happened, where
+    known, and when it was said) and is told to write each time as the date
+    it names, read against its own text's date, with the event it belongs
+    to. Before, it read the two texts with no date at all, and "a road trip
+    last year" said in April 2023 became "the previous year's road trip"
+    beside a trip of 16 December 2022 (LoCoMo conv-41)."""
+    from memry.intelligence.reconcile import MERGE_REQUEST, RECONCILE_SYSTEM
+
+    llm = FakeLLM()
+    store = _store(Judge("MORE", 0.95), llm)
+    _save(store, "Tom returned from a family road trip on 2026-03-01 and said it was fun",
+          layout, 0, FIRST, memory_type="episodic",
+          memory_metadata={"when": {"start": "2026-03-01"}})
+    llm.queue(decision("MORE", target=0, content="merged"), facts_response())
+    _save(store, "Tom said a road trip he took last year explored the coast", layout, 1, LATER)
+
+    system, prompt = llm.calls[0]
+    assert system == RECONCILE_SYSTEM and MERGE_REQUEST in prompt
+    assert ("[0] [happened 2026-03-01] Tom returned from a family road trip on 2026-03-01 and "
+            "said it was fun (said 2 March 2026)") in prompt
+    assert ("NEW fact:\nTom said a road trip he took last year explored the coast "
+            "(said 13 April 2026)") in prompt
+    rule = " ".join(system.split())
+    assert "The merged text is stored as said on the NEW fact's date." in rule
+    assert "reading a relative time" in rule and "against the date its own text was said" in rule
+    assert "keep each date with the event it belongs to" in rule
+    store.close()
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_a_more_the_merge_writer_reads_as_two_things_is_added_as_new(layout):
+    """Jev's MORE on a second event of one kind (a trip "last year" beside a
+    trip of March) stood at 0.80 to 0.97 in the LoCoMo stores, as high as its
+    right merges, so no bar tells them apart. The writer reads both texts with
+    their dates; when it answers that the new fact is another event or thing
+    of the same kind, nothing is merged and the fact is stored beside the
+    memory, as a NEW is. Before, a writer that wrote no text left the new fact
+    superseding the old one."""
+    from memry.intelligence.reconcile import MERGE_REQUEST
+
+    llm = FakeLLM()
+    store = _store(Judge("MORE", 0.95), llm)
+    old = _save(store, "Tom returned from a family road trip on 2026-03-01", layout, 0, FIRST)
+    llm.queue(decision("NEW"))
+    new = _save(store, "Tom said a road trip he took last year explored the coast", layout, 1,
+                LATER)
+
+    assert MERGE_REQUEST in llm.calls[0][1]
+    assert "another event or thing" in llm.calls[0][1]
+    assert new.event == "ADD" and new.memory_id != old.memory_id
+    assert new.conflicts_with is None
+    assert _live(store) == sorted([old.memory_id, new.memory_id])
+    assert store.get(old.memory_id).invalid_at is None
+    assert _supersede_kinds(store, old.memory_id) == []
+    assert store.get(new.memory_id).content == (
+        "Tom said a road trip he took last year explored the coast")
+    assert "another event or thing" in new.reason and old.memory_id in new.reason
+    assert llm.responses == []
+    store.close()
+
+
 # ---------------------------------------------------------------------- NEW
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_two_identical_yoga_class_texts_on_different_dates_stay_two(layout):
@@ -427,3 +493,74 @@ def test_the_update_benchmark_grades_a_store_by_rule():
     answers = [{"action": "SAME", "conf": 0.9, "ok": ["SAME"]},
                {"action": "SAME", "conf": 0.6, "ok": ["MORE"]}]
     assert bars(answers)["SAME"]["bar_with_no_wrong"] == pytest.approx(0.61)
+
+
+def test_the_update_benchmark_keeps_two_of_one_kind_apart_and_grades_a_moved_time():
+    """Two events or things of one kind must stay two (NEW is the only
+    answer that fits), and a merged memory written at a later save must not
+    state a time relative to another day: the conv-41 regression (R1) fails
+    as "misdated" when the April text holding both trips puts the coast trip
+    in "the previous year" beside the December date, and passes when it
+    gives the coast trip its year. A memory of the coast trip alone, which
+    says "last year" on the day it was said, is not checked."""
+    from evals.reconcile_benchmark import CASES, grade
+
+    case = {c["id"]: c for c in CASES}
+    kinds = {c["kind"] for c in CASES}
+    assert {"two of one kind", "relative time"} <= kinds
+    for id in ("L1", "L2", "L3", "L4", "L5"):
+        assert (case[id]["expect"], case[id]["ok"], case[id]["n"]) == ("separate", [()], 2)
+    assert case["R1"]["ok"] == [()] and case["M1"]["ok"] == [("MORE",)]
+
+    def row(id, content, at, invalid=None):
+        return {"id": id, "content": content, "created_at": at, "invalid_at": invalid,
+                "history": bool(invalid), "conflict": None}
+
+    december, april = "2026-12-17T09:00:00+00:00", "2027-04-10T09:00:00+00:00"
+    old = row("o", "Tom returned from a family road trip on 2026-12-16 and said it was fun.",
+              december, invalid=april)
+    saves = [{"at": december}, {"at": april, "before": [dict(old, invalid_at=None)]}]
+
+    def result(text):
+        merged = row("m", text, april)
+        return {"saves": saves, "final": [old, merged], "search": [merged]}
+
+    wrong = result("Tom returned from a family road trip on 2026-12-16 and said it was fun. He "
+                   "said the previous year's road trip explored the coast up north.")
+    assert grade(case["R1"], wrong)[0] == "misdated"
+    right = result("Tom returned from a family road trip on 2026-12-16 and said it was fun. On "
+                   "10 April 2027 he said a road trip he took in 2026 explored the coast up "
+                   "north.")
+    assert grade(case["R1"], right) == ("right", "")
+    alone = row("n", "Tom said a road trip he took last year explored the coast up north.", april)
+    kept_apart = {"saves": saves, "final": [dict(old, invalid_at=None), alone],
+                  "search": [alone]}
+    assert grade(case["R1"], kept_apart) == ("right", "")
+
+
+def test_the_merge_writer_pairs_grade_conv41_by_its_times():
+    """``reconcile_benchmark.py merges`` asks the merge writer to join fixed
+    pairs, the texts as extraction wrote them. P1 is conv-41: the text of
+    3517519's writer, "the previous year's road trip" after the December
+    date, is misdated; one that gives the coast trip its year is not, and it
+    still joins two trips; declining is right."""
+    from evals.reconcile_benchmark import MERGE_PAIRS, grade_merge
+
+    pairs = {p["id"]: p for p in MERGE_PAIRS}
+    p1 = pairs["P1"]
+    assert (p1["expect"], p1["old"][0], p1["new"][0]) == ("apart", 290, 404)
+    assert "previous year" in p1["new"][1]
+
+    def written(answer, text=None):
+        return {"id": "P1", "answer": answer, "text": text}
+
+    recorded = ("Tom returned from a family road trip on 2026-12-16 and said it was fun. He said "
+                "the previous year's road trip explored the coast up north.")
+    assert grade_merge(p1, written("merged", recorded)) == "misdated"
+    dated = ("Tom returned from a family road trip on 2026-12-16 and said it was fun. On 10 April "
+             "2027 he said a road trip he took in 2026 explored the coast up north.")
+    assert grade_merge(p1, written("merged", dated)) == "joined"
+    assert grade_merge(p1, written("apart")) == "right"
+    assert grade_merge(pairs["P10"], written("apart")) == "apart"
+    assert {p["kind"] for p in MERGE_PAIRS} >= {"relative time", "two of one kind",
+                                               "added detail"}

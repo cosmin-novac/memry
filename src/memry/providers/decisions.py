@@ -399,6 +399,12 @@ class JevDecider(Decider):
     # runs: the wrong SAMEs at 0.83 and below, the same three MOREs above 0.8
     # (a plan with its outcome, two accounts of one event), and one CHANGED
     # outside the labels, at 0.31 and 0.33, under its bar. The bars stand.
+    # Measured again with cases of two events of one kind and of a relative
+    # time in a merged fact (two runs): no new wrong SAME, CHANGED or WRONG;
+    # the only new wrong MORE is two road trips told months apart (LoCoMo
+    # conv-41 in fictional form) at 0.88 to 0.97, as high as right merges, so
+    # no bar separates it. The merge writer keeps such a pair apart or dates
+    # each trip (``reconcile.MERGE_REQUEST``). The bars stand.
     reconcile_bars = {"SAME": 0.85, "MORE": 0.8, "CHANGED": 0.5, "WRONG": 0.5}
 
     def __init__(self, cfg: DecisionConfig) -> None:
