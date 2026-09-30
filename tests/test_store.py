@@ -3,8 +3,13 @@ from __future__ import annotations
 import json
 
 import pytest
-from conftest import decision, fact, facts_response
+from conftest import FakeLLM, decision, fact, facts_response
 
+from memry.intelligence.entities import (
+    DESCRIPTION_FACTS,
+    DESCRIPTION_SYSTEM,
+    synthesize_entity_description,
+)
 from memry.models import Scope
 
 
@@ -752,3 +757,47 @@ def test_a_deferred_save_keeps_its_time_metadata_and_date_for_distillation(store
     # the raw memory went out of use at the save's time too
     raw_after = store.get(pending.id)
     assert raw_after.invalid_at == raw_after.updated_at == STAMP
+
+
+def test_a_description_reads_the_memories_its_prompt_shows(store, fake_llm, monkeypatch):
+    """An entity's description is written from its newest memories in use,
+    ``DESCRIPTION_FACTS`` of them: the store asks the backend for that many
+    and the prompt shows each, of an entity with twice as many; and the
+    prompt shows no more than that many of any longer list. A store asking
+    for more read memories the prompt dropped; asking for fewer, it left out
+    what the prompt could show."""
+    from memry.models import Entity, EntityMention, Memory
+
+    def shown(prompt: str) -> list[str]:
+        evidence = prompt.split("Active evidence:\n", 1)[1]
+        return [line[2:] for line in evidence.splitlines() if line.startswith("- ")]
+
+    backend = store.backend
+    marcus = backend.insert_entity(Entity(name="Marcus", entity_type="person", user_id="ada"))
+    for i in range(2 * DESCRIPTION_FACTS):
+        memory = backend.insert_memory(
+            Memory(content=f"Marcus solved physics problem {i:03d}.", user_id="ada"))
+        backend.add_mention(
+            EntityMention(entity_id=marcus.id, memory_id=memory.id, surface="Marcus"))
+    asked: list[tuple[str, int, list[str]]] = []
+    read = backend.entity_memories
+
+    def entity_memories(entity_id: str, limit: int = 10, **kwargs):
+        found = read(entity_id, limit, **kwargs)
+        asked.append((entity_id, limit, [m.content for m in found]))
+        return found
+
+    monkeypatch.setattr(backend, "entity_memories", entity_memories)
+    fake_llm.queue(json.dumps({"description": "Marcus solves physics problems."}))
+    described = store._refresh_entity_description(marcus.id)
+    assert described.description == "Marcus solves physics problems."
+    [(entity_id, limit, given)] = asked
+    assert (entity_id, limit, len(given)) == (marcus.id, DESCRIPTION_FACTS, DESCRIPTION_FACTS)
+    [(system, prompt)] = fake_llm.calls
+    assert system == DESCRIPTION_SYSTEM
+    assert shown(prompt) == given
+
+    llm = FakeLLM([json.dumps({"description": "Marcus."})])
+    many = [f"Marcus solved physics problem {i:03d}." for i in range(2 * DESCRIPTION_FACTS)]
+    synthesize_entity_description(llm, marcus, many)
+    assert shown(llm.calls[0][1]) == many[:DESCRIPTION_FACTS]

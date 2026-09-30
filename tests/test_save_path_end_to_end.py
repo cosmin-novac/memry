@@ -793,7 +793,8 @@ class WorldLLM(LLM):
         return ref.surface
 
     def _budget(self, name: str) -> None:
-        """What the design lets a save ask about this name (``Checker.save_budget``)."""
+        """The comparisons the design lets a save ask about this name
+        (``Checker.save_budget``)."""
         if self.store is None or not self.judged:
             return
         backend = self.store.backend
@@ -801,8 +802,8 @@ class WorldLLM(LLM):
         ids = {e.id for e in found}
         open_pairs = [p for p in backend.proposals_of(sorted(ids)) if p.status == "proposed"]
         with self.calls.lock:
-            self.calls.budget["compare"] += len(found) + CANDIDATES_PER_NAME
-            self.calls.budget["recheck"] += len(open_pairs)
+            self.calls.budget["comparisons"] += (2 * (len(found) + CANDIDATES_PER_NAME)
+                                                 + 3 * len(open_pairs))
 
     # -- reconciliation -----------------------------------------------------
     def _reconcile(self, user: str) -> str:
@@ -1519,12 +1520,17 @@ class Checker:
         * decision provider: per fact 1 action and 1 screen of names new to
           the store, and 1 more screen per MORE;
         * identity: none without a calibrated judge. With one, per name
-          compared, at most 6 questions per candidate (2 orders, at a step
-          of 10 memories and one of 50, and once in context; an entity of
-          the name itself is asked in 1 order), the candidates being the
-          entities of that name and ``CANDIDATES_PER_NAME`` more, and the
-          same 6 for each open pair of those entities the save compares
-          again.
+          compared, the candidates are the entities of that name and
+          ``CANDIDATES_PER_NAME`` more, each compared at most twice (the
+          mention has one memory: at the first step, and once in context),
+          and each open pair of those entities the save compares again, at
+          most three times (at a step of 10 memories and one of 50, and
+          once in context). A comparison is asked in 2 orders, 2 calls,
+          except the known-name check: an entity of the mention's name
+          compared with the mention is asked with the entity first only,
+          1 call (``identity.compare``, ``one_order``). The bound is the
+          calls the comparisons the save asked allow (``_instrument``
+          counts them), and those comparisons are held to the count above.
         """
         budget = self.calls.budget
         text = {k: counts[k] for k in ("extract", "coverage", "reconcile_text", "merge_text")}
@@ -1532,7 +1538,10 @@ class Checker:
         decider = {k: counts[k] for k in ("reconcile_action", "screen", "when_confirm")}
         decider_bound = (2 * facts + updates) if self.decides else 0
         identity = sum(counts[k] for k in Calls.IDENTITY)
-        identity_bound = 6 * (budget["compare"] + budget["recheck"]) if self.judged else 0
+        identity_bound = budget["asked"] if self.judged else 0
+        if budget["compared"] > (budget["comparisons"] if self.judged else 0):
+            self.add("4 calls per save", "identity comparisons", (self.calls.op, "comparisons"), {
+                "comparisons": budget["compared"], "bound": budget["comparisons"]})
         other = {k: n for k, n in counts.items()
                  if k not in text and k not in decider and k not in Calls.IDENTITY
                  and k != "embedded_texts"}
@@ -2022,7 +2031,8 @@ def _pick(world: World, slots: list[Slot], weights: dict[str, int], used: set[st
 def _instrument(monkeypatch, calls: Calls, store: MemoryStore) -> None:
     """Deterministic ids and clock; and the save's resolution and each
     comparison recorded, so an identity question can be traced to the name
-    and the memory it was about."""
+    and the memory it was about, and counted against the calls its
+    comparison may make (``Checker.save_budget``)."""
     monkeypatch.setattr(uuid, "uuid4", _Ids())
     for module in (models_mod, retrieval_mod, identity_mod, decay_mod, store_mod):
         monkeypatch.setattr(module, "datetime", _FakeDateTime)
@@ -2044,20 +2054,41 @@ def _instrument(monkeypatch, calls: Calls, store: MemoryStore) -> None:
                 for alias in store.backend.entity_aliases(e.id)}
 
     compare = entities_mod.compare
+    # whether the comparison running in this thread is the known-name check
+    # (pairs compared again are compared side by side)
+    known = threading.local()
 
     def comparing(decider, backend, a, b, *args, **kwargs):
         before = calls.comparing
         if isinstance(b, Mention):
             calls.comparing = {"name": b.name, "with": a.name, "memory": b.memory.id,
                                "already_linked": b.name.casefold() in linked_names(b.memory.id)}
+            # an entity of the mention's name, as the save looks it up
+            # (``entities.resolve_mentions``)
+            known.name = a.id in {e.id for e in store.backend.find_entity_candidates(
+                b.name.strip().lower(), Scope(user_id=USER))}
         else:
             calls.comparing = {"name": b.name, "with": a.name}
+            known.name = False
         try:
             return compare(decider, backend, a, b, *args, **kwargs)
         finally:
             calls.comparing = before
+            known.name = False
 
     monkeypatch.setattr(entities_mod, "compare", comparing)
+
+    ask = identity_mod.judge_pair_and_belongs
+
+    def comparison(decider, a, b, **kwargs):
+        """One comparison, and the calls the design lets it make
+        (``Checker.save_budget``): 1 for the known-name check, 2 otherwise."""
+        with calls.lock:
+            calls.budget["compared"] += 1
+            calls.budget["asked"] += 1 if getattr(known, "name", False) else 2
+        return ask(decider, a, b, **kwargs)
+
+    monkeypatch.setattr(identity_mod, "judge_pair_and_belongs", comparison)
 
     judge = entities_mod._judge
 

@@ -656,3 +656,43 @@ def test_a_search_scores_none_of_another_accounts_memories(monkeypatch):
                 few = _steps(small, lambda: small.keyword_search(question, scope, 40))
                 many = _steps(large, lambda: large.keyword_search(question, scope, 40))
                 assert many - few <= 3 * added, (question, few, many)
+
+
+def _common(rows: int, size: int) -> LocalBackend:
+    """ada's store: a dozen memories saying "zebra", one of them "garden"
+    too, and ``size`` more, ``rows`` of which say "garden" and the rest
+    "meadow"."""
+    b = make_backend()
+    for i in range(12):
+        b.insert_memory(Memory(content=f"zebra {i:02d} grazed near a {'garden ' * (i == 0)}pond",
+                               user_id="ada"))
+    for i in range(size):
+        b.insert_memory(Memory(content=f"{'garden' if i < rows else 'meadow'} plot {i:05d} "
+                                       "was watered", user_id="ada"))
+    return b
+
+
+def test_a_search_scores_a_common_word_only_where_the_rare_one_leaves_room():
+    """A question with a rare word and a common one, in one account, the
+    rare word in more memories than the search returns: a common word
+    cannot lift a memory holding only it past them, so it is scored in the
+    memories the rare word found and nowhere else. With the common word in
+    four times as many of the account's memories (N above the bar,
+    ``_WHOLE_WORD_ROWS``, and 4N), the search scores as many memories
+    (``bm25()`` evaluations). Every word scored everywhere, as before the
+    exact top-k, scored 3N more."""
+    from memry.backends import local
+
+    scope, question, limit = Scope(user_id="ada"), "What did the zebra eat in the garden?", 10
+    n = local._WHOLE_WORD_ROWS + 50
+    stores = {rows: _common(rows, 4 * n) for rows in (n, 4 * n)}
+    scored = {}
+    for rows, b in stores.items():
+        found = [(m.id, s) for m, s in b.keyword_search(question, scope, limit)]
+        assert found == _scored_everywhere(b, question, scope, limit), rows
+        scored[rows] = _scored(b, lambda: b.keyword_search(question, scope, limit))
+    assert scored[4 * n] - scored[n] <= 3 * n // 10, (n, scored)
+    # the growth it avoids: every word scored in each memory holding it
+    everywhere = {rows: _scored(b, lambda: _scored_everywhere(b, question, scope, limit))
+                  for rows, b in stores.items()}
+    assert everywhere[4 * n] - everywhere[n] == 3 * n, (n, everywhere)
