@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from memry.backends.local import LocalBackend
-from memry.models import Memory, Scope, SyntheticTag, Topic, TopicRelation
+from memry.models import Memory, Scope
 
 
 def test_topics_dual_write_filter_and_count(verbatim_store):
@@ -69,95 +69,58 @@ def test_hard_delete_removes_topic_links(verbatim_store):
     ).fetchone()[0]
     assert count == 0
 
-def test_parent_topic_expands_at_query_time_without_copying(verbatim_store):
-    store = verbatim_store
-    store.add("Ada runs", user_id="ada", infer=False, categories=["running"])
-    store.add("Ada sleeps", user_id="ada", infer=False, categories=["sleep"])
-    backend = store.backend
-    topics = {topic.normalized: topic for topic in backend.list_topics(Scope(user_id="ada"))}
-    parent = backend.upsert_topic(
-        Topic(name="health", normalized="health", user_id="ada", provenance="synthetic")
-    )
-    for child in (topics["running"], topics["sleep"]):
-        backend.add_topic_relation(
-            TopicRelation(
-                broader_topic_id=parent.id,
-                narrower_topic_id=child.id,
-                user_id="ada",
-            )
-        )
 
-    matches = store.get_all(user_id="ada", categories=["health"], limit=20)
-    assert {memory.content for memory in matches} == {"Ada runs", "Ada sleeps"}
-    assert all("health" not in memory.categories for memory in matches)
-    # Tags are topic entities now, counted directly: a parent no longer rolls
-    # up the memories of its children in the histogram (synthetic parents are
-    # off), while the filter above still reaches them.
-    assert store.categories(user_id="ada") == [
-        {"category": "running", "count": 1},
-        {"category": "sleep", "count": 1},
-    ]
-
-
-def test_legacy_copied_synthetic_tags_migrate_to_edges(tmp_path):
-    path = tmp_path / "synthetic-topic-migration.db"
+def test_an_old_stores_synthetic_parents_widen_no_filter_and_are_left_as_they_were(tmp_path):
+    """Synthetic parent tags are gone: a store that recorded some (a parent
+    topic, its hierarchy edges, its record) opens, a filter on the parent
+    reaches nothing, a filter on a tag reaches the memories filed under it,
+    and a tag edit works. The old rows are left where they are."""
+    path = tmp_path / "synthetic-parents.db"
     backend = LocalBackend(str(path))
-    memory = backend.insert_memory(
-        Memory(content="Ada runs", user_id="ada", categories=["running", "health"])
-    )
-    backend.record_synthetic_tag(
-        SyntheticTag(tag="health", source_tags=["running"], user_id="ada")
-    )
+    backend.insert_memory(Memory(content="Ada runs", user_id="ada", categories=["running"]))
+    backend.insert_memory(Memory(content="Ada sleeps", user_id="ada", categories=["sleep"]))
     with backend._lock:
-        backend._db.execute("DELETE FROM meta WHERE key = 'schema:topic-relations:v1'")
-        backend._db.commit()
+        db = backend._db
+        db.executescript("""
+            CREATE TABLE IF NOT EXISTS topic_relations (
+                id TEXT PRIMARY KEY, broader_topic_id TEXT NOT NULL,
+                narrower_topic_id TEXT NOT NULL, user_id TEXT,
+                provenance TEXT NOT NULL DEFAULT 'synthetic', created_at TEXT NOT NULL,
+                UNIQUE (broader_topic_id, narrower_topic_id));
+            CREATE TABLE IF NOT EXISTS synthetic_tags (
+                id TEXT PRIMARY KEY, tag TEXT NOT NULL, user_id TEXT,
+                source_tags TEXT NOT NULL, created_at TEXT NOT NULL);
+        """)
+        db.execute("INSERT INTO topics (id, name, normalized, user_id, provenance, created_at, "
+                   "updated_at) VALUES ('parent', 'health', 'health', 'ada', 'synthetic', "
+                   "'2026-01-01', '2026-01-01')")
+        for child in db.execute("SELECT id FROM topics WHERE normalized IN ('running', 'sleep')"):
+            db.execute("INSERT INTO topic_relations (id, broader_topic_id, narrower_topic_id, "
+                       "user_id, created_at) VALUES (?, 'parent', ?, 'ada', '2026-01-01')",
+                       (f"edge-{child['id']}", child["id"]))
+        db.execute("INSERT INTO synthetic_tags (id, tag, user_id, source_tags, created_at) "
+                   "VALUES ('s1', 'health', 'ada', '[\"running\", \"sleep\"]', '2026-01-01')")
+        db.commit()
     backend.close()
 
     reopened = LocalBackend(str(path))
     try:
-        stored = reopened.get_memory(memory.id)
-        assert stored.categories == ["running"]
-        assert [row.id for row in reopened.list_memories(
-            Scope(user_id="ada"), categories=["health"]
-        )] == [memory.id]
+        ada = Scope(user_id="ada")
+        assert reopened.list_memories(ada, categories=["health"]) == []
+        assert [m.content for m in reopened.list_memories(ada, categories=["running"])] == [
+            "Ada runs"]
+        assert reopened.topic_mention_counts(ada) == [
+            {"category": "running", "count": 1}, {"category": "sleep", "count": 1}]
+        assert reopened.retag_topics(ada, {"running"}, "jogging") == 1
+        assert [m.content for m in reopened.list_memories(ada, categories=["jogging"])] == [
+            "Ada runs"]
+        with reopened._lock:
+            left = [reopened._db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    for table in ("topic_relations", "synthetic_tags")]
+        assert left == [2, 1]
     finally:
         reopened.close()
 
-def test_topic_edits_preserve_and_remove_hierarchy(verbatim_store):
-    store = verbatim_store
-    store.add("Ada runs", user_id="ada", infer=False, categories=["running"])
-    backend = store.backend
-    child = backend.list_topics(Scope(user_id="ada"))[0]
-    parent = backend.upsert_topic(
-        Topic(name="health", normalized="health", user_id="ada", provenance="synthetic")
-    )
-    backend.add_topic_relation(
-        TopicRelation(
-            broader_topic_id=parent.id,
-            narrower_topic_id=child.id,
-            user_id="ada",
-        )
-    )
-    backend.record_synthetic_tag(
-        SyntheticTag(tag="health", source_tags=["running"], user_id="ada")
-    )
-
-    assert store.rename_tag("running", "jogging", user_id="ada") == 1
-    assert [memory.content for memory in store.get_all(
-        user_id="ada", categories=["health"]
-    )] == ["Ada runs"]
-
-    assert store.rename_tag("health", "wellness", user_id="ada") == 0
-    assert [memory.content for memory in store.get_all(
-        user_id="ada", categories=["wellness"]
-    )] == ["Ada runs"]
-    assert store.synthetic_tags(user_id="ada") == []
-
-    assert store.delete_tag("wellness", user_id="ada") == 0
-    assert store.get_all(user_id="ada", categories=["wellness"]) == []
-    assert [memory.content for memory in store.get_all(
-        user_id="ada", categories=["jogging"]
-    )] == ["Ada runs"]
 
 def test_plural_topic_is_merged_automatically_on_write(verbatim_store):
     verbatim_store.add("Ada likes vegetables", user_id="ada", infer=False, categories=["foods"])
@@ -190,7 +153,7 @@ def test_existing_plural_topics_are_merged_by_maintenance(verbatim_store):
     ]
 
 
-# ------------------------------------------- tags decided by a calibrated judge
+# ---------------------- tags decided by a calibrated judge, as entity pairs
 def _tag_judge(same: float):
     from memry.providers.decisions import Answer, Answers, NoneDecider
 
@@ -213,6 +176,11 @@ def _tag_judge(same: float):
     return Judge()
 
 
+def _weekly(store):
+    """The weekly pass's entity pairs: raised, then compared."""
+    store.resolve_entities(user_id="ada")
+
+
 def _tagged(store, tag, times):
     for i in range(times):
         store.add(f"{tag} fact {i}", user_id="ada", infer=False, categories=[tag])
@@ -222,7 +190,7 @@ def test_a_judged_tag_pair_merges_into_the_more_used_tag(verbatim_store):
     verbatim_store.decider = _tag_judge(0.9)
     _tagged(verbatim_store, "quality assurance", 5)
     _tagged(verbatim_store, "qa", 1)
-    verbatim_store.merge_obvious_topics(user_id="ada")
+    _weekly(verbatim_store)
     assert verbatim_store.categories(user_id="ada") == [
         {"category": "quality assurance", "count": 6}]
 
@@ -231,15 +199,19 @@ def test_a_tag_pair_under_the_threshold_stays(verbatim_store):
     verbatim_store.decider = _tag_judge(0.5)
     _tagged(verbatim_store, "quality assurance", 5)
     _tagged(verbatim_store, "qa", 1)
-    verbatim_store.merge_obvious_topics(user_id="ada")
+    _weekly(verbatim_store)
     assert len(verbatim_store.categories(user_id="ada")) == 2
 
 
 def test_without_a_calibrated_judge_only_formatting_merges(verbatim_store):
+    """Any other pair of tags waits for a person, as a merge proposal."""
     _tagged(verbatim_store, "quality assurance", 5)
     _tagged(verbatim_store, "qa", 1)
-    verbatim_store.merge_obvious_topics(user_id="ada")
+    _weekly(verbatim_store)
     assert len(verbatim_store.categories(user_id="ada")) == 2
+    [pair] = verbatim_store.proposals_for_a_person("ada")
+    assert {verbatim_store.backend.get_entity(e).name for e in (pair.entity_a, pair.entity_b)} \
+        == {"qa", "quality assurance"}
 
 
 def test_the_judge_is_told_which_tags_name_an_entity(verbatim_store):
@@ -252,7 +224,7 @@ def test_the_judge_is_told_which_tags_name_an_entity(verbatim_store):
                                                 entity_type="product", user_id="ada"))
     _tagged(verbatim_store, "memory", 5)
     _tagged(verbatim_store, "memry", 5)
-    verbatim_store.merge_obvious_topics(user_id="ada")
+    _weekly(verbatim_store)
     assert judge.states and all('a product named "Memry"' in s for s in judge.states)
     assert all("memry fact 4" in s and "memory fact 4" in s for s in judge.states)
     assert len(verbatim_store.categories(user_id="ada")) == 2
@@ -271,48 +243,19 @@ def test_a_tag_pair_is_compared_when_found_and_once_more_at_10_memories(verbatim
 
     tag("quality assurance", 5)
     tag("qa", 1)
-    verbatim_store.merge_obvious_topics(user_id="ada")
-    verbatim_store.merge_obvious_topics(user_id="ada")
+    _weekly(verbatim_store)
+    _weekly(verbatim_store)
     assert len(judge.states) == 2  # both orders, once
     tag("quality assurance", 5)
-    verbatim_store.merge_obvious_topics(user_id="ada")
+    _weekly(verbatim_store)
     assert len(judge.states) == 2  # "qa" is still on one memory
     tag("qa", 9)
-    verbatim_store.merge_obvious_topics(user_id="ada")
-    verbatim_store.merge_obvious_topics(user_id="ada")
+    _weekly(verbatim_store)
+    _weekly(verbatim_store)
     assert len(judge.states) == 4
     tag("qa", 40)
-    verbatim_store.merge_obvious_topics(user_id="ada")
+    _weekly(verbatim_store)
     assert len(judge.states) == 4  # never after
-
-
-def test_the_suggest_merges_button_only_suggests(verbatim_store):
-    """The button asks the tag question and returns the pair; the merge is the
-    person's, or the weekly pass's, which still compares the pair as its own."""
-    from starlette.testclient import TestClient
-
-    from memry.rest import create_app
-
-    judge = _tag_judge(0.9)
-    verbatim_store.decider = judge
-    for tag, times in (("quality assurance", 5), ("qa", 1)):
-        for i in range(times):
-            verbatim_store.add(f"{tag} fact {i}", user_id="default", infer=False,
-                               categories=[tag])
-    # Not entered as a context manager, so the upkeep scheduler, whose weekly
-    # pass does judge tags, does not start.
-    client = TestClient(create_app(verbatim_store))
-    response = client.get("/api/v1/tags/suggest-merges")
-    assert response.status_code == 200
-    assert response.json() == [{"canonical": "quality assurance",
-                                "variants": ["qa", "quality assurance"],
-                                "reason": "stub: same subject"}]
-    assert len(judge.states) == 2  # both orders
-    assert len(verbatim_store.categories(user_id="default")) == 2
-    verbatim_store.merge_obvious_topics(user_id="default")
-    assert len(judge.states) == 4
-    assert verbatim_store.categories(user_id="default") == [
-        {"category": "quality assurance", "count": 6}]
 
 
 def test_tags_that_only_share_a_word_are_not_compared(verbatim_store):
@@ -321,5 +264,68 @@ def test_tags_that_only_share_a_word_are_not_compared(verbatim_store):
     verbatim_store.decider = judge
     _tagged(verbatim_store, "art assets", 2)
     _tagged(verbatim_store, "art direction", 2)
-    verbatim_store.merge_obvious_topics(user_id="ada")
+    _weekly(verbatim_store)
     assert judge.states == []
+
+
+def test_the_tag_questions_answers_from_before_are_carried_to_their_pairs(verbatim_store):
+    """Before tags were entity pairs the tag question's funnel kept the step
+    each pair of tags was compared at (upkeep "tag_pairs"), and the Upkeep
+    list of tags that looked like one subject kept the pairs a person kept
+    apart. Each becomes the pair's merge proposal, so the weekly pass asks
+    none of them again: compared at its step, or kept apart. A pair whose tag
+    is gone is dropped, and both lists go. A pair never compared is asked."""
+    from memry.models import Scope
+
+    judge = _tag_judge(0.3)
+    verbatim_store.decider = judge
+    for tag, times in (("quality assurance", 5), ("qa", 1), ("tech", 3), ("technical", 3),
+                       ("cologne", 2), ("colonge", 1)):
+        _tagged(verbatim_store, tag, times)
+    verbatim_store._upkeep_set("tag_pairs", "ada", {"qa\nquality assurance": 1, "gone\nqa": 1})
+    verbatim_store._upkeep_set("tag_split:ignored", "ada", [["tech", "technical"]])
+    _weekly(verbatim_store)
+    assert len(judge.states) == 2 and all('"colonge"' in state for state in judge.states)
+
+    def named(proposal):
+        return tuple(sorted(verbatim_store.backend.get_entity(e).name
+                            for e in (proposal.entity_a, proposal.entity_b)))
+
+    pairs = {named(p): (p.status, p.compared_step)
+             for p in verbatim_store.backend.list_proposals(Scope(user_id="ada"), status=None)}
+    assert pairs == {("qa", "quality assurance"): ("proposed", 1),
+                     ("tech", "technical"): ("rejected", 0),
+                     ("cologne", "colonge"): ("proposed", 1)}
+    assert verbatim_store._upkeep_get("tag_pairs", "ada", None) is None
+    assert verbatim_store._upkeep_get("tag_split:ignored", "ada", None) is None
+    _weekly(verbatim_store)
+    assert len(judge.states) == 2
+
+
+def test_without_a_judge_only_tags_spelled_alike_are_raised(verbatim_store):
+    """Tags close only in meaning ("travel" and "trips") are raised where a
+    judge will answer them; without one Memry raises the obvious cases only,
+    tags spelled alike ("hepatology" and "hepatolgy"), for a person."""
+    from memry.intelligence.entities import propose_same_name_duplicates
+    from memry.models import Scope
+
+    for tag in ("travel", "trips", "hepatology", "hepatolgy"):
+        _tagged(verbatim_store, tag, 1)
+
+    def embed(names):  # "travel" and "trips" mean one thing, the rest nothing alike
+        return [[1.0, 0.0, 0.0] if n in ("travel", "trips") else
+                [0.0, 1.0, 0.0] if n == "hepatology" else [0.0, 0.0, 1.0] for n in names]
+
+    def raised(decider):
+        scope = Scope(user_id="ada")
+        with verbatim_store.backend._lock:
+            verbatim_store.backend._db.execute("DELETE FROM entity_proposals")
+            verbatim_store.backend._db.commit()
+        propose_same_name_duplicates(backend=verbatim_store.backend, scope=scope,
+                                     decider=decider, embed=embed)
+        return {tuple(sorted(verbatim_store.backend.get_entity(e).name
+                             for e in (p.entity_a, p.entity_b)))
+                for p in verbatim_store.backend.list_proposals(scope, status=None)}
+
+    assert raised(None) == {("hepatolgy", "hepatology")}
+    assert raised(_tag_judge(0.3)) == {("hepatolgy", "hepatology"), ("travel", "trips")}

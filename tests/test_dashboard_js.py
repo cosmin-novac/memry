@@ -581,8 +581,8 @@ for(const value of ["mum's health",'say "hi"','<b>&amp;</b>',"it's & <that>",
 """
     result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    for call in ("filterByTag(${jsArg(String(c))})", "renameEntity(${jsArg(id)})",
-                 "deleteTagEntity(${jsArg(id)})", "applyMerge(${jsArg(group)},${index})",
+    for call in ("filterByEntity(${jsArg(entity)})", "renameEntity(${jsArg(id)})",
+                 "deleteTagEntity(${jsArg(id)})",
                  "toggleEntityType(${jsArg(group.type)})", "setEntityType(${jsArg(chip.type)})",
                  "pickEntity(${jsArg(id)},this.checked)", "openEntity(${jsArg(id)})"):
         assert call in source, call
@@ -745,19 +745,20 @@ def test_upkeep_has_one_entities_view_and_the_map_one_mode():
                  'id="mapTagsBtn"', 'id="filter-topic"', 'id="filter-entity"'):
         assert gone not in html, gone
     for gone in ("setMapMode", "mapMode", "renderTags", "loadTags", "Tags page",
-                 "mergeTags", "into one named", "legacy_tags", "tag_edges"):
+                 "mergeTags", "into one named", "legacy_tags", "tag_edges",
+                 "suggestMerges", "suggest-merges", "tag_split", "tag_health"):
         assert gone not in source, gone
     # the one combine path: keep one, merge the rest into it
     combine = _region(source, "async function combineSelected(", "function closeCombine(")
     assert "/api/v1/tags/edit" not in combine and "prompt(" not in combine
     assert "api('/api/v1/entities/merge'" in _region(source, "async function applyCombine(", "// Where this")
     panel = _region(html, '<section class="kpanel" id="kpanel-entities"', "</section>")
-    for control in ('id="entsearch"', 'id="enttypes"', 'id="entsel"', ">Suggest merges</button>",
+    for control in ('id="entsearch"', 'id="enttypes"', 'id="entsel"',
                     ">Combine selected...</button>", ">Backfill types</button>",
                     ">Merge proposals</h2>", 'id="entitydetail"'):
         assert control in panel, control
-    # Suggest merges says what it covers
-    assert "This covers tags only: people and things that may be one are under Merge proposals." in panel
+    # two tags that may be one are a merge proposal like any pair
+    assert "Suggest merges" not in html and 'id="tagsuggest"' not in html
     # the map offers tags as a type, off until turned on
     assert 'title="Show every type except concept, other and tag.">defaults</button>' in html
     assert 'title="Show every type, tags included.">all</button>' in html
@@ -790,10 +791,9 @@ const rows=[
   ...concepts];
 const reads={
   '/api/v1/entities?limit=100000&include_merged=true&kind=any':rows,
-  '/api/v1/relations?limit=2000':[],'/api/v1/entities/proposals?asked=true':[],
-  '/api/v1/tags/synthetic':[{tag:'life',source_tags:['travel']}]};
+  '/api/v1/relations?limit=2000':[],'/api/v1/entities/proposals?asked=true':[]};
 const api=async path=>reads[path];
-""" + _region(source, "// -- tags: deleted, and merged as suggested", "// Where this entity belongs") + r"""
+""" + _region(source, "// -- tags: deleted on every memory", "// Where this entity belongs") + r"""
 function check(condition,message){if(!condition)throw new Error(message)}
 const chips=view=>view.chips.map(chip=>chip.label+'='+chip.count).join();
 let view=entityListView(rows);
@@ -816,7 +816,7 @@ check(chips(entityListView(rows,{type:'event'})).endsWith('event=0'),'a type pic
   check(list.includes("deleteTagEntity(&quot;t-travel&quot;)"),'a tag row deletes');
   check(!list.includes("deleteTagEntity(&quot;ada&quot;)"),'a person row does not');
   check(list.includes("renameEntity(&quot;ada&quot;)")&&list.includes("renameEntity(&quot;t-travel&quot;)"),'every row renames');
-  check(list.includes('life</button>')&&list.includes('synthetic parent'),'a synthetic tag is marked');
+  check(list.includes('life</button>')&&!list.includes('synthetic'),'a tag carries no synthetic badge');
   check(list.includes('show 1 more'),'the capped type offers the rest');
   check(nodes.entsel.textContent==='none selected','nothing checked yet');
   pickEntity('t-travel',true);pickEntity('ada',true);
@@ -848,8 +848,7 @@ def test_a_tag_is_renamed_deleted_and_combined_from_the_entities_list():
         store.backend.add_mention(EntityMention(
             entity_id=jonas.id, memory_id=added.actions[0].memory_id, surface="Jonas"))
         reads_paths = ("/api/v1/entities?limit=100000&include_merged=true&kind=any",
-                       "/api/v1/relations?limit=2000", "/api/v1/entities/proposals?asked=true",
-                       "/api/v1/tags/synthetic")
+                       "/api/v1/relations?limit=2000", "/api/v1/entities/proposals?asked=true")
         with TestClient(create_app(store)) as client:
             html = client.get("/").text
             reads = {path: client.get(path).json() for path in reads_paths}
@@ -879,7 +878,7 @@ const noop=async()=>{};
 const loadSearchFilters=noop,loadMapData=noop,loadStats=noop,search=noop,openEntity=noop,
   closeEntity=()=>{},clearMapEntityDetail=()=>{},galaxyRead=()=>{},showMapEntityDetail=()=>{},
   entityIdentityBlock=()=>'';
-""" + _region(source, "// -- tags: deleted, and merged as suggested", "// Where this entity belongs") \
+""" + _region(source, "// -- tags: deleted on every memory", "// Where this entity belongs") \
                 + _region(source, "function syncEntityIdentity(", "async function addMapAlias(") + r"""
 function check(condition,message){if(!condition)throw new Error(message)}
 (async()=>{
@@ -939,10 +938,11 @@ function check(condition,message){if(!condition)throw new Error(message)}
 
 
 def test_the_about_filter_maps_picks_onto_the_api_parameters():
-    """A tag picked goes to ``categories``, anything else to ``entity_id``:
-    the tag filter reaches the tags under a broader one, which an entity
-    filter on the topic id does not, and the two filters hold together."""
-    from memry.models import Scope, Topic, TopicRelation
+    """A tag picked goes to ``categories``, anything else to ``entity_id``,
+    and the two filters hold together: a tag with a person finds the
+    memories that have both. A tag filter reaches the memories filed under
+    that tag and no other."""
+    from memry.models import Scope
 
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
     try:
@@ -956,13 +956,6 @@ def test_the_about_filter_maps_picks_onto_the_api_parameters():
             store.backend.add_mention(EntityMention(
                 entity_id=ada.id, memory_id=added[content], surface="Ada"))
         scope = Scope(user_id="default")
-        parent = store.backend.upsert_topic(Topic(
-            name="life", normalized="life", user_id="default", provenance="synthetic"))
-        for child in store.backend.list_topics(scope, limit=100):
-            if child.normalized in ("work", "health"):
-                store.backend.add_topic_relation(TopicRelation(
-                    broader_topic_id=parent.id, narrower_topic_id=child.id,
-                    user_id="default", provenance="synthetic"))
         life = store.backend.topic_entity("life", scope, create=False)
         with TestClient(create_app(store)) as client:
             html = client.get("/").text
@@ -976,10 +969,7 @@ def test_the_about_filter_maps_picks_onto_the_api_parameters():
             both = found(categories=["work"], entity_id=[ada.id])
     finally:
         store.close()
-    # why a tag goes to categories: the broader tag reaches its narrower ones
-    assert by_tag == ["Ada's running plan", "Ada's standup notes", "Quarterly planning",
-                      "Sleep eight hours"]
-    assert by_topic_id == ["Sleep eight hours"]
+    assert by_tag == by_topic_id == ["Sleep eight hours"]
     # a tag and a person together: the memories that have both
     assert both == ["Ada's standup notes"]
 
@@ -1000,7 +990,7 @@ const PAGE=100,sent=[];
 const api=async(path,opts={})=>{sent.push(opts.body?JSON.parse(opts.body):path);return []};
 const render=()=>{},togglePanel=()=>{},toggleClear=()=>{},clearMapEntityDetail=()=>{},
   showMapEntityDetail=()=>{},galaxyRead=()=>{};
-""" + _region(source, "function filterByTag(tag){", "function toggleClear(){") \
+""" + _region(source, "function filterByEntity(entity){", "function toggleClear(){") \
         + _region(source, "// A click on a planet makes it", "document.getElementById('map').addEventListener('click'") + r"""
 function check(condition,message){if(!condition)throw new Error(message)}
 const pick=(...values)=>select.options.forEach(o=>{o.selected=values.includes(o.value)});
@@ -1032,16 +1022,76 @@ const pick=(...values)=>select.options.forEach(o=>{o.selected=values.includes(o.
   await applyMapNodeFilter({key:'entity:ada',entity_id:'ada',label:'Ada',entity_type:'person'});
   check(JSON.stringify(sent.at(-1))==='{"query":"","limit":100,"entity_id":["ada"]}','a person planet');
   check(select.selectedOptions.map(o=>o.value).join()==='ada','only the planet clicked is picked');
-  // a tag chip on a memory card toggles its tag, and adds one the list lacks
-  pick();filterByTag('Travel');await Promise.resolve();
+  // a chip on a memory card toggles its thing, and adds one the list lacks
+  pick();filterByEntity({id:'t-travel',name:'travel',entity_type:'topic'});await Promise.resolve();
   check(select.selectedOptions.map(o=>o.value).join()==='t-travel','the listed tag is picked');
-  filterByTag('packing');
-  const loose=select.options.find(o=>o.value==='tag:packing');
-  check(loose&&loose.selected&&loose.dataset.tag==='packing','an unlisted tag gets an option');
+  filterByEntity({id:'t-packing',name:'packing',entity_type:'topic'});
+  const added=select.options.find(o=>o.value==='t-packing');
+  check(added&&added.selected&&added.dataset.tag==='packing','an unlisted tag gets an option');
   check(JSON.stringify(searchFilters().topics)==='["travel","packing"]','both are tag filters');
 })().catch(e=>{console.error(e.message);process.exit(1)});
 """
     _run_node(contract)
+
+def test_a_memory_card_shows_what_it_is_about_in_one_row_of_typed_chips():
+    """A memory's tags are things it is about: the card shows them beside
+    the people and things, in one row of chips, each typed as the Entities
+    list types it ("person", "tag"), and no "#tag" row. A chip filters by its
+    thing through the About filter (a tag as a tag filter, a person by id),
+    and a second click takes it off again. The API keeps ``categories``."""
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    try:
+        memory_id = store.add("Ada booked the flights to Lisbon", user_id="default",
+                              infer=False, categories=["travel", "lisbon trip"]
+                              ).actions[0].memory_id
+        ada = store.backend.insert_entity(Entity(name="Ada", entity_type="person",
+                                                 user_id="default"))
+        store.backend.add_mention(EntityMention(entity_id=ada.id, memory_id=memory_id,
+                                                surface="Ada"))
+        with TestClient(create_app(store)) as client:
+            html = client.get("/").text
+            [memory] = client.get("/api/v1/memories").json()
+    finally:
+        store.close()
+    assert memory["categories"] == ["travel", "lisbon trip"]
+    assert [(link["name"], link["entity_type"]) for link in memory["entity_links"]] == [
+        ("Ada", "person"), ("travel", "topic"), ("lisbon trip", "topic")]
+    source = "\n".join(_scripts(html))
+    assert "tagfilter" not in html and "filterByTag" not in source
+    contract = _lines(source, "function esc(s)", "function typeLabel(", "function jsArg(v)",
+                      "const TAG_TYPE=", "function tagKey(") + r"""
+class Option{constructor(text,value){this.textContent=text;this.value=value;this.dataset={};this.selected=false}}
+const select={options:[],get selectedOptions(){return this.options.filter(o=>o.selected)},
+  add(o){this.options.push(o)}};
+const nodes={'filter-about':select,'filter-date':{value:''},'filter-date-to':{value:''},q:{value:''}};
+const document={getElementById:id=>nodes[id]};
+const panels={filters:false};
+let activeMapKey=null,editingId=null,opened=0;
+const sent=[];
+const togglePanel=()=>{opened++},toggleClear=()=>{},clearMapEntityDetail=()=>{};
+const search=async()=>{sent.push(searchFilters())};
+""" + _region(source, "function normalizedMemoryType", "function editCard(") \
+        + _region(source, "function filterByEntity(entity){", "async function loadSearchFilters(") + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+const decode=s=>s.replace(/&#39;/g,"'").replace(/&quot;/g,'"').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
+const memory=JSON.parse(process.argv[2]);
+const card=viewCard(memory);
+check(!card.includes('#travel')&&!card.includes('tagfilter'),'no #tag row: '+card);
+const chips=[...card.matchAll(/<button class="entity-chip"[^>]*onclick='filterByEntity\(([^)]*)\)'>([^<]*)<span class="chip-type">([^<]*)<\/span>/g)];
+check(chips.map(m=>m[2].trim()+':'+m[3]).join()==='Ada:person,travel:tag,lisbon trip:tag',
+      'one row of chips, typed: '+chips.map(m=>m[2]+':'+m[3]).join());
+const clicked=chips.map(m=>JSON.parse(decode(m[1])));
+(async()=>{
+  filterByEntity(clicked[1]);
+  check(opened===1,'the filters open to show the pick');
+  filterByEntity(clicked[0]);
+  check(JSON.stringify(sent.at(-1))==='{"since":"","until":"","topics":["travel"],"entities":["'+clicked[0].id+'"]}',
+        'a tag chip filters by its tag, a person chip by its id: '+JSON.stringify(sent.at(-1)));
+  filterByEntity(clicked[1]);
+  check(JSON.stringify(sent.at(-1).topics)==='[]','a second click takes the tag off');
+})().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+    _run_node(contract, json.dumps(memory))
 
 
 def test_a_tag_panel_renames_and_deletes_but_offers_no_alias():

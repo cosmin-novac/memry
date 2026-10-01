@@ -6,7 +6,6 @@ from .config import (
     EmbeddingConfig,
     LLMConfig,
     RetrievalConfig,
-    TagAbstractionConfig,
 )
 from .models import (
     AddAction,
@@ -21,13 +20,11 @@ from .models import (
     Relation,
     Scope,
     Topic,
-    TopicRelation,
     SearchResult,
-    SyntheticTag,
 )
 from .store import MemoryStore
 
-__version__ = "0.2.40"
+__version__ = "0.2.41"
 
 __all__ = [
     "MemoryStore",
@@ -36,7 +33,6 @@ __all__ = [
     "EmbeddingConfig",
     "RetrievalConfig",
     "DecayConfig",
-    "TagAbstractionConfig",
     "Memory",
     "Episode",
     "Entity",
@@ -44,9 +40,7 @@ __all__ = [
     "MemoryEvent",
     "Scope",
     "Topic",
-    "TopicRelation",
     "SearchResult",
-    "SyntheticTag",
     "Relation",
     "AddResult",
     "AddAction",

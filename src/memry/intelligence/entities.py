@@ -53,6 +53,7 @@ from .identity import (
     name_vectors,
     pair_reason,
     parallel,
+    topic_pairs,
     worth_comparing,
 )
 
@@ -850,9 +851,10 @@ def _answer(verdict: Verdict) -> dict[str, Any]:
             "step": verdict.step}
 
 
-#: A tag and a thing of its very name are raised first, up to this fraction
-#: (1/n) of a pass's limit; the name pairs have the rest, and either takes
-#: what the other leaves (``propose_same_name_duplicates``).
+#: Pairs with a tag are raised first (a tag and a thing of its very name, and
+#: two tags), up to this fraction (1/n) of a pass's limit; the name pairs have
+#: the rest, and either takes what the other leaves
+#: (``propose_same_name_duplicates``).
 TAG_PAIR_SHARE = 4
 
 
@@ -882,10 +884,12 @@ def propose_same_name_duplicates(
     A tag (a topic entity) is paired with each named thing of its very name
     ("bildy" the tag, "Bildy" the product), with or without a judge, and the
     pair goes through the same comparison as any: the tag's memories are its
-    side. Those pairs have a share of ``limit`` of their own
+    side. Two tags are paired as tags are (``identity.topic_pairs``: never on
+    a shared word alone), with or without a judge, and compared by the tag
+    question (``identity.compare_topics``); without a judge only tags spelled
+    alike are paired, and they wait for a person. Pairs with a tag have a share of ``limit`` of their own
     (``TAG_PAIR_SHARE``), so a pass with more name pairs than the limit still
-    raises them. Two tags are never paired here; the tag question decides
-    those (``MemoryStore.merge_obvious_topics``).
+    raises them.
     """
     entities = [e for e in backend.list_entities(scope, limit=10_000) if e.merged_into is None]
     pairs: list[tuple[Entity, Entity]] = []
@@ -940,9 +944,12 @@ def propose_same_name_duplicates(
         if not is_owner(entity):
             named.setdefault(entity.normalized or entity.name.strip().lower(), []).append(entity)
     # the tags, read once for the pass
-    tag_pairs = [(thing, topic)
-                 for topic in backend.list_entities(scope, limit=100_000, kind="topic")
-                 for thing in named.get(topic.normalized, [])]
+    topics = [topic for topic in backend.list_entities(scope, limit=100_000, kind="topic")
+              if topic.merged_into is None]
+    tag_pairs = [(thing, topic) for topic in topics for thing in named.get(topic.normalized, [])]
+    # names close only in meaning are raised for a judge to answer; without
+    # one only names spelled alike, the obvious cases, wait for a person
+    tag_pairs += topic_pairs(topics, name_vectors(embed, topics) if judges_pairs(decider) else None)
 
     def propose(candidates: list[tuple[Entity, Entity]], room: int) -> int:
         made = 0

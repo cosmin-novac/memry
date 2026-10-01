@@ -36,9 +36,7 @@ from ..models import (
     HISTORY_KINDS,
     TOPIC_TYPE,
     Scope,
-    SyntheticTag,
     Topic,
-    TopicRelation,
     later_ts,
     new_id,
     utcnow,
@@ -140,19 +138,6 @@ CREATE TABLE IF NOT EXISTS memory_topics (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_topics_topic ON memory_topics(topic_id, memory_id);
 CREATE INDEX IF NOT EXISTS idx_memory_topics_memory ON memory_topics(memory_id, topic_id);
-CREATE TABLE IF NOT EXISTS topic_relations (
-    id TEXT PRIMARY KEY,
-    broader_topic_id TEXT NOT NULL,
-    narrower_topic_id TEXT NOT NULL,
-    user_id TEXT,
-    provenance TEXT NOT NULL DEFAULT 'synthetic',
-    created_at TEXT NOT NULL,
-    UNIQUE (broader_topic_id, narrower_topic_id)
-);
-CREATE INDEX IF NOT EXISTS idx_topic_relations_broader
-    ON topic_relations(broader_topic_id, narrower_topic_id);
-CREATE INDEX IF NOT EXISTS idx_topic_relations_narrower
-    ON topic_relations(narrower_topic_id, broader_topic_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content, content='memories', content_rowid='rowid'
 );
@@ -275,14 +260,6 @@ CREATE TABLE IF NOT EXISTS ann_keys (
     key INTEGER PRIMARY KEY AUTOINCREMENT,
     memory_id TEXT NOT NULL UNIQUE
 );
-CREATE TABLE IF NOT EXISTS synthetic_tags (
-    id          TEXT PRIMARY KEY,
-    tag         TEXT NOT NULL,
-    user_id     TEXT,
-    source_tags TEXT NOT NULL,
-    created_at  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_synthetic_tags_user ON synthetic_tags(user_id);
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -434,17 +411,14 @@ _BACKUP_TABLE_KEYS: dict[str, tuple[str, ...]] = {
     "memory_events": ("id",),
     "topics": ("id",),
     "memory_topics": ("memory_id", "topic_id"),
-    "topic_relations": ("id",),
     "entities": ("id",),
     "entity_mentions": ("id",),
     "entity_proposals": ("id",),
-    "synthetic_tags": ("id",),
     "relations": ("id",),
 }
 _BACKUP_ORDER = tuple(_BACKUP_TABLE_KEYS)
 _BACKUP_USER_TABLES = {
-    "episodes", "memories", "topics", "topic_relations", "entities",
-    "entity_proposals", "synthetic_tags", "relations",
+    "episodes", "memories", "topics", "entities", "entity_proposals", "relations",
 }
 _BACKUP_BYTES = "__memry_base64__"
 
@@ -604,13 +578,8 @@ def _category_clause(categories: list[str] | None, memory_id: str) -> tuple[str,
         return "1=1", []
     placeholders = ",".join("?" * len(normalized))
     return (
-        "EXISTS (WITH RECURSIVE descendants(topic_id, depth) AS ("
-        f"SELECT id, 0 FROM topics WHERE normalized IN ({placeholders}) "
-        "UNION SELECT tr.narrower_topic_id, d.depth + 1 FROM topic_relations tr "
-        "JOIN descendants d ON tr.broader_topic_id = d.topic_id "
-        "WHERE d.depth < 8) "
-        "SELECT 1 FROM memory_topics mt JOIN descendants d ON d.topic_id = mt.topic_id "
-        f"WHERE mt.memory_id = {memory_id})",
+        "EXISTS (SELECT 1 FROM memory_topics mt JOIN topics t ON t.id = mt.topic_id "
+        f"WHERE mt.memory_id = {memory_id} AND t.normalized IN ({placeholders}))",
         normalized,
     )
 
@@ -754,7 +723,6 @@ class LocalBackend(MemoryBackend):
         self._ensure_exact_topic_scopes()
         self._ensure_one_active_topic_per_name()
         self._backfill_topics()
-        self._migrate_synthetic_topic_relations()
         self._migrate_tags_to_topic_entities()
         self._refile_merged_tags()
         self._name_index = self._ensure_entity_names()
@@ -862,78 +830,6 @@ class LocalBackend(MemoryBackend):
         self._refile_locked("1=1", (), cache={})
         self._db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema:topics:v1', ?)",
-            (utcnow(),),
-        )
-
-    def _migrate_synthetic_topic_relations(self) -> None:
-        """Turn legacy copied umbrella tags into hierarchy edges exactly once."""
-        marker = self._db.execute(
-            "SELECT value FROM meta WHERE key = 'schema:topic-relations:v1'"
-        ).fetchone()
-        if marker:
-            return
-        rows = self._db.execute(
-            "SELECT tag, user_id, source_tags FROM synthetic_tags"
-        ).fetchall()
-        for row in rows:
-            tag = str(row["tag"]).strip()
-            sources = [
-                str(value).strip() for value in json.loads(row["source_tags"])
-                if str(value).strip()
-            ]
-            if not tag or not sources:
-                continue
-            scope = Scope(user_id=row["user_id"])
-            parent = self._topic_locked(tag, scope, provenance="synthetic")
-            for source in sources:
-                matches = self._db.execute(
-                    "SELECT * FROM topics WHERE normalized = ? AND user_id IS ?",
-                    (source.lower(), row["user_id"]),
-                ).fetchall()
-                if not matches:
-                    matches = [
-                        self._topic_locked(source, scope, provenance="memory").model_dump()
-                    ]
-                for match in matches:
-                    child_id = match["id"]
-                    if child_id == parent.id:
-                        continue
-                    relation = TopicRelation(
-                        broader_topic_id=parent.id,
-                        narrower_topic_id=child_id,
-                        user_id=row["user_id"],
-                        provenance="synthetic-migration",
-                    )
-                    self._db.execute(
-                        "INSERT OR IGNORE INTO topic_relations "
-                        "(id, broader_topic_id, narrower_topic_id, user_id, provenance, created_at) "
-                        "VALUES (?,?,?,?,?,?)",
-                        (
-                            relation.id, relation.broader_topic_id,
-                            relation.narrower_topic_id, relation.user_id,
-                            relation.provenance, relation.created_at,
-                        ),
-                    )
-            source_set = {source.lower() for source in sources}
-            memories = self._db.execute(
-                "SELECT id, categories, user_id, agent_id, run_id FROM memories "
-                "WHERE user_id IS ?",
-                (row["user_id"],),
-            ).fetchall()
-            for memory in memories:
-                categories = json.loads(memory["categories"])
-                normalized = {str(value).strip().lower() for value in categories}
-                if tag.lower() not in normalized or not normalized.intersection(source_set):
-                    continue
-                kept = [
-                    value for value in categories
-                    if str(value).strip().lower() != tag.lower()
-                ]
-                self._file_tags_locked(
-                    memory["id"], kept, _row_scope(memory), stored=categories)
-        self._db.execute(
-            "INSERT OR REPLACE INTO meta (key, value) "
-            "VALUES ('schema:topic-relations:v1', ?)",
             (utcnow(),),
         )
 
@@ -2097,13 +1993,6 @@ class LocalBackend(MemoryBackend):
         ]
 
     # -- normalized topics -------------------------------------------------
-    def upsert_topic(self, topic: Topic) -> Topic:
-        scope = Scope(user_id=topic.user_id, agent_id=topic.agent_id, run_id=topic.run_id)
-        with self._lock:
-            stored = self._topic_locked(topic.name, scope, topic.provenance)
-            self._db.commit()
-        return stored
-
     def list_topics(self, scope: Scope, *, limit: int = 1000) -> list[Topic]:
         clause, params = _scope_clause(scope)
         with self._lock:
@@ -2173,19 +2062,6 @@ class LocalBackend(MemoryBackend):
                 (*topic_params, *sorted(normalized)),
             ).fetchall()
             old_ids = {row["id"] for row in topic_rows}
-            target_ids: dict[str, str] = {}
-            if add:
-                for row in topic_rows:
-                    target = self._topic_locked(
-                        add,
-                        Scope(
-                            user_id=row["user_id"], agent_id=row["agent_id"],
-                            run_id=row["run_id"],
-                        ),
-                        provenance="user",
-                    )
-                    target_ids[row["id"]] = target.id
-
             rows = self._db.execute(
                 "SELECT DISTINCT m.id, m.categories, m.user_id, m.agent_id, m.run_id, "
                 "m.invalid_at FROM memories m JOIN memory_topics mt ON mt.memory_id = m.id "
@@ -2214,77 +2090,11 @@ class LocalBackend(MemoryBackend):
                 if filed != categories and row["invalid_at"] is None:
                     changed += 1
 
-            if old_ids:
-                edge_placeholders = ",".join("?" * len(old_ids))
-                edges = self._db.execute(
-                    "SELECT * FROM topic_relations "
-                    f"WHERE broader_topic_id IN ({edge_placeholders}) "
-                    f"OR narrower_topic_id IN ({edge_placeholders})",
-                    (*old_ids, *old_ids),
-                ).fetchall()
-                for edge in edges:
-                    self._db.execute(
-                        "DELETE FROM topic_relations WHERE id = ?", (edge["id"],)
-                    )
-                    if not add:
-                        continue
-                    broader = target_ids.get(edge["broader_topic_id"], edge["broader_topic_id"])
-                    narrower = target_ids.get(edge["narrower_topic_id"], edge["narrower_topic_id"])
-                    if broader == narrower:
-                        continue
-                    rewritten = TopicRelation(
-                        broader_topic_id=broader,
-                        narrower_topic_id=narrower,
-                        user_id=edge["user_id"],
-                        provenance=edge["provenance"],
-                        created_at=edge["created_at"],
-                    )
-                    self._db.execute(
-                        "INSERT OR IGNORE INTO topic_relations "
-                        "(id, broader_topic_id, narrower_topic_id, user_id, provenance, created_at) "
-                        "VALUES (?,?,?,?,?,?)",
-                        (
-                            rewritten.id, rewritten.broader_topic_id,
-                            rewritten.narrower_topic_id, rewritten.user_id,
-                            rewritten.provenance, rewritten.created_at,
-                        ),
-                    )
-
-            synthetic_rows = self._db.execute(
-                "SELECT * FROM synthetic_tags WHERE user_id IS ?", (scope.user_id,)
-            ).fetchall()
-            for synthetic in synthetic_rows:
-                tag = str(synthetic["tag"]).strip().lower()
-                sources = [
-                    str(value).strip().lower()
-                    for value in json.loads(synthetic["source_tags"])
-                    if str(value).strip()
-                ]
-                if tag in normalized:
-                    self._db.execute(
-                        "DELETE FROM synthetic_tags WHERE id = ?", (synthetic["id"],)
-                    )
-                    continue
-                rewritten_sources = [
-                    add if source in normalized and add else source
-                    for source in sources
-                    if source not in normalized or add
-                ]
-                rewritten_sources = list(dict.fromkeys(rewritten_sources))
-                self._db.execute(
-                    "UPDATE synthetic_tags SET tag = ?, source_tags = ? WHERE id = ?",
-                    (tag, json.dumps(rewritten_sources), synthetic["id"]),
-                )
-
             for old_id in old_ids:
-                if target_ids.get(old_id) == old_id:
-                    continue
                 self._db.execute(
                     "DELETE FROM topics WHERE id = ? "
-                    "AND NOT EXISTS (SELECT 1 FROM memory_topics WHERE topic_id = ?) "
-                    "AND NOT EXISTS (SELECT 1 FROM topic_relations "
-                    "WHERE broader_topic_id = ? OR narrower_topic_id = ?)",
-                    (old_id, old_id, old_id, old_id),
+                    "AND NOT EXISTS (SELECT 1 FROM memory_topics WHERE topic_id = ?)",
+                    (old_id, old_id),
                 )
             if not add:
                 # a deleted tag's topic goes with its last mention, retired as
@@ -2312,27 +2122,12 @@ class LocalBackend(MemoryBackend):
                 f"AND normalized IN ({marks}) "
                 "UNION SELECT m.user_id FROM memories m "
                 "JOIN memory_topics mt ON mt.memory_id = m.id "
-                f"JOIN topics t ON t.id = mt.topic_id WHERE t.normalized IN ({marks}) "
-                f"UNION SELECT user_id FROM synthetic_tags WHERE lower(tag) IN ({marks})",
-                (TOPIC_TYPE, *wanted, *wanted, *wanted),
+                f"JOIN topics t ON t.id = mt.topic_id WHERE t.normalized IN ({marks})",
+                (TOPIC_TYPE, *wanted, *wanted),
             ).fetchall()
         # None first, then by name: a stable order for the edits made one by one
         return sorted((row["user_id"] for row in rows),
                       key=lambda user: (user is not None, user or ""))
-
-    def add_topic_relation(self, relation: TopicRelation) -> TopicRelation:
-        with self._lock:
-            self._db.execute(
-                "INSERT OR IGNORE INTO topic_relations "
-                "(id, broader_topic_id, narrower_topic_id, user_id, provenance, created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (
-                    relation.id, relation.broader_topic_id, relation.narrower_topic_id,
-                    relation.user_id, relation.provenance, relation.created_at,
-                ),
-            )
-            self._db.commit()
-        return relation
 
     # -- tags as topic entities ----------------------------------------------
     # A tag is an entity of type ``TOPIC_TYPE``, one per namespace (``user_id``
@@ -2815,9 +2610,6 @@ class LocalBackend(MemoryBackend):
         (or with ``dry_run``, would be) created per user, with the user's
         legacy ``topics`` rows counted. Idempotent: an entity or a mention
         that exists is counted as existing and left alone.
-
-        A synthetic parent that no memory carries is skipped: it lived only as
-        a hierarchy edge (``topic_relations``), which is not carried over.
         ``all_users`` False migrates ``user_id`` alone (None: the memories
         without a user)."""
         with self._lock:
@@ -2848,58 +2640,16 @@ class LocalBackend(MemoryBackend):
 
     def _tags_to_topics_locked(self, user_id: str | None) -> dict[str, Any]:
         counts = {
-            "user_id": user_id, "topics": 0, "skipped_parents": 0,
+            "user_id": user_id, "topics": self._db.execute(
+                "SELECT COUNT(*) FROM topics WHERE user_id IS ?", (user_id,)).fetchone()[0],
             "entities_created": 0, "entities_existing": 0,
             "mentions_created": 0, "mentions_existing": 0,
         }
-        for topic in self._db.execute(
-            "SELECT t.provenance, "
-            "EXISTS (SELECT 1 FROM memory_topics mt WHERE mt.topic_id = t.id) AS used "
-            "FROM topics t WHERE t.user_id IS ?",
-            (user_id,),
-        ).fetchall():
-            counts["topics"] += 1
-            if topic["provenance"] == "synthetic" and not topic["used"]:
-                counts["skipped_parents"] += 1
         self._refile_locked(
             "user_id IS ? AND categories != '[]'", (user_id,), cache={}, counts=counts)
         return counts
 
-    # -- synthetic tags + meta ---------------------------------------------
-    def record_synthetic_tag(self, tag: SyntheticTag) -> None:
-        with self._lock:
-            self._db.execute(
-                "INSERT OR REPLACE INTO synthetic_tags "
-                "(id, tag, user_id, source_tags, created_at) VALUES (?,?,?,?,?)",
-                (tag.id, tag.tag, tag.user_id, json.dumps(tag.source_tags),
-                 tag.created_at),
-            )
-            self._db.commit()
-
-    def list_synthetic_tags(self, scope: Scope) -> list[SyntheticTag]:
-        clause, params = _scope_clause(Scope(user_id=scope.user_id))
-        with self._lock:
-            rows = self._db.execute(
-                f"SELECT * FROM synthetic_tags WHERE {clause} ORDER BY created_at DESC",
-                params,
-            ).fetchall()
-        return [
-            SyntheticTag(
-                id=r["id"], tag=r["tag"], user_id=r["user_id"],
-                source_tags=json.loads(r["source_tags"]), created_at=r["created_at"],
-            )
-            for r in rows
-        ]
-
-    def delete_synthetic_tag(self, scope: Scope, tag: str) -> None:
-        clause, params = _scope_clause(Scope(user_id=scope.user_id))
-        with self._lock:
-            self._db.execute(
-                f"DELETE FROM synthetic_tags WHERE {clause} AND lower(tag) = ?",
-                (*params, tag.strip().lower()),
-            )
-            self._db.commit()
-
+    # -- meta ------------------------------------------------------------------
     def distinct_user_ids(self) -> list[str | None]:
         with self._lock:
             rows = self._db.execute(
@@ -4646,21 +4396,6 @@ class LocalBackend(MemoryBackend):
             table, f"{column} IN ({placeholders})", tuple(sorted(values))
         )
 
-    def _backup_rows_for_users(
-        self, table: str, user_ids: set[str | None]
-    ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
-        params: list[str] = []
-        named = sorted(value for value in user_ids if value is not None)
-        if named:
-            clauses.append(f"user_id IN ({','.join('?' * len(named))})")
-            params.extend(named)
-        if None in user_ids:
-            clauses.append("user_id IS NULL")
-        if not clauses:
-            return []
-        return self._select_backup_rows(table, " OR ".join(clauses), tuple(params))
-
     def export_backup(self, scope: Scope) -> dict[str, Any]:
         """Export exact source records; FTS and ANN remain derived indexes."""
         with self._lock:
@@ -4674,19 +4409,11 @@ class LocalBackend(MemoryBackend):
             memory_ids = {row["id"] for row in tables["memories"]}
             topic_ids = {row["id"] for row in tables["topics"]}
             entity_ids = {row["id"] for row in tables["entities"]}
-            user_ids = {
-                row["user_id"]
-                for table in ("episodes", "memories", "topics", "entities")
-                for row in tables[table]
-            }
-            if scope.user_id is not None:
-                user_ids.add(scope.user_id)
 
             if scope.is_empty():
                 for table in (
-                    "memory_events", "memory_topics", "topic_relations",
-                    "entity_mentions", "entity_proposals", "synthetic_tags",
-                    "relations",
+                    "memory_events", "memory_topics", "entity_mentions",
+                    "entity_proposals", "relations",
                 ):
                     tables[table] = self._select_backup_rows(table)
             else:
@@ -4697,11 +4424,6 @@ class LocalBackend(MemoryBackend):
                     row for row in self._backup_rows_for_ids(
                         "memory_topics", "memory_id", memory_ids
                     ) if row["topic_id"] in topic_ids
-                ]
-                tables["topic_relations"] = [
-                    row for row in self._backup_rows_for_ids(
-                        "topic_relations", "broader_topic_id", topic_ids
-                    ) if row["narrower_topic_id"] in topic_ids
                 ]
                 tables["entity_mentions"] = [
                     row for row in self._backup_rows_for_ids(
@@ -4719,9 +4441,6 @@ class LocalBackend(MemoryBackend):
                     ) if row["object"] in entity_ids
                     and (row["memory_id"] is None or row["memory_id"] in memory_ids)
                 ]
-                tables["synthetic_tags"] = self._backup_rows_for_users(
-                    "synthetic_tags", user_ids
-                )
 
             ordered = {table: tables.get(table, []) for table in _BACKUP_ORDER}
         return {
@@ -4784,9 +4503,6 @@ class LocalBackend(MemoryBackend):
         for row in tables["memory_topics"]:
             if row["memory_id"] not in memory_ids or row["topic_id"] not in topic_ids:
                 raise ValueError("topic assignment references data outside the backup")
-        for row in tables["topic_relations"]:
-            if row["broader_topic_id"] not in topic_ids or row["narrower_topic_id"] not in topic_ids:
-                raise ValueError("topic hierarchy references data outside the backup")
         for row in tables["entity_mentions"]:
             if row["memory_id"] not in memory_ids or row["entity_id"] not in entity_ids:
                 raise ValueError("entity link references data outside the backup")

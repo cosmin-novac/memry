@@ -17,7 +17,7 @@ indexes and organization layered on top.
 | **Memory** | One distilled, self-contained fact/event/statement. Bi-temporal. | `memories` table | extraction + reconciliation |
 | **Entity** | A stable referent hub with aliases, a derived description, and linked evidence. | `entities` + `entity_mentions` | entity linking on save; description on first use |
 | **Relation** | A typed edge between two entities (`Ada -works_on-> Helios`). | `relations` table | relation extraction on save |
-| **Tag** | A classification and filter: an entity of type `topic`, one per user and name, mentioned by every memory filed under it. | `entities` + `entity_mentions`; the `categories` column and the `topics`/`memory_topics` filter index; `topic_relations` for optional parents | extraction, user, or abstraction |
+| **Tag** | A classification and filter: an entity of type `topic`, one per user and name, mentioned by every memory filed under it. | `entities` + `entity_mentions`; the `categories` column and the `topics`/`memory_topics` filter index | extraction or user |
 
 Two important properties of a **Memory**:
 
@@ -200,22 +200,22 @@ Entities are **extracted, disambiguated, and typed.**
 Public APIs still call a memory's tags `categories`. Each tag is an entity of type `topic`,
 one per user and normalized name, and every memory filed under it mentions it. The
 `categories` column and the legacy `topics`/`memory_topics` index, which the filters read,
-are written from the same tags. Two tags merge through the tag question (each shown with
-its 10 most recent memories); a tag and a named thing of the same name ("bildy" and the
-product Bildy) through the entity pair question. A tag is never a hub and never what a
+are written from the same tags. Two tags are a merge proposal like two names, compared by
+the tag question (each shown with its 10 most recent memories); a tag and a named thing of
+the same name ("bildy" and the product Bildy) by the entity pair question. A tag is never a hub and never what a
 search is about.
 
 - The dashboard's Upkeep > Entities lists tags with the people and things, filtered by
   type (a tag reads "tag"), with counts, and supports rename, combine, and delete; the map
   draws tags once their type is turned on, and the memory list's About filter picks any
-  of them.
+  of them. A memory card shows its tags as chips beside the people and things it
+  mentions, each chip with its type, and a click on one filters by it.
 - Separator and conservative singular/plural duplicates such as `food`/`foods` merge
-  automatically. "Suggest merges" proposes semantic synonyms for review; distinct related
-  topics remain separate.
-- Synthetic abstraction creates hierarchy edges such as `health` broader than
-  `liver health`. The parent is not copied onto the child memories. Filtering by `health`
-  expands through the hierarchy at query time. It is off by default and meant for
-  browsing: a filter that names the specific tag retrieves better than its parent.
+  automatically. Other tags that may be one (`qa`/`quality assurance`) are merge proposals:
+  a calibrated judge decides them, and without one they wait under Upkeep with the other
+  pairs. Distinct related topics remain separate.
+- There are no parent tags. A tag filter finds the memories filed under that tag, and a
+  question whose answer is a set reads the tags its first answers share.
 - Entity structure: whether a name is a hub is computed when asked, from its type, its
   memories and relations and the name screen's verdict. The structure pass records each
   part's home (a stated `part_of` relation, or the judge's answer that it is a version or
@@ -235,16 +235,14 @@ search is about.
             │
         episodes               ← immutable source of truth
             │
-     tags (topic entities)    ← cross-cutting filters, optional hierarchy
+     tags (topic entities)    ← cross-cutting filters
 ```
 
 - **Memories** are the atoms; **episodes** are what they came from.
 - **Entities + relations** are where retrieval intelligence lives: they turn a
   bag of facts into a graph you can traverse, which is the only thing that makes
   multi-hop questions answerable.
-- **Tags** cut across memories as filters; hierarchy provides abstraction without copying labels.
-- Synthetic tag parents are an optional map on top, off by default, not places
-  facts live.
+- **Tags** cut across memories as filters, and are things a memory is about.
 
 ## Keeping it manageable
 
@@ -258,8 +256,8 @@ search is about.
 - Run **`memry backfill-relations`** once to extract relations from memories that
   predate the feature (cheap: only multi-entity memories, marked done so re-runs
   are free).
-- Use **Upkeep > Tags** and conservative "Suggest merges" to keep the
-  classification vocabulary clean; prefer specific topics.
+- Upkeep > Entities lists tags with the people and things, to rename, combine or delete;
+  prefer specific topics.
 - Nothing the system does destroys data: forgetting is invalidation, and every
   mutation is in `memory_events`.
 
@@ -272,7 +270,7 @@ search is about.
 | Hybrid retrieval (vector + BM25 + recency/importance) | real |
 | Entity extraction + conservative disambiguation + merge proposals | real |
 | Typed relations + the linked search | real |
-| Tags as topic entities, hierarchy expansion, canonicalization | real (abstraction opt-in) |
+| Tags as topic entities, canonicalization | real |
 | Entity types (person/project/place/…) + typing backfill | real |
 | Memory-type-driven decay (episodic fades, procedural persists) | real |
 | Unified Upkeep area: what needs you, entity hubs with their relations, tags, and the archive of what was removed | real |

@@ -432,10 +432,11 @@ def _tag_judge(same: float):
         tag_merge_probability = 0.55  # JevDecider's measured bar
 
         def __init__(self):
-            self.states = []
+            self.states, self.other = [], []
 
         def decide(self, state, questions):
             if "tag" not in questions:
+                self.other.append(sorted(questions))
                 return Answers({})
             self.states.append(state)
             return Answers({"tag": Answer("same" if same >= 0.5 else "different",
@@ -446,6 +447,9 @@ def _tag_judge(same: float):
 
 @pytest.mark.parametrize("same, merged", [(0.56, True), (0.54, False)])
 def test_two_topics_are_judged_by_the_tag_question_at_its_bar(tagged, same, merged):
+    """Two tags are an entity pair: the weekly pass raises them as a merge
+    proposal, and the funnel asks the tag question of it (never the entity
+    pair question) and merges from the measured bar, the more used tag kept."""
     judge = _tag_judge(same)
     tagged.decider = judge
     for i in range(5):
@@ -453,13 +457,16 @@ def test_two_topics_are_judged_by_the_tag_question_at_its_bar(tagged, same, merg
                    categories=["quality assurance"])
     tagged.add("qa fact", user_id="ada", infer=False, categories=["qa"])
     qa = tagged.backend.topic_entity("qa", Scope(user_id="ada"), create=False)
-    tagged.merge_obvious_topics(user_id="ada")
-    assert judge.states and all("Two tags" in state for state in judge.states)
+    judge.states, judge.other = [], []
+    tagged.resolve_entities(user_id="ada")
+    assert len(judge.states) == 2 and all("Two tags" in state for state in judge.states)
+    assert judge.other == []
     folded = tagged.backend.get_entity(qa.id).merged_into is not None
     assert folded is merged
     assert len(tagged.categories(user_id="ada")) == (1 if merged else 2)
-    # two tags never become a pair for the entity identity funnel
-    assert tagged.backend.list_proposals(Scope(user_id="ada"), status=None) == []
+    [pair] = tagged.backend.list_proposals(Scope(user_id="ada"), status=None)
+    assert (pair.status, pair.compared_step, pair.confidence) == (
+        ("confirmed" if merged else "proposed"), 1, same)
     _agree(tagged, "ada")
 
 
@@ -639,22 +646,13 @@ def _legacy(store):
 def _tables(store):
     db = store.backend._db
     return {table: [tuple(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY 1, 2")]
-            for table in ("topics", "memory_topics", "topic_relations", "entities",
-                          "entity_mentions")}
+            for table in ("topics", "memory_topics", "entities", "entity_mentions")}
 
 
 def test_tags_to_topics_migrates_counts_and_is_idempotent(tagged):
-    from memry.models import Topic, TopicRelation
-
     tagged.add("Ada runs", user_id="ada", infer=False, categories=["Health", "running"])
     tagged.add("Ada sleeps", user_id="ada", infer=False, categories=["health"])
     tagged.add("Bob works", user_id="bob", infer=False, categories=["work"])
-    parent = tagged.backend.upsert_topic(Topic(name="wellbeing", normalized="wellbeing",
-                                               user_id="ada", provenance="synthetic"))
-    running = next(t for t in tagged.backend.list_topics(Scope(user_id="ada"))
-                   if t.normalized == "running")
-    tagged.backend.add_topic_relation(TopicRelation(
-        broader_topic_id=parent.id, narrower_topic_id=running.id, user_id="ada"))
     _legacy(tagged)
     assert tagged.categories(user_id="ada") == []
     before = _tables(tagged)
@@ -666,7 +664,7 @@ def test_tags_to_topics_migrates_counts_and_is_idempotent(tagged):
         {k: v for k, v in row.items() if k != "dry_run"} for row in report]
     by_user = {row["user_id"]: row for row in report}
     assert by_user["ada"] == {
-        "user_id": "ada", "topics": 3, "skipped_parents": 1, "entities_created": 2,
+        "user_id": "ada", "topics": 2, "entities_created": 2,
         "entities_existing": 0, "mentions_created": 3, "mentions_existing": 0,
         "dry_run": False}
     assert by_user["bob"]["entities_created"] == 1 and by_user["bob"]["mentions_created"] == 1
@@ -676,8 +674,8 @@ def test_tags_to_topics_migrates_counts_and_is_idempotent(tagged):
     _agree(tagged, "ada")
     _agree(tagged, "bob")
     after = _tables(tagged)
-    # the legacy tables are the record: read, never written; relations stay put
-    for table in ("topics", "memory_topics", "topic_relations"):
+    # the legacy tables are the record: read, never written
+    for table in ("topics", "memory_topics"):
         assert after[table] == before[table]
 
     again = tagged.tags_to_topics()
@@ -964,19 +962,15 @@ def test_the_dashboard_lists_tags_as_topic_entities():
 @pytest.mark.skipif(shutil.which("node") is None, reason="node renders the entity list")
 def test_the_dashboard_entity_list_draws_tags_from_topic_entities():
     """The Entities list draws each tag from its topic entity, with its
-    count: a tag with no legacy index row is listed, a synthetic parent adds
-    no rolled-up row, and a tag reads "tag"."""
+    count: a tag with no legacy index row is listed, and a tag reads "tag"."""
     import re
 
-    from memry.models import SyntheticTag
     from memry.rest import create_app
 
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
     try:
         store.add("a", user_id="default", infer=False, categories=["work", "diet"])
         store.add("b", user_id="default", infer=False, categories=["work"])
-        store.backend.record_synthetic_tag(SyntheticTag(
-            tag="life", source_tags=["work", "diet"], user_id="default"))
         with store.backend._lock:
             store.backend._db.execute("DELETE FROM memory_topics")
             store.backend._db.commit()
@@ -985,8 +979,7 @@ def test_the_dashboard_entity_list_draws_tags_from_topic_entities():
             replies = {path: client.get(path).json() for path in (
                 "/api/v1/entities?limit=100000&include_merged=true&kind=any",
                 "/api/v1/relations?limit=2000",
-                "/api/v1/entities/proposals?asked=true",
-                "/api/v1/tags/synthetic")}
+                "/api/v1/entities/proposals?asked=true")}
     finally:
         store.close()
     source = "\n".join(re.findall(r"<script>(.*?)</script>", html, re.S))
@@ -1009,7 +1002,6 @@ function check(condition,message){if(!condition)throw new Error(message)}
   check(rows.join()==='diet=1,work=2','rows: '+rows.join());
   check(html.includes('<div class="ent-group"><span>tag</span>'),'tags read "tag"');
   check(!html.includes('>topic<'),'never "topic"');
-  check(!html.includes('synthetic parent')&&!html.includes('life'),'no parent row');
 })().catch(e=>{console.error(e.message);process.exit(1)});
 """
     result = subprocess.run(["node", "-", json.dumps(replies)], input=contract,
@@ -1078,23 +1070,35 @@ def test_tags_combined_through_the_entity_merge_are_filed_as_the_tag_merge_files
 
 
 # ------------------------------------------------------------------- upkeep
-def test_synthetic_parents_do_not_run_in_upkeep_unless_configured():
-    llm = FakeLLM()
-    config = Config(db_path=":memory:")
-    store = MemoryStore(config, llm=llm, embedder=HashEmbedder(64))
+def test_synthetic_parent_tags_are_gone(monkeypatch, tmp_path, capsys):
+    """No pass, switch, setting, command or endpoint makes parent tags any
+    more: a question that needs a set reads the things its answers share."""
+    from memry.cli import main
+    from memry.rest import create_app
+
+    monkeypatch.setenv("MEMRY_TAG_ABSTRACTION", "on")
+    monkeypatch.setenv("MEMRY_CONFIG", str(tmp_path / "missing.json"))
+    config = Config.load()
+    assert not hasattr(config, "tags")
+    store = MemoryStore(Config(db_path=":memory:"), llm=FakeLLM(), embedder=HashEmbedder(64))
     try:
-        for key in ("dedup_entities", "durability", "consolidation", "structure"):
-            store.set_maintenance_enabled(key, False)
-        store.add("a", user_id="ada", infer=False, categories=["x"])
-        # a stored switch alone does not bring the pass back
-        store.set_maintenance_enabled("tag_abstraction", True)
-        assert not store.maintenance_enabled("tag_abstraction")
-        assert "tag_abstraction" not in store.run_upkeep_cycle(user_id="ada")
-        config.tags.enabled = True
-        ran = store.run_upkeep_cycle(user_id="ada")
-        assert "tags" in ran["tag_abstraction"]["skipped"]  # reachable, too few tags
+        store.add("a", user_id="default", infer=False, categories=["x"])
+        assert "tag_abstraction" not in store._MAINTENANCE_KEYS
+        assert not store.set_maintenance_enabled("tag_abstraction", True)
+        with pytest.raises(ValueError):
+            store.run_upkeep_pass("tag_abstraction", user_id="default")
+        assert not hasattr(store, "abstract_tags") and not hasattr(store, "synthetic_tags")
+        with TestClient(create_app(store)) as client:
+            assert client.get("/api/v1/tags/synthetic").status_code == 404
+            assert client.post("/api/v1/tags/abstract", json={}).status_code == 404
+            assert client.post("/api/v1/maintenance/run/tag_abstraction",
+                               json={}).status_code == 404
+            assert client.get("/api/v1/categories").json() == [{"category": "x", "count": 1}]
     finally:
         store.close()
+    with pytest.raises(SystemExit):
+        main(["abstract-tags"])
+    capsys.readouterr()
 
 
 def test_stats_count_topics_apart_from_named_entities(tagged):

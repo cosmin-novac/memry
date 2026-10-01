@@ -681,12 +681,6 @@ class WorldLLM(LLM):
         if system.startswith("You review the entity list"):
             self.calls.count("referent_review")
             return json.dumps({"junk": []})
-        if system.startswith("You organize a personal memory system's tags"):
-            self.calls.count("synthetic_tags")
-            known = re.findall(r"^- (.*) \(\d+\)$", user, re.MULTILINE)
-            members = [t for t in ("kitchen renovation", "apartment", "cat care") if t in known]
-            clusters = [{"tag": "home life", "members": members}] if len(members) >= 2 else []
-            return json.dumps({"clusters": clusters})
         if system.startswith("You are consolidating an AI assistant's long-term memory"):
             self.calls.count("consolidate")
             texts = re.findall(r"^\[\d+\] (.*)$", user, re.MULTILINE)
@@ -2141,7 +2135,6 @@ def build(setup: str, monkeypatch) -> Replay:
     world, calls = World(), Calls()
     judged = setup == "judge"
     config = Config(db_path=":memory:")
-    config.tags.enabled = True                       # synthetic parent tags, weekly
     config.decay.durability = setup != "text_only"   # needs a decision provider
     if setup == "text_decider":
         config.decision.provider = "llm"

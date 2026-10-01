@@ -362,16 +362,6 @@ class Topic(BaseModel):
     updated_at: str = Field(default_factory=utcnow)
 
 
-class TopicRelation(BaseModel):
-    """A taxonomy edge: ``broader`` contains the narrower topic."""
-
-    id: str = Field(default_factory=new_id)
-    broader_topic_id: str
-    narrower_topic_id: str
-    user_id: str | None = None
-    provenance: str = "synthetic"
-    created_at: str = Field(default_factory=utcnow)
-
 class Entity(BaseModel):
     """A distinct real-world thing (person/org/place/...) referenced by memories.
 
@@ -467,22 +457,6 @@ class Relation(BaseModel):
     created_at: str = Field(default_factory=utcnow)
     valid_from: str = Field(default_factory=utcnow)
     invalid_at: str | None = None
-
-
-class SyntheticTag(BaseModel):
-    """A higher-level tag an LLM proposed to cluster several existing tags.
-
-    Recorded so the system remembers which tags it invented (vs. tags that came
-    from the user/extraction), can avoid re-proposing them, and can show or undo
-    them later. The label is NOT copied onto member memories: it exists only as
-    a ``TopicRelation`` edge, and query-time hierarchy expansion makes a filter
-    on the parent reach the memories tagged with its children."""
-
-    id: str = Field(default_factory=new_id)
-    tag: str
-    source_tags: list[str] = Field(default_factory=list)
-    user_id: str | None = None
-    created_at: str = Field(default_factory=utcnow)
 
 
 class ContextResult(BaseModel):

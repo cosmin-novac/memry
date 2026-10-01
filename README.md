@@ -52,11 +52,9 @@ Prior merges are followed, so an older proposal cannot leave a broken merge targ
 **Topics organize themselves.** Extraction tags each memory at the level a later
 conversation would ask about (`liver health`, `weekly gym`, `2026 taxes`), reusing the
 vocabulary already in your store rather than coining a synonym every session. Mechanical
-variants such as `food`/`foods` merge without review, and Memry also spots tags that have
-quietly split one subject. An optional, off-by-default pass groups tags under broader
-parents for browsing, stored as hierarchy edges rather than copied onto every memory;
-it is off because retrieval measures best at the specific level, not the broad one.
-Search and list by topic or by date window.
+variants such as `food`/`foods` merge without review, and two tags that name one subject
+are compared and merged as two names of one thing are. Search and list by topic or by date
+window.
 
 **It stays simple as one shared service.** SQLite is the sole production store. One Memry
 server can serve many agents, devices, and tenant namespaces without an external database.

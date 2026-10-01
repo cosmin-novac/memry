@@ -232,7 +232,7 @@ merge-proposal review under **Upkeep** matters as much as it did before.
 | Reconcile | The action and its target. The text model writes the merged sentence for an UPDATE; without one, the old memory is kept and superseded by the new one, so no text is lost. A contradiction only replaces a memory on its own where little is at stake; see below. |
 | How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. Off unless `MEMRY_DURABILITY=1` (`decay.durability`), for the scheduler and "run now" alike; the score does not move a memory's `updated_at`. |
 | Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. Word-for-word duplicates merge on their own; a merge the model proposed waits under Upkeep, because that judgement has not been measured. |
-| Tag drift | Two tags merge on their own when the provider, shown each with its 10 most recent memories and asked in both orders, puts P(same subject) at 0.55 or more (measured for Jev on 379 tag pairs of a real store; a text model is not asked). **Suggest merges** on the **Entities** tab of Upkeep asks the same question at the same bar about the tags nothing else flagged, when at most 20 are left, and only suggests: a tag changes when you apply the suggestion. |
+| Tag drift | Two tags that may be one are a merge proposal like two names. They merge on their own when the provider, shown each with its 10 most recent memories and asked in both orders, puts P(same subject) at its tag bar or more (0.55 for Jev; a text model is not asked). Without a calibrated judge the pair waits under Upkeep with the other merge proposals. |
 | Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna, gpt-5-mini), and is refused for one that was not. Where it is on, `retrieval.relational_relevance` "auto" (the default) has the provider judge the first 20 of every search, filtered or not, in the linked search's order when the question names a hub and in the text ranking's otherwise, and the results are ordered by that judgement. `"vector"` judges no search: a question naming a hub is ordered by the property vectors, and one naming none by the text ranking. |
 
 ### The settings, and where they came from
@@ -355,7 +355,6 @@ No external queue service is required.
 memry sweep --threshold 0.1   # soft-forget stale, low-importance memories
 memry stats                   # counts, providers, db path
 memry export > backup.json    # knowledge only: IDs, provenance, entities, relations, history
-memry abstract-tags           # LLM clusters tags into higher-level ones now
 memry tags-to-things --dry-run   # tags to topic entities (done at first open): count only
 ```
 
@@ -383,15 +382,16 @@ deleted under the current user filter, and checked entries of any type can be co
 The same topic operations remain available at `POST /api/v1/tags/edit` for API
 compatibility.
 
-An optional, off-by-default LLM pass proposes higher-level parents for browsing, such as
-`health` over `liver health` and `weekly gym`. Leave it off unless you want that navigation
-view: retrieval measures best when a filter names the specific level, and a broad parent
-adds candidates without adding coverage (`MEMRY_TAG_ABSTRACTION=on`,
-`MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS=7`, or `memry abstract-tags`; the config switch is the
-only way into the upkeep cycle). Memry stores hierarchy edges and expands a parent filter at
-query time; it does not copy the parent label onto each memory. Tag counts
-(`/api/v1/categories`, the tags in the Entities list) are direct and do not roll a parent
-up; recorded parents are listed at `GET /api/v1/tags/synthetic`.
+A memory card shows what the memory is about in one row of chips: the people and things
+it mentions, then its tags, each with its type as the Entities list names it. A click on a
+chip filters the list by it through the About filter. The API lists the tags in a memory's
+`entity_links` as entities of type `topic`, and keeps its `categories`.
+
+There are no parent tags. The pass that proposed them, its settings
+(`MEMRY_TAG_ABSTRACTION`, `MEMRY_TAG_ABSTRACTION_INTERVAL_DAYS`), the `memry abstract-tags`
+command and `GET /api/v1/tags/synthetic` are gone, and a tag filter finds the memories filed
+under that tag only. A database that recorded parents keeps those rows, and nothing reads
+them.
 
 Entities open as hubs with aliases, a bounded description, and active
 supporting memories. Relations are listed under the entity they describe and can open their

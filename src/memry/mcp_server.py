@@ -159,7 +159,6 @@ class ListMemoriesOutput(BaseModel):
 class CategoryOutput(BaseModel):
     category: str
     count: int
-    synthetic: bool | None = None
 
 
 class ListCategoriesOutput(BaseModel):
@@ -598,12 +597,6 @@ def create_server(
         drilling into a category with search_memories. Each count is the
         memories filed directly under that tag."""
         cats = await _threaded(store.categories, user_id=_uid(user_id))
-        synthetic = {
-            t.tag for t in await _threaded(store.synthetic_tags, user_id=_uid(user_id))
-        }
-        for c in cats:
-            if c["category"] in synthetic:
-                c["synthetic"] = True
         return _tool_result(cats, ListCategoriesOutput(categories=cats))
 
     @mcp.tool(
