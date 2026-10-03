@@ -55,6 +55,11 @@ class HnswSidecar:
     def needs_rebuild(self) -> bool:
         return not self._loaded_ok
 
+    def mark_stale(self) -> None:
+        """Rebuild from SQLite at the next use: writes whose vectors it took
+        were rolled back."""
+        self._loaded_ok = False
+
     def _try_load(self) -> bool:
         if not self._persist or self.index_path is None or not self.index_path.exists():
             return False

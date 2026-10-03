@@ -8,8 +8,9 @@ utilities; it is not a runtime configuration choice.
 
 from __future__ import annotations
 
+import contextlib
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from typing import TYPE_CHECKING
@@ -724,6 +725,19 @@ class MemoryBackend(ABC):
         """Decide a proposal; ``reason``, when given, says what decided it (a
         rule, or a person) in place of the answer it held."""
         return None
+
+    # -- transactions ------------------------------------------------------
+    #: Whether ``transaction`` keeps its writes together. A write that must
+    #: not be left half made (a split) refuses to run where it does not.
+    supports_transactions: bool = False
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """The writes made inside are kept together or not at all, where the
+        backend can (``supports_transactions``, LocalBackend). This default
+        keeps each write as it is made, so an adapter without transactions
+        still runs the same code, without the guarantee."""
+        yield
 
     # -- key/value meta ------------------------------------------------------
     # Default no-ops so adapters without their own storage (e.g. Mem0) stay

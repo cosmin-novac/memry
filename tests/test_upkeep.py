@@ -235,7 +235,7 @@ def test_a_pass_switched_off_does_not_run_and_records_no_run(store):
     assert ran == [] and store.last_pass_run("structure", "ada") is None
     store.set_maintenance_enabled("structure", True)
     assert store.run_upkeep_pass("structure", user_id="ada") == {}
-    assert ran == [{"user_id": "ada"}]
+    assert ran == [{"user_id": "ada", "exact_user": False}]
     assert store.last_pass_run("structure", "ada")["result"] == {}
     with pytest.raises(ValueError):
         store.run_upkeep_pass("nonsense")
@@ -430,3 +430,62 @@ def test_the_button_is_upkeep_and_the_tabs_open_on_what_needs_you(client):
     assert order == sorted(order), "Upkeep, Entities, Archive"
     assert ">Entities</button>" in page and ">Archive</button>" in page
     assert "async function openKnowledge(tab='maintenance')" in page
+
+
+# ------------------------------------------------------- the namespace walk
+def _saved(store, content: str, user_id: str | None) -> None:
+    """A memory of ``user_id`` exactly, None too (an import files None under
+    "default")."""
+    from memry.models import Memory
+
+    store.backend.insert_memory(
+        Memory(content=content, user_id=user_id, embedding_model=store.embedder.model_id),
+        embedding=store.embedder.embed([content])[0])
+
+
+def _walk(store, now=None):
+    """The scheduler's tick: each namespace once, None being the memories
+    without a user."""
+    return {uid: store.run_upkeep_cycle(user_id=uid, now=now, exact_user=True)
+            for uid in store.backend.distinct_user_ids()}
+
+
+def test_the_upkeep_walk_does_each_namespace_once_and_never_mixes_them(store):
+    """None among the namespaces read as every user at once: its tick scored
+    everyone's memories, merged word-for-word twins of different users into
+    one, and the tick of each named namespace then found nothing left."""
+    store.config.decay.durability = True
+    store.decider = FakeDecider(1.5)
+    store.llm = FakeLLM()  # word-for-word twins need no answer
+    for user in (None, "a", "b"):
+        _saved(store, "Allergic to penicillin", user)
+    _saved(store, "Allergic to penicillin.", "a")
+
+    ran = _walk(store)
+
+    # what is left of each namespace scored in its own tick, the twins of "a" merged
+    assert {uid: r["durability"]["scored"] for uid, r in ran.items()} == {
+        None: 1, "a": 1, "b": 1}
+    # the twins of "a" merged; none across namespaces
+    assert {uid: r["consolidation"]["merged"] for uid, r in ran.items()} == {
+        None: 0, "a": 1, "b": 0}
+    for user in (None, "a", "b"):
+        live = store.get_all(user_id=user, exact_user=True, limit=10)
+        assert len(live) == 1 and all(m.user_id == user for m in live)
+
+
+def test_the_scheduler_walks_the_namespaces_exactly(store, monkeypatch):
+    """The server's scheduler asks for each namespace's tick with
+    ``exact_user``, None included."""
+    import time
+
+    for user in (None, "a"):
+        _saved(store, f"note of {user}", user)
+    calls = []
+    monkeypatch.setattr(store, "run_upkeep_cycle", lambda **kw: calls.append(kw) or {})
+    with TestClient(create_app(store)):
+        deadline = time.monotonic() + 5
+        while len(calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
+    assert sorted((c["user_id"] or "", c["exact_user"]) for c in calls[:2]) == [
+        ("", True), ("a", True)]

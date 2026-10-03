@@ -19,6 +19,13 @@ from .base import MemoryBackend
 
 
 def _scope_kwargs(scope: Scope) -> dict[str, str]:
+    """Mem0's filters for ``scope``. Mem0 filters by a user it is given and
+    cannot ask for the memories without one, so a scope meaning just those
+    (``Scope.exact_user``, a walk over the namespaces) is refused rather
+    than read as everyone's."""
+    if scope.exact_user and scope.user_id is None:
+        raise ValueError("the Mem0 adapter cannot list the memories without a user apart "
+                         "from everyone's; name the namespace")
     kwargs: dict[str, str] = {}
     if scope.user_id:
         kwargs["user_id"] = scope.user_id

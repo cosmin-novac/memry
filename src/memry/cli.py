@@ -119,6 +119,15 @@ def _account_command(args: argparse.Namespace) -> int:
     return 1
 
 
+def _namespaces(store: Any, user: str | None) -> list[str | None]:
+    """The namespaces a maintenance command goes through: the one asked for,
+    else each in the store. None among them is the memories without a user;
+    the command is called with ``exact_user=True`` so that its pass for None
+    does not take in every namespace, each named one then done a second
+    time."""
+    return [user] if user else (store.backend.distinct_user_ids() or [None])
+
+
 def _scope_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-u", "--user", default=None, help="user_id scope")
     parser.add_argument("-a", "--agent", default=None, help="agent_id scope")
@@ -275,6 +284,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the summary as JSON")
     p.add_argument("--undo", metavar="MEMORY_ID", default=None,
                    help="bring back a memory that was split and forget its facts")
+    p.add_argument("--plan-out", metavar="PATH", default=None,
+                   help="with --dry-run: write the proposed splits to PATH as a JSON plan")
+    p.add_argument("--plan-in", metavar="PATH", default=None,
+                   help="make exactly the splits of a plan from --plan-out, asking no "
+                        "model; a memory that left use or changed since is skipped")
 
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
@@ -452,28 +466,24 @@ def main(argv: list[str] | None = None) -> int:
             if not store.llm.available:
                 print("no LLM configured; relation backfill needs one", file=sys.stderr)
                 return 1
-            namespaces = (
-                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
-            )
-            _print([store.backfill_relations(user_id=uid) for uid in namespaces])
+            namespaces = _namespaces(store, args.user)
+            _print([store.backfill_relations(user_id=uid, exact_user=True)
+                    for uid in namespaces])
         elif args.command == "backfill-entity-types":
             if not store.llm.available:
                 print("no LLM configured; entity typing needs one", file=sys.stderr)
                 return 1
-            namespaces = (
-                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
-            )
-            _print([store.backfill_entity_types(user_id=uid) for uid in namespaces])
+            namespaces = _namespaces(store, args.user)
+            _print([store.backfill_entity_types(user_id=uid, exact_user=True)
+                    for uid in namespaces])
         elif args.command == "repair-dates":
-            namespaces = (
-                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
-            )
-            _print([store.repair_updated_at(user_id=uid) for uid in namespaces])
+            namespaces = _namespaces(store, args.user)
+            _print([store.repair_updated_at(user_id=uid, exact_user=True)
+                    for uid in namespaces])
         elif args.command == "restore-context":
-            namespaces = (
-                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
-            )
-            _print([store.restore_context_labels(user_id=uid, dry_run=args.dry_run)
+            namespaces = _namespaces(store, args.user)
+            _print([store.restore_context_labels(user_id=uid, dry_run=args.dry_run,
+                                                 exact_user=True)
                     for uid in namespaces])
         elif args.command == "split-memories":
             if args.undo:
@@ -484,23 +494,58 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
                 _print({"undone": undone, "memory_id": args.undo})
                 return 0 if undone else 1
-            if not store.llm.available:
-                print("no LLM configured; splitting memories needs one", file=sys.stderr)
+            from .intelligence.split import make_plan, plan_entries
+
+            if args.plan_out and (args.plan_in or not args.dry_run):
+                print("error: --plan-out goes with --dry-run, and not with --plan-in",
+                      file=sys.stderr)
                 return 1
-            namespaces = (
-                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
-            )
-            reports = [store.split_memories(user_id=uid, dry_run=args.dry_run,
-                                            min_words=args.min_words) for uid in namespaces]
+            if args.plan_in:
+                # the plan's splits as they were read; no model is asked
+                try:
+                    with open(args.plan_in, encoding="utf-8") as fh:
+                        plan = plan_entries(json.load(fh))
+                except (OSError, ValueError) as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
+                # each namespace's splits in that namespace alone (exact_user)
+                namespaces = ([args.user] if args.user
+                              else list(dict.fromkeys(entry["user"] for entry in plan)))
+                left_out = sum(entry["user"] not in namespaces for entry in plan)
+                if left_out:
+                    print(f"{left_out} planned splits of other namespaces left out",
+                          file=sys.stderr)
+                reports = [store.split_memories(
+                    user_id=uid, dry_run=args.dry_run, exact_user=True,
+                    plan=[entry for entry in plan if entry["user"] == uid])
+                    for uid in namespaces]
+            else:
+                if not store.llm.available:
+                    print("no LLM configured; splitting memories needs one", file=sys.stderr)
+                    return 1
+                reports = [store.split_memories(user_id=uid, dry_run=args.dry_run,
+                                                min_words=args.min_words, exact_user=True)
+                           for uid in _namespaces(store, args.user)]
             if args.as_json:
                 _print(reports)
             else:
                 print(format_split_report(reports))
+            if args.plan_out:
+                # after the report: a plan that cannot be written leaves it shown
+                plan_file = make_plan(reports)
+                try:
+                    with open(args.plan_out, "w", encoding="utf-8") as fh:
+                        json.dump(plan_file, fh, indent=2, ensure_ascii=False)
+                except OSError as exc:
+                    print(f"error: the plan was not written: {exc}", file=sys.stderr)
+                    return 1
+                print(f"plan of {len(plan_file['splits'])} splits written to {args.plan_out}; "
+                      f"make exactly these with: memry split-memories --plan-in {args.plan_out}",
+                      file=sys.stderr)
         elif args.command == "backfill-property-vectors":
-            namespaces = (
-                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
-            )
-            _print([{"user": uid, "embedded": store.refresh_property_vectors(user_id=uid)}
+            namespaces = _namespaces(store, args.user)
+            _print([{"user": uid,
+                     "embedded": store.refresh_property_vectors(user_id=uid, exact_user=True)}
                     for uid in namespaces])
         elif args.command == "tags-to-things":
             scopes = store.tags_to_topics(
@@ -540,27 +585,43 @@ def main(argv: list[str] | None = None) -> int:
 
 def format_split_report(reports: list[dict[str, Any]]) -> str:
     """``split-memories`` for a person to read: the counts per namespace, then
-    each memory split (or that would be), with its facts."""
+    each memory split (or that would be), with its facts and under each the
+    entities it keeps, for the owner to read before the split is made."""
     lines: list[str] = []
     for report in reports:
         verb = "would be split" if report["dry_run"] else "split"
-        lines.append(
-            f"namespace {report['user'] or '(none)'}: {report['in_use']} memories in use, "
-            f"{report['candidates']} with more than one sentence asked, "
-            f"{report['one_fact']} one fact (left alone), {report['split']} {verb} into "
-            f"{report['facts']} facts, {report['no_subject']} left because a fact would not "
-            f"state its subject, {report['lossy']} left because the facts would lose a "
-            f"detail, {report['failed']} failed"
-            + (" (dry run: nothing written)" if report["dry_run"] else ""))
+        if "planned" in report:  # a run of a plan (--plan-in)
+            lines.append(
+                f"namespace {report['user'] or '(none)'}: {report['planned']} splits planned, "
+                f"{report['split']} {verb} into {report['facts']} facts as planned, "
+                f"{report['stale']} skipped because the memory left use or changed since "
+                f"the plan, {report['failed']} failed"
+                + (" (dry run: nothing written)" if report["dry_run"] else ""))
+        else:
+            lines.append(
+                f"namespace {report['user'] or '(none)'}: {report['in_use']} memories in use, "
+                f"{report['candidates']} with more than one sentence asked, "
+                f"{report['one_fact']} one fact (left alone), {report['split']} {verb} into "
+                f"{report['facts']} facts, {report['no_entity']} left because a fact would "
+                f"keep none of the memory's entities, {report['lost_entity']} left because "
+                f"an entity would be lost, {report['no_subject']} left because a fact would "
+                f"not state its subject, {report['lossy']} left because the facts would lose "
+                f"a detail, {report['failed']} failed"
+                + (" (dry run: nothing written)" if report["dry_run"] else ""))
         for entry in report["splits"]:
             lines.append("")
             lines.append(f"memory {entry['memory_id']}:")
             lines.append(f"  {entry['content']}")
             if entry.get("not_split"):
                 lines.append(f"  not split: {entry['not_split']}")
+            labels = entry.get("labels") or {}
             for i, fact in enumerate(entry["facts"], 1):
                 made = entry.get("memory_ids")
                 lines.append(f"  {i}. {fact}" + (f"  [{made[i - 1]}]" if made else ""))
+                if labels:  # a memory linked to nothing has nothing to show
+                    kept = entry["about"][i - 1]
+                    lines.append("     about: " + (", ".join(labels.get(e, e) for e in kept)
+                                                   or "nothing"))
         lines.append("")
     if reports and not reports[0]["dry_run"]:
         lines.append("Undo one: memry split-memories --undo MEMORY_ID, or undo under Archive "

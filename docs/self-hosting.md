@@ -364,7 +364,7 @@ memories one claim at a time: each save that said something new about one subjec
 merged into the memory before it, until one memory read "The central claim of Ana's
 thesis is ... The thesis further argues ... The thesis explicitly rejects ...". One
 memory like that is found less well by a search for any one of its claims.
-`memry split-memories [--user USER] [--min-words N] [--dry-run]` repairs them:
+`memry split-memories [--user USER] [--min-words N] [--dry-run [--plan-out PATH]] [--plan-in PATH]` repairs them:
 
 - It asks the text model about each memory in use whose text has more than one sentence.
   A memory of one sentence is left alone without asking. `--min-words N` asks only about
@@ -379,12 +379,19 @@ memory like that is found less well by a search for any one of its claims.
 - A split is made only when the same check a save gets finds that the facts keep every
   detail of the memory. Otherwise the memory stays, and the report says what would have
   been lost.
-- Each fact becomes a memory with the old one's dates, the turns it rests on, its tags,
-  importance, run and agent. The people and things it named are linked to the facts that
-  name them, and its relations to the fact that names both ends. The old memory leaves
-  search and is listed under Archive in the dashboard.
-- `--dry-run` asks the model and prints each memory with the facts it would become,
-  writing nothing. Run it first and read the splits.
+- The model also says what each fact is about among the people, things and tags the
+  memory is linked to, including ones the fact does not spell out. Each fact keeps those
+  and any its text names, and its tags are the tags among them. If a fact would keep none
+  of them, or one of them would be on no fact, the memory stays whole.
+- Each fact becomes a memory with the old one's dates, the turns it rests on, importance,
+  run and agent, and the relations go to the fact that keeps both ends. The old memory
+  leaves search and is listed under Archive in the dashboard.
+- `--dry-run` asks the model and prints each memory with the facts it would become and
+  what each is about, writing nothing. Run it first and read the splits. Asked again the
+  model answers a little differently, so add `--plan-out plan.json` to keep what you read,
+  then `memry split-memories --plan-in plan.json` makes exactly those splits without the
+  model, skipping any memory that changed since.
+- Each memory is split in one transaction: a failure or a stop leaves it as it was.
 
 Undo a split under Archive (the memory comes back and its facts are forgotten), with
 `memry split-memories --undo MEMORY_ID`, or with

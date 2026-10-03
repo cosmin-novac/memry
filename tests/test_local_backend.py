@@ -24,6 +24,57 @@ def test_insert_get_list_scoping():
     assert len(everyone) == 2
 
 
+def test_exact_user_scope_lists_the_memories_without_a_user_alone():
+    """No user means every user's, unless ``exact_user``: then the memories
+    without one, as a walk over the namespaces needs."""
+    b = make_backend()
+    for user in (None, "ada", "bob"):
+        b.insert_memory(Memory(content=f"memory of {user}", user_id=user))
+    assert len(b.list_memories(Scope())) == 3
+    assert [m.content for m in b.list_memories(Scope(exact_user=True))] == ["memory of None"]
+    assert [m.content for m in b.list_memories(Scope(user_id="ada", exact_user=True))] == [
+        "memory of ada"]
+    assert "exact_user" not in Scope(exact_user=True).model_dump()
+
+
+def test_a_transaction_keeps_its_writes_together_or_not_at_all(tmp_path):
+    """The write methods commit on their own, except inside ``transaction``:
+    an error rolls back every write made in it, a transaction inside another
+    joins it, and nothing is seen by another connection before the end."""
+    path = str(tmp_path / "tx.db")
+    b = LocalBackend(path)
+    kept = b.insert_memory(Memory(content="kept", user_id="ada"))
+
+    def count() -> int:
+        other = sqlite3.connect(path)
+        try:
+            return other.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        finally:
+            other.close()
+
+    try:
+        with b.transaction():
+            b.insert_memory(Memory(content="first", user_id="ada"))
+            with b.transaction():
+                b.invalidate_memory(kept.id)
+                b.add_event(MemoryEvent(memory_id=kept.id, event="DELETE"))
+            assert count() == 1  # not committed by the inner block or the writes
+            raise RuntimeError("stop")
+    except RuntimeError:
+        pass
+    assert [m.content for m in b.list_memories(Scope(user_id="ada"))] == ["kept"]
+    assert b.history(kept.id) == []
+
+    with b.transaction():
+        b.insert_memory(Memory(content="second", user_id="ada"))
+        b.invalidate_memory(kept.id)
+    assert count() == 2
+    assert [m.content for m in b.list_memories(Scope(user_id="ada"))] == ["second"]
+    b.insert_memory(Memory(content="third", user_id="ada"))  # commits on its own again
+    assert count() == 3
+    b.close()
+
+
 def test_knowledge_map_aggregates_all_memories_without_content():
     backend = make_backend()
     first = backend.insert_memory(

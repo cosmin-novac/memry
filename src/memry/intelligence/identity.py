@@ -1195,7 +1195,7 @@ def compare_topics(
         examples[topic.normalized] = [
             m.content for m in backend.entity_memories(topic.id, limit=TAG_EXAMPLES)]
         for entity in backend.find_entities_by_aliases(
-                [topic.normalized], Scope(user_id=topic.user_id)):
+                [topic.normalized], Scope(user_id=topic.user_id, exact_user=True)):
             if entity.name.strip().casefold() == topic.normalized:
                 known[topic.normalized] = (entity.name, entity.entity_type)
                 break
