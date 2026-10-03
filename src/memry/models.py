@@ -242,16 +242,19 @@ class Memory(BaseModel):
 #: a newer memory contradicting it (it was never true), a newer memory
 #: updating it (what it said changed, or a text merging a detail into it, or
 #: a newer memory adding to it with no merged text written), a merge of
-#: duplicates, or the distilling of a raw saved message.
-SUPERSEDE_KINDS: tuple[str, ...] = ("contradiction", "update", "consolidation", "distillation")
+#: duplicates, the distilling of a raw saved message, or a split of a memory
+#: that held several facts into one memory per fact (``MemoryStore.
+#: split_memories``; its undo brings it back and forgets the facts).
+SUPERSEDE_KINDS: tuple[str, ...] = ("contradiction", "update", "consolidation", "distillation",
+                                    "split")
 
 #: The SUPERSEDE kinds after which a memory stays retrievable as history: an
 #: update ends what it said at the newer memory's date (``invalid_at``), and
 #: it held until then. Search returns it, after the memory that replaced it,
 #: with the source turns it rests on as evidence (``MemoryStore.evidence``),
 #: and shows that date (``context.until_note``). The other kinds leave search
-#: as before: a contradiction was never true, and a consolidated or distilled
-#: memory lives on in what replaced it.
+#: as before: a contradiction was never true, and a consolidated, distilled or
+#: split memory lives on in what replaced it.
 HISTORY_KINDS: tuple[str, ...] = ("update",)
 
 

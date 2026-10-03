@@ -13,6 +13,7 @@
     memry backfill-property-vectors  property vectors for the linked search
     memry export / import         lossless backup/restore; legacy JSON imports
     memry tags-to-things          give existing tags their topic entities (first open does it)
+    memry split-memories          split memories that hold several facts (--dry-run first)
     memry config                  print resolved configuration
     memry eval --dataset <path>   run the retrieval eval harness
 """
@@ -260,6 +261,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
     p.add_argument("--dry-run", action="store_true", help="count without writing")
 
+    p = sub.add_parser(
+        "split-memories",
+        help="split each memory in use that holds several facts into one memory per fact "
+             "(asks the text model; undo under Archive or with --undo)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="ask the model and print each split, writing nothing")
+    p.add_argument("--min-words", type=int, default=0,
+                   help="ask only about memories of at least this many words")
+    p.add_argument("--json", action="store_true", dest="as_json",
+                   help="print the summary as JSON")
+    p.add_argument("--undo", metavar="MEMORY_ID", default=None,
+                   help="bring back a memory that was split and forget its facts")
+
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
     p = sub.add_parser(
@@ -459,6 +475,27 @@ def main(argv: list[str] | None = None) -> int:
             )
             _print([store.restore_context_labels(user_id=uid, dry_run=args.dry_run)
                     for uid in namespaces])
+        elif args.command == "split-memories":
+            if args.undo:
+                try:
+                    undone = store.undo_replacement(args.undo)
+                except ValueError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
+                _print({"undone": undone, "memory_id": args.undo})
+                return 0 if undone else 1
+            if not store.llm.available:
+                print("no LLM configured; splitting memories needs one", file=sys.stderr)
+                return 1
+            namespaces = (
+                [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
+            )
+            reports = [store.split_memories(user_id=uid, dry_run=args.dry_run,
+                                            min_words=args.min_words) for uid in namespaces]
+            if args.as_json:
+                _print(reports)
+            else:
+                print(format_split_report(reports))
         elif args.command == "backfill-property-vectors":
             namespaces = (
                 [args.user] if args.user else (store.backend.distinct_user_ids() or [None])
@@ -499,6 +536,36 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         store.close()
     return 0
+
+
+def format_split_report(reports: list[dict[str, Any]]) -> str:
+    """``split-memories`` for a person to read: the counts per namespace, then
+    each memory split (or that would be), with its facts."""
+    lines: list[str] = []
+    for report in reports:
+        verb = "would be split" if report["dry_run"] else "split"
+        lines.append(
+            f"namespace {report['user'] or '(none)'}: {report['in_use']} memories in use, "
+            f"{report['candidates']} with more than one sentence asked, "
+            f"{report['one_fact']} one fact (left alone), {report['split']} {verb} into "
+            f"{report['facts']} facts, {report['no_subject']} left because a fact would not "
+            f"state its subject, {report['lossy']} left because the facts would lose a "
+            f"detail, {report['failed']} failed"
+            + (" (dry run: nothing written)" if report["dry_run"] else ""))
+        for entry in report["splits"]:
+            lines.append("")
+            lines.append(f"memory {entry['memory_id']}:")
+            lines.append(f"  {entry['content']}")
+            if entry.get("not_split"):
+                lines.append(f"  not split: {entry['not_split']}")
+            for i, fact in enumerate(entry["facts"], 1):
+                made = entry.get("memory_ids")
+                lines.append(f"  {i}. {fact}" + (f"  [{made[i - 1]}]" if made else ""))
+        lines.append("")
+    if reports and not reports[0]["dry_run"]:
+        lines.append("Undo one: memry split-memories --undo MEMORY_ID, or undo under Archive "
+                     "in the dashboard.")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def format_eval_report(report: dict[str, Any]) -> str:

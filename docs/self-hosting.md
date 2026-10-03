@@ -356,7 +356,41 @@ memry sweep --threshold 0.1   # soft-forget stale, low-importance memories
 memry stats                   # counts, providers, db path
 memry export > backup.json    # knowledge only: IDs, provenance, entities, relations, history
 memry tags-to-things --dry-run   # tags to topic entities (done at first open): count only
+memry split-memories --dry-run   # memories that hold several facts: print each split, write nothing
 ```
+
+A memory should hold one fact. Before merges were kept to one fact, a store could grow
+memories one claim at a time: each save that said something new about one subject was
+merged into the memory before it, until one memory read "The central claim of Ana's
+thesis is ... The thesis further argues ... The thesis explicitly rejects ...". One
+memory like that is found less well by a search for any one of its claims.
+`memry split-memories [--user USER] [--min-words N] [--dry-run]` repairs them:
+
+- It asks the text model about each memory in use whose text has more than one sentence.
+  A memory of one sentence is left alone without asking. `--min-words N` asks only about
+  memories of at least N words.
+- The model splits the memory into single facts. A list stays one fact ("Ada's skills
+  include Python, SQL and Go") unless its items carry details of their own. When it finds
+  one fact (a fact and its details can take two sentences), the memory stays as it is.
+- Each fact must say what it is about, by a name the memory uses: a fact such as "Merge
+  the first change first", with no project named, would be worse than the memory. If any
+  fact names none of the people or things the memory is linked to, nor a name the memory
+  states, nor you, the memory stays whole, and the report names that fact.
+- A split is made only when the same check a save gets finds that the facts keep every
+  detail of the memory. Otherwise the memory stays, and the report says what would have
+  been lost.
+- Each fact becomes a memory with the old one's dates, the turns it rests on, its tags,
+  importance, run and agent. The people and things it named are linked to the facts that
+  name them, and its relations to the fact that names both ends. The old memory leaves
+  search and is listed under Archive in the dashboard.
+- `--dry-run` asks the model and prints each memory with the facts it would become,
+  writing nothing. Run it first and read the splits.
+
+Undo a split under Archive (the memory comes back and its facts are forgotten), with
+`memry split-memories --undo MEMORY_ID`, or with
+`POST /api/v1/memories/{id}/undo-replacement`. Over REST the command is
+`POST /api/v1/memories/split` with `{"user_id": ..., "dry_run": true, "min_words": ...}`.
+It costs one text-model call for each memory asked, and one more for each memory split.
 
 Tags are entities of type `topic`. A database or backup from before that change keeps its
 tags in the `categories` column and the legacy `topics`/`memory_topics` tables, which every

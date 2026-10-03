@@ -1,14 +1,16 @@
 """Reconcile on updates: does a later save retire, merge or keep what an earlier
 one said, whichever run each save belongs to?
 
-**The cases.** 55 synthetic cases (``CASES``) of 2 or 3 saves by two invented
+**The cases.** 60 synthetic cases (``CASES``) of 2 or 3 saves by two invented
 speakers, Maria and Tom: a value that changes, a correction, the same fact
 reworded, an exact restatement, a contradiction nobody announces, an added
 detail, a plan that happened, a time-bound fact, a recurring event, a
 preference that changes, a project's status, two events or things of one
-kind (two trips, injuries, deals, paintings, games), and a relative time in a
+kind (two trips, injuries, deals, paintings, games), a relative time in a
 fact that is merged (with LoCoMo conv-41's two road trips in fictional form,
-R1). Each case runs twice on fresh
+R1), claims about one subject that must stay one memory each (S1 to S3,
+graded "joined" when one memory holds two of them), and a detail of the same
+claim that must merge (T1, T2). Each case runs twice on fresh
 in-memory stores through ``MemoryStore.add(infer=True)``, saved as the LoCoMo
 runner saves a session: one message whose role is the speaker, with the
 context "conversation between Maria and Tom, <date>" and the save's date as
@@ -53,10 +55,13 @@ embeddings; every call counted in ``--ledger LEDGER.sqlite`` and capped per
 group, ``--jev-cap`` and ``--chat-cap``):
 
     python evals/reconcile_benchmark.py cases OUT.json --ledger L [--only A1,B2] [--layouts same,diff]
-    python evals/reconcile_benchmark.py replay CASES.json OUT.json --ledger L
-    python evals/reconcile_benchmark.py pairs PAIRS.json OUT.json --ledger L
+    python evals/reconcile_benchmark.py replay CASES.json OUT.json --ledger L [--judge text]
+    python evals/reconcile_benchmark.py pairs PAIRS.json OUT.json --ledger L [--judge text]
+    python evals/reconcile_benchmark.py claims OUT.json --ledger L
+    python evals/reconcile_benchmark.py claims-text OUT.json --ledger L
     python evals/reconcile_benchmark.py merges OUT.json --ledger L [--runs 3]
     python evals/reconcile_benchmark.py merge-table OUT.json [OUT.json ...]
+    python evals/reconcile_benchmark.py claim-table OUT.json [OUT.json ...]
     python evals/reconcile_benchmark.py table CASES.json [CASES.json ...]
     python evals/reconcile_benchmark.py bars ANSWERS.json [ANSWERS.json ...]
 
@@ -67,7 +72,12 @@ the answers given on the way. ``merges`` asks the installed memry's merge
 writer (the text model, ``OPENAI_API_KEY``) to join each fixed pair of
 ``MERGE_PAIRS`` (texts as extraction wrote them, with their dates), and
 grades the text it writes: two things of one kind must not be joined, and
-no time may move (``misdated``). LoCoMo conv-41 is P1.
+no time may move (``misdated``). LoCoMo conv-41 is P1. ``CLAIM_PAIRS`` (Q, a
+new claim about the memory's subject, which must stay apart; D, a detail of
+the same claim, which must merge) are among those pairs, and ``claims`` asks
+Jev the reconcile question on them (``claims-text``: the text model as judge,
+as memry asks it where no decision provider answers; ``--judge text`` does
+the same for ``replay`` and ``pairs``).
 """
 
 from __future__ import annotations
@@ -436,6 +446,56 @@ CASES: list[dict[str, Any]] = [
         misdated=r"\b(previous|prior|last) year\b|\byear before\b|\b2025\b|\byesterday\b",
         anchored=r"(?<![\d-])2026(?![\d-])",
         query="When did Tom take the road trip up the coast?", ok=[()]),
+    # -- claims about one subject (must stay separate) ---------------------------
+    # Each save states another claim, position or decision about one thing (a
+    # thesis, a book, a project). A merge folds each new one into the memory
+    # before it, so one memory ends up holding every claim, which no one vector
+    # matches well. Each claim must stay a memory of its own: no live memory
+    # may hold two of ``claims`` (graded "joined").
+    case("S1", "claims about one subject", "separate", [
+        (0, "Maria", "The central claim of my thesis is that small language models can match "
+                     "large ones on narrow tasks."),
+        (14, "Maria", "My thesis also argues that benchmark contamination explains most of the "
+                      "reported gains of large models."),
+        (30, "Maria", "In my thesis I explicitly reject the idea that scale alone produces "
+                      "reasoning.")],
+        n=3, claims=[r"narrow tasks", r"contamination", r"scale alone"],
+        topic=r"thesis|narrow tasks|contamination|scale alone", new=r"scale alone",
+        query="What does Maria's thesis argue?", ok=[(), ()]),
+    case("S2", "claims about one subject", "separate", [
+        (0, "Tom", "I'm reading 'Slow Rivers'; its main argument is that 20th-century dams did "
+                   "more harm than good."),
+        (10, "Tom", "'Slow Rivers' also claims that beavers restore wetlands faster than "
+                    "engineered projects do."),
+        (20, "Tom", "The author of 'Slow Rivers' rejects fish ladders as a fix for dams.")],
+        n=3, claims=[r"more harm than good", r"beaver", r"fish ladder"],
+        topic=r"slow rivers|dams?\b|beaver|fish ladder", new=r"fish ladder",
+        query="What does the book Slow Rivers argue?", ok=[(), ()]),
+    case("S3", "claims about one subject", "separate", [
+        (0, "Maria", "For our app Orbit we decided to write the backend in Go."),
+        (7, "Maria", "For Orbit we also decided to host everything on a single VPS instead of "
+                     "Kubernetes."),
+        (21, "Maria", "We decided that Orbit ships without user accounts in its first version.")],
+        n=3, claims=[r"\bgo\b", r"\bvps\b|kubernetes", r"user accounts"],
+        topic=r"orbit", new=r"user accounts",
+        query="What did Maria's team decide about Orbit?", ok=[(), ()]),
+    # -- a detail of the same claim (must merge) ---------------------------------
+    # The later save states the same claim again with a detail it did not have
+    # (how strongly it is held, why): one statement, merged (MORE).
+    case("T1", "claim detail", "merge", [
+        (0, "Maria", "My thesis predicts that open models will match closed ones on most "
+                     "benchmarks by 2028."),
+        (20, "Maria", "I hold my prediction that open models will match closed ones by 2028 "
+                      "very strongly.")],
+        new=r"strongly", old=r"2028", topic=r"open models|2028|prediction",
+        query="How strongly does Maria hold her prediction about open models?",
+        ok=[("MORE",)]),
+    case("T2", "claim detail", "merge", [
+        (0, "Tom", "Our team decided to write the Orbit backend in Go."),
+        (14, "Tom", "We chose Go for the Orbit backend because everyone on the team already "
+                    "knows it.")],
+        new=r"already know|everyone", old=r"\bgo\b", topic=r"orbit|backend",
+        query="Why did Tom's team choose Go for the Orbit backend?", ok=[("MORE",)]),
 ]
 KINDS = list(dict.fromkeys(c["kind"] for c in CASES))
 LAYOUTS = ("same", "diff")
@@ -521,6 +581,116 @@ MERGE_PAIRS: list[dict[str, Any]] = [
                      "again next month.", None)),
 ]
 
+# -- claims about one subject -------------------------------------------------
+# A labelled set for the rule that a merge keeps a memory to one fact: "new
+# claim" pairs, where the new fact states another claim, position, finding or
+# decision about the memory's subject (it must be its own memory: NEW, and the
+# writer must not join it), and "claim detail" pairs, where it states the same
+# claim with a detail the memory lacks (a condition, a reason, the evidence,
+# how strongly it is held, who or when: MORE, one merged text). Q4, Q5 and Q15
+# start from a memory that earlier merges already joined, the step by which one
+# memory grows with every save. Every pair: the memory said on day 0, the new
+# fact on day 21.
+_THESIS = ("The central claim of Ana Reyes's thesis is that small language models can match "
+           "large ones on narrow tasks.")
+_CONTAMINATION = ("Ana Reyes's thesis argues that benchmark contamination explains most of the "
+                  "reported gains of large models.")
+_SCALE = "Ana Reyes's thesis explicitly rejects the idea that scale alone produces reasoning."
+_PROSE = "Ana Reyes accepts that large models still write better open-ended prose than small ones."
+_REMOTE = "Jonas Berg believes remote work makes teams more productive."
+_BATTERY = "The Vela X2 laptop's battery lasts about 14 hours."
+_GO = "The Orbit team decided to write the backend in Go."
+_NET_ZERO = "The Harbor Council's climate plan sets a goal of net zero emissions by 2040."
+_GAS = "The Harbor Council's climate plan bans new gas heating in public buildings from 2028."
+_DAMS = "The book 'Slow Rivers' argues that 20th-century dams did more harm than good."
+_FUSION = ("One idea for Lena's AGI article is to compare AGI forecasts with past forecasts for "
+           "fusion power.")
+_SLEEP = "Dr. Okafor holds that sleep debt cannot be repaid by sleeping in on weekends."
+_WALKS = "The 2024 Lindqvist study found that daily walks lowered blood pressure."
+_PASTA = "Maria thinks the pasta at Nonna's is the best in town."
+_KNEE = "Tom's doctor said his knee pain comes from weak quadriceps."
+_PREDICTION = ("Ana Reyes's thesis predicts that open models will match closed ones on most "
+               "benchmarks by 2028.")
+
+
+def _claim(id: str, old: str, new: str) -> dict[str, Any]:
+    return merge_pair(id, "new claim", "apart", (0, old, None), (21, new, None))
+
+
+def _detail(id: str, old: str, new: str) -> dict[str, Any]:
+    return merge_pair(id, "claim detail", "merge", (0, old, None), (21, new, None))
+
+
+CLAIM_PAIRS: list[dict[str, Any]] = [
+    _claim("Q1", _THESIS, _CONTAMINATION),
+    _claim("Q2", _THESIS, _SCALE),
+    _claim("Q3", _CONTAMINATION, _PROSE),
+    _claim("Q4", f"{_THESIS} The thesis further argues that benchmark contamination explains "
+                 "most of the reported gains of large models.", _PREDICTION),
+    _claim("Q5", f"{_THESIS} The thesis further argues that benchmark contamination explains "
+                 "most of the reported gains of large models. The thesis explicitly rejects the "
+                 "idea that scale alone produces reasoning.", _PROSE),
+    _claim("Q6", _REMOTE, "Jonas Berg thinks open-plan offices should be phased out."),
+    _claim("Q7", _BATTERY, "The Vela X2 laptop's keyboard is too shallow for long typing "
+                           "sessions."),
+    _claim("Q8", _GO, "The Orbit team decided to host everything on a single VPS instead of "
+                      "Kubernetes."),
+    _claim("Q9", _NET_ZERO, _GAS),
+    _claim("Q10", _DAMS, "'Slow Rivers' claims that beavers restore wetlands faster than "
+                         "engineered projects do."),
+    _claim("Q11", _FUSION, "Lena wants her AGI article to argue that current benchmarks measure "
+                           "memorization rather than general ability."),
+    _claim("Q12", _SLEEP, "Dr. Okafor recommends no screens for an hour before bed."),
+    _claim("Q13", _WALKS, "The 2024 Lindqvist study found no effect of daily walks on "
+                          "cholesterol."),
+    _claim("Q14", _PASTA, "Maria finds Nonna's too loud for a quiet conversation."),
+    _claim("Q15", f"{_REMOTE} He also thinks open-plan offices should be phased out.",
+           "Jonas Berg argues that four-day weeks reduce burnout."),
+    _claim("Q16", _KNEE, "Tom's doctor told him to stop running on concrete."),
+    _detail("D1", _THESIS, "Ana Reyes's thesis claims that small language models match large "
+                           "ones on narrow tasks once they are fine-tuned on fewer than 10,000 "
+                           "examples."),
+    _detail("D2", _PREDICTION, "Ana Reyes holds her prediction that open models will match "
+                               "closed ones by 2028 very strongly."),
+    _detail("D3", _REMOTE, "Jonas Berg believes remote work makes teams more productive because "
+                           "it cuts down on interruptions."),
+    _detail("D4", _BATTERY, "The Vela X2's 14-hour battery life was measured on video playback "
+                            "at half brightness."),
+    _detail("D5", _GO, "The Orbit team chose Go for the backend because everyone on the team "
+                       "already knows it."),
+    _detail("D6", _GAS, "The Harbor Council's ban on new gas heating from 2028 also covers "
+                        "schools and libraries."),
+    _detail("D7", _DAMS, "'Slow Rivers' backs its case against 20th-century dams with the "
+                         "collapse of salmon runs on the Columbia River."),
+    _detail("D8", _FUSION, "Lena wants the comparison of AGI and fusion forecasts in her article "
+                           "to go back to the 1950s."),
+    _detail("D9", _WALKS, "In the 2024 Lindqvist study, daily 30-minute walks lowered systolic "
+                          "blood pressure by 5 mmHg over 12 weeks."),
+    _detail("D10", _PASTA, "Maria says the cacio e pepe at Nonna's is the best pasta in town."),
+    _detail("D11", _KNEE, "Dr. Hale, Tom's doctor, told him on Monday that his knee pain comes "
+                          "from weak quadriceps."),
+    _detail("D12", _PROSE, "Ana Reyes concedes in chapter 4 of her thesis that large models still "
+                           "write better open-ended prose."),
+    _detail("D13", _SLEEP, "Dr. Okafor holds that sleep debt cannot be repaid on weekends, citing "
+                           "her 2023 study of 400 night-shift nurses."),
+    _detail("D14", "Tom is learning the cello.", "Tom is learning the cello with weekly lessons "
+                                                 "at the Riverside music school."),
+    _detail("D15", "The Orbit team moved the launch to May.", "The Orbit team moved the launch "
+                                                              "to 12 May 2026 to finish the "
+                                                              "security audit first."),
+]
+MERGE_PAIRS += CLAIM_PAIRS
+
+
+def claim_question_pairs() -> list[dict[str, Any]]:
+    """``CLAIM_PAIRS`` as labelled pairs for the reconcile question
+    (``pair_answers``): a new claim fits no answer that acts (it is stored as
+    new), a detail of the same claim fits MORE."""
+    return [{"id": p["id"], "set": "claims", "label": "NEW" if p["expect"] == "apart" else "MORE",
+             "ok": [] if p["expect"] == "apart" else ["MORE"],
+             "old": p["old"][1], "old_said": _day_stamp(p["old"][0]),
+             "new": p["new"][1], "new_said": _day_stamp(p["new"][0])} for p in CLAIM_PAIRS]
+
 _DATED = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b(january|february|march|april|may|june|july|"
                     r"august|september|october|november|december) \d{1,2}\b", re.I)
 
@@ -564,7 +734,8 @@ def grade(case: dict[str, Any], result: dict[str, Any]) -> tuple[str, str]:
     the new one waiting for a person), or what went wrong: "stale" (a live
     memory states only an older value, as current), "duplicate" (a later save
     left a second live copy), "redundant" (a detail beside the fact it
-    refines), "merged" (recurring events became one), "lost" (the new fact is
+    refines), "merged" (recurring events became one), "joined" (one live
+    memory holds two of a case's separate ``claims``), "lost" (the new fact is
     not live), "retracted" (a memory that stays true was taken out of
     search), "not found" (not among the search's first five), "misranked" (an
     older value ranks above the current one), "misdated" (a memory written
@@ -626,6 +797,11 @@ def grade(case: dict[str, Any], result: dict[str, Any]) -> tuple[str, str]:
             return "lost", "the detail"
         return ("right" if found else "not found"), ""
     if expect == "separate":
+        joined = next((r["content"] for r in live
+                       if sum(_says(claim, r["content"]) for claim in case.get("claims", ())) > 1),
+                      None)
+        if joined:
+            return "joined", joined
         if len(live) >= case["n"]:
             return "right", ""
         return ("merged" if live else "lost"), f"{len(live)} live of {case['n']}"
@@ -747,13 +923,36 @@ def render_state(candidates: list[tuple[str, str | None]], new: str, new_said: s
     return f"EXISTING memories:\n{listing}\n\nNEW fact:\n{new}"
 
 
+def ask_text(llm: Any, state: str) -> dict[str, Any]:
+    """The reconcile question asked of the text model alone
+    (``reconcile.RECONCILE_SYSTEM``), as memry asks it where no decision
+    provider answers. Its answer carries no confidence and acts as given
+    (read here as 1.0); a MORE carries the merged text it wrote."""
+    from memry.intelligence import reconcile
+    from memry.intelligence.extraction import parse_lenient_json
+
+    parsed = parse_lenient_json(llm.complete(reconcile.RECONCILE_SYSTEM, state,
+                                             json_schema=reconcile.RECONCILE_SCHEMA))
+    parsed = parsed if isinstance(parsed, dict) else {}
+    action, target = parsed.get("action"), parsed.get("target")
+    if isinstance(target, str) and target.strip().isdigit():
+        target = int(target)
+    return {"state": state, "raw": action, "action": action if action in ACTIONS else None,
+            "conf": 1.0 if action in ACTIONS else None,
+            "target": target if isinstance(target, int) else None,
+            "content": parsed.get("content"), "reason": parsed.get("reason")}
+
+
 def ask(decider: Any, candidates: list[tuple[str, str | None]], new: str,
         new_said: str | None) -> dict[str, Any]:
     """One reconcile question as the installed memry asks it, and the answer
-    read in the five answers of the redesign."""
+    read in the five answers of the redesign: of the decision provider, or of
+    the text model when ``decider`` is one (``ask_text``)."""
     from memry.intelligence import reconcile
 
     state = render_state(candidates, new, new_said)
+    if not hasattr(decider, "decide"):
+        return ask_text(decider, state)
     decided = reconcile._decide_action(decider, state, len(candidates))
     if decided is None:
         return {"state": state, "action": None}
@@ -876,6 +1075,43 @@ def merge_table(results: list[dict[str, Any]]) -> str:
     for r in results:
         lines.append(f"{r['id']} run {r['run']}: {grade_merge(pairs[r['id']], r)} "
                      f"({r['answer']}) {r['text'] or ''}")
+    return "\n".join(lines)
+
+
+#: Jev's measured bars (``JevDecider.reconcile_bars``), read when an answer is
+#: graded as memry acts on it.
+JEV_BARS = {"SAME": 0.85, "MORE": 0.8, "CHANGED": 0.5, "WRONG": 0.5}
+
+
+def acted(answer: dict[str, Any], bars_: dict[str, float] = JEV_BARS) -> str:
+    """What memry does with an answer at the bars: the answer itself at or
+    above its bar, "NEW" for a SAME or a MORE under it (stored as new),
+    "held" for a CHANGED or a WRONG under it (both kept, a person asked)."""
+    action, conf = answer.get("action"), answer.get("conf")
+    if action in (None, "NEW") or conf is None:
+        return action or "none"
+    if conf >= bars_.get(action, 0.0):
+        return action
+    return "NEW" if action in ("SAME", "MORE") else "held"
+
+
+def claim_table(answers: list[dict[str, Any]]) -> str:
+    """Per label of ``CLAIM_PAIRS`` (a new claim, NEW; a detail of the same
+    claim, MORE): how the answers act at Jev's bars, and MORE's confidences."""
+    lines = ["| label | pairs | acted as | MORE confidences |", "|---|---|---|---|"]
+    for label in ("NEW", "MORE"):
+        rows = [a for a in answers if a.get("label") == label]
+        counts = collections.Counter(acted(a) for a in rows)
+        confs = sorted((a["conf"] for a in rows if a.get("action") == "MORE"
+                        and a.get("conf") is not None), reverse=True)
+        lines.append(f"| {label} | {len(rows)} | "
+                     + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+                     + " | " + (", ".join(f"{c:.2f}" for c in confs) or "-") + " |")
+    lines.append("")
+    for a in answers:
+        lines.append(f"{a['source']} {a.get('label')}: {a.get('action')} "
+                     f"{a.get('conf') if a.get('conf') is None else round(a['conf'], 2)} "
+                     f"-> {acted(a)}")
     return "\n".join(lines)
 
 
@@ -1019,8 +1255,9 @@ def _dump(path: str, data: Any) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("cases", "replay", "pairs", "merges", "table", "bars",
-                                            "merge-table"))
+    parser.add_argument("command", choices=("cases", "replay", "pairs", "claims", "claims-text",
+                                            "merges", "table", "bars", "merge-table",
+                                            "claim-table"))
     parser.add_argument("paths", nargs="+")
     parser.add_argument("--only", default="", help="case ids, comma-separated")
     parser.add_argument("--layouts", default="same,diff")
@@ -1030,6 +1267,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--jev-cap", type=int, default=3000)
     parser.add_argument("--chat-cap", type=int, default=5000)
     parser.add_argument("--runs", type=int, default=1, help="merges: runs over the pairs")
+    parser.add_argument("--judge", choices=("jev", "text"), default="jev",
+                        help="replay, pairs: ask Jev, or the text model alone as memry asks "
+                             "it where no decision provider answers")
     args = parser.parse_args(argv)
 
     if args.command == "table":
@@ -1045,6 +1285,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "merge-table":
         print(merge_table([r for path in args.paths for r in _load(path)]))
         return
+    if args.command == "claim-table":
+        print(claim_table([a for path in args.paths for a in _load(path)]))
+        return
 
     if not args.ledger:
         parser.error(f"{args.command} needs --ledger")
@@ -1052,10 +1295,18 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.command == "pairs":
             pairs = _load(args.paths[0])["pairs"]
-            decider = _jev()
+            decider = _text_model() if args.judge == "text" else _jev()
             _dump(args.paths[1], pair_answers(pairs, decider))
+        elif args.command == "claims":
+            answers = pair_answers(claim_question_pairs(), _jev())
+            _dump(args.paths[0], answers)
+            print(claim_table(answers))
+        elif args.command == "claims-text":
+            answers = pair_answers(claim_question_pairs(), _text_model())
+            _dump(args.paths[0], answers)
+            print(claim_table(answers))
         elif args.command == "replay":
-            decider = _jev()
+            decider = _text_model() if args.judge == "text" else _jev()
             _dump(args.paths[1], replay_answers(_load(args.paths[0]), decider))
         elif args.command == "merges":
             from evals import api_usage

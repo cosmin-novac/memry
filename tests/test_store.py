@@ -248,6 +248,10 @@ def test_more_merges_into_a_new_memory_that_supersedes_the_old_one(store, fake_l
         decision(
             "MORE", target=0, content="User works at Northwind as a data engineer"
         ),
+        # the merge writer writes the merged text after the text model's MORE
+        decision(
+            "MORE", target=0, content="User works at Northwind as a data engineer"
+        ),
         facts_response(fact("User works at Northwind as a data engineer")),
     )
     result = store.add("I'm a data engineer there", user_id="ada")

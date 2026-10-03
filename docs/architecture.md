@@ -499,7 +499,11 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    and full-text entry (an embedding failure leaves the episode to its words).
 2. With an LLM, extract small candidate memories, types, importance, topics, entities, and
    possible relations, offered the user's tags from every run. Without an LLM, store the
-   input verbatim.
+   input verbatim. Extraction leaves out the saving agent's own notes on how it uses
+   Memry: which context label, run or tag to use or reuse, that a conversation belongs to
+   a context, or what to recall next time. They say nothing about the user or the world,
+   and such a note, often a restatement of the shared context label the prompt offers,
+   was stored as a fact beside the real ones.
 3. Retrieve the five most similar memories in use of the user across runs (with the
    agent) and reconcile each candidate (`intelligence/reconcile.py`). The judge (the
    decision provider, or the text model where it abstains) sees each memory with the date
@@ -529,6 +533,20 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
      detail, so no bar can tell them apart, while the writer, reading both texts with their
      dates, often can. With no merged text written and no such answer, the new fact itself
      supersedes the old one as an update.
+
+     A merge keeps a memory to one fact. It adds a detail to the same claim, event or
+     attribute (a reason, a condition, who, when, how sure); another claim about the same
+     subject is a memory of its own. So the writer also answers NEW when the new fact
+     states another claim than the memory does: a thesis's second argument, a position it
+     rejects, another decision about one project. Without that, each save that said
+     something new about one subject was merged into the memory before it, until one memory
+     held every claim about a thesis, and its one vector matched none of them well. The
+     writer writes every merged text: after the decision provider's MORE, and after the
+     text model's own MORE where no decision provider answers (the text model's own merged
+     text then stands only if the writer writes nothing). The rule is in the writer's
+     request only. Put in the judge's instructions, it made the text model call a reworded
+     fact or a changed value NEW; worded into the decision provider's question, it lowered
+     MORE on real added details.
    - CHANGED: the memory was true and is no longer. The new memory is added and the old
      one's validity ends at its date (`invalid_at`, `superseded_by`), superseded as an
      update. The decision provider's question gives two examples of it, a plan that then
@@ -547,11 +565,12 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    one save counts once however many of its messages it rests on. An exact duplicate (normalized text) is SAME
    with no model asked, unless it is an event (either memory episodic, or with an occurrence
    time) said on another day, which the judge decides. Each SUPERSEDE event records its `kind`
-   (contradiction, update, consolidation or distillation), which the Archive and search
-   read; an event from before the column is classified by its reason. The Archive lists a
-   memory an update or a contradiction replaced; the undo of an update brings the old one
-   back beside the newer one, the undo of a contradiction forgets the newer one unless the
-   person keeps both.
+   (contradiction, update, consolidation, distillation or split), which the Archive and
+   search read; an event from before the column is classified by its reason. The Archive
+   lists a memory an update or a contradiction replaced, and one split into single facts
+   (below); the undo of an update brings the old one back beside the newer one, the undo
+   of a contradiction forgets the newer one unless the person keeps both, and the undo of
+   a split brings the memory back and forgets the facts it was split into.
 
    Runs are read from evidence. A search restricted to a run returns the memories said in
    it: the run's own, and those whose source episodes include an episode of the run, such
@@ -591,6 +610,51 @@ matching; discovering a brand-new entity still requires an LLM.
 
 Entity descriptions are not mandatory write-path work. This keeps ingestion latency and
 provider cost bounded.
+
+### Maintenance commands
+
+The one-time and repair commands run from the CLI on one user or every user:
+`repair-dates` (each memory's `updated_at` from its audit trail), `restore-context` (the
+context label from the episodes), `backfill-relations`, `backfill-entity-types`,
+`backfill-property-vectors`, `tags-to-things` and `split-memories`. All but
+`backfill-property-vectors` and `tags-to-things` also have a REST route under
+`/api/v1`. `restore-context`, `tags-to-things` and `split-memories` take `--dry-run`
+(`{"dry_run": true}`) to see first what they would do.
+
+`split-memories` (`POST /api/v1/memories/split`, `intelligence/split.py`,
+`MemoryStore.split_memories`) repairs memories that hold several facts, as merges made
+them before a merge was kept to one fact (section 4, MORE):
+
+- Candidates are the memories in use whose text has more than one sentence (a ".", "!"
+  or "?" before a capital, or any ";"), left alone while waiting for extraction or for a
+  person under Upkeep. `--min-words N` narrows the run to longer texts. A text of one
+  sentence is one statement and is not asked about.
+- The text model splits each candidate into single facts, each naming its subject, each
+  detail kept with the fact it belongs to. A list stays one fact unless its items carry
+  details of their own (a price, a date, a reason). One fact back means the memory states
+  one fact (a detail or a reason can take a sentence of its own), and it is left alone.
+- Every fact must state its subject, since a fact read alone later has nothing around it:
+  the prompt asks for the name the memory uses, never "he", "it" or "the project" alone.
+  Before anything is written, each fact is checked: it must name one of the things the
+  memory is linked to, a tag the memory's text names, a name the text states (a one-word
+  abbreviation such as "PR" or "API" does not count) or the owner, and must not open on
+  "he", "it", "this" or the like. A fact without its subject is worse than the memory it
+  came from, so one such fact keeps the memory whole, and the report names the fact.
+- The coverage audit a save gets reads the facts against the memory. A split it finds
+  lossy is not made; the report says what would have been lost.
+- Each fact becomes a memory with the old one's `created_at`, `updated_at`, `valid_from`,
+  sources, tags, importance, type, metadata ("when" included), run and agent, and
+  `split_from`. The old memory's named entities are linked to the facts that name them (to
+  every fact when none does), and each relation rests on the fact that names both ends.
+  The ADD event of each fact is dated at the old memory's `updated_at`, so `repair-dates`
+  reads the same times.
+- The old memory leaves use with a SUPERSEDE of kind `split` and `split_into` on it. Like a
+  consolidated or distilled memory it leaves search, since its facts live on in the new
+  memories. The Archive lists it with its facts; the undo (`undo_replacement`, or
+  `memry split-memories --undo ID`) brings it back and forgets the facts that are still as
+  they were made.
+- `--dry-run` asks the model and writes nothing; the CLI prints each memory with the facts
+  it would become, for a person to read before the real run.
 
 ## 5. Read path
 
@@ -906,6 +970,10 @@ up as a red run within a week instead of in a user's terminal.
   many such pairs apart, not all (two injuries, two paintings, two bowls told by the same
   person). The merged text then usually says each fact with its own date, but a writer
   that takes the two for one event can still give that event one date.
+- The line between a detail of one claim and another claim about the same thing is the
+  writer's reading. It keeps apart most other claims, and sometimes also a detail given
+  in words of its own (which kind of dog, which book is the favorite); such a detail is
+  then a memory beside the one it adds to, and nothing is lost.
 
 ## 9. Decision record
 
@@ -922,6 +990,8 @@ up as a red run within a week instead of in a user's terminal.
 | Anthropic defaults to claude-haiku-4-5 | Memory extraction is frequent background work, so the lower-cost, lower-latency model is the useful default; operators can explicitly select a larger model when quality justifies the extra cost. | Yes |
 | Provider HTTP clients are reused for the store lifetime | Reusing connections removes repeated connection setup from enrichment latency without adding a service or a second execution path. | Yes |
 | Reconcile answers NEW, SAME, MORE, CHANGED or WRONG and acts alike in every run; a changed value stays searchable as history; a restatement is recorded as evidence on the memory it restates | Acting only on a memory of the save's own run left every changed value live and every restatement duplicated when each session was its own run. Keeping the older value dated answers questions about the past, and the save's episodes already say which run said it, so no new record is needed. | Yes |
+| A memory holds one fact: a merge adds a detail to the same claim, event or attribute, another claim about the same subject is its own memory, and the merge writer writes every merged text | One vector per memory matches one fact well. Merges that folded each new claim about a subject into one memory left memories that no search for any one of their claims found well. | Yes |
+| `split-memories` repairs a memory that holds several facts by replacing it with one memory per fact, undoable from the Archive | The repair must keep what the memory rested on (dates, sources, tags, links, run and agent) and be reversible, since the split is a model's reading; a lossy split is not made. | Yes |
 | A memory is linked to the lines it rests on, and memories found are shown with those source turns as evidence | A memory is a summary, and the words it came from keep what the summary left out (a feeling, a name, what a photo showed). Episodes stay provenance: they are never searched on their own, only chosen among the sources of the memories found, within a token budget, and a deleted or forgotten memory never shows them; an update's old value kept as history shows its own, as any memory found does. | Yes |
 
 Any future consequential architecture change must be added here with its product reason and

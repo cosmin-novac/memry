@@ -116,6 +116,12 @@ Do NOT extract:
   or assistant boilerplate
 - secrets or credentials (passwords, API keys, tokens) - never store these
 - information the user asked to keep out of memory
+- notes about how the assistant uses this memory: which context label, run or
+  tag to use or reuse, that a conversation belongs to a context, or that
+  something should be saved, recalled or reused for future prompts. They are
+  about the assistant's own bookkeeping, not about the user or the world. The
+  shared context given with the conversation is there to read it by; never
+  store it as a fact
 
 Rules:
 - each fact must be fully self-contained: resolve pronouns and references

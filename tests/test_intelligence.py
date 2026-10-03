@@ -104,6 +104,16 @@ _SOURCES = (
     '  conversation numbers them ("[2]" is line 2): every line whose words the fact\n'
     '  carries, and no other.\n')
 _SOURCES_SHAPE = (',\n"sources": [int]}]}.', "}]}.")
+#: The rule that leaves out the assistant's own notes on how it uses the
+#: memory (which context label or run to reuse, that a conversation belongs to
+#: a context): 12 memories of one store were such notes.
+_AGENT_NOTES = (
+    "- notes about how the assistant uses this memory: which context label, run or\n"
+    "  tag to use or reuse, that a conversation belongs to a context, or that\n"
+    "  something should be saved, recalled or reused for future prompts. They are\n"
+    "  about the assistant's own bookkeeping, not about the user or the world. The\n"
+    "  shared context given with the conversation is there to read it by; never\n"
+    "  store it as a fact\n")
 #: sha256 of the system prompt for _DAY before the shared-content rule came in.
 _SYSTEM_BEFORE = "b11b82895f4fd93438b422c12467bc6244d26a0816456049e1854b7aee16a6a4"
 
@@ -111,11 +121,14 @@ _SYSTEM_BEFORE = "b11b82895f4fd93438b422c12467bc6244d26a0816456049e1854b7aee16a6
 def _without_later_rules(system: str) -> str:
     """The system prompt with the rules added since ``_SYSTEM_BEFORE`` taken
     out again: the shared-content rule, the rules that keep specifics with the
-    narrowed small-talk exclusion, and the sources rule with its field."""
-    for part in (_SHARED, _DID, _SPECIFICS, _SMALL_TALK[0], _SOURCES, _SOURCES_SHAPE[0]):
+    narrowed small-talk exclusion, the sources rule with its field, and the
+    rule that leaves out the assistant's own memory notes."""
+    for part in (_SHARED, _DID, _SPECIFICS, _SMALL_TALK[0], _SOURCES, _SOURCES_SHAPE[0],
+                 _AGENT_NOTES):
         assert part in system, part[:40]
     return (system.replace(_SHARED, "").replace(_DID, "").replace(_SPECIFICS, "")
-            .replace(*_SMALL_TALK).replace(_SOURCES, "").replace(*_SOURCES_SHAPE))
+            .replace(*_SMALL_TALK).replace(_SOURCES, "").replace(*_SOURCES_SHAPE)
+            .replace(_AGENT_NOTES, ""))
 
 
 def _asked(messages, **kwargs) -> tuple[str, str]:
@@ -152,8 +165,9 @@ def test_named_speakers_are_named_in_their_facts():
 def test_a_user_and_assistant_conversation_is_asked_as_before():
     """Earlier measurements of extraction rest on this prompt. Its changes since:
     the shared-content rule, the rules that keep specifics (with the small-talk
-    exclusion narrowed), and the numbered lines with the sources rule (each
-    fact names the lines it rests on)."""
+    exclusion narrowed), the numbered lines with the sources rule (each fact
+    names the lines it rests on), and the rule that leaves out the assistant's
+    own notes on how it uses the memory."""
     import hashlib
 
     system, user = _asked(
@@ -182,6 +196,53 @@ def test_what_a_person_shares_is_part_of_what_they_said():
     shared = [{"role": "Ada", "content": "Look what I made [shares a photo: a blue scarf]"}]
     for messages in (shared, _PLAIN):
         assert _SHARED in _asked(messages)[0]
+
+
+def test_the_assistants_own_notes_on_how_it_uses_the_memory_are_not_facts():
+    """A saving agent's notes on its own use of Memry ("This conversation
+    belongs to the shared context 'AGI article ideas' ... and should be reused
+    for future related prompts") say nothing about the user or the world, yet
+    12 memories of one store were such notes. The rule is among what not to
+    extract, and it names the shared context the prompt offers, which such a
+    note repeats."""
+    system, _ = _asked(_PLAIN)
+    head, _, rules = system.partition("Do NOT extract:\n")
+    do_not = rules.split("\n\nRules:")[0]
+    assert _AGENT_NOTES.rstrip("\n") in do_not
+    assert "which context label, run or\n  tag to use or reuse" in do_not
+    assert "never\n  store it as a fact" in do_not
+
+
+def test_a_save_with_a_context_label_reaches_extraction_with_the_rule(tmp_path):
+    """Extraction with a recording stub on the path such notes came through: a
+    deferred save with a context label, whose text carries the agent's note.
+    The one extraction call carries the rule and the label it must not store,
+    and what extraction returns (here the article idea alone) is what is kept."""
+    from datetime import timedelta
+
+    from memry.config import Config
+    from memry.models import parse_ts
+    from memry.providers.embeddings import HashEmbedder
+    from memry.store import MemoryStore
+
+    idea = "Lena wants her AGI article to compare AGI forecasts with fusion forecasts"
+    llm = FakeLLM([facts_response(fact(idea)), '{"missing": []}'])
+    store = MemoryStore(Config(db_path=str(tmp_path / "m.db")), llm=llm,
+                        embedder=HashEmbedder(64))
+    saved = store.add_deferred(
+        "Idea for the AGI article: compare AGI forecasts with past fusion forecasts. This "
+        "conversation belongs to the shared context 'AGI article ideas' and should be reused "
+        "for future related prompts.",
+        user_id="lena", metadata={"context": "AGI article ideas"})
+    pending = store.get(saved.actions[0].memory_id)
+    store.process_pending_enrichments(
+        quiet_seconds=120, now=parse_ts(pending.created_at) + timedelta(seconds=121))
+
+    system, user = llm.calls[0]
+    assert _AGENT_NOTES in system
+    assert "Shared context for these related inputs:\nAGI article ideas" in user
+    assert [m.content for m in store.get_all(user_id="lena")] == [idea]
+    store.close()
 
 
 def test_effective_importance_decays_toward_floor():
