@@ -16,16 +16,19 @@ stored.
            memory: a memory is in a run when it is the run's own or when its
            evidence includes an episode of the run (``LocalBackend``'s search
            scope). Nothing but the memory's evidence records it.
-- MORE     it adds detail to a memory that stays true: the text model writes
-           one text of both (``write_merged``), stored as a new memory dated
-           at the save, which supersedes the old one as an update. The writer
-           reads both facts with the dates they were said (and happened,
-           where known) and writes each time as the date it names, since the
-           merged text is dated at the save. When it reads the new fact as
-           another event or thing of the same kind (another trip, another
-           game), nothing is merged and the fact is added as NEW. With no
-           merged text written, the new fact itself supersedes the old one as
-           an update, held back as a CHANGED is.
+- MORE     it adds detail to a memory that stays true: the merge writer (the
+           text model, ``write_merged``) writes one text of both, stored as a
+           new memory dated at the save, which supersedes the old one as an
+           update. The writer reads both facts with the dates they were said
+           (and happened, where known) and writes each time as the date it
+           names, since the merged text is dated at the save. A memory holds
+           one fact, so a merge adds a detail to the same claim, event or
+           attribute: when the writer reads the new fact as another event or
+           thing of the same kind (another trip, another game), or as another
+           claim about the memory's subject (a thesis's second argument),
+           nothing is merged and the fact is added as NEW. With no merged text
+           written, the new fact itself supersedes the old one as an update,
+           held back as a CHANGED is.
 - CHANGED  the memory was true and is no longer: the new memory is added, and
            the old one's validity ends at the new one's date (``invalid_at``,
            ``superseded_by``), superseded as an update.
@@ -49,7 +52,8 @@ several separate saves.
 
 The judge is the decision provider (``ACTION_QUESTION``), or, where it
 abstains, the text model (``RECONCILE_SYSTEM``), whose answers carry no
-confidence: they act, within ``held_back``'s protections. Both see each memory
+confidence: they act, within ``held_back``'s protections. A MORE of either
+goes to the merge writer, which writes the merged text. Both see each memory
 with the date it was said and the new fact with the save's: without dates a
 second trip cannot be told from a changed plan. An exact duplicate is SAME
 with no model asked, unless it is an event said on another day
@@ -239,25 +243,48 @@ def _decide_action(
     }
 
 
-#: Appended to the reconcile prompt when a decision provider has already
-#: answered MORE: the text model writes the merged text, or says that the new
-#: fact is about another event or thing of the same kind, which is then
-#: stored as NEW (``Merged.apart``). Jev's MORE on two different trips,
-#: games or injuries is as sure as on a detail added to one, so no bar tells
-#: them apart; the writer, reading both texts with their dates, tells many of
-#: them apart (PhD notes, reconcile-more).
+#: Appended to the reconcile prompt once MORE was answered (by a decision
+#: provider, or by the text model judging alone): the text model writes the
+#: merged text, or says that the new
+#: fact is about another event or thing of the same kind, or states another
+#: claim about the memory's subject, which is then stored as NEW
+#: (``Merged.apart``). Jev's MORE on two different trips, games or injuries is
+#: as sure as on a detail added to one, so no bar tells them apart; the
+#: writer, reading both texts with their dates, tells many of them apart (PhD
+#: notes, reconcile-more).
+#:
+#: A merge keeps a memory to one fact: it adds a detail to the same claim,
+#: event or attribute, and a new claim about the same subject is a memory of
+#: its own. Without that rule, saves that each stated another claim about one
+#: thesis were folded one by one into one memory of five claims, whose one
+#: vector matched none of them well. Asked to merge fixed pairs
+#: (``evals/reconcile_benchmark.py merges``, two runs each), the writer joined
+#: 11 and 12 of 16 new claims about one subject before, and none after; it
+#: merged 15 of 15 details of the same claim after (15 and 14 before), and
+#: the other kinds much as before (a car-show detail kept apart once). On the
+#: 153 recorded LoCoMo merges it keeps apart 28 of the 128 that join one
+#: thing (5 before), most of them another claim about that thing. The rule
+#: is here alone: in ``RECONCILE_SYSTEM`` it made the text model as judge
+#: answer NEW to restatements and changed values, and Jev's MORE worded as
+#: "the same statement, with more detail" fell on right merges, while Jev's
+#: MORE on new claims already stayed under its bar. Where the text model
+#: judges alone, its MORE goes to this writer too (``reconcile_candidate``)
+#: (PhD notes, atomic-memories).
 MERGE_REQUEST = ('The answer is MORE of memory [0]: reply with action "MORE", target 0 and, as '
                  "content, the merged text. If the NEW fact is about another event or thing "
-                 "than memory [0], of the same kind (another trip, game, purchase or photo), do "
-                 'not merge: reply with action "NEW", target null and no content.')
+                 "than memory [0], of the same kind (another trip, game, purchase or photo), or "
+                 "states another claim about the same subject than memory [0] does (another "
+                 "argument, position, finding, opinion or decision, not a detail of the one "
+                 'memory [0] states), do not merge: reply with action "NEW", target null and '
+                 "no content.")
 
 
 @dataclass(frozen=True)
 class Merged:
     """What the merge writer answered for a MORE: the merged text, or
     ``apart`` when it read the new fact as another event or thing of the same
-    kind. Neither when there is no text model, it failed, or it wrote
-    nothing."""
+    kind, or as another claim about the memory's subject. Neither when there
+    is no text model, it failed, or it wrote nothing."""
 
     content: str | None = None
     apart: bool = False
@@ -500,20 +527,24 @@ def reconcile_candidate(
         return _restated(backend, target, candidate, scope, episode_ids, stamped, reason)
 
     if action == "MORE" and target is not None:
-        merged = str(decision.get("content") or "").strip()
-        apart = False
-        if not merged:
-            written = write_merged(llm, target, candidate.content, said=said,
-                                   when=(candidate.metadata or {}).get("when"))
-            merged, apart = written.content or "", written.apart
+        # The merge writer writes every merged text, whoever answered MORE: it
+        # alone may answer that the new fact is another event, thing or claim
+        # (``MERGE_REQUEST``). A text model judging alone wrote a text too,
+        # which stands only where the writer wrote nothing.
+        written = write_merged(llm, target, candidate.content, said=said,
+                               when=(candidate.metadata or {}).get("when"))
+        merged, apart = written.content or "", written.apart
+        if not merged and not apart:
+            merged = str(decision.get("content") or "").strip()
         if merged:
             return _merged(backend, embedder, target, candidate, merged, scope, episode_ids,
                            said, stamped, reason, prepare_update)
         if apart:
             # The writer read the new fact as another event or thing of the
-            # same kind: nothing is merged, and it is stored as a NEW is.
+            # same kind, or another claim about the memory's subject: nothing
+            # is merged, and it is stored as a NEW is.
             reason = (f"MORE of memory {target.id}, but the merge writer read it as another "
-                      f"event or thing: added as new. {reason}").strip()
+                      f"event or thing, or another claim: added as new. {reason}").strip()
             action, target = "NEW", None
         # Otherwise nothing wrote the merged text. Overwriting the old memory
         # with the new fact alone would lose what only the old one said, so

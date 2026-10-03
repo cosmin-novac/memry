@@ -421,7 +421,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
   <p class="hint">Deleting a memory hides it from search but keeps the record, so nothing is lost by accident. This is where those land. Permanent deletion is only possible from here, and only for memories that are already forgotten.</p>
   <div id="forgottenlist"></div>
   <h2 style="font-size:.95rem;margin-top:1.2rem">Replaced by a newer memory</h2>
-  <p class="hint">When something new contradicts a memory, Memry takes the old one out of use and lists it here. That is a model's judgement, so it can be wrong. With undo you get the old memory back and the one that replaced it is forgotten. With keep both you get the old memory back and keep the new one too. A memory an update replaced (a value that changed, or a detail merged in) is listed too; its undo brings it back beside the newer one.</p>
+  <p class="hint">When something new contradicts a memory, Memry takes the old one out of use and lists it here. That is a model's judgement, so it can be wrong. With undo you get the old memory back and the one that replaced it is forgotten. With keep both you get the old memory back and keep the new one too. A memory an update replaced (a value that changed, or a detail merged in) is listed too; its undo brings it back beside the newer one. So is a memory split into single facts; its undo brings it back and forgets the facts.</p>
   <div id="replacedlist"></div>
   <h2 style="font-size:.95rem;margin-top:1.2rem">Removed names</h2>
   <p class="hint">Removing a person or thing leaves the memories alone and puts the name here. Restoring one brings back its aliases, and the mentions and relations whose memories are still around.</p>
@@ -1559,9 +1559,10 @@ async function loadReplaced(){
   if(!rows.length){el.innerHTML='<div class="empty">Nothing was replaced.</div>';return}
   el.innerHTML=rows.map(row=>`<div class="tagrow"><span class="name">
     ${esc(row.memory.content)}
-    <div class="hint">replaced ${esc((row.replaced_at||'').slice(0,10))}${row.actor==='user'?' by you':''} with: ${esc(row.replacement?row.replacement.content:'a memory that no longer exists')}</div>
+    <div class="hint">${row.split?`split ${esc((row.replaced_at||'').slice(0,10))} into ${row.parts.length} facts: ${row.parts.map(p=>esc(p.content)).join(' | ')}`:`replaced ${esc((row.replaced_at||'').slice(0,10))}${row.actor==='user'?' by you':''} with: ${esc(row.replacement?row.replacement.content:'a memory that no longer exists')}`}</div>
     ${row.reason?`<div class="hint">${esc(row.reason)}</div>`:''}</span>
-    ${row.contradiction===false?`<button class="act" title="bring this memory back beside the newer one, which updated it"
+    ${row.split?`<button class="act" title="bring this memory back and forget the facts it was split into"
+      onclick='undoReplacement(${JSON.stringify(row.memory.id)},false)'>undo</button>`:row.contradiction===false?`<button class="act" title="bring this memory back beside the newer one, which updated it"
       onclick='undoReplacement(${JSON.stringify(row.memory.id)},true)'>undo</button>`:`<button class="act" title="bring this memory back and forget the one that replaced it"
       onclick='undoReplacement(${JSON.stringify(row.memory.id)},false)'>undo</button>
     <button class="act" title="bring this memory back and keep the newer one too"
@@ -2937,6 +2938,8 @@ def create_app(
                 "reason": row["reason"],
                 "actor": row["actor"],
                 "contradiction": row["contradiction"],
+                "split": row["split"],
+                "parts": [_memory_payload(part) for part in row["parts"]],
             }
             for row in rows
         ])
@@ -3314,6 +3317,24 @@ def create_app(
             user_id=_p(request).namespace(body.get("user_id")),
             dry_run=bool(body.get("dry_run")),
         ))
+        return JSONResponse(result)
+
+    async def split_memories_route(request: Request) -> Response:
+        """Split each memory in use that holds several facts into one memory
+        per fact (the text model is asked about each memory of more than one
+        sentence). ``{"dry_run": true}`` asks and writes nothing;
+        ``min_words`` narrows the run. A split is undone under Archive
+        (``/memories/{id}/undo-replacement``)."""
+        body = await request.json() if await request.body() else {}
+        try:
+            result = await run_in_threadpool(partial(
+                store.split_memories,
+                user_id=_p(request).namespace(body.get("user_id")),
+                dry_run=bool(body.get("dry_run")),
+                min_words=int(body.get("min_words") or 0),
+            ))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
         return JSONResponse(result)
 
     async def edit_tags_route(request: Request) -> Response:
@@ -3863,6 +3884,7 @@ def create_app(
         Route("/api/v1/entities/backfill-types", guarded(backfill_entity_types_route), methods=["POST"]),
         Route("/api/v1/memories/repair-dates", guarded(repair_dates_route), methods=["POST"]),
         Route("/api/v1/memories/restore-context", guarded(restore_context_route), methods=["POST"]),
+        Route("/api/v1/memories/split", guarded(split_memories_route), methods=["POST"]),
         Route("/api/v1/export", guarded(export_memories_route), methods=["GET"]),
         Route("/api/v1/import", guarded(import_memories_route), methods=["POST"]),
         Route("/api/v1/search", guarded(search), methods=["POST"]),

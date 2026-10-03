@@ -8,6 +8,8 @@ the answer; the text model, where one is needed, writes a MORE's merged text.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from conftest import FakeLLM, decision, facts_response
 
@@ -16,6 +18,8 @@ from memry.intelligence.reconcile import (
     ACTION_QUESTION,
     ACTIONS,
     CONFLICT_KEY,
+    MERGE_REQUEST,
+    RECONCILE_SYSTEM,
     reconcile_state,
     saves_of,
 )
@@ -357,6 +361,165 @@ def test_a_more_the_merge_writer_reads_as_two_things_is_added_as_new(layout):
     store.close()
 
 
+# ------------------------------------------------------- one fact per memory
+#: Saves about one thesis, each stating another claim, then (the last) a
+#: detail of the fourth claim: how strongly it is held. The shape of the
+#: memories a store saved under 0.2.39 grew into, one save at a time: "The
+#: central claim of X's thesis is ... The thesis further argues ... The thesis
+#: explicitly rejects ... X explicitly accepts that ... X holds this
+#: prediction very strongly."
+CLAIMS = [
+    "The central claim of Ana's thesis is that small models can match large ones on narrow tasks",
+    "Ana's thesis further argues that benchmark contamination explains most reported gains",
+    "Ana's thesis explicitly rejects the idea that scale alone produces reasoning",
+    "Ana's thesis predicts that open models will match closed ones by 2028",
+    "Ana explicitly accepts that large models write better open-ended prose",
+]
+DETAIL = "Ana holds her prediction that open models will match closed ones by 2028 very strongly"
+SAVED = ["2026-03-02", "2026-03-09", "2026-03-16", "2026-03-23", "2026-03-30", "2026-04-06"]
+
+
+def _words(text: str) -> set[str]:
+    return {w.strip(".,").lower() for w in text.split() if len(w) > 3}
+
+
+class ChainJudge(Judge):
+    """Answers MORE at 0.95 to every save, about the memory that shares the
+    most words with the new fact: a judge that reads every claim about the
+    thesis as detail added to the thesis memory."""
+
+    def __init__(self) -> None:
+        super().__init__("MORE", 0.95)
+
+    def decide(self, state, questions):
+        answers = super().decide(state, questions).answers
+        if "target" in questions:
+            listed = [line.split(") ", 1)[-1] for line in state.split("\n")
+                      if line.startswith("[")]
+            new = state.rsplit(":\n", 1)[-1]
+            best = max(range(len(listed)), key=lambda i: len(_words(listed[i]) & _words(new)))
+            answers["target"] = Answer(str(best), {str(best): 1.0}, 1.0, True)
+        return Answers(answers)
+
+
+class InstructedWriter(FakeLLM):
+    """A text model that does what its instructions allow, for the reconcile
+    prompt (as the judge where no decision provider answers, and as the
+    merge writer after a MORE): a new fact the test marks as another claim
+    (``claims``) is kept apart (NEW) only when the instructions name another
+    claim as a reason not to merge; anything else is merged as the prompt
+    asks, one text that says everything both say. Its merged text is the two
+    texts joined, which is what every merge of a claim into an essay was.
+    The judge's prompt names no other claim, so as the judge it answers MORE
+    to every save; as the writer it keeps another claim apart."""
+
+    def __init__(self, claims: list[str]) -> None:
+        super().__init__()
+        self.claims = set(claims)
+
+    def complete(self, system, user, *, json_schema=None):
+        self.calls.append((system, user))
+        if "Conversation:" in user:  # the no-provider path extracts nothing new
+            return facts_response()
+        def text(line: str) -> str:  # a listed memory or the new fact, without its dates
+            return re.sub(r"^\(said [^)]*\) | \(said [^)]*\)$", "", line)
+
+        listed = [text(line.split("] ", 1)[1]) for line in user.split("\n")
+                  if line.startswith("[")]
+        new = text(user.split("NEW fact", 1)[1].split(":\n", 1)[1].split("\n", 1)[0])
+        instructions = " ".join((system + " " + user).split())
+        if new in self.claims and "another claim" in instructions:
+            return decision("NEW")
+        target = max(range(len(listed)), key=lambda i: len(_words(listed[i]) & _words(new)))
+        return decision("MORE", target=target, content=f"{listed[target]}. {new}")
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("judge", ["decision provider", "text model"])
+def test_saves_of_other_claims_about_one_subject_stay_one_memory_per_claim(layout, judge):
+    """Each save states another claim about one thesis, and every one reads
+    as MORE: to the decision provider (the stub answers MORE for every save),
+    or to the text model deciding alone. A merge adds a detail to the same
+    fact; another claim about the same subject is a memory of its own, so the
+    five claims stay five memories, and the last save, a detail of the
+    fourth claim, merges into that one. The merge writer writes every merged
+    text, after either judge's MORE, and keeps another claim apart. Before,
+    nothing in the writer's instructions named another claim, and a text
+    model judging alone wrote its merged text itself: each save folded its
+    claim into the memory before it, and one memory grew with every save
+    until it held all five."""
+    llm = InstructedWriter(CLAIMS[1:])
+    decider = ChainJudge() if judge == "decision provider" else NoneDecider()
+    store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64),
+                        decider=decider)
+    for i, text in enumerate([*CLAIMS, DETAIL]):
+        _save(store, text, layout, i, f"{SAVED[i]}T09:00:00+00:00")
+
+    live = [m.content for m in store.get_all(user_id=USER)]
+    holding = {claim: [m for m in live if claim in m] for claim in CLAIMS}
+    assert len(live) == 5, f"{len(live)} memories in use: {live}"
+    assert all(len(found) == 1 for found in holding.values()), holding
+    [prediction] = holding[CLAIMS[3]]
+    assert prediction == f"{CLAIMS[3]}. {DETAIL}"
+    # the other claims were kept apart by the merge writer, which says why (the
+    # fourth one's memory then took the detail and is history);
+    # the text model judging alone answered MORE, and the writer, asked after
+    # it as after a decision provider's MORE, kept them apart
+    kept = [e.reason for m in store.get_all(user_id=USER) for e in store.history(m.id)
+            if e.event == "ADD" and "another claim" in (e.reason or "")]
+    assert len(kept) == 3
+    writer = [user for _, user in llm.calls if MERGE_REQUEST in user]
+    judged = [user for _, user in llm.calls
+              if "EXISTING memories" in user and MERGE_REQUEST not in user]
+    assert len(writer) == 5 and len(judged) == (0 if judge == "decision provider" else 5)
+    store.close()
+
+
+def test_the_merge_writer_is_told_that_a_merge_keeps_one_fact():
+    """The merge writer, which writes every merged text, may answer NEW for a
+    new fact that states another claim about the memory's subject (another
+    argument, position, finding, opinion or decision), not only for another
+    event or thing of one kind. Before, its only exit was another event or
+    thing. The rule is in the writer's request alone: the same rule in the
+    judge's system prompt made the text model answer NEW to restatements and
+    changed values, and MORE worded as "the same statement, with more detail"
+    lowered Jev's MORE on right merges, so both are as they were."""
+    request = " ".join(MERGE_REQUEST.split())
+    assert "another event or thing than memory [0], of the same kind" in request
+    assert ("or states another claim about the same subject than memory [0] does (another "
+            "argument, position, finding, opinion or decision, not a detail of the one memory "
+            "[0] states)") in request
+    assert "another claim" not in RECONCILE_SYSTEM
+    assert ACTION_QUESTION.criteria["MORE"] == (
+        "It adds detail to one existing memory, and that memory is still true as it stands.")
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_a_text_models_more_is_written_by_the_merge_writer(layout):
+    """With no decision provider, the text model answers MORE with a merged
+    text of its own; the merge writer is asked all the same, and its text is
+    the one stored. Where the writer writes nothing, the judge's text
+    stands."""
+    llm = FakeLLM()
+    store = _store(NoneDecider(), llm)
+    first = _save(store, "Tom is learning Spanish", layout, 0, FIRST)
+    llm.queue(decision("MORE", target=0, content="the judge's text"),
+              decision("MORE", target=0, content="Tom is learning Spanish with a tutor"),
+              facts_response())
+    more = _save(store, "Tom has a Spanish tutor", layout, 1, LATER)
+    assert more.event == "UPDATE"
+    assert store.get(more.memory_id).content == "Tom is learning Spanish with a tutor"
+    assert MERGE_REQUEST in llm.calls[1][1] and MERGE_REQUEST not in llm.calls[0][1]
+
+    llm.queue(decision("MORE", target=0, content="Tom is learning Spanish with a tutor on "
+                       "Tuesdays"), "not json", facts_response())
+    again = _save(store, "Tom sees his Spanish tutor on Tuesdays", layout, 2, LATER)
+    assert store.get(again.memory_id).content == (
+        "Tom is learning Spanish with a tutor on Tuesdays")
+    assert first.memory_id not in _live(store) and llm.responses == []
+    store.close()
+
+
 # ---------------------------------------------------------------------- NEW
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_two_identical_yoga_class_texts_on_different_dates_stay_two(layout):
@@ -564,3 +727,45 @@ def test_the_merge_writer_pairs_grade_conv41_by_its_times():
     assert grade_merge(pairs["P10"], written("apart")) == "apart"
     assert {p["kind"] for p in MERGE_PAIRS} >= {"relative time", "two of one kind",
                                                "added detail"}
+
+
+def test_the_update_benchmark_keeps_claims_about_one_subject_apart():
+    """Saves that each state another claim about one subject must end as one
+    memory per claim: a live memory that holds two of a case's ``claims`` is
+    "joined". The claim pairs label a new claim NEW (the writer must keep it
+    apart) and a detail of the same claim MORE (it must merge), and Jev's
+    answers are graded as memry acts on them at its bars."""
+    from evals.reconcile_benchmark import (
+        CASES, CLAIM_PAIRS, MERGE_PAIRS, acted, claim_question_pairs, grade, grade_merge)
+
+    case = {c["id"]: c for c in CASES}
+    s1 = case["S1"]
+    assert (s1["expect"], s1["n"], s1["ok"]) == ("separate", 3, [(), ()])
+
+    def row(id, content):
+        return {"id": id, "content": content, "invalid_at": None, "history": False,
+                "conflict": None, "created_at": FIRST}
+
+    claims = ["Maria's thesis claims small language models can match large ones on narrow "
+              "tasks.", "Maria's thesis argues benchmark contamination explains most gains.",
+              "Maria rejects the idea that scale alone produces reasoning."]
+    apart = [row(str(i), text) for i, text in enumerate(claims)]
+    saves = [{"at": FIRST}, {"at": LATER, "before": apart[:1]}]
+    assert grade(s1, {"saves": saves, "final": apart, "search": apart[2:]}) == ("right", "")
+    essay = row("e", " ".join(claims))
+    assert grade(s1, {"saves": saves, "final": [essay], "search": [essay]})[0] == "joined"
+    assert {c["kind"] for c in CASES} >= {"claims about one subject", "claim detail"}
+
+    kinds = [p["kind"] for p in CLAIM_PAIRS]
+    assert (kinds.count("new claim"), kinds.count("claim detail")) == (16, 15)
+    assert all(p in MERGE_PAIRS for p in CLAIM_PAIRS)
+    labelled = {p["id"]: p for p in claim_question_pairs()}
+    assert (labelled["Q1"]["ok"], labelled["D1"]["ok"]) == ([], ["MORE"])
+    q1 = next(p for p in CLAIM_PAIRS if p["id"] == "Q1")
+    d1 = next(p for p in CLAIM_PAIRS if p["id"] == "D1")
+    assert grade_merge(q1, {"answer": "merged", "text": "both claims"}) == "joined"
+    assert grade_merge(q1, {"answer": "apart", "text": None}) == "right"
+    assert grade_merge(d1, {"answer": "apart", "text": None}) == "apart"
+    assert acted({"action": "MORE", "conf": 0.7}) == "NEW"
+    assert acted({"action": "MORE", "conf": 0.9}) == "MORE"
+    assert acted({"action": "CHANGED", "conf": 0.4}) == "held"

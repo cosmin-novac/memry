@@ -67,9 +67,9 @@ from .intelligence.entities import (
     synthesize_entity_description,
 )
 from .intelligence.graph_retrieval import (
-    FAMILY_MIN,
     FAMILY_SCAN,
     FAMILY_TOP,
+    LOW,
     SET_BAR,
     SET_NEAREST,
     SET_RESULT_CAP,
@@ -153,6 +153,8 @@ from .retrieval import hybrid_search
 _ENRICHMENT_KEY = "_enrichment"
 _ENRICHMENT_BATCH_SIZE = 8
 _ENRICHMENT_MAX_BACKOFF_SECONDS = 300
+#: How many memories ``split_memories`` asks the text model about at once.
+_SPLIT_WORKERS = 4
 
 
 def _queued_at(memory: Memory) -> datetime:
@@ -2021,7 +2023,7 @@ class MemoryStore:
         judged pool.
 
         With seeds (``plan.seeds``), the candidates are the text ranking's
-        and, for every entity the links reach at ``FAMILY_MIN`` or more, the
+        and, for every entity the links reach, however weakly, the
         ``FAMILY_TOP`` of its memories that the search reads (``_Reads``:
         its scope and run, history, tags, entity and date windows, applied
         before they are chosen) that best state the property asked. The
@@ -2058,9 +2060,7 @@ class MemoryStore:
         several = len(seeds) > 1
         asked = self._asked_vector(plan.question)
         pool: dict[str, SearchResult] = {r.memory.id: r for r in results}
-        for entity_id, strength in act.items():
-            if strength < FAMILY_MIN:
-                continue
+        for entity_id in act:
             # what the search reads of an entity's memories is kept to in
             # SQL before the newest FAMILY_SCAN are taken
             members = plan.reads.entity_memories(self.backend, entity_id, FAMILY_SCAN)
@@ -2162,10 +2162,11 @@ class MemoryStore:
         links reach most strongly, a tie by entity id) in the question and
         the memories; with several or none, both are read as written. With
         seeds aboutness weighs each score, and a thing's answer yields to
-        its version's own. Each memory judged, with whether it is a member
-        and its score, is left in ``plan.judged`` for the final order
-        (``_final_order``); ``ranked`` is returned with the memories the
-        second call added after it."""
+        its version's own, never below an answer about something else
+        judged the same (``aboutness``). Each memory judged, with whether it
+        is a member and its score, is left in ``plan.judged`` for the final
+        order (``_final_order``); ``ranked`` is returned with the memories
+        the second call added after it."""
         size = max(self.config.decision.rerank_pool, 2)
         act, above, entities = plan.act, plan.above, plan.entities
         seeds = set(plan.seeds)
@@ -2268,19 +2269,26 @@ class MemoryStore:
 
         for mid, value in judged.items():
             result = found[mid]
+            held = 1.0  # what the override leaves of the answer
             if seeds and subject(mid) in above:
                 discount = overridden(subject(mid))
-                value *= 1.0 - discount
+                held = (1.0 - discount) ** specific
                 result.signals = {**result.signals, "overridden": round(discount, 4)}
             about = 1.0
             if seeds:
                 about = result.signals.get("about") or aboutness([act.get(e.id) for e in ents(mid)])
                 result.signals = {**result.signals, "about": round(about, 3)}
-            result.signals = {**result.signals, "judged": round(value ** specific, 4),
+            result.signals = {**result.signals, "judged": round(value ** specific * held, 4),
                               "specific": round(specific, 4), "several": round(several, 4),
                               "calls": calls, "pool": pooled,
                               **({"member": True} if mid in members else {})}
-            plan.judged[mid] = (mid in members, value ** specific * about)
+            # The override comes after aboutness's floor, so what it leaves is
+            # floored again: an answer from a thing the entity belongs to,
+            # however weak its link and however much of it the entity's own
+            # memories replace, counts at least as much as an answer about
+            # something else judged the same (``aboutness``: a link never
+            # ranks below no link).
+            plan.judged[mid] = (mid in members, value ** specific * max(held * about, LOW))
         return ranked + extra
 
     def _final_order(self, ranked: list[SearchResult], plan: _SearchPlan) -> list[SearchResult]:
@@ -3163,7 +3171,9 @@ class MemoryStore:
         superseded (a change, a merged detail, or an addition with no merged
         text written) held until then and stays searchable as history: if the
         update was a mistake, its undo brings it back into use beside the
-        newer one.
+        newer one. One split into single facts (``split_memories``) is listed
+        too, with the facts (``parts``): its undo brings it back and forgets
+        them.
         """
         scope = Scope(user_id=user_id)
         out: list[dict[str, Any]] = []
@@ -3182,7 +3192,8 @@ class MemoryStore:
             if event is None:
                 continue
             contradiction = _is_contradiction(event)
-            if not (contradiction or _is_update_supersede(event)):
+            split = event.kind == "split"
+            if not (contradiction or split or _is_update_supersede(event)):
                 continue
             out.append({
                 "memory": memory,
@@ -3191,6 +3202,10 @@ class MemoryStore:
                 "reason": event.reason,
                 "actor": event.actor,
                 "contradiction": contradiction,
+                "split": split,
+                "parts": [part for part_id in
+                          ((memory.metadata or {}).get("split_into") or [] if split else [])
+                          if (part := self.backend.get_memory(part_id)) is not None],
             })
         out.sort(key=lambda row: row["replaced_at"] or "", reverse=True)
         return out[:limit]
@@ -3200,13 +3215,14 @@ class MemoryStore:
         owner_prefix: str | None = None,
     ) -> bool:
         """Bring back into use a memory that a contradiction or an update
-        replaced.
+        replaced, or that was split into single facts.
 
         ``keep_new`` leaves the replacement in use as well, for when both turn
         out to be true. Otherwise the replacement is forgotten - it goes to the
         Archive like any deleted memory, so this is itself undoable. The
         replacement of an update never contradicted the memory and is always
-        kept.
+        kept. A split's facts are forgotten, unless ``keep_new``
+        (``_undo_split``).
         """
         memory = self.backend.get_memory(memory_id)
         if not _owned(memory, owner_prefix):
@@ -3218,6 +3234,8 @@ class MemoryStore:
              if e.event == "SUPERSEDE"),
             None,
         )
+        if event is not None and event.kind == "split":
+            return self._undo_split(memory, keep_new=keep_new, owner_prefix=owner_prefix)
         if event is not None and _is_update_supersede(event):
             keep_new = True  # the newer memory adds to it; both stay
         elif event is None or not _is_contradiction(event):
@@ -3360,6 +3378,208 @@ class MemoryStore:
                 self.backend.set_memory_timestamp(memory.id, true_ts)
                 fixed += 1
         return {"fixed": fixed}
+
+    def split_memories(
+        self, *, user_id: str | None = None, dry_run: bool = False, min_words: int = 0,
+    ) -> dict[str, Any]:
+        """Split each memory in use that holds several facts into one memory
+        per fact (``intelligence/split.py``).
+
+        A memory is asked about when its text has more than one sentence (and
+        at least ``min_words`` words); the text model splits it, and one fact
+        back leaves it alone. A split is made only when every fact states its
+        subject and no detail is lost. A fact that names nothing the memory's
+        text names, nor the owner (``split.without_subject``), is worse than
+        the memory it came from, so its memory is kept whole, and
+        the coverage audit a save gets reads the facts against the memory:
+        a split it finds lossy is not made either. Each fact becomes a memory
+        with the old one's dates (``created_at``, ``updated_at``,
+        ``valid_from``), sources, tags, importance, type, metadata ("when"
+        included), run and agent; each named entity the old one was linked to
+        is linked to the facts that name it (to all of them when none does),
+        and each of its relations rests on the fact naming both ends. The old
+        memory leaves use as a SUPERSEDE of kind "split", listed under
+        Archive, whose undo (``undo_replacement``) brings it back and forgets
+        the facts.
+
+        ``dry_run`` asks the model and writes nothing. The summary counts the
+        memories in use, the candidates, those one fact, those split (or that
+        would be) and the facts they make, those kept because a fact would
+        not state its subject (``no_subject``) or a detail would be lost
+        (``lossy``), and lists each split and each kept."""
+        from .intelligence.split import is_candidate, split_facts, without_subject
+
+        if not self.llm.available:
+            raise ValueError("no LLM configured; splitting memories needs one")
+        in_use = self.get_all(user_id=user_id, limit=1_000_000)
+        candidates = [m for m in in_use if is_candidate(m, min_words=min_words)]
+        summary: dict[str, Any] = {
+            "user": user_id, "dry_run": dry_run, "in_use": len(in_use),
+            "candidates": len(candidates), "one_fact": 0, "split": 0, "facts": 0,
+            "no_subject": 0, "lossy": 0, "failed": 0, "splits": [],
+        }
+        # what each memory is about: the names and aliases of its named entities
+        linked = {m.id: [name for entity in self.backend.entities_of_memory(m.id)
+                         for name in (entity.name, *self.backend.entity_aliases(entity.id))]
+                  for m in candidates}
+        # who "the user" is: a fact may name the owner by their name instead
+        owner_entity = self.owner_entity(user_id)
+        owner = [name for name in (
+            self.owner_name(user_id),
+            *((owner_entity.name, *self.backend.entity_aliases(owner_entity.id))
+              if owner_entity is not None else ())) if name]
+
+        def ask(memory: Memory) -> dict[str, Any] | Exception:
+            try:
+                facts = split_facts(self.llm, memory)
+                if len(facts) < 2:
+                    return {"facts": facts}
+                orphans = without_subject(facts, memory, linked[memory.id], owner)
+                if orphans:  # no audit for a split that is not made anyway
+                    return {"facts": facts, "orphans": orphans}
+                return {"facts": facts, "missing": verify_coverage(
+                    self.llm, [{"role": "user", "content": memory.content}], facts)}
+            except Exception as exc:  # one failed call leaves that memory as it is
+                return exc
+
+        # the model is asked about several memories at once; the writes that
+        # follow go one memory at a time, in the order of the candidates
+        with ThreadPoolExecutor(max_workers=_SPLIT_WORKERS) as pool:
+            answers = list(pool.map(ask, candidates))
+        for memory, answer in zip(candidates, answers):
+            if isinstance(answer, Exception):
+                summary["failed"] += 1
+                log.warning("splitting memory %s failed: %s", memory.id, answer)
+                continue
+            facts = answer["facts"]
+            if len(facts) < 2:
+                summary["one_fact"] += 1
+                continue
+            entry: dict[str, Any] = {"memory_id": memory.id, "content": memory.content,
+                                     "facts": facts}
+            if answer.get("orphans"):
+                summary["no_subject"] += 1
+                entry["not_split"] = ("a fact would not state its subject: "
+                                      + "; ".join(answer["orphans"]))
+                summary["splits"].append(entry)
+                continue
+            if answer.get("missing"):
+                summary["lossy"] += 1
+                entry["not_split"] = "the facts would lose: " + "; ".join(answer["missing"])
+                summary["splits"].append(entry)
+                continue
+            if not dry_run:
+                entry["memory_ids"] = self._split_memory(memory, facts)
+            summary["split"] += 1
+            summary["facts"] += len(facts)
+            summary["splits"].append(entry)
+        return summary
+
+    def _split_memory(self, memory: Memory, facts: list[str]) -> list[str]:
+        """Replace ``memory`` with one memory per fact; return their ids.
+
+        The ADD event of each fact is dated at the old memory's
+        ``updated_at``, which the fact keeps, so ``repair_updated_at`` reads
+        the same time; the reason says when the split happened."""
+        from .intelligence.split import names_in
+
+        now = utcnow()
+        metadata = {key: value for key, value in (memory.metadata or {}).items()
+                    if key not in (CONFLICT_KEY, "pending_distillation", _ENRICHMENT_KEY)}
+        metadata["split_from"] = memory.id
+        linked: list[tuple[Entity, list[str], EntityMention | None]] = []
+        for entity in self.backend.entities_of_memory(memory.id):
+            names = [entity.name, *self.backend.entity_aliases(entity.id)]
+            mention = next((m for m in self.backend.entity_mentions(entity.id)
+                            if m.memory_id == memory.id), None)
+            linked.append((entity, names, mention))
+        # each named thing on the facts that name it, on all when none does
+        homes = {entity.id: [i for i, fact in enumerate(facts) if names_in(fact, names)]
+                 or list(range(len(facts))) for entity, names, _ in linked}
+        parts: list[Memory] = []
+        for i, fact in enumerate(facts):
+            names = [entity.name for entity, _, _ in linked if i in homes[entity.id]]
+            part = Memory(
+                content=fact, memory_type=memory.memory_type, user_id=memory.user_id,
+                agent_id=memory.agent_id, run_id=memory.run_id, importance=memory.importance,
+                categories=list(memory.categories),
+                entities=[name for name in memory.entities if names_in(fact, [name])] or names,
+                metadata=dict(metadata), created_at=memory.created_at,
+                updated_at=memory.updated_at, valid_from=memory.valid_from,
+                source_episode_ids=list(memory.source_episode_ids),
+            )
+            embedding = self.embedder.embed([fact])[0] if self.embedder.dimensions else None
+            if embedding:
+                part.embedding_model = self.embedder.model_id
+            parts.append(self.backend.insert_memory(part, embedding=embedding))
+        for entity, _, mention in linked:
+            for i in homes[entity.id]:
+                self.backend.add_mention(EntityMention(
+                    entity_id=entity.id, memory_id=parts[i].id,
+                    surface=mention.surface if mention else entity.name,
+                    decided=mention.decided if mention else None,
+                    entity_type=mention.entity_type if mention else None))
+        relations = [r for r in self.backend.list_relations(
+            Scope(user_id=memory.user_id), limit=1_000_000)
+            if r.memory_id == memory.id and r.invalid_at is None]
+        ids = [part.id for part in parts]
+        # out of use first: its relations end with it, and each comes back on
+        # a fact (one live edge per triple)
+        self.backend.invalidate_memory(memory.id, superseded_by=ids[0], at=now)
+        retired = self.backend.get_memory(memory.id)
+        self.backend.update_memory(
+            memory.id, metadata={**(retired.metadata if retired else memory.metadata),
+                                 "split_into": ids}, touch=False)
+        for relation in relations:
+            ends = [homes.get(relation.subject, []), homes.get(relation.object, [])]
+            both = [i for i in ends[0] if i in ends[1]]
+            home = (both or ends[0] or ends[1] or [0])[0]
+            self.backend.add_relation(Relation(
+                subject=relation.subject, predicate=relation.predicate,
+                object=relation.object, user_id=relation.user_id, memory_id=ids[home],
+                created_at=now, valid_from=relation.valid_from))
+        for part in parts:
+            self.backend.add_event(MemoryEvent(
+                memory_id=part.id, event="ADD", new_content=part.content,
+                reason=f"split on {now[:10]} from memory {memory.id}, one of its "
+                       f"{len(parts)} facts",
+                created_at=memory.updated_at))
+        self.backend.add_event(MemoryEvent(
+            memory_id=memory.id, event="SUPERSEDE", old_content=memory.content,
+            new_content="\n".join(facts),
+            reason=f"split into {len(parts)} facts, one memory each: {', '.join(ids)}",
+            kind="split", created_at=now))
+        self._property_vectors_after_save(ids)
+        return ids
+
+    def _undo_split(
+        self, memory: Memory, *, keep_new: bool, owner_prefix: str | None,
+    ) -> bool:
+        """Bring back a memory that was split, and forget the facts it was
+        split into that are still in use as they were made (a fact changed
+        since, by a merge or a delete, is left as it is). ``keep_new`` keeps
+        them in use as well."""
+        parts = [self.backend.get_memory(i)
+                 for i in (memory.metadata or {}).get("split_into") or []]
+        if not keep_new:
+            for part in parts:
+                if (part is not None and part.invalid_at is None
+                        and _owned(part, owner_prefix)):
+                    self.backend.invalidate_memory(part.id)
+                    self.backend.add_event(MemoryEvent(
+                        memory_id=part.id, event="DELETE", old_content=part.content,
+                        actor="user",
+                        reason=f"you undid the split of memory {memory.id}, which is back"))
+        if self.backend.revalidate_memory(memory.id) is None:
+            return False
+        restored = self.backend.get_memory(memory.id)
+        metadata = dict(restored.metadata if restored else memory.metadata)
+        metadata.pop("split_into", None)
+        self.backend.update_memory(memory.id, metadata=metadata, touch=False)
+        self.backend.add_event(MemoryEvent(
+            memory_id=memory.id, event="ADD", new_content=memory.content, actor="user",
+            reason=f"you undid its split into {len(parts)} facts"))
+        return True
 
     def backfill_relations(
         self, *, user_id: str | None = None, limit: int = 100_000

@@ -311,10 +311,12 @@ def activation_paths(
 # it take place?" is closest to "It takes place in Lisbon", the forum's memory,
 # which the 2024 edition inherits. See the PhD notes, relative-retrieval.
 
-#: Entities linked at least this strongly have their memories that best state
-#: the property asked searched as well: ``FAMILY_TOP`` of them each, chosen
-#: among their ``FAMILY_SCAN`` newest.
-FAMILY_MIN = 0.3
+#: Every entity the links reach (``activation_paths`` follows none under
+#: ``FLOOR``) has its memories that best state the property asked searched as
+#: well: ``FAMILY_TOP`` of them each, chosen among their ``FAMILY_SCAN``
+#: newest. An entity linked however weakly is no less about what the query
+#: names than one the links do not reach (``aboutness``), and its memories
+#: join the candidates as every linked entity's do.
 FAMILY_TOP = 10
 FAMILY_SCAN = 500
 #: A memory that names only entities the links do not reach is about something
@@ -434,7 +436,9 @@ def aboutness(activations: list[float | None]) -> float:
     reach): the strongest linked one, ``LOW`` if it names only unlinked ones,
     ``NO_ENTITY`` if it names none. A link, however weak, never ranks below no
     link: a version Jev linked at 0.4 (0.28 on the way down) is still more
-    likely about the product than a memory about something else."""
+    likely about the product than a memory about something else. What an
+    override leaves of a link (a thing's answer yielding to the entity's
+    own, ``store._judge_ranking``) is floored the same way."""
     linked = [a for a in activations if a is not None]
     if linked:
         return max(max(linked), LOW)
