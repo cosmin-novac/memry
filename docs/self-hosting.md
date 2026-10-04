@@ -266,8 +266,8 @@ on its own when the memory it would replace is rated below 0.8 in importance, wa
 in a single save, and, with a typed decision provider, the judgement reaches its bar.
 A memory rated important or stated in several saves is still replaced without asking when
 the decision provider reads it, in the same call, as a changeable state that has since
-moved on (a listing deleted, a task stopped, a document uploaded) and is at least 0.8
-sure: importance says how much a fact matters, not how risky replacing it is, and the old
+moved on (a listing deleted, a task stopped, a document uploaded), and puts at least 0.8
+on its no longer holding (changed and wrong together): importance says how much a fact matters, not how risky replacing it is, and the old
 memory stays as history. Read as still true beside the new fact, both are kept and nobody
 is asked. A lasting fact or a standing rule (health, identity, a relationship, "never do
 X"), an unsure reading, and any answer of the text model alone still wait under **Upkeep

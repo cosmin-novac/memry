@@ -652,9 +652,11 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    a changeable state or status as it stood when said (a listing active, a task running, a
    document present or missing, a plan in progress), or a lasting fact or standing rule
    (health, identity, origin, a relationship, "never do X"). Read as a state at 0.6 or more
-   (`STANDING_BAR`), with the answer at 0.8 or more (`supersede.state_confidence`, or its
-   own bar where higher), the change replaces the memory without asking, as an update kept
-   as history even where the judge said WRONG; read as still true, both stay in use and
+   (`STANDING_BAR`), with P(it no longer holds) at 0.8 or more (`no_longer_holds`: CHANGED
+   and WRONG of the action question together; `supersede.state_confidence`), the change
+   replaces the memory without asking, as an update kept as history even where the judge
+   said WRONG. The top answer alone was too low a bar: on a real queue Jev answered CHANGED
+   at 0.35-0.65 to a listing deleted and a task stopped, with most of the rest on WRONG; read as still true, both stay in use and
    nobody is asked; a lasting fact, a standing rule, an unsure reading and the text model's
    answers (no probabilities) wait under Upkeep as before. A partial change ("the task
    stopped", of a memory that also listed its criteria) replaces the whole memory: what

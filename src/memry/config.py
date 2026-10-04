@@ -217,10 +217,10 @@ class SupersedeConfig(BaseModel):
     #: The prompt path reports no confidence, so there only the two
     #: protections above apply.
     confidence: float = 0.9
-    #: The confidence from which a change replaces a protected memory the
-    #: decision provider read as a changeable state that moved on
-    #: (``reconcile.replacement_verdict``): importance raises the bar instead of
-    #: blocking. Provisional; ``memry reconcile-queue`` shows the real judge's
+    #: P(it no longer holds), CHANGED and WRONG together, from which a change
+    #: replaces a protected memory the decision provider read as a changeable
+    #: state (``reconcile.replacement_verdict``): importance raises the bar
+    #: instead of blocking. Provisional; ``memry reconcile-queue`` shows the real judge's
     #: answers on a live queue.
     state_confidence: float = 0.8
 

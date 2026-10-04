@@ -452,6 +452,21 @@ def standing_of(decision: dict[str, Any]) -> str | None:
     return best if float(read[best]) >= STANDING_BAR else None
 
 
+def no_longer_holds(decision: dict[str, Any]) -> float | None:
+    """P(the memory no longer holds): P(CHANGED) + P(WRONG) of the action
+    question's distribution, or the answer's own confidence where no
+    distribution came with it; None with neither. On a real queue Jev
+    answered CHANGED at 0.35 and 0.37 to a listing deleted and a task
+    stopped, with most of the rest on WRONG: either way the state no longer
+    held, and the top answer alone kept both in the queue."""
+    probabilities = decision.get("probabilities") or {}
+    if probabilities:
+        return (float(probabilities.get("CHANGED") or 0.0)
+                + float(probabilities.get("WRONG") or 0.0))
+    confidence = decision.get("confidence")
+    return float(confidence) if isinstance(confidence, (int, float)) else None
+
+
 def replacement_verdict(
     action: str, decision: dict[str, Any], target: Memory, cfg: SupersedeConfig,
     *, bar: float | None, saves: int,
@@ -463,8 +478,8 @@ def replacement_verdict(
     person settles it under Upkeep; the why is ``held_back``'s).
 
     A protected memory (``protection``) is replaced only when the judge read
-    it as a changeable state that moved on and its answer reaches the raised
-    bar (``cfg.state_confidence``, or the answer's own bar where higher). Read
+    it as a changeable state and P(it no longer holds) (``no_longer_holds``:
+    CHANGED and WRONG together) reaches ``cfg.state_confidence``. Read
     as still true, it is kept beside the new fact. A lasting fact, a standing
     rule, an unsure reading, or an answer with no reading (the text model's)
     is held as before. Partial changes ("the task stopped", of a memory that
@@ -474,14 +489,12 @@ def replacement_verdict(
     guarded = protection(target, cfg, saves)
     if guarded and action in ("CHANGED", "WRONG"):
         reading = standing_of(decision)
-        confidence = decision.get("confidence")
-        raised = max(cfg.state_confidence, bar if bar is not None else cfg.confidence)
+        gone = no_longer_holds(decision)
         if reading == "still":
             return "both", f"the judge read memory {target.id} as still true beside it"
-        if (reading == "state" and isinstance(confidence, (int, float))
-                and confidence >= raised):
-            why = (f"a state that moved on ({confidence:.2f}, at or over {raised:.2f}), "
-                   f"replaced although {guarded}")
+        if reading == "state" and gone is not None and gone >= cfg.state_confidence:
+            why = (f"a state that no longer holds (P {gone:.2f}, at or over "
+                   f"{cfg.state_confidence:.2f}), replaced although {guarded}")
             return ("update" if action == "WRONG" else "replace"), why
     held = held_back(target, decision, cfg, bar=bar, saves=saves)
     return ("ask", held) if held else ("replace", "")

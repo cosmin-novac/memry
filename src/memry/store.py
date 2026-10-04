@@ -125,6 +125,7 @@ from .intelligence.reconcile import (
     _decide_action,
     bar_for,
     held_back,
+    no_longer_holds,
     reconcile_candidate,
     reconcile_state,
     replacement_verdict,
@@ -3344,7 +3345,9 @@ class MemoryStore:
             action = judged["action"]
             saves = saves_of(self.backend, old)
             bar = bar_for(self.decider, action, cfg)
+            gone = no_longer_holds(judged)
             row["answer"] = {"action": action, "confidence": judged.get("confidence"),
+                             "no_longer_holds": round(gone, 3) if gone is not None else None,
                              "standing": judged.get("standing")}
             if action in ("CHANGED", "WRONG"):
                 held = held_back(old, judged, cfg, bar=bar, saves=saves)
