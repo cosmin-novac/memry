@@ -35,8 +35,8 @@ merges entities only by fixed rules, and you confirm the other merges yourself.
 ones: duplicates are skipped, refinements update in place, and contradictions supersede
 the old memory instead of deleting it. Memories are bi-temporal (`valid_from` /
 `invalid_at` / `superseded_by`), so "moved to Amsterdam" does not erase "lived in
-Berlin" - it dates it. Importance decays with a half-life, and a sweep retires stale
-trivia, again without destroying anything.
+Berlin" - it dates it. Nothing is forgotten for being old: a memory leaves use only when
+you delete it or a later one replaces it, and either can be undone.
 
 **Nothing is a black box.** Raw episodes are stored immutably before anything is derived
 from them, every memory links back to its source episodes, every mutation is an
@@ -267,7 +267,6 @@ memry add "I moved to Amsterdam and joined ASML" -u ada
 memry search "where does ada work" -u ada
 memry context "plan a commute" -u ada
 memry history <memory_id>          # full audit trail
-memry sweep                        # decay: soft-forget stale memories
 memry eval --dataset evals/datasets/synthetic_v1.jsonl
 ```
 
@@ -307,9 +306,8 @@ flowchart LR
    boosted by recency and importance. A question naming a known entity also takes the
    memories of the entities linked to it (the linked search). Pending raw memories are
    searchable immediately.
-5. **Forgetting.** Effective importance decays over time; `memry sweep` invalidates
-   memories that fall below threshold. Tag filters (`memry search -c diet`) narrow any
-   query.
+5. **No forgetting by age.** Recency lifts newer memories in ranking, but age never
+   takes a memory out of use. Tag filters (`memry search -c diet`) narrow any query.
 
 ## Configuration
 
@@ -376,7 +374,7 @@ src/memry/
   enrichment.py        # managed pending-memory worker and restart recovery
   retrieval.py         # hybrid search: RRF + recency + importance
   backends/            # storage contract + the production SQLite engine
-  intelligence/        # extraction, reconciliation, decay, context building
+  intelligence/        # extraction, reconciliation, entities, context building
   providers/           # LLMs (Anthropic/OpenAI/Ollama) & embeddings (+hash fallback)
   mcp_server.py        # MCP tools (stdio + streamable HTTP)
   rest.py              # REST API + dashboard + /mcp mount

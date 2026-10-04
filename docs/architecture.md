@@ -90,7 +90,7 @@ those limits are visible and intentional.
 |---|---|---|
 | Public surfaces | Python API, CLI, REST, dashboard, MCP | They call `MemoryStore`; they do not implement memory behavior independently. |
 | `MemoryStore` | Ownership checks, write/read workflows, knowledge operations | It is the product facade and the main invariant boundary. |
-| Intelligence | Extraction, reconciliation, entity resolution, relation extraction, topic abstraction, descriptions, decay, consolidation | Derived outputs remain rebuildable from evidence. |
+| Intelligence | Extraction, reconciliation, entity resolution, relation extraction, topic abstraction, descriptions, consolidation | Derived outputs remain rebuildable from evidence. Nothing forgets a memory for its age. |
 | Retrieval | FTS5/BM25, vectors, reciprocal-rank fusion, recency/importance, the linked search over entity links | Invalidated evidence is excluded by default and work is bounded. |
 | Providers | LLM and embedding integrations | External providers are optional; zero-key fallbacks remain functional. |
 | Production persistence | `LocalBackend` | SQLite is the sole production source of truth. |
@@ -262,12 +262,15 @@ that the existing types describe badly, which is the standard `document` and `co
 
 #### How Memry decides that two entities are one
 
-Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py`):
+Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `owner.py`, `store.py`):
 
 1. **Extraction names the entities.** The extractor is given the store's existing entity
    names that the text may mean (a rare shared name word, or initials), and the owner's
-   name ("the user" until the account names it). It writes a stored name as stored when a
-   fact names that entity, and lists the owner under the owner's name.
+   name ("the user" until the account names it or a conversation states it). It writes a
+   stored name as stored when a fact names that entity, and lists the owner under the
+   owner's name. While the owner has no name it also reports the user's own name
+   (`user_name`) when the conversation states it, and only then (see "Who the owner is"
+   below).
 2. **Save time (`resolve_mentions`).** Each extracted name is looked up across the whole
    namespace (not only the save's session): entities with that name or alias, plus up to
    five from the name index (a rare shared word, similar spelling, a typo, initials, a
@@ -280,7 +283,8 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    (a memory rewritten by an UPDATE or an edit that still names it keeps that entity;
    compared with it, the memory sat on both sides and was left out of both, so nothing
    was left to compare and a second entity of the name was made). Every other candidate
-   is compared with the new memory.
+   is compared with the new memory. The owner while it is still called "the user" is no
+   candidate for any other name ("User Research" shares the word "user" with it).
    A name the store already has joins the entity of that name with the highest P(same),
    unless the judge says "different" at 0.5 or more; the merge bar does not apply. (Held
    to it, 88 of 431 mentions of a known name became one-memory entities in a replayed
@@ -330,8 +334,10 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    candidate left it keeps waiting, since it may be a third person. It asks the judge
    nothing.
 6. **The weekly pass (`resolve_entities`, upkeep key `dedup_entities`).** It raises new
-   pairs from the name index over all entities (identical names included) and pairs the
-   owner with the three people whose memories are closest to its own. Names that only
+   pairs from the name index over all entities (identical names included) and pairs a
+   named owner with the three people whose memories are closest to its own (an account's
+   login shares no name with the person it is). The owner still called "the user" is paired
+   with nobody, and an open pair it has is not compared. Names that only
    share a word written in capitals ("PR #42" and "the Dutch address PR") are looked at
    by the judge on the two names alone first, up to 10 per name and 20 names per pass;
    a pair it rules out (P(different) of 0.9 or more, provisional) is recorded as
@@ -340,26 +346,102 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `store.py
    keeps the name and becomes the owner. It also removes orphan entities. The structure
    pass (`same_name_plan`) merges entities of one name only where nothing sets them
    apart: a pair kept apart (a rejected proposal, or P(different) of 0.5 or more) is
-   never merged there, nor joined through a third.
+   never merged there, nor joined through a third. The owner still called "the user" is
+   left out of it.
 7. **Descriptions** are built from the entity's newest 40 memories in use
    (`entities.DESCRIPTION_FACTS`) when an entity is opened or recalled into context, not
    on the save path. The writer reads each memory's own text and writes the lasting
    picture of the entity: what it is, its roles, relationships, preferences and the facts
    that stay true. It leaves one-off events, past or planned, to the memories, and
    mentions one only as far as it tells what the entity is, without its date
-   (`entities.DESCRIPTION_SYSTEM`).
+   (`entities.DESCRIPTION_SYSTEM`). An entity with fewer than 2 memories in use
+   (`entities.DESCRIPTION_MIN_MEMORIES`) gets none: no text-model call, nothing stored,
+   and nothing shown in context or on the entity page, since the memory speaks for itself
+   and a description would only repeat it. One stored when it had more memories stays
+   stored but is not shown until it has 2 again.
 
 Merge proposals never reach the Upkeep queue when a calibrated judge decides pairs.
 A merge keeps what decided it on its proposal: the two entities (the one merged away stays
 as a tombstone pointing at the other), the judge's answer and the step it was given at,
 and, where no single answer decided it, the rule (one name that the judge did not call
 different, the clear favourite among namesakes, one side with no memories), "confirmed by
-you" or, for a merge made on the entity page, "merged by you". A name a save joins to an
+you", for a merge made on the entity page "merged by you", or the statement that said who
+the owner is. A pair kept apart from the Upkeep list says "kept apart by you". A name a
+save joins to an
 entity the store has keeps the rule or the answer that joined it on its mention
 (`EntityMention.decided`), and so does a mention a rewritten memory's new text makes. A
 merge leaves one row per pair: where both entities had a pair with a third, the more
 decided row stays (a decision over an open pair), of two alike the later answer, and the
-other goes into the merge record.
+other goes into the merge record. A pair is recorded once: `add_proposal` looks for a row
+of the two, in either order, and writes in one statement, so a save and the weekly pass
+running at once cannot both add it.
+
+#### Who the owner is
+
+Each namespace has one owner entity, the person the memories belong to. Without an
+account name it is called "the user", and "the user" is a role, not a name. Asked whether
+that entity and a named person are one, the judge compares two sets of memories: on a real
+store it read the owner (61 memories) and "Cosmin" (363), the person it was, as two people
+at P(different) 0.94-0.95, and the pair was kept apart for good, so the owner stayed "the
+user". Who the owner is is stated instead, and the judge is never asked about the owner
+while it is called "the user" (`identity.unnamed_owner`): not at save, not in the weekly
+pass, not in the choice among namesakes, the structure pass or the check of a restored
+name. Once the owner has a name it is compared like any person.
+
+- **Where a name is stated.** Extraction reports `user_name` when the user gives their
+  name ("I'm Cos", "my name is", a signature), the assistant calls the user by it, or a
+  line says it ("The user's name is Cos."); never as a guess. A save whose turns in role
+  user carry one speaker's name (`name`) names the owner too. Neither costs an extra call.
+  The question (a rule in the prompt and a field in the answer, about 80 prompt and 6
+  output tokens) is asked only while the owner is called "the user" and no account names
+  it. For a named owner the prompt and schema are byte for byte those without it, which
+  keeps the provider's prompt cache; so a conversation giving a named owner another name
+  goes unnoticed at save. Corrections are rare, and `learn_owner_name` still takes one
+  from any caller.
+- **What a stated name does** (`MemoryStore.learn_owner_name`, after the save's facts are
+  written). While the owner is called "the user", it is folded into the person who carries
+  the name, through the merge any pair goes through: the person keeps the name and becomes
+  the owner, "the user" becomes one of their merged names, the pair is confirmed with the
+  statement as its reason, and Archive > Merged names undoes it. A judge's "different" on
+  that pair does not stand in the way; a person's ("kept apart by you", "undone by you")
+  does, and the owner then takes the name itself. With no person of that name, the owner
+  is renamed to it, "the user" kept as an alias. From then on the extractor lists the owner
+  under the real name. The name and what stated it (the text, the memories and the turns)
+  are kept in the namespace's upkeep state (`owner_stated`).
+- **Which person a name is** (`owner.person_for`): the one person who carries it as name
+  or alias, ignoring case and accents. Failing that, for one word: the one person whose
+  name starts with that word ("Dan" is "Dan Popescu", also beside a "Dana"), else, from
+  three letters on, the one person whose first name begins with it ("Cos" is "Cosmin" when
+  no other person's name starts with "Cos"). Two people who fit are no answer, and the
+  owner takes the stated name itself.
+- **One name holds.** The first name stated is kept. A later different name is recorded
+  as a conflict and changes nothing, unless it is a correction (it names the first name
+  and says it was wrong: "my name is Cosima, not Cosmin") and the owner still carries the
+  first name itself. After a fold into a person, a correction is left to you: undo the
+  merge. An account's name wins over any stated one; with an account name, statements are
+  only recorded. An owner entity made before its account named it takes the account's
+  name, or the person who carries exactly that name.
+- **Stores saved before** (`learn_owner`, `memry learn-owner`, and once per namespace by
+  the upkeep cycle while the owner is "the user"). Patterns pick out the memories, in use
+  and forgotten (a forgotten duplicate still states the fact), and the saved turns that may
+  state the name: "my name is", "the user's name is", "I'm", "call me", "the user (Cos)", a
+  greeting by name in an assistant turn, turns in role user that carry a name. With none,
+  nothing is asked. Otherwise one text-model call reads them against the namespace's people
+  (names, aliases and memory counts) and says which person the statements say the owner is,
+  or none, and the name they give. Without a text model only the statements that say the
+  name outright count, by the matching rule. `--dry-run` prints the evidence, the person
+  chosen and what would be folded or renamed, writing nothing.
+- **The upgrade** (once, at the first open). Pairs of an owner still called "the user"
+  with a person that the judge decided, rejected or answered and left open (a reason that
+  starts with the judge's name, or the names-alone screen's), are opened again as never
+  compared, and wait until the owner has a name; a pair a person decided says "by you" and
+  stays. A rejection made from the Upkeep list before rejections said so kept the judge's
+  reason and is opened again too. Rows written twice for one pair are collapsed to the one
+  a merge keeps, confirmed rows staying as they are: a merge before 0.2.40 moved the merged
+  entity's pairs without looking for one the kept entity had, so the owner paired with
+  "Cosmin" and "Cosmin Novac" in one pass had two rows once those two were merged. What the
+  upgrade opened or dropped is kept under its marker (`schema:owner-pairs:v1`,
+  `schema:one-row-per-pair:v1`).
 
 A merge can be undone (`undo_merge`; Upkeep > Archive > Merged names, `POST
 /api/v1/entities/unmerge`, `memry entities unmerge`). Each merge records what it moved
@@ -563,7 +645,24 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    memory is rated important or was stated in two or more separate saves: the saves behind
    its evidence (the episodes it was made from and those of each save that said it again),
    a save being its run and its time, which every message of one save shares. A fact from
-   one save counts once however many of its messages it rests on. An exact duplicate (normalized text) is SAME
+   one save counts once however many of its messages it rests on. Importance says how much
+   a fact matters, not how risky replacing it is, so where such a protected memory is among
+   those compared, the decision provider is also asked, in the same call, what it is
+   (`STANDING_QUESTION`, about 92 words, asked only then): still true beside the new fact,
+   a changeable state or status as it stood when said (a listing active, a task running, a
+   document present or missing, a plan in progress), or a lasting fact or standing rule
+   (health, identity, origin, a relationship, "never do X"). Read as a state at 0.6 or more
+   (`STANDING_BAR`), with the answer at 0.8 or more (`supersede.state_confidence`, or its
+   own bar where higher), the change replaces the memory without asking, as an update kept
+   as history even where the judge said WRONG; read as still true, both stay in use and
+   nobody is asked; a lasting fact, a standing rule, an unsure reading and the text model's
+   answers (no probabilities) wait under Upkeep as before. A partial change ("the task
+   stopped", of a memory that also listed its criteria) replaces the whole memory: what
+   stays true is still read in its history, and a memory that holds one fact
+   (`split_memories`) does not mix the two. `memry reconcile-queue [--user U] [--apply]`
+   asks the decision provider again about each question waiting under Upkeep and prints
+   what the old rule and this one decide, writing nothing without `--apply`; with it a
+   replacement is made by Memry with its reason and undone under Archive. An exact duplicate (normalized text) is SAME
    with no model asked, unless it is an event (either memory episodic, or with an occurrence
    time) said on another day, which the judge decides. Each SUPERSEDE event records its `kind`
    (contradiction, update, consolidation, distillation or split), which the Archive and

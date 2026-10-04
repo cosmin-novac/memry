@@ -49,13 +49,13 @@ from .intelligence.context import (
 )
 from .intelligence.decay import (
     DURABILITY_KEY,
-    decay_sweep,
     score_durability,
 )
 from .intelligence.entities import (
     _gate,
     classify_entity_types,
     DESCRIPTION_FACTS,
+    DESCRIPTION_MIN_MEMORIES,
     judge_entity_referents,
     non_referent_reason,
     screen_names,
@@ -91,14 +91,27 @@ from .intelligence.identity import (
     BELONGS_BAR,
     NameIndex,
     belonging,
+    decided_by_a_person,
     fold_topic,
     is_topic,
     judges_pairs,
     merge_pair,
+    unnamed_owner,
+)
+from .intelligence.owner import (
+    STATEMENT_CHARS,
+    Statement,
+    choose_owner,
+    fold as fold_name,
+    is_correction,
+    person_for,
+    rule_choice,
+    statements_in,
 )
 from .intelligence.extraction import (
     OWNER_PLACEHOLDER,
     VOCABULARY_LIMIT,
+    clean_stated_name,
     extract_facts,
     extract_relations,
     speaker_name,
@@ -109,7 +122,13 @@ from .intelligence.extraction import (
 from .intelligence.reconcile import (
     CONFLICT_KEY,
     UPDATE_SUPERSEDE_REASON,
+    _decide_action,
+    bar_for,
+    held_back,
     reconcile_candidate,
+    reconcile_state,
+    replacement_verdict,
+    saves_of,
 )
 from .intelligence.structure import (
     ANCHOR_TYPES,
@@ -357,6 +376,12 @@ def _upkeep_key(name: str, user_id: str | None) -> str:
     return f"upkeep:{name}:{user_id or ''}"
 
 
+#: The reason on a pair of the owner without a name and a person, opened
+#: again because only the judge had decided it (``_settle_owner_pairs``).
+OWNER_PAIR_REOPENED = ("opened again: the judge was asked about the owner before "
+                       "the owner had a name")
+
+
 #: Meta keys that are the store's own settings, not a namespace's state: the
 #: pause switch and each pass turned on or off (``maintenance:``). A reset
 #: keeps them; the queues, the owner and when each pass ran go.
@@ -391,11 +416,12 @@ def _forgetting_trigger(event: Any) -> str:
     if event.actor == "user":
         return "You deleted it."
     if event.actor == "decay":
+        # the forgetting sweep of versions before 0.2.44; nothing forgets by age now
         score = re.search(r"importance ([0-9.]+) < ([0-9.]+)", reason)
         if score:
-            return (f"The forgetting sweep removed it: its importance had faded to "
-                    f"{score.group(1)}, below the {score.group(2)} it needs to stay.")
-        return "The forgetting sweep removed it: its importance had faded too far."
+            return (f"The forgetting sweep, since retired, removed it: its importance had "
+                    f"faded to {score.group(1)}, below the {score.group(2)} it needed to stay.")
+        return "The forgetting sweep, since retired, removed it: its importance had faded too far."
     if event.event == "SUPERSEDE" and "into 0 fact" in reason:
         return ("It was a raw saved message, and distilling it produced nothing new: "
                 "every fact in it was already stored, or there was nothing to keep.")
@@ -647,6 +673,10 @@ class MemoryStore:
         self._pass_locks: dict[tuple[str, str | None], threading.RLock] = {}
         self._pass_locks_guard = threading.Lock()
         self.backend.names_changed = self._names_changed
+        try:
+            self._settle_owner_pairs()
+        except Exception as exc:  # an upgrade step must never stop a store opening
+            log.warning("pairs of the owner without a name were not settled: %s", exc)
 
     # ------------------------------------------------------------------
     # write path
@@ -707,6 +737,7 @@ class MemoryStore:
 
         candidates: list[CandidateFact]
         warnings: list[str] = []
+        stated: list[str] = []
         if not infer:
             text = content if isinstance(content, str) else "\n".join(
                 m.get("content", "") for m in messages
@@ -727,6 +758,7 @@ class MemoryStore:
                     now=now,
                     context=_ingestion_context(metadata),
                     tag_hints=_client_tag_hints(metadata, categories),
+                    stated=stated,
                 )
             except Exception as exc:
                 # Provider outage / exhausted credits must not lose the save:
@@ -744,6 +776,8 @@ class MemoryStore:
         actions = self._apply_candidates(candidates, scope, episode_ids, created_at=created_at,
                                          messages=messages,
                                          line_episodes=[[e] for e in episode_ids])
+        if infer:
+            self._learn_from_save(scope, messages, stated, [[e] for e in episode_ids], actions)
 
         missing = self._coverage_gaps(messages, actions) if infer else []
         if missing:
@@ -774,13 +808,19 @@ class MemoryStore:
         now: datetime | None,
         context: str,
         tag_hints: list[str],
+        stated: list[str] | None = None,
     ) -> list[CandidateFact]:
         """The facts extraction finds in a direct save's messages (``add``)
         or a pending group's (``_distill_pending_group``), asked the same way:
         offered the tags and entities their words may name and the owner as
         these messages speak of them (``owner_name``), each fact's time then
         checked against ``now``. A deferred save is extracted as it would have
-        been saved directly."""
+        been saved directly. ``stated`` receives the user's name where the
+        messages state it (``extraction.extract_facts``), asked only while the
+        owner has no name (``_owner_unnamed``): for a named owner the prompt
+        and schema are those without the question, so a conversation that
+        gives a named owner another name goes unnoticed at save. Corrections
+        are rare, and the question cost every call about 80 prompt tokens."""
         said = "\n".join(str(m.get("content") or "") for m in messages)
         candidates = extract_facts(
             self.llm,
@@ -791,6 +831,8 @@ class MemoryStore:
             tag_hints=tag_hints,
             owner=self.owner_name(scope.user_id, messages),
             entity_names=self._entity_vocabulary(scope, said),
+            identity=stated if stated is not None and self._owner_unnamed(scope.user_id)
+            else None,
         )
         self._confirm_candidate_whens(candidates, now=now)
         return candidates
@@ -1726,9 +1768,13 @@ class MemoryStore:
         memory_metadata: dict[str, Any] = {}
         for job in jobs:
             memory_metadata.update(job.get("memory_metadata") or {})
+        stated: list[str] = []
         candidates = self._extract(
-            messages, first_scope, now=now, context=context, tag_hints=tag_hints)
+            messages, first_scope, now=now, context=context, tag_hints=tag_hints,
+            stated=stated)
         if not candidates:
+            # a group extracted to nothing may still say who the user is
+            self._learn_from_save(first_scope, messages, stated, line_episodes, [])
             for memory in active:
                 metadata = self._clear_enrichment_metadata(memory.metadata)
                 self.backend.update_memory(
@@ -1750,6 +1796,7 @@ class MemoryStore:
             messages=messages,
             line_episodes=line_episodes,
         )
+        self._learn_from_save(first_scope, messages, stated, line_episodes, actions)
         landed = sum(1 for action in actions if action.event != "NONE")
         new_id = next(
             (
@@ -3110,7 +3157,7 @@ class MemoryStore:
         ):
             if memory.invalid_at is None or memory.superseded_by:
                 continue
-            # Whatever ended it: a delete (yours, or the forgetting sweep), or
+            # Whatever ended it: a delete (yours, or the retired forgetting sweep), or
             # a distillation that put nothing in its place. Looking for DELETE
             # alone is what left "forgotten by system" with no explanation.
             removal = next(
@@ -3211,7 +3258,13 @@ class MemoryStore:
     def _decide_conflict(
         self, item_id: str, decision: str, *,
         user_id: str | None, owner_prefix: str | None,
+        actor: str = "user", why: str | None = None, update: bool | None = None,
     ) -> bool:
+        """Settle one queued contradiction: "accept" (the new one replaces the
+        old), "decline" (the new one is wrong) or "other" (both are true).
+        ``actor``, ``why`` and ``update`` are for a decision Memry makes itself
+        (``redecide_conflicts``): who decided, the reason recorded, and
+        whether a replacement is an update (kept as history)."""
         found = next(
             (row for row in self._open_conflicts(user_id) if row[0]["id"] == item_id),
             None,
@@ -3225,14 +3278,15 @@ class MemoryStore:
         # a confirmed replacement is an update's, which keeps the old one as
         # history and which the Archive's undo reverses keeping both
         # (``undo_replacement``)
-        update = _conflict_mark(new).get("kind") == "update"
+        if update is None:
+            update = _conflict_mark(new).get("kind") == "update"
         if decision == "accept":  # the new one is right
             self.backend.invalidate_memory(old.id, superseded_by=new.id)
             self.backend.add_event(MemoryEvent(
                 memory_id=old.id, event="SUPERSEDE", old_content=old.content,
-                new_content=new.content, actor="user",
-                reason=(f"you confirmed that memory {new.id} updates it" if update
-                        else f"you confirmed that memory {new.id} replaces it"),
+                new_content=new.content, actor=actor,
+                reason=why or (f"you confirmed that memory {new.id} updates it" if update
+                               else f"you confirmed that memory {new.id} replaces it"),
                 kind="update" if update else "contradiction",
             ))
         elif decision == "decline":  # the old one is right
@@ -3246,8 +3300,8 @@ class MemoryStore:
         else:  # both are true
             self.backend.add_event(MemoryEvent(
                 memory_id=new.id, event="NONE", new_content=new.content,
-                actor="user",
-                reason=f"you kept it beside memory {old.id}: both are true",
+                actor=actor,
+                reason=why or f"you kept it beside memory {old.id}: both are true",
             ))
         self._clear_conflict_mark(new)
         self._upkeep_set(
@@ -3256,6 +3310,61 @@ class MemoryStore:
              if e["id"] != item_id],
         )
         return True
+
+    def redecide_conflicts(
+        self, *, user_id: str | None = None, apply: bool = False
+    ) -> list[dict[str, Any]]:
+        """Ask the decision provider again about each queued contradiction
+        and say, per item, what the rule it was held under decides
+        (``reconcile.held_back``: importance holds it) and what the rule of
+        now decides (``reconcile.replacement_verdict``: a protected state that
+        moved on is replaced at a raised bar, a memory still true is kept
+        beside, a lasting fact or rule still asks). One provider call per
+        item; nothing is written unless ``apply``. With ``apply`` a "replace"
+        or "update" supersedes the old memory as a person's yes would, by
+        Memry and with the reason, listed under Archive and undone there; a
+        "both" keeps both and clears the question; an "ask" stays."""
+        cfg = self.config.supersede
+        out: list[dict[str, Any]] = []
+        for entry, new, old in self._open_conflicts(user_id):
+            row: dict[str, Any] = {
+                "id": new.id, "with": old.id, "new": new.content, "old": old.content,
+                "importance": old.importance, "queued": entry.get("reason")}
+            state = reconcile_state([old], new.content, new.created_at)
+            try:
+                judged = _decide_action(self.decider, state, 1, standing=True)
+            except Exception as exc:  # one item's outage leaves the others
+                judged = None
+                row["error"] = str(exc)
+            if judged is None:
+                row.update(answer=None, before="ask", now="ask",
+                           why="the decision provider gave no answer")
+                out.append(row)
+                continue
+            action = judged["action"]
+            saves = saves_of(self.backend, old)
+            bar = bar_for(self.decider, action, cfg)
+            row["answer"] = {"action": action, "confidence": judged.get("confidence"),
+                             "standing": judged.get("standing")}
+            if action in ("CHANGED", "WRONG"):
+                held = held_back(old, judged, cfg, bar=bar, saves=saves)
+                row["before"] = "ask" if held else "replace"
+                row["now"], row["why"] = replacement_verdict(
+                    action, judged, old, cfg, bar=bar, saves=saves)
+                if row["now"] == "replace" and action == "WRONG":
+                    row["now"] = "contradiction"
+            else:  # NEW, SAME or MORE: no conflict between the two
+                row["before"] = row["now"] = "both"
+                row["why"] = f"the judge answered {action}: no conflict"
+            row["applied"] = False
+            if apply and row["now"] != "ask":
+                why = f"Memry decided again ({row['answer']['action']}): {row['why']}"
+                row["applied"] = self._decide_conflict(
+                    new.id, "other" if row["now"] == "both" else "accept",
+                    user_id=user_id, owner_prefix=None, actor="system", why=why,
+                    update=row["now"] in ("replace", "update"))
+            out.append(row)
+        return out
 
     def replaced(
         self, *, user_id: str | None = None, limit: int = 200
@@ -4073,12 +4182,28 @@ class MemoryStore:
             summary["proposals"] = proposals
         return summary
 
+    def _undescribed(self, entity: Entity) -> Entity:
+        """``entity`` shown without a description while it has fewer than
+        ``DESCRIPTION_MIN_MEMORIES`` memories in use: the memory speaks for
+        itself. One stored from when it had more stays stored, unshown, for
+        when it has them again."""
+        if entity.description is None or (
+                self.backend.count_entity_memories(entity.id) >= DESCRIPTION_MIN_MEMORIES):
+            return entity
+        return entity.model_copy(update={"description": None})
+
     def _refresh_entity_description(
         self, entity_id: str, *, force: bool = False
     ) -> Entity | None:
+        """The entity with its description, built or rebuilt where it is stale.
+        With fewer than ``DESCRIPTION_MIN_MEMORIES`` memories in use there is
+        none: no model is asked, nothing is stored, and one stored before is
+        not shown (``_undescribed``)."""
         entity = self.backend.get_entity(entity_id)
         if entity is None or not entity.is_active:
             return None
+        if self.backend.count_entity_memories(entity_id) < DESCRIPTION_MIN_MEMORIES:
+            return entity.model_copy(update={"description": None})
         evidence_updated_at = self.backend.entity_evidence_updated_at(entity_id)
         if (
             not force
@@ -4122,6 +4247,8 @@ class MemoryStore:
             entity = self._refresh_entity_description(entity_id)
             if entity is None:
                 return None
+        else:
+            entity = self._undescribed(entity)
         # Relations belong to the entity being looked at, not to a list of every
         # edge in the store: an edge only means something next to the thing it
         # connects. These are also what relational retrieval traverses, so
@@ -4227,11 +4354,14 @@ class MemoryStore:
     def reject_merge(
         self, proposal_id: str, *, owner_prefix: str | None = None
     ) -> bool:
-        """User says: these are different entities. They stay separate for good."""
+        """User says: these are different entities. They stay separate for good,
+        and the pair says a person decided it ("kept apart by you"), not the
+        answer it held: a judge's answer on a pair with the owner while it had
+        no name is opened again (``_settle_owner_pairs``), a person's is not."""
         proposal = self.backend.get_proposal(proposal_id)
         if not _owned(proposal, owner_prefix) or proposal.status != "proposed":
             return False
-        self.backend.set_proposal_status(proposal_id, "rejected")
+        self.backend.set_proposal_status(proposal_id, "rejected", reason="kept apart by you")
         return True
 
     def entity_junk(
@@ -4332,13 +4462,14 @@ class MemoryStore:
         back, kept apart by a person, stays apart. A failure never fails the
         restore: the weekly pass pairs them."""
         entity = self.backend.get_entity(entity_id)
-        if entity is None or entity.entity_type == TOPIC_TYPE or not entity.normalized:
+        if (entity is None or entity.entity_type == TOPIC_TYPE or not entity.normalized
+                or unnamed_owner(entity)):
             return
         scope = Scope(user_id=entity.user_id)
         try:
             pairs: set[str] = set()
             for other in self.backend.find_entity_candidates(entity.normalized, scope):
-                if other.id == entity.id:
+                if other.id == entity.id or unnamed_owner(other):
                     continue
                 proposal = self.backend.find_proposal(entity.id, other.id)
                 if proposal is None:
@@ -4478,14 +4609,31 @@ class MemoryStore:
             status="confirmed", confidence=1.0, reason="merged by you", decided_at=utcnow()))
 
     # -- the store owner ----------------------------------------------------
+    #: Statements of the established name, and of other names, kept per
+    #: namespace with the owner's upkeep state (``learn_owner_name``).
+    OWNER_EVIDENCE_KEPT = 10
+    OWNER_CONFLICTS_KEPT = 20
+
     def set_owner_name(self, user_id: str | None, name: str) -> None:
         """Record the name of the person a namespace belongs to, from their
-        account. The owner entity starts with it; the identity judge may later
-        find the owner to be a named person in the store, whose name it keeps.
+        account. The owner entity starts with it, and an owner entity made
+        before the account named it, still called "the user", takes it now
+        (``_name_owner``: the person who carries exactly that name, else the
+        name itself). An account's name wins over a stated one
+        (``learn_owner_name``). The identity judge may later find a named
+        owner to be a named person in the store, whose name it keeps.
         """
         name = " ".join(str(name or "").split())[:80]
-        if name and self._upkeep_get("owner_name", user_id, None) != name:
+        if not name:
+            return
+        if self._upkeep_get("owner_name", user_id, None) != name:
             self._upkeep_set("owner_name", user_id, name)
+        owner = self.owner_entity(user_id)
+        if unnamed_owner(owner) and clean_stated_name(name):
+            outcome = self._name_owner(user_id, owner, name, f'the account is named "{name}"',
+                                       short_names=False)
+            self._upkeep_set("owner_stated", user_id, {
+                **(self._upkeep_get("owner_stated", user_id, None) or {}), "outcome": outcome})
 
     def owner_entity(self, user_id: str | None) -> Entity | None:
         """The entity of the person this namespace belongs to, once a memory
@@ -4508,13 +4656,17 @@ class MemoryStore:
         self, user_id: str | None, messages: list[dict[str, str]] | None = None
     ) -> str | None:
         """The name the extractor lists the owner of ``messages`` under: the
-        owner entity's, else the account's, else "the user". Without a real
-        name, "the user" is the owner only of a conversation with the user
+        owner entity's, else the account's, else the one stated
+        (``learn_owner_name``), else "the user". Without a real name, "the
+        user" is the owner only of a conversation with the user
         (``speaks_with_the_user``; no ``messages`` asks about one): where the
         speakers are named it would be one of them, so there is none (None)."""
         entity = self.owner_entity(user_id)
-        name = entity.name if entity is not None else self._upkeep_get(
-            "owner_name", user_id, None)
+        if entity is not None:
+            name = entity.name
+        else:
+            name = (self._upkeep_get("owner_name", user_id, None)
+                    or (self._upkeep_get("owner_stated", user_id, None) or {}).get("name"))
         if name and name.strip().casefold() != OWNER_PLACEHOLDER:
             return name
         if messages is not None and not speaks_with_the_user(messages):
@@ -4535,12 +4687,397 @@ class MemoryStore:
         if name is None or not any(
                 str(s).strip().casefold() == name.casefold() for s in surfaces):
             return None
+        return self._new_owner(scope.user_id, name)
+
+    def _owner_unnamed(self, user_id: str | None) -> bool:
+        """Whether the owner still has no name: called "the user", with no
+        account name. Only then does extraction ask who the user is."""
+        account = self._upkeep_get("owner_name", user_id, None)
+        return (self.owner_name(user_id) == OWNER_PLACEHOLDER
+                and not (account and clean_stated_name(account)))
+
+    def _new_owner(self, user_id: str | None, name: str) -> Entity:
         owner = self.backend.insert_entity(Entity(
             name=name, normalized=name.lower(), entity_type="person",
-            user_id=scope.user_id, metadata={"owner": True},
+            user_id=user_id, metadata={"owner": True},
         ))
-        self._upkeep_set("owner_entity", scope.user_id, owner.id)
+        self._upkeep_set("owner_entity", user_id, owner.id)
         return owner
+
+    def learn_owner_name(
+        self, user_id: str | None, name: str, *,
+        evidence: dict[str, Any] | None = None, person_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Learn that the owner of a namespace was stated to be ``name``: the
+        user gave it, signed with it, was called by it, or a memory says it.
+        ``evidence`` is what stated it (its ``text``, ``memory_ids`` and
+        ``episode_ids``), kept with the name in the owner's upkeep state
+        (``owner_stated``). ``person_id`` is the person the statements were
+        read to be (``learn_owner``), in place of the name's matching rule.
+
+        Who the owner is, is stated, not judged (``identity.unnamed_owner``).
+        While the owner is called "the user", or has no entity yet, it takes
+        the stated identity (``_name_owner``): folded into the person who
+        carries the name, through the merge any pair goes through, so the
+        person keeps their name and becomes the owner, "the user" one of their
+        merged names, recorded with the statement as its reason and undone
+        under Archive > Merged names like any merge. A judge's "different" on
+        that pair does not stand in the way: it answered a question it should
+        not have been asked. A person's does ("kept apart by you", "undone by
+        you"): the owner then takes the stated name itself. With no person of
+        that name, the owner is renamed to it, "the user" kept as an alias.
+        From then on the extractor lists the owner under its real name.
+
+        One name holds, so statements cannot flip it back and forth. The
+        first name stated is kept; a later different name is recorded as a
+        conflict and changes nothing, unless it is a correction
+        (``owner.is_correction``: it names the first name and says it was
+        wrong) and the owner still carries the first name itself, not the
+        name of a person it was folded into. An account's name wins
+        (``set_owner_name``): with one, statements are only recorded.
+        Returns what was done ("folded", "renamed", "recorded", "kept",
+        "conflict" or "none") with why."""
+        name = clean_stated_name(name)
+        if not name or fold_name(name) == OWNER_PLACEHOLDER:
+            return {"action": "none", "reason": "no name was stated"}
+        state = dict(self._upkeep_get("owner_stated", user_id, None) or {})
+        statement = {"name": name, "at": utcnow(), **(evidence or {})}
+        statement["text"] = str(statement.get("text") or "")[:STATEMENT_CHARS]
+
+        def keep(outcome: dict[str, Any], *, conflict: bool = False) -> dict[str, Any]:
+            if conflict:
+                state["conflicts"] = ([*state.get("conflicts", []),
+                                       {**statement, "why": outcome["reason"]}]
+                                      [-self.OWNER_CONFLICTS_KEPT:])
+            else:
+                known = {(e.get("text"), e.get("source")) for e in state.get("evidence", [])}
+                if (statement["text"], statement.get("source")) not in known:
+                    state["evidence"] = ([*state.get("evidence", []), statement]
+                                         [-self.OWNER_EVIDENCE_KEPT:])
+            if outcome["action"] in ("folded", "renamed"):
+                state["outcome"] = outcome
+            self._upkeep_set("owner_stated", user_id, state)
+            return outcome
+
+        account = self._upkeep_get("owner_name", user_id, None)
+        if account and clean_stated_name(account) and fold_name(account) != OWNER_PLACEHOLDER:
+            same = fold_name(account) == fold_name(name)
+            return keep({"action": "recorded",
+                         "reason": f'the account\'s name, "{account}", wins'}, conflict=not same)
+        owner = self.owner_entity(user_id)
+        established = state.get("name")
+        corrected = False
+        if established and fold_name(established) != fold_name(name):
+            if not is_correction(statement["text"], established, name):
+                return keep({"action": "conflict", "reason": (
+                    f'"{established}" was stated first and stays')}, conflict=True)
+            outcome = state.get("outcome") or {}
+            folded = (owner is not None and outcome.get("action") == "folded"
+                      and outcome.get("entity_id") == owner.id)
+            if owner is not None and not unnamed_owner(owner) and (
+                    folded or fold_name(owner.name) != fold_name(established)):
+                return keep({"action": "conflict", "reason": (
+                    f'a correction of "{established}", but the owner was folded into '
+                    f'"{owner.name}": undo that merge under Archive > Merged names to change it')},
+                    conflict=True)
+            corrected = True
+        state["name"] = name
+        if owner is not None and not unnamed_owner(owner) and not corrected:
+            return keep({"action": "kept", "reason": f'the owner is "{owner.name}"'})
+        reason = (f'the owner\'s name was stated: "{statement["text"][:120]}"'
+                  if statement["text"] else f'the owner\'s name was stated as "{name}"')
+        return keep(self._name_owner(user_id, owner, name, reason, person_id=person_id))
+
+    def _owner_people(
+        self, user_id: str | None, owner: Entity | None
+    ) -> list[dict[str, Any]]:
+        """The namespace's people besides the owner, each with its names and
+        aliases and how many memories it is on, most first."""
+        people = [e for e in self.backend.list_entities(
+            Scope(user_id=user_id, exact_user=True), limit=1_000_000)
+            if e.entity_type == "person" and e.merged_into is None
+            and not (e.metadata or {}).get("owner") and (owner is None or e.id != owner.id)]
+        counts = self.backend.entity_memory_counts([e.id for e in people])
+        rows = [{"id": e.id, "name": e.name, "aliases": self.backend.entity_aliases(e.id),
+                 "memories": counts.get(e.id, 0)} for e in people]
+        return sorted(rows, key=lambda row: (-row["memories"], fold_name(row["name"])))
+
+    def _kept_apart_by_a_person(self, entity_a: str, entity_b: str) -> bool:
+        proposal = self.backend.find_proposal(entity_a, entity_b)
+        return (proposal is not None and proposal.status == "rejected"
+                and decided_by_a_person(proposal.reason))
+
+    def _owner_identity_plan(
+        self, user_id: str | None, owner: Entity | None, name: str, *,
+        person_id: str | None = None, short_names: bool = True,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """The person the owner is to be folded into, or None, and why."""
+        people = self._owner_people(user_id, owner)
+        if person_id is None:
+            person_id = person_for(name, [(p["id"], p["aliases"]) for p in people],
+                                   short_names=short_names)
+        person = next((p for p in people if p["id"] == person_id), None)
+        if person is None:
+            return None, f'no one person carries the name "{name}"'
+        if owner is not None and self._kept_apart_by_a_person(owner.id, person["id"]):
+            return None, f'"{person["name"]}" was kept apart from the owner by a person'
+        return person, f'"{person["name"]}" carries the name "{name}"'
+
+    def _name_owner(
+        self, user_id: str | None, owner: Entity | None, name: str, reason: str, *,
+        person_id: str | None = None, short_names: bool = True,
+    ) -> dict[str, Any]:
+        """Give the owner the identity ``name`` states (``learn_owner_name``):
+        fold it into the person who carries the name, else rename it, else,
+        with no owner entity yet, keep the name for when one is made."""
+        person, why = self._owner_identity_plan(user_id, owner, name, person_id=person_id,
+                                                short_names=short_names)
+        if person is not None:
+            was = owner.name if owner is not None else OWNER_PLACEHOLDER
+            # no owner entity yet: one is made to be folded, so the merge is
+            # recorded and can be undone like any other
+            owner = owner or self._new_owner(user_id, OWNER_PLACEHOLDER)
+            if self._fold_owner(owner, person["id"], reason):
+                return {"action": "folded", "owner": was, "into": person["name"],
+                        "entity_id": person["id"], "reason": reason}
+            why = f'the merge into "{person["name"]}" was refused'
+        if owner is None:
+            return {"action": "recorded", "name": name, "reason": (
+                "no owner entity yet: the extractor lists the owner under this name")}
+        if fold_name(owner.name) != fold_name(name):
+            renamed = self.backend.rename_entity(owner.id, name)
+            if renamed is not None:
+                return {"action": "renamed", "owner": owner.name, "to": renamed.name,
+                        "entity_id": owner.id, "reason": f"{reason}; {why}"}
+        return {"action": "kept", "reason": f'the owner is "{owner.name}"'}
+
+    def _fold_owner(self, owner: Entity, person_id: str, reason: str) -> bool:
+        """Fold the owner into the person (``identity.merge_pair``: the person
+        keeps their name and becomes the owner) and record on their pair what
+        decided it, where Archive > Merged names reads it."""
+        person = self.backend.get_entity(person_id)
+        if person is None or not merge_pair(self.backend, owner, person):
+            return False
+        proposal = self.backend.find_proposal(owner.id, person.id)
+        if proposal is None:
+            self.backend.add_proposal(MergeProposal(
+                entity_a=person.id, entity_b=owner.id, user_id=owner.user_id,
+                status="confirmed", confidence=1.0, reason=reason, decided_at=utcnow()))
+        else:
+            self.backend.set_proposal_status(proposal.id, "confirmed", reason=reason)
+        return True
+
+    def _learn_from_save(
+        self, scope: Scope, messages: list[dict[str, str]], stated: list[str],
+        line_episodes: list[list[str]], actions: list[AddAction],
+    ) -> None:
+        """What a save states about who the user is (``learn_owner_name``):
+        the name the extractor reported (``extraction.stated_user_name``),
+        for messages with a turn in role user, and the one speaker's name the
+        turns in role user carry. ``line_episodes`` are the episodes of each
+        message that says something, in order. Never fails the save."""
+        try:
+            said = [m for m in messages if _says_something(m)]
+            lines = list(zip(said, line_episodes))
+
+            def in_role_user(message: dict[str, str]) -> bool:
+                return str(message.get("role", "user")).strip().casefold() == "user"
+
+            found: list[tuple[str, dict[str, Any]]] = []
+            signed = {speaker_name(m) for m in said if in_role_user(m) and speaker_name(m)}
+            if len(signed) == 1:
+                [signer] = signed
+                found.append((signer, {
+                    "text": f"turns in role user are signed {signer}", "source": "turn",
+                    "episode_ids": [e for m, es in lines
+                                    if in_role_user(m) and speaker_name(m) == signer
+                                    for e in es][:5]}))
+            if stated and any(in_role_user(m) for m in said):
+                name = stated[0]
+
+                def names_it(text: str) -> bool:
+                    return fold_name(name) in fold_name(text)
+
+                memories = [a for a in actions
+                            if a.memory_id and a.content and names_it(a.content)]
+                turns = [(m, es) for m, es in lines if names_it(str(m.get("content") or ""))]
+                text = (memories[0].content if memories
+                        else str(turns[0][0].get("content") or "") if turns else "")
+                found.append((name, {
+                    "text": text, "source": "save",
+                    "memory_ids": list(dict.fromkeys(a.memory_id for a in memories))[:5],
+                    "episode_ids": [e for _, es in turns for e in es][:5]}))
+            for name, evidence in found:
+                outcome = self.learn_owner_name(scope.user_id, name, evidence=evidence)
+                if outcome["action"] in ("folded", "renamed", "conflict"):
+                    log.info("the owner's name was stated as %r: %s", name, outcome)
+        except Exception as exc:  # learning who the owner is must not fail a save
+            log.warning("a stated name of the owner was not learned: %s", exc)
+
+    def _owner_statements(self, user_id: str | None) -> list[Statement]:
+        """What the namespace has stored and saved that may state who the
+        user is (``owner.statements_in``): memories in use and forgotten
+        (a forgotten duplicate still states the fact), and saved turns, a turn
+        in role user that carries a speaker's name among them. Those that say
+        the name outright first, then the most recent."""
+        scope = Scope(user_id=user_id, exact_user=True)
+        out: list[Statement] = []
+        seen: set[str] = set()
+
+        def add(statement: Statement) -> None:
+            key = fold_name(statement.text)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(statement)
+
+        for memory in self.backend.list_memories(scope, include_invalid=True, limit=10**9):
+            for name, strong in statements_in(memory.content, role="memory"):
+                add(Statement(text=memory.content[:STATEMENT_CHARS], name=name, strong=strong,
+                              memory_id=memory.id, forgotten=memory.invalid_at is not None))
+                break
+        signed: Counter[str] = Counter()
+        signed_at: dict[str, str] = {}
+        for episode in self.backend.list_episodes(scope, limit=10**9):
+            role = str(episode.role or "user").strip().casefold()
+            if role == "user" and episode.name:
+                signed[episode.name] += 1
+                signed_at.setdefault(episode.name, episode.id)
+            for name, strong in statements_in(episode.content, role=role):
+                speaker = f"{episode.name} ({role})" if episode.name else role
+                add(Statement(text=f"{speaker}: {episode.content}"[:STATEMENT_CHARS],
+                              name=name, strong=strong, episode_id=episode.id))
+                break
+        for signer, count in signed.most_common():
+            add(Statement(text=f"{count} saved turns in role user are signed {signer}",
+                          name=signer, strong=len(signed) == 1,
+                          episode_id=signed_at[signer]))
+        return sorted(out, key=lambda s: not s.strong)
+
+    def learn_owner(self, *, user_id: str | None = None, dry_run: bool = False) -> dict[str, Any]:
+        """Learn who the owner of a namespace is from what it already holds,
+        for stores saved before extraction reported a stated name: once a
+        namespace, by the upkeep cycle while the owner is called "the user",
+        and by ``memry learn-owner``.
+
+        Cheap first: patterns pick out the memories (in use and forgotten)
+        and saved turns that may state the user's name
+        (``_owner_statements``); with none, nothing is asked. Otherwise one
+        text-model call reads them against the namespace's people, with
+        their aliases and memory counts, and says which person the
+        statements say the owner is, or none, and the name they give
+        (``owner.choose_owner``). Without a text model, or without an answer,
+        only statements that say the name outright count, by the matching
+        rule (``owner.rule_choice``). Then the owner takes that identity as
+        any stated one (``learn_owner_name``). ``dry_run`` asks the same and
+        writes nothing: the report shows the evidence, the person chosen and
+        what would be folded or renamed."""
+        owner = self.owner_entity(user_id)
+        current = self.owner_name(user_id)
+        report: dict[str, Any] = {"user": user_id, "owner": current, "dry_run": dry_run,
+                                  "evidence": [], "decision": None, "action": None}
+
+        def done(action: dict[str, Any]) -> dict[str, Any]:
+            report["action"] = action
+            if not dry_run:
+                self._upkeep_set("owner_learned", user_id, {
+                    "at": utcnow(), "action": action.get("action")})
+            return report
+
+        if current != OWNER_PLACEHOLDER:
+            return done({"action": "none", "reason": f'the owner has a name: "{current}"'})
+        statements = self._owner_statements(user_id)
+        report["evidence"] = [s.as_dict() for s in statements]
+        if not statements:
+            return done({"action": "none", "reason": "nothing states who the user is"})
+        people = self._owner_people(user_id, owner)
+        if owner is not None:
+            report["owner_memories"] = self.backend.count_entity_memories(owner.id)
+        decision = None
+        if self.llm.available and people:
+            try:
+                decision = choose_owner(self.llm, statements, people)
+                if decision is not None:
+                    decision["by"] = "the text model"
+            except Exception as exc:  # an outage leaves the rule
+                log.warning("the text model did not read who the owner is: %s", exc)
+        if decision is None:
+            decision = rule_choice(statements, people)
+            if decision is not None:
+                decision["by"] = "the matching rule"
+        report["decision"] = decision
+        name = (decision or {}).get("name") or (decision or {}).get("person")
+        if not name:
+            return done({"action": "none",
+                         "reason": "the statements do not say who the user is"})
+        chosen = decision.get("person_id")
+        said = [fold_name(n) for n in (name, decision.get("person")) if n]
+        backing = [s for s in statements if any(n in fold_name(s.text) for n in said)]
+        backing = backing or statements
+        evidence = {
+            "text": backing[0].text, "source": "learn-owner",
+            "memory_ids": [s.memory_id for s in backing if s.memory_id][:5],
+            "episode_ids": [s.episode_id for s in backing if s.episode_id][:5],
+        }
+        if dry_run:
+            person, why = self._owner_identity_plan(user_id, owner, name, person_id=chosen)
+            if person is not None:
+                report["action"] = {
+                    "action": "would fold",
+                    "owner": owner.name if owner is not None else OWNER_PLACEHOLDER,
+                    "owner_memories": report.get("owner_memories", 0),
+                    "into": person["name"], "into_memories": person["memories"],
+                    "reason": why}
+            elif owner is not None:
+                report["action"] = {"action": "would rename", "owner": owner.name,
+                                    "to": name, "reason": why}
+            else:
+                report["action"] = {"action": "would record", "name": name, "reason": why}
+            return report
+        return done(self.learn_owner_name(user_id, name, evidence=evidence, person_id=chosen))
+
+    def _settle_owner_pairs(self) -> None:
+        """Once per database (marker ``schema:owner-pairs:v1``): the judge's
+        answers on pairs of an owner still called "the user" with a person no
+        longer keep the two apart. The judge should never have been asked
+        (``identity.unnamed_owner``): such a pair rejected, or left open with
+        an answer, by the judge (its reason starts with the judge's name, as
+        "jev: different") or by the names-alone screen, is open again as
+        never compared, and waits until the owner has a name. A pair a person
+        decided says so ("by you") and stays. A rejection a person made from
+        the Upkeep list before it said so kept the judge's reason, and cannot
+        be told apart: it is opened again too, which the owner of the store
+        this was found on asked for. Each pair opened is listed under the
+        marker as it was, so it can be put back."""
+        marker = "schema:owner-pairs:v1"
+        if self.backend.get_meta(marker):
+            return
+        reopened: list[dict[str, Any]] = []
+        for key in self.backend.meta_items("upkeep:owner_entity:"):
+            user_id = key[len("upkeep:owner_entity:"):] or None
+            owner = self.owner_entity(user_id)
+            if not unnamed_owner(owner):
+                continue
+            for proposal in self.backend.list_proposals(
+                    Scope(user_id=user_id), status=None, limit=1_000_000):
+                if proposal.status == "confirmed" or decided_by_a_person(proposal.reason):
+                    continue
+                if (proposal.status == "proposed" and proposal.different is None
+                        and not proposal.compared_step):
+                    continue  # never answered: nothing to void
+                ends = {self.backend.resolve_entity_id(proposal.entity_a),
+                        self.backend.resolve_entity_id(proposal.entity_b)}
+                if owner.id not in ends or None in ends or len(ends) != 2:
+                    continue
+                [other_id] = ends - {owner.id}
+                other = self.backend.get_entity(other_id)
+                if other is None or other.entity_type != "person":
+                    continue
+                if self.backend.reopen_proposal(proposal.id, OWNER_PAIR_REOPENED):
+                    reopened.append(proposal.model_dump(mode="json"))
+        self.backend.set_meta(marker, json.dumps({"at": utcnow(), "reopened": reopened}))
+        if reopened:
+            log.info("reopened %d pair(s) the judge decided for an owner without a name",
+                     len(reopened))
 
     def resolve_entities(
         self, *, user_id: str | None = None, exact_user: bool = False,
@@ -4980,15 +5517,15 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """Record how long each memory is worth keeping, for memories missing it.
 
-        Decay runs on a half-life per memory type, which treats "the train was
-        delayed this morning" and "allergic to penicillin" the same because both
-        are semantic. A per-fact estimate replaces that guess; anything still
-        unscored keeps the old behaviour.
+        An estimate per fact (days, months or years) that nothing acts on yet:
+        no memory is forgotten by age, and search does not read it. It is kept
+        for a planned experiment on relevance per entity, where "the train was
+        delayed this morning" and "allergic to penicillin" should not count
+        alike.
 
         Off unless ``decay.durability`` is set, whoever asks (the scheduler,
         "run now", the REST route). The score is housekeeping: it is written
-        without moving the memory's ``updated_at``, which drives recency and
-        decay age.
+        without moving the memory's ``updated_at``, which drives recency.
         """
         outcome: dict[str, Any] = {"scored": 0, "skipped": 0, "provider": self.decider.name}
         if not self.pass_allowed("durability"):
@@ -5204,8 +5741,11 @@ class MemoryStore:
                 metadata.pop("home", None)
             self.backend.set_entity_metadata(entity.id, metadata)
 
-        plan = same_name_plan(nodes, homes, self._held_apart(
-            Scope(user_id=user_id, exact_user=exact_user)))
+        # the owner without a name shares "the user" with nobody it is
+        # (``identity.unnamed_owner``): it is in no same-name step
+        unnamed = {e.id for e in entities if unnamed_owner(e)}
+        plan = same_name_plan([node for node in nodes if node.id not in unnamed], homes,
+                              self._held_apart(Scope(user_id=user_id, exact_user=exact_user)))
         tally = {"merge": "merged", "ask": "asked", "separate": "separate"}
         for step in plan:
             outcome[tally[step["action"]]] += 1
@@ -5377,11 +5917,25 @@ class MemoryStore:
         cycles on a many-account server. ``exact_user`` as in
         ``run_upkeep_pass``: the scheduler walks the namespaces with it, so
         its tick for None is the memories without a user, not everyone's.
+
+        The first tick of a namespace whose owner is still called "the user"
+        also looks for who the owner is in what it holds (``learn_owner``);
+        it is marked done either way, so it costs nothing after.
         """
         now = now or datetime.now(timezone.utc)
         ran: dict[str, Any] = {}
         if self.upkeep_paused():
             return ran
+        if (self._upkeep_get("owner_learned", user_id, None) is None
+                and self.owner_name(user_id) == OWNER_PLACEHOLDER):
+            # once a namespace: who the owner is, from what it already holds
+            try:
+                learned = self.learn_owner(user_id=user_id)
+            except Exception as exc:
+                log.warning("learning who the owner is failed: %s", exc)
+                learned = None
+            if learned and (learned["action"] or {}).get("action") != "none":
+                ran["learn_owner"] = learned["action"]
         every = self.config.dedup_interval_days
         dedup_due = _due(self.backend.get_meta(_dedup_run_key(user_id)), every, now)
         if self.maintenance_enabled("structure") and dedup_due:
@@ -5669,9 +6223,6 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # maintenance
     # ------------------------------------------------------------------
-    def decay_sweep(self, threshold: float = 0.1) -> list[str]:
-        return decay_sweep(self.backend, self.config.decay, threshold=threshold)
-
     def reindex(self) -> int:
         """Re-embed every memory with the currently configured embedder, then
         rebuild the ANN sidecar (when available)."""

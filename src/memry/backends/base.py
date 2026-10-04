@@ -726,6 +726,11 @@ class MemoryBackend(ABC):
         rule, or a person) in place of the answer it held."""
         return None
 
+    def reopen_proposal(self, proposal_id: str, reason: str) -> MergeProposal | None:
+        """Open a pair that is not confirmed again as never compared, with
+        ``reason`` saying why; None when there is no such pair."""
+        return None
+
     # -- transactions ------------------------------------------------------
     #: Whether ``transaction`` keeps its writes together. A write that must
     #: not be left half made (a split) refuses to run where it does not.
@@ -780,7 +785,7 @@ class MemoryBackend(ABC):
     # -- maintenance ------------------------------------------------------
     @abstractmethod
     def all_memories_iter(self, include_invalid: bool = True) -> list[Memory]:
-        """All memories, for reindexing/decay sweeps."""
+        """All memories, for reindexing."""
 
     @abstractmethod
     def stats(self) -> dict[str, Any]: ...

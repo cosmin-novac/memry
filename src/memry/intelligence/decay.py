@@ -1,10 +1,12 @@
-"""Forgetting: importance decays with time since last touch.
+"""Importance over time, and how long each fact stays worth keeping.
 
-``effective_importance`` never hard-deletes anything - a decay *sweep*
-invalidates memories whose decayed importance falls below a threshold
-(soft-forget: they leave retrieval but remain in the audit trail and can be
-inspected or restored). Inspired by Recall's STRONG→MEDIUM→WEAK GC and by
-what Mem0 ships only in its managed platform.
+Nothing forgets by decay now. The forgetting sweep that invalidated memories
+whose decayed importance fell below a threshold (``memry sweep``) was retired
+in 0.2.44: a fact must never leave search for its age alone, and relevance is
+to be measured per entity first. ``effective_importance`` and
+``durability_factor`` stay as library functions that nothing in the product
+calls; ``score_durability`` is the durability pass, which records an estimate
+per fact that nothing acts on yet.
 """
 
 from __future__ import annotations
@@ -12,9 +14,8 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 
-from ..backends.base import MemoryBackend
 from ..config import DecayConfig
-from ..models import Memory, MemoryEvent, parse_ts
+from ..models import Memory, parse_ts
 from ..providers.decisions import Decider, Score
 
 
@@ -27,6 +28,7 @@ DURABILITY_KEY = "durability"
 
 def durability_factor(memory: Memory) -> float | None:
     """The recorded durability as a half-life multiplier, or None if absent.
+    A library function: nothing forgets by decay now.
 
     Stored as a 0-2 score, so a value between levels interpolates between the
     multipliers rather than snapping to one.
@@ -49,6 +51,9 @@ def durability_factor(memory: Memory) -> float | None:
 def effective_importance(
     memory: Memory, cfg: DecayConfig, now: datetime | None = None
 ) -> float:
+    """``memory``'s importance decayed by its age on the half-life of its
+    durability, else of its type. A library function: nothing forgets or
+    ranks by it now."""
     if not cfg.enabled:
         return memory.importance
     now = now or datetime.now(timezone.utc)
@@ -68,36 +73,6 @@ def effective_importance(
     return memory.importance * (cfg.floor + (1.0 - cfg.floor) * decay)
 
 
-def decay_sweep(
-    backend: MemoryBackend,
-    cfg: DecayConfig,
-    *,
-    threshold: float = 0.1,
-    now: datetime | None = None,
-) -> list[str]:
-    """Invalidate active memories whose decayed importance dropped below
-    ``threshold``. Returns the invalidated memory ids."""
-    if not cfg.enabled:
-        return []
-    now = now or datetime.now(timezone.utc)
-    forgotten: list[str] = []
-    for memory in backend.all_memories_iter(include_invalid=False):
-        score = effective_importance(memory, cfg, now)
-        if score < threshold:
-            backend.invalidate_memory(memory.id)
-            backend.add_event(
-                MemoryEvent(
-                    memory_id=memory.id,
-                    event="DELETE",
-                    old_content=memory.content,
-                    reason=f"decay sweep (effective importance {score:.3f} < {threshold})",
-                    actor="decay",
-                )
-            )
-            forgotten.append(memory.id)
-    return forgotten
-
-
 DURABILITY_QUESTION_LEVELS = [
     "Days. A passing detail that stops mattering almost immediately.",
     "Months. Relevant for a while, then stale.",
@@ -110,7 +85,7 @@ def score_durability(decider: Decider, contents: list[str]) -> dict[int, float]:
     """How long each fact stays worth keeping, all in one call.
 
     Returns {index: 0-2 score}, leaving out anything the provider declined to
-    answer so the caller falls back to the per-type half-life for those.
+    answer.
     """
     if not decider.available or not contents:
         return {}

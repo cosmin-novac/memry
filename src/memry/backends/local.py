@@ -746,6 +746,7 @@ class LocalBackend(MemoryBackend):
         self._ensure_one_active_topic_per_name()
         self._backfill_topics()
         self._migrate_tags_to_topic_entities()
+        self._one_row_per_pair_everywhere()
         self._refile_merged_tags()
         self._name_index = self._ensure_entity_names()
         self._commit()
@@ -4243,6 +4244,47 @@ class LocalBackend(MemoryBackend):
                 self._db.execute("DELETE FROM entity_proposals WHERE id = ?", (loser["id"],))
         return dropped
 
+    def _one_row_per_pair_everywhere(self) -> None:
+        """Once per database: each pair of entities keeps one row. A merge
+        before 0.2.40 pointed the merged entity's pairs at the kept one without
+        looking for a row the kept one had for the same third entity, so a
+        pass that paired the store owner with "Cosmin" and "Cosmin Novac"
+        left, once those two were merged, two rows for the owner and "Cosmin",
+        both created in that pass. Of each pair's rows the one a merge keeps
+        stays (``_one_row_per_pair_locked``): confirmed rows all stay as they
+        are, and beside one the rest go (the two are one, the pair is moot);
+        otherwise the more decided, of two alike the later answer. The rows
+        that go are kept under the marker, so each can be put back."""
+        if self._db.execute(
+            "SELECT 1 FROM meta WHERE key = 'schema:one-row-per-pair:v1'"
+        ).fetchone():
+            return
+        groups = self._db.execute(
+            "SELECT MIN(entity_a, entity_b) AS lo, MAX(entity_a, entity_b) AS hi "
+            "FROM entity_proposals GROUP BY lo, hi HAVING COUNT(*) > 1"
+        ).fetchall()
+        dropped: list[dict[str, Any]] = []
+        for group in groups:
+            rows = self._db.execute(
+                "SELECT * FROM entity_proposals WHERE (entity_a = ? AND entity_b = ?) "
+                "OR (entity_a = ? AND entity_b = ?) ORDER BY created_at, id",
+                (group["lo"], group["hi"], group["hi"], group["lo"]),
+            ).fetchall()
+            if any(r["status"] == "confirmed" for r in rows):
+                losers = [r for r in rows if r["status"] != "confirmed"]
+            else:
+                best = max(rows, key=lambda r: (
+                    self._DECIDED.get(r["status"], 0), r["decided_at"] or r["created_at"],
+                    r["id"]))
+                losers = [r for r in rows if r["id"] != best["id"]]
+            for loser in losers:
+                dropped.append(dict(loser))
+                self._db.execute("DELETE FROM entity_proposals WHERE id = ?", (loser["id"],))
+        self._db.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema:one-row-per-pair:v1', ?)",
+            (json.dumps({"at": utcnow(), "dropped": dropped}),),
+        )
+
     def _merge_snapshot_locked(self, keep_id: str, merge_id: str) -> dict[str, Any]:
         """What a merge of ``merge_id`` into ``keep_id`` is about to move, read
         before it moves it: both entity rows and the names each answered to,
@@ -4455,21 +4497,50 @@ class LocalBackend(MemoryBackend):
         return True
 
     def add_proposal(self, proposal: MergeProposal) -> MergeProposal:
+        """Record a pair, one row a pair: where the two already have a row,
+        in either order, nothing is written and that row is returned. Every
+        caller looks for the pair first (``find_proposal``), but a save and
+        the weekly pass run in different threads, and two processes may share
+        the file, so the look and the insert are one statement here: a pair
+        found missing by both was written twice."""
+        pair = (proposal.entity_a, proposal.entity_b, proposal.entity_b, proposal.entity_a)
         with self._lock:
-            self._db.execute(
+            cur = self._db.execute(
                 "INSERT INTO entity_proposals (id, entity_a, entity_b, user_id, status, "
                 "confidence, reason, created_at, decided_at, compared_step, different, "
-                "belongs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "belongs) SELECT ?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS ("
+                "SELECT 1 FROM entity_proposals WHERE (entity_a = ? AND entity_b = ?) "
+                "OR (entity_a = ? AND entity_b = ?))",
                 (
                     proposal.id, proposal.entity_a, proposal.entity_b, proposal.user_id,
                     proposal.status, proposal.confidence, proposal.reason,
                     proposal.created_at, proposal.decided_at, proposal.compared_step,
                     proposal.different,
                     json.dumps(proposal.belongs) if proposal.belongs is not None else None,
+                    *pair,
                 ),
             )
             self._commit()
-        return proposal
+            if cur.rowcount:
+                return proposal
+            row = self._db.execute(
+                "SELECT * FROM entity_proposals WHERE (entity_a = ? AND entity_b = ?) "
+                "OR (entity_a = ? AND entity_b = ?) ORDER BY created_at, id", pair,
+            ).fetchone()
+        return self._row_to_proposal(row) if row else proposal
+
+    def reopen_proposal(self, proposal_id: str, reason: str) -> MergeProposal | None:
+        """Open a pair again as never compared: no answer, no decision, the
+        funnel at its start, ``reason`` saying why."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE entity_proposals SET status = 'proposed', confidence = 0.5, "
+                "reason = ?, decided_at = NULL, compared_step = 0, different = NULL, "
+                "belongs = NULL WHERE id = ? AND status != 'confirmed'",
+                (reason, proposal_id),
+            )
+            self._commit()
+        return self.get_proposal(proposal_id) if cur.rowcount else None
 
     def get_proposal(self, proposal_id: str) -> MergeProposal | None:
         with self._lock:

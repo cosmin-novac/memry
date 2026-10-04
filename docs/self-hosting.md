@@ -230,7 +230,7 @@ merge-proposal review under **Upkeep** matters as much as it did before.
 | Entity identity | The verdict and the confidence the automatic-merge gate reads. |
 | Entity typing | One question per name in a single call, instead of one call per batch through the text model. |
 | Reconcile | The action and its target. The text model writes the merged sentence for an UPDATE; without one, the old memory is kept and superseded by the new one, so no text is lost. A contradiction only replaces a memory on its own where little is at stake; see below. |
-| How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. Off unless `MEMRY_DURABILITY=1` (`decay.durability`), for the scheduler and "run now" alike; the score does not move a memory's `updated_at`. |
+| How long facts stay relevant | A per-fact estimate (days, months or years), recorded on each memory and acted on by nothing yet: no memory is forgotten for its age, and search does not read it. It is kept for a planned experiment on relevance per entity. Off unless `MEMRY_DURABILITY=1` (`decay.durability`), for the scheduler and "run now" alike; the score does not move a memory's `updated_at`. |
 | Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. Word-for-word duplicates merge on their own; a merge the model proposed waits under Upkeep, because that judgement has not been measured. |
 | Tag drift | Two tags that may be one are a merge proposal like two names. They merge on their own when the provider, shown each with its 10 most recent memories and asked in both orders, puts P(same subject) at its tag bar or more (0.55 for Jev; a text model is not asked). Without a calibrated judge the pair waits under Upkeep with the other merge proposals. |
 | Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna, gpt-5-mini), and is refused for one that was not. Where it is on, `retrieval.relational_relevance` "auto" (the default) has the provider judge the first 20 of every search, filtered or not, in the linked search's order when the question names a hub and in the text ranking's otherwise, and the results are ordered by that judgement. `"vector"` judges no search: a question naming a hub is ordered by the property vectors, and one naming none by the text ranking. |
@@ -263,12 +263,28 @@ for comparison.
 **When a contradiction may replace a memory.** Replacing is the one reconcile action that
 takes a fact out of use, and it rests on one model reading one text. So it only happens
 on its own when the memory it would replace is rated below 0.8 in importance, was stated
-in a single save, and, with a typed decision provider, the judgement is at least 0.9
-sure. Otherwise both memories stay in use and the pair waits under **Upkeep >
-Contradictions**, where you say which is right or that both are. A replacement that did
+in a single save, and, with a typed decision provider, the judgement reaches its bar.
+A memory rated important or stated in several saves is still replaced without asking when
+the decision provider reads it, in the same call, as a changeable state that has since
+moved on (a listing deleted, a task stopped, a document uploaded) and is at least 0.8
+sure: importance says how much a fact matters, not how risky replacing it is, and the old
+memory stays as history. Read as still true beside the new fact, both are kept and nobody
+is asked. A lasting fact or a standing rule (health, identity, a relationship, "never do
+X"), an unsure reading, and any answer of the text model alone still wait under **Upkeep
+> Contradictions**, where you say which is right or that both are. A replacement that did
 go ahead is listed under **Upkeep > Archive > Replaced by a newer memory** and can be
-undone there. The three thresholds are `MEMRY_SUPERSEDE_PROTECT_IMPORTANCE`,
-`MEMRY_SUPERSEDE_PROTECT_SOURCES` and `MEMRY_SUPERSEDE_CONFIDENCE`.
+undone there. The thresholds are `MEMRY_SUPERSEDE_PROTECT_IMPORTANCE`,
+`MEMRY_SUPERSEDE_PROTECT_SOURCES`, `MEMRY_SUPERSEDE_CONFIDENCE` and
+`MEMRY_SUPERSEDE_STATE_CONFIDENCE` (0.8).
+
+Questions already waiting can be asked again under the new rule:
+
+```bash
+memry reconcile-queue           # per question: the judge's answer, the old and the new decision
+memry reconcile-queue --apply   # act on the new decisions; undo a replacement under Archive
+```
+
+It costs one decision-provider call per question and writes nothing without `--apply`.
 
 **Re-ranking** has the decision provider judge the first 20 of a search in one call and
 orders the results by that judgement. When it first asked whether a memory "helps answer
@@ -352,11 +368,11 @@ No external queue service is required.
 ## Maintenance
 
 ```bash
-memry sweep --threshold 0.1   # soft-forget stale, low-importance memories
 memry stats                   # counts, providers, db path
 memry export > backup.json    # knowledge only: IDs, provenance, entities, relations, history
 memry tags-to-things --dry-run   # tags to topic entities (done at first open): count only
 memry split-memories --dry-run   # memories that hold several facts: print each split, write nothing
+memry learn-owner --dry-run      # who "the user" is, from what was said: print it, write nothing
 ```
 
 A memory should hold one fact. Before merges were kept to one fact, a store could grow
@@ -422,6 +438,37 @@ memry adopt-unscoped             # the move; a second run finds nothing to do
 - Nothing is deleted. A backup with rows without a namespace restores into the default
   namespace; into the store it came from, run `adopt-unscoped` first.
 
+Each namespace has an owner entity, the person the memories belong to. It takes the
+account's name where an account named it, and is otherwise called "the user" until a
+conversation states who the user is: the user gives their name, signs, is called by it, or
+a memory says it ("The user's name is Cos."). Extraction asks for the name only while the
+owner is "the user", so a named owner's saves pay nothing for it. The owner is then folded into the person who
+carries that name (the person keeps it and becomes the owner; undo under Archive > Merged
+names), or renamed to it when nobody does. The identity judge is never asked about an
+owner still called "the user": "the user" is a role, and on a real store the judge read the
+owner and the person it was as two people. Once named, the owner is compared like anyone.
+The first name stated holds; a later different one is recorded and changes nothing unless
+it corrects the first ("Cosima, not Cosmin"). An account's name wins over a stated one.
+
+For a store saved before extraction reported stated names, `memry learn-owner [--user USER]
+[--dry-run]` looks for them in what the namespace holds, and the upkeep cycle runs it once
+per namespace on its own while the owner is "the user":
+
+```bash
+memry learn-owner --dry-run   # the statements found, the person chosen, what would be folded
+memry learn-owner             # fold or rename; a second run finds the owner named
+```
+
+- Patterns pick out the memories, in use and forgotten, and the saved turns that may say
+  the user's name ("my name is", "the user's name is", "I'm", "call me", a turn in role
+  user that carries a speaker's name). With none, nothing is asked and nothing changes.
+- Otherwise one text-model call per namespace reads them against the namespace's people,
+  with their aliases and memory counts, and says which person they say the owner is, or
+  none. Without a text model, only statements that say the name outright count.
+- The first open after upgrading also opens again the judge's earlier answers on pairs of
+  an owner still called "the user" with a person, so they no longer keep the two apart, and
+  keeps one row for each pair of entities. Pairs you decided stay as you decided them.
+
 Tags are entities of type `topic`. A database or backup from before that change keeps its
 tags in the `categories` column and the legacy `topics`/`memory_topics` tables, which every
 filter still reads. The first open of such a database gives each tag its topic entity and
@@ -433,8 +480,12 @@ only reads the legacy tables, and a second run changes nothing.
 When accounts or OAuth are enabled, also back up `auth.db` with `memry.db`. The JSON export
 does not contain login data.
 
-A weekly `sweep` in cron/Task Scheduler keeps long-running stores lean; forgotten memories
-are invalidated (auditable, recoverable), never destroyed.
+Nothing forgets a memory for its age. `memry sweep`, which invalidated memories whose
+importance had decayed below a threshold, was retired in 0.2.44: a fact must not leave
+search because it is old. A memory leaves use when you delete it, when a later one
+replaces it, or when consolidation merges it, and each of those is recorded and can be
+undone. Memories an older version let fade out stay under Forgotten, where they can be
+restored.
 
 ## Managing topics and entities
 
@@ -458,7 +509,8 @@ under that tag only. A database that recorded parents keeps those rows, and noth
 them.
 
 Entities open as hubs with aliases, a bounded description, and active
-supporting memories. Relations are listed under the entity they describe and can open their
+supporting memories. An entity with one memory in use has no description: the memory says
+it, and no text-model call is spent on repeating it. Relations are listed under the entity they describe and can open their
 members.
 
 Upkeep runs on its own and asks only for what it will not decide: it lists the entity

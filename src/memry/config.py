@@ -217,15 +217,23 @@ class SupersedeConfig(BaseModel):
     #: The prompt path reports no confidence, so there only the two
     #: protections above apply.
     confidence: float = 0.9
+    #: The confidence from which a change replaces a protected memory the
+    #: decision provider read as a changeable state that moved on
+    #: (``reconcile.replacement_verdict``): importance raises the bar instead of
+    #: blocking. Provisional; ``memry reconcile-queue`` shows the real judge's
+    #: answers on a live queue.
+    state_confidence: float = 0.8
 
 
 class DecayConfig(BaseModel):
     enabled: bool = True
-    #: The durability pass: the decision provider estimates, per memory,
-    #: whether it matters for days, months or years, and decay reads that in
-    #: place of the type's half-life. Off unless set (MEMRY_DURABILITY): the
-    #: config is the only way to put it in the upkeep cycle or to run it now;
-    #: a stored dashboard switch alone cannot.
+    #: Nothing forgets by decay now (the forgetting sweep was retired in
+    #: 0.2.44); these settings shape ``decay.effective_importance``, a library
+    #: function. The durability pass: the decision provider estimates, per
+    #: memory, whether it matters for days, months or years, recorded and acted
+    #: on by nothing yet. Off unless set (MEMRY_DURABILITY): the config is the
+    #: only way to put it in the upkeep cycle or to run it now; a stored
+    #: dashboard switch alone cannot.
     durability: bool = False
     half_life_days: float = 90.0
     floor: float = 0.15  # decayed importance never drops below floor * importance
@@ -436,6 +444,7 @@ def _from_env() -> dict[str, Any]:
 
     put("supersede", "protect_importance", _float(e("MEMRY_SUPERSEDE_PROTECT_IMPORTANCE")))
     put("supersede", "protect_sources", _int(e("MEMRY_SUPERSEDE_PROTECT_SOURCES")))
+    put("supersede", "state_confidence", _float(e("MEMRY_SUPERSEDE_STATE_CONFIDENCE")))
     put("supersede", "confidence", _float(e("MEMRY_SUPERSEDE_CONFIDENCE")))
 
     put("embedding", "provider", e("MEMRY_EMBEDDING_PROVIDER"))

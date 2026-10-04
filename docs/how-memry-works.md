@@ -44,7 +44,7 @@ Two important properties of a **Memory**:
   saved that weekend.
 - **`updated_at` tracks content, not housekeeping.** It moves only on a genuine
   content change (a user edit, or a reconciliation UPDATE), because it drives
-  recency ranking and decay *age*. Tagging, relation backfill, and re-embedding
+  recency ranking. Tagging, relation backfill, and re-embedding
   update the row with `touch=False` and leave `updated_at` alone. `created_at`
   never changes after creation.
 
@@ -77,10 +77,13 @@ was said, and the decision model gives one of five answers:
 - **WRONG**: the old memory was never true (a correction). Memry retires it.
 
 A memory kept as history is still found by search, shown with the day it was
-said and `[until <date>]`, the day it stopped holding. When the old memory is
-rated important or was said in two or more saves, or the decision model is
-unsure of a CHANGED or a WRONG, Memry keeps both memories in use and lists the
-pair under Upkeep for you to decide. Section 4 of
+said and `[until <date>]`, the day it stopped holding. When the decision model
+is unsure of a CHANGED or a WRONG, Memry keeps both memories in use and lists the
+pair under Upkeep for you to decide. So it does when the old memory is rated
+important or was said in two or more saves, unless the decision model reads it as
+a state that has since moved on (a listing deleted, a task stopped), which it
+then replaces as history, or as still true beside the new fact, which it keeps
+without asking. Section 4 of
 [architecture.md](architecture.md) has the details.
 
 `infer=false` skips extraction and reconciliation entirely and stores the text
@@ -156,22 +159,20 @@ question:
 
 ## Memory types: semantic / episodic / procedural / working
 
-The extractor assigns one per fact, and the type now **shapes how fast a memory
-fades** (via `half_life_by_type` in `DecayConfig`):
+The extractor assigns one per fact. Nothing forgets a memory for its age (the
+forgetting sweep was retired in 0.2.44), so the type no longer shapes how a memory
+fades; `half_life_by_type` in `DecayConfig` only feeds the library function
+`decay.effective_importance`, which nothing in the product calls:
 
-- **semantic** — a stable fact or preference ("Ada lives in Berlin"). Base rate.
-- **episodic** — a dated event or plan ("Ada launched Helios on 2026-03-01").
-  Fades about twice as fast: events lose relevance as they age.
-- **procedural** — a how-to or workflow rule ("always send Ada currency in EUR").
-  Persists about three times as long: rules should stick.
-- **working** — short-lived scratch; fades fastest.
+- **semantic**: a stable fact or preference ("Ada lives in Berlin").
+- **episodic**: a dated event or plan ("Ada launched Helios on 2026-03-01").
+- **procedural**: a how-to or workflow rule ("always send Ada currency in EUR").
+- **working**: short-lived scratch.
 
-So over time an old dated event decays out of retrieval sooner than a standing
-rule, even at equal starting importance. The type is not shown in the context
+The type is not shown in the context
 block: a memory reads `[happened 2023-05-07] <text> (said 8 May 2023)`, with the
 day its event happens where known and the day it was said
-(`context.memory_lines`). It does not (yet) change ranking within a single
-query, only how importance decays with age.
+(`context.memory_lines`). It does not (yet) change ranking.
 
 ## Entities and their types
 
@@ -272,6 +273,6 @@ search is about.
 | Typed relations + the linked search | real |
 | Tags as topic entities, canonicalization | real |
 | Entity types (person/project/place/…) + typing backfill | real |
-| Memory-type-driven decay (episodic fades, procedural persists) | real |
+| Forgetting by age (the decay sweep) | retired in 0.2.44 |
 | Unified Upkeep area: what needs you, entity hubs with their relations, tags, and the archive of what was removed | real |
-| Memory-type effect on *ranking* (in addition to decay) | not yet |
+| Memory-type effect on *ranking* | not yet |

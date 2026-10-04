@@ -54,6 +54,7 @@ from .identity import (
     pair_reason,
     parallel,
     topic_pairs,
+    unnamed_owner,
     worth_comparing,
 )
 
@@ -136,6 +137,12 @@ DESCRIPTION_SYSTEM = (
 )
 
 
+#: Fewest memories in use an entity needs before it gets a description. With
+#: one, the description says what that memory says, at the cost of a text-model
+#: call, and is shown beside the memory it repeats: the memory speaks for itself.
+DESCRIPTION_MIN_MEMORIES = 2
+
+
 def _bound_description(value: str) -> str:
     text = " ".join(value.split()).strip()
     words = text.split()
@@ -156,9 +163,11 @@ def synthesize_entity_description(
 
     ``facts`` are the memories' own texts, not the lines a model answering
     from them reads (``context.memory_line``): the description leaves
-    one-off events and their dates to those lines (``DESCRIPTION_SYSTEM``)."""
+    one-off events and their dates to those lines (``DESCRIPTION_SYSTEM``).
+    Fewer than ``DESCRIPTION_MIN_MEMORIES`` facts make no description, and
+    no model is asked."""
     clean_facts = [" ".join(fact.split()).strip() for fact in facts if fact.strip()]
-    if not clean_facts:
+    if len(clean_facts) < DESCRIPTION_MIN_MEMORIES:
         return ""
     fallback = _bound_description(" ".join(clean_facts[:6]))
     if not llm.available:
@@ -615,6 +624,8 @@ def resolve_mentions(
 
     ``owner`` is the store owner's entity. The extractor was told to list the
     owner under that entity's name, so that name attaches to it directly.
+    While the owner has no name (``identity.unnamed_owner``) it is no
+    candidate for any other name: the judge is never asked about it.
 
     A name the memory already names an entity by keeps that entity, and
     nothing is compared: an edited memory that still names it, or a name
@@ -680,7 +691,8 @@ def resolve_mentions(
         if non_referent_reason(surface) or screened_out(verdicts.get(normalized)):
             continue
 
-        candidates = backend.find_entity_candidates(normalized, lookup)
+        candidates = [c for c in backend.find_entity_candidates(normalized, lookup)
+                      if not unnamed_owner(c)]
         same_name = {c.id for c in candidates}
         target: Entity | None = None
         # what joined the mention to an entity the store has, kept on it
@@ -702,7 +714,8 @@ def resolve_mentions(
             target, decided = _join_by_rule(backend, memory, candidates)
         else:
             if index is None:
-                index = NameIndex(backend.list_entities(lookup, limit=100_000))
+                index = NameIndex([e for e in backend.list_entities(lookup, limit=100_000)
+                                   if not unnamed_owner(e)])
             candidates += index.candidates(surface, exclude={c.id for c in candidates})
             target, decided, proposals = _judged_join(
                 backend, judge, scope, candidates, same_name,
@@ -874,9 +887,12 @@ def propose_same_name_duplicates(
     calibrated judge, every name is paired with the names worth comparing
     (``identity.NameIndex``: a rare shared word, a similar spelling, an
     acronym, or a name close in meaning when ``embed`` is a semantic embedder),
-    and pairs already decided either way are not raised again. The store
+    and pairs already decided either way are not raised again. A named store
     ``owner`` is also paired with the people whose memories are closest to its
-    own (``identity.closest_people``), since its name may be no name. Without one,
+    own (``identity.closest_people``), since its name may be an account's
+    login. An owner without a name (``identity.unnamed_owner``) is paired with
+    nothing, with or without a judge: who it is gets stated, not judged
+    (``MemoryStore.learn_owner_name``). Without one,
     only identical names are paired, and a pair whose members live under
     different homes ("privacy policy" in two projects) is left alone, since no
     judge could answer it and no person should be asked.
@@ -891,7 +907,8 @@ def propose_same_name_duplicates(
     (``TAG_PAIR_SHARE``), so a pass with more name pairs than the limit still
     raises them.
     """
-    entities = [e for e in backend.list_entities(scope, limit=10_000) if e.merged_into is None]
+    entities = [e for e in backend.list_entities(scope, limit=10_000)
+                if e.merged_into is None and not unnamed_owner(e)]
     pairs: list[tuple[Entity, Entity]] = []
     if judges_pairs(decider):
         index = NameIndex(entities, name_vectors(embed, entities))
@@ -928,7 +945,7 @@ def propose_same_name_duplicates(
                     reason=f"the names alone rule it out: P(different) {different:.2f}",
                     decided_at=utcnow(),
                 ))
-        if owner is not None:
+        if owner is not None and not unnamed_owner(owner):
             pairs[:0] = [(owner, person)
                          for person in closest_people(backend, scope, owner, entities)]
     else:
@@ -1003,6 +1020,9 @@ def resolve_open_proposals(
     even through a third (``join_namesakes``). That holds for a tag and the
     thing of its very name as well, whose merge folds the tag into the
     thing. Any other pair stays open for a person, nothing written on it.
+
+    A pair with the store owner while it has no name is not put to the judge
+    (``identity.unnamed_owner``): it waits until the owner has one.
     """
     outcome = {"confirmed": 0, "rejected": 0, "kept": 0}
     judge = decider if judges_pairs(decider) else None
@@ -1046,7 +1066,11 @@ def resolve_open_proposals(
                     reason="one name, and one of the two has no memories")
                 outcome["confirmed"] += 1
                 continue
-        if judge is not None:
+        if judge is not None and (unnamed_owner(entity_a) or unnamed_owner(entity_b)):
+            # the owner without a name is never put to the judge; the pair
+            # waits until the owner has one (``identity.unnamed_owner``)
+            outcome["kept"] += 1
+        elif judge is not None:
             pending.append((proposal, entity_a, entity_b))
         elif auto_confirm and _one_name(entity_a, entity_b) and not _apart_homes(
                 entity_a, entity_b):
@@ -1225,7 +1249,8 @@ def choose_among_candidates(
     association (0.575) and two PR #42s ruled out at 0.84 and 0.96 is one
     candidate, not three, and a lead over ruled-out ones merged it at a bar of
     0.5. With one candidate it keeps waiting: it may be a third Sofia. Asks
-    the judge nothing: it reads the answers stored on the open pairs."""
+    the judge nothing: it reads the answers stored on the open pairs. A pair
+    with the owner while it has no name is left out (``identity.unnamed_owner``)."""
     options: dict[str, list[tuple[MergeProposal, str]]] = defaultdict(list)
     counts: dict[str, int] = {}
 
@@ -1234,10 +1259,17 @@ def choose_among_candidates(
             counts[entity_id] = backend.count_entity_memories(entity_id)
         return counts[entity_id]
 
+    unnamed: dict[str, bool] = {}
+
+    def without_a_name(entity_id: str) -> bool:
+        if entity_id not in unnamed:
+            unnamed[entity_id] = unnamed_owner(backend.get_entity(entity_id))
+        return unnamed[entity_id]
+
     for proposal in backend.list_proposals(scope, status="proposed", limit=1000):
         a = backend.resolve_entity_id(proposal.entity_a)
         b = backend.resolve_entity_id(proposal.entity_b)
-        if a is None or b is None or a == b:
+        if a is None or b is None or a == b or without_a_name(a) or without_a_name(b):
             continue
         thin, other = (a, b) if count(a) <= count(b) else (b, a)
         if count(thin) < PAIR_STEPS[1]:

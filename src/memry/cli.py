@@ -8,13 +8,14 @@
     memry context "task" -u ada   build a context block
     memry history <memory_id>     audit trail for one memory
     memry stats                   store statistics
-    memry sweep                   decay sweep (soft-forget stale memories)
     memry reindex                 re-embed all memories
     memry backfill-property-vectors  property vectors for the linked search
     memry export / import         lossless backup/restore; legacy JSON imports
     memry tags-to-things          give existing tags their topic entities (first open does it)
     memry split-memories          split memories that hold several facts (--dry-run first)
     memry adopt-unscoped          give memories without a namespace one (--dry-run first)
+    memry learn-owner             learn who "the user" is from what was said (--dry-run first)
+    memry reconcile-queue         re-ask the judge about queued contradictions (--apply to act)
     memry config                  print resolved configuration
     memry eval --dataset <path>   run the retrieval eval harness
 """
@@ -243,9 +244,6 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("stats", help="store statistics")
 
-    p = sub.add_parser("sweep", help="decay sweep: soft-forget stale memories")
-    p.add_argument("--threshold", type=float, default=0.1)
-
     p = sub.add_parser(
         "backfill-relations",
         help="extract typed relations from existing memories (one-time, cheap)",
@@ -300,6 +298,28 @@ def main(argv: list[str] | None = None) -> int:
                    help="the namespace they go to (default: the configured default user)")
     p.add_argument("--dry-run", action="store_true",
                    help="report what would move and fold, writing nothing")
+
+    p = sub.add_parser(
+        "learn-owner",
+        help='learn who the owner still called "the user" is from the memories and saved '
+             "turns that state it (at most one text-model call per namespace); the owner "
+             "is folded into that person or takes the name (undo under Archive > Merged names)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the evidence, the person chosen and what would be folded or "
+                        "renamed, writing nothing")
+
+    p = sub.add_parser(
+        "reconcile-queue",
+        help="ask the decision provider again about each contradiction waiting under Upkeep "
+             "and print what the old rule and the new rule decide (one call per item); "
+             "writes nothing without --apply",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+    p.add_argument("--apply", action="store_true",
+                   help="act on the new rule's decisions: replace (undo under Archive) or "
+                        "keep both; questions it still asks stay")
 
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
@@ -470,9 +490,6 @@ def main(argv: list[str] | None = None) -> int:
             _print([e.model_dump() for e in store.history(args.memory_id)])
         elif args.command == "stats":
             _print(store.stats())
-        elif args.command == "sweep":
-            forgotten = store.decay_sweep(threshold=args.threshold)
-            _print({"forgotten": forgotten, "count": len(forgotten)})
         elif args.command == "backfill-relations":
             if not store.llm.available:
                 print("no LLM configured; relation backfill needs one", file=sys.stderr)
@@ -555,6 +572,16 @@ def main(argv: list[str] | None = None) -> int:
                       file=sys.stderr)
         elif args.command == "adopt-unscoped":
             _print(store.adopt_unscoped(into=args.into, dry_run=args.dry_run))
+        elif args.command == "reconcile-queue":
+            if not store.decider.available:
+                print("no decision provider configured; this asks one", file=sys.stderr)
+                return 1
+            _print([{"user": uid, "items": store.redecide_conflicts(user_id=uid,
+                                                                    apply=args.apply)}
+                    for uid in _namespaces(store, args.user)])
+        elif args.command == "learn-owner":
+            _print([store.learn_owner(user_id=uid, dry_run=args.dry_run)
+                    for uid in _namespaces(store, args.user)])
         elif args.command == "backfill-property-vectors":
             namespaces = _namespaces(store, args.user)
             _print([{"user": uid,

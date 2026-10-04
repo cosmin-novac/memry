@@ -399,7 +399,8 @@ def test_memory_cards_show_when_the_fact_happens():
     source = "\n".join(_scripts(html))
 
     assert ".when-chip" in html
-    assert "${memoryTypeBadge(m)}${whenChip(m)}" in source
+    # the "happened" date sits under the "said" date in the date column
+    assert "${said.slice(0,10)}</span>${whenChip(m)}" in source
 
     chip_source = source[
         source.index("const WHEN_UNITS=") : source.index("function viewCard")
@@ -1247,5 +1248,74 @@ check(list.includes('needs a language model')&&!list.includes('backfillTypes('),
   await backfillTypes(button);
   check(nodes['passlog-backfill-types'].textContent.endsWith(' - not run: no LLM configured'),'says why not');
 })().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+    _run_node(contract)
+
+
+def test_the_memory_list_is_a_table_sorted_by_a_header_click():
+    """The list reads as a table: a header row, then a row per memory with the
+    text, what it is about, its tags, the dates and the numbers in their own
+    cells. A header click sorts the loaded rows (importance highest first, then
+    lowest first, then back to the order they came in) and the choice sticks
+    per browser. Chips still filter, edit and forget still work, and the
+    namespace column shows only when more than one namespace is listed."""
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+    assert ".mrow" in html and ".mhead" in html and "@media(max-width:56rem)" in html
+    contract = _lines(source, "function esc(s)", "function typeLabel(", "function jsArg(v)",
+                      "const TAG_TYPE=") + r"""
+const store={memry_memory_sort:JSON.stringify({key:'nope',dir:1})};
+const localStorage={getItem:k=>store[k]??null,setItem:(k,v)=>{store[k]=String(v)},removeItem:k=>{delete store[k]}};
+const list={innerHTML:'',vars:{},classList:{on:new Set(),add(c){this.on.add(c)},remove(c){this.on.delete(c)}},
+  style:{setProperty(k,v){list.vars[k]=v}},insertAdjacentHTML(_,h){list.innerHTML+=h}};
+const document={getElementById:id=>id==='list'?list:null};
+let current=[],haveMore=false,searchActive=false,editingId=null;
+const moreBar=()=>'',drawMap=()=>{};
+""" + _region(source, "function render(items,appendFrom){", "// ---- galaxy map") + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+const rows=()=>[...list.innerHTML.matchAll(/<div class="mrow">[\s\S]*?<div class="c-text"><div>([^<]*)<\/div>/g)].map(m=>m[1]);
+const cell=(row,name)=>{const m=row.match(new RegExp('<div class="'+name+'"[^>]*>([\\s\\S]*?)</div>'));return m?m[1]:null};
+const items=[
+  {id:'a',content:'beta',importance:0.5,user_id:'default',created_at:'2026-09-02T10:00:00',
+   entity_links:[{id:'e1',name:'Ada',entity_type:'person'},{id:'t1',name:'travel',entity_type:'topic'}]},
+  {id:'b',content:'alpha',importance:0.9,user_id:'default',created_at:'2026-09-03T10:00:00',
+   when:{start:'2026-09-10'},next_occurrence:null,entity_links:[]},
+  {id:'c',content:'gamma',importance:0.2,user_id:'default',created_at:'2026-09-01T10:00:00',entity_links:[]}];
+check(memSort===null,'a saved sort for an unknown column is ignored');
+render(items);
+check(list.classList.on.has('memtable'),'the list is a table');
+check(list.innerHTML.startsWith('<div class="mhead">'),'a header row comes first');
+for(const key of ['text','type','said','happened','imp'])
+  check(list.innerHTML.includes(`onclick="sortMemories('${key}')"`),'a sortable header for '+key);
+check(!list.innerHTML.includes("sortMemories('score')")&&!list.innerHTML.includes('c-score'),'no score column when browsing');
+check(!list.innerHTML.includes('c-ns')&&!list.innerHTML.includes('@default'),'one namespace, no namespace column');
+check(rows().join()==='beta,alpha,gamma','the order the list came in by default');
+const first=list.innerHTML.split('<div class="mrow">')[1];
+const unq=s=>s.replace(/&quot;/g,'"');
+check(cell(first,'c-ent').includes('Ada')&&!cell(first,'c-ent').includes('travel'),'people and things in their own cell');
+check(cell(first,'c-tags').includes('travel')&&!cell(first,'c-tags').includes('Ada'),'tags in their own cell');
+check(/onclick='filterByEntity\([^)]*Ada/.test(unq(cell(first,'c-ent'))),'an entity chip still filters');
+check(/onclick='filterByEntity\([^)]*travel/.test(unq(cell(first,'c-tags'))),'a tag chip still filters');
+check(first.includes(`onclick="startEdit('a')"`)&&first.includes(`onclick="del('a')"`),'edit and forget stay on the row');
+check(list.innerHTML.split('<div class="mrow">')[2].includes('happened 2026-09-10'),'the happened date shows in the date cell');
+check(cell(first,'c-imp')==='0.50','importance has its own cell');
+sortMemories('imp');
+check(rows().join()==='alpha,beta,gamma','first click: highest importance first');
+check(list.innerHTML.includes('imp ↓'),'the header shows the direction');
+check(JSON.parse(store.memry_memory_sort).dir===-1,'the sort sticks per browser');
+sortMemories('imp');
+check(rows().join()==='gamma,beta,alpha','second click: lowest importance first');
+check(list.innerHTML.includes('imp ↑'),'the header shows the reversed direction');
+sortMemories('imp');
+check(rows().join()==='beta,alpha,gamma'&&!('memry_memory_sort' in store),'third click: back to the order it came in');
+sortMemories('text');
+check(rows().join()==='alpha,beta,gamma','the text sorts A to Z');
+sortMemories('happened');
+check(rows()[0]==='alpha','a memory with no happened date goes last');
+render(items.map((m,i)=>({...m,score:1-i/10,user_id:i?'default':'work'})));
+check(list.innerHTML.includes("sortMemories('score')")&&list.innerHTML.includes('0.900'),'search results get a score column');
+check(list.innerHTML.includes('@work')&&list.vars['--memcols'].split(' ').length===8,'two namespaces add a namespace column');
+render([]);
+check(!list.classList.on.has('memtable')&&list.innerHTML.includes('No memories yet.'),'an empty list is no table');
 """
     _run_node(contract)

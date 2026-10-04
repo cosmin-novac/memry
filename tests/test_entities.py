@@ -224,10 +224,11 @@ def test_entity_description_is_lazy_bounded_and_active_only(verbatim_store):
     active = backend.insert_memory(
         Memory(content="Marcus is a strong physics student.", user_id="ada")
     )
+    rowing = backend.insert_memory(Memory(content="Marcus rows on Sundays.", user_id="ada"))
     obsolete = backend.insert_memory(
         Memory(content="Marcus studies chemistry.", user_id="ada")
     )
-    for memory in (active, obsolete):
+    for memory in (active, rowing, obsolete):
         backend.add_mention(
             EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Marcus")
         )
@@ -243,7 +244,39 @@ def test_entity_description_is_lazy_bounded_and_active_only(verbatim_store):
     refreshed = verbatim_store.entity(entity.id)
     assert "physics" in refreshed["entity"].description
     assert "chemistry" not in refreshed["entity"].description
-    assert [memory.id for memory in refreshed["memories"]] == [active.id]
+    assert {memory.id for memory in refreshed["memories"]} == {active.id, rowing.id}
+
+    # down to one memory in use: the description stays stored, and is not shown
+    backend.invalidate_memory(rowing.id)
+    assert verbatim_store.entity(entity.id)["entity"].description is None
+    assert verbatim_store.entity(entity.id, refresh_description=False)["entity"].description is None
+    assert "physics" in backend.get_entity(entity.id).description
+
+
+def test_an_entity_with_one_memory_gets_no_description(store, fake_llm):
+    """The memory speaks for itself: no text-model call, nothing stored, and
+    nothing shown beside it. At two memories the description is built."""
+    from memry.models import Entity, EntityMention, Memory
+
+    backend = store.backend
+    marcus = backend.insert_entity(Entity(name="Marcus", entity_type="person", user_id="ada"))
+
+    def remember(text: str) -> None:
+        memory = backend.insert_memory(Memory(content=text, user_id="ada"))
+        backend.add_mention(EntityMention(entity_id=marcus.id, memory_id=memory.id,
+                                          surface="Marcus"))
+
+    assert store._refresh_entity_description(marcus.id).description is None
+    remember("Marcus is a strong physics student.")
+    assert store._refresh_entity_description(marcus.id).description is None
+    assert store.described_entities("What does Marcus study?", user_id="ada") == []
+    assert backend.get_entity(marcus.id).description is None and fake_llm.calls == []
+
+    remember("Marcus rows on Sundays.")
+    fake_llm.queue(json.dumps({"description": "Marcus studies physics and rows."}))
+    assert store._refresh_entity_description(marcus.id).description == (
+        "Marcus studies physics and rows.")
+    assert len(fake_llm.calls) == 1
 
 
 def test_entity_description_is_in_reconstructed_context(verbatim_store):
@@ -258,6 +291,15 @@ def test_entity_description_is_in_reconstructed_context(verbatim_store):
         EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Marcus")
     )
 
+    # one memory: it is shown, with no description repeating it
+    context = verbatim_store.reconstruct_context("What do we know about Marcus?", user_id="ada")
+    assert "## Known entities" not in context.text
+    assert "Marcus is a good student" in context.text
+
+    second = backend.insert_memory(Memory(content="Marcus plays chess.", user_id="ada"))
+    backend.add_mention(
+        EntityMention(entity_id=entity.id, memory_id=second.id, surface="Marcus")
+    )
     context = verbatim_store.reconstruct_context("What do we know about Marcus?", user_id="ada")
     assert "## Known entities" in context.text
     assert "Marcus is a good student" in context.text

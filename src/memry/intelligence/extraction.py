@@ -198,6 +198,44 @@ Respond with JSON only: {{"facts": [{{"content": str, "type": str,
 "sources": [int]}}]}}.
 Return {{"facts": []}} if nothing is worth remembering."""
 
+#: What asking for the user's name adds to the prompt and the schema, only
+#: while the owner has no name (``extract_facts(identity=...)``). Once the owner
+#: is named, the prompt and schema are exactly the ones without it: the rule and
+#: the field cost about 80 prompt tokens and 6 output tokens a call, and a
+#: prompt that stays the same byte for byte keeps the provider's prompt cache.
+USER_NAME_RULE = """- user_name: the user's own name, only when the conversation states it: the
+  user gives it ("I'm Cos", "my name is", a signature), the assistant calls the
+  user by it, or a line says what the user's name is. Never guess it, and never
+  give the name of someone the user only talks about. null otherwise.
+"""
+_SHAPE_END = '"sources": [int]}}]}}.\nReturn {{"facts": []}} if'
+_SHAPE_END_WITH_USER_NAME = (
+    '"sources": [int]}}], "user_name": str|null}}.\n'
+    'Return {{"facts": [], "user_name": null}} if')
+
+
+def extraction_system(*, ask_user_name: bool = False) -> str:
+    """The extraction instructions, unformatted (``{today}`` still in them):
+    ``EXTRACTION_SYSTEM`` as it is, or with the ``user_name`` rule placed
+    after the last rule and the field added to the answer's shape."""
+    if not ask_user_name:
+        return EXTRACTION_SYSTEM
+    rules_end = "\n\nRespond with JSON only:"
+    return (EXTRACTION_SYSTEM.replace(rules_end, "\n" + USER_NAME_RULE.rstrip("\n")
+                                      + rules_end, 1)
+            .replace(_SHAPE_END, _SHAPE_END_WITH_USER_NAME, 1))
+
+
+def extraction_schema(*, ask_user_name: bool = False) -> dict[str, Any]:
+    """``EXTRACTION_SCHEMA`` as it is, or with a required, nullable
+    ``user_name`` beside ``facts``."""
+    if not ask_user_name:
+        return EXTRACTION_SCHEMA
+    return {**EXTRACTION_SCHEMA,
+            "properties": {**EXTRACTION_SCHEMA["properties"],
+                           "user_name": {"type": ["string", "null"]}},
+            "required": [*EXTRACTION_SCHEMA["required"], "user_name"]}
+
 
 VOCABULARY_LIMIT = 120  # bounded so a large store cannot inflate every call
 
@@ -209,6 +247,31 @@ CHAT_ROLES = frozenset({"user", "assistant", "system", "developer", "tool", "fun
 #: entity name while no real one is known. A role, not a name: offered for a
 #: conversation between named people, the model wrote one of them as "the user".
 OWNER_PLACEHOLDER = "the user"
+
+#: Words that say who someone is by role, never by name: a "name" stated as one
+#: of these names nobody.
+_ROLE_WORDS = frozenset({
+    "user", "the user", "a user", "owner", "the owner", "assistant", "the assistant",
+    "me", "myself", "you", "i", "unknown", "none", "null", "n/a", "anonymous",
+})
+
+
+def clean_stated_name(value: Any) -> str:
+    """A stated name of the user as the store keeps it: on one line, at most
+    four words and 80 characters, with a letter in it; "" for anything that
+    names nobody (empty, a role word such as "the user", or a sentence)."""
+    name = " ".join(str(value or "").split()).strip(" .,;:!?\"'()[]")
+    if (not name or len(name) > 80 or len(name.split()) > 4
+            or name.casefold() in _ROLE_WORDS or not any(ch.isalpha() for ch in name)):
+        return ""
+    return name
+
+
+def stated_user_name(data: Any) -> str:
+    """The user's name an extraction output states (``user_name``), cleaned
+    (``clean_stated_name``); "" when it states none. The extractor is told to
+    give it only when the conversation says it, never as a guess."""
+    return clean_stated_name(data.get("user_name")) if isinstance(data, dict) else ""
 
 
 def speaker_name(message: dict[str, str]) -> str:
@@ -267,12 +330,22 @@ def extract_facts(
     tag_hints: list[str] | None = None,
     owner: str | None = None,
     entity_names: list[tuple[str, str | None]] | None = None,
+    identity: list[str] | None = None,
 ) -> list[CandidateFact]:
     """LLM extraction (phase 1). Raises if the LLM is unavailable.
 
+    ``identity``, when given, asks for the user's name as well and receives
+    it when the conversation states it (``stated_user_name``): the user
+    introduces themself, signs, is called by it, or a line says it. Only
+    stated, never guessed; the store decides what it names
+    (``MemoryStore._learn_from_save``). The store passes it only while the
+    owner has no name; without it the prompt and schema are the ones without
+    the question (``extraction_system``, ``extraction_schema``).
+
     ``owner`` is the entity name of the person the store belongs to. Facts
     about that person are listed under it, so they collect on one entity that
-    the identity judge can later find to be a named person in the store.
+    a stated name (``identity``) can later show to be a named person in the
+    store.
     The placeholder "the user" is offered only for a conversation with the
     user (``speaks_with_the_user``); without an owner nothing is offered.
 
@@ -363,14 +436,18 @@ def extract_facts(
         if known_entities
         else ""
     )
+    ask_user_name = identity is not None
     raw = llm.complete(
-        EXTRACTION_SYSTEM.format(today=now.date().isoformat()),
+        extraction_system(ask_user_name=ask_user_name).format(today=now.date().isoformat()),
         f"Conversation:\n{transcript}{speaker_offer}{context_offer}{owner_offer}{entity_offer}"
         f"{offer}{hint_offer}"
         "\n\nExtract the facts as JSON.",
-        json_schema=EXTRACTION_SCHEMA,
+        json_schema=extraction_schema(ask_user_name=ask_user_name),
     )
-    return _parse_facts(raw)
+    data = parse_lenient_json(raw)
+    if identity is not None and stated_user_name(data):
+        identity.append(stated_user_name(data))
+    return _facts_from(data)
 
 
 COVERAGE_SCHEMA: dict[str, Any] = {
@@ -436,7 +513,11 @@ _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$", re.MULTILINE)
 
 
 def _parse_facts(raw: str) -> list[CandidateFact]:
-    data = parse_lenient_json(raw)
+    return _facts_from(parse_lenient_json(raw))
+
+
+def _facts_from(data: Any) -> list[CandidateFact]:
+    """The facts of an extraction output already read as JSON."""
     if data is None:
         return []
     items = data.get("facts", []) if isinstance(data, dict) else data
