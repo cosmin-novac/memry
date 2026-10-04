@@ -1319,3 +1319,49 @@ render([]);
 check(!list.classList.on.has('memtable')&&list.innerHTML.includes('No memories yet.'),'an empty list is no table');
 """
     _run_node(contract)
+
+
+def test_about_this_server_shows_backups_footprint_timing_and_host():
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+    assert '<div id="aboutinfo"></div>' in html
+    assert "if(tab==='server'){renderServerInfo();loadAboutInfo()}" in source
+    assert "api('/api/v1/about')" in source
+    contract = _lines(source, "function esc(s)") + "\n" + _region(
+        source, "function fmtBytes(", "async function loadAboutInfo("
+    ) + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+const server={version:'0.2.46',scope:'server',
+  backups:{enabled:true,dir:'/backups',host_dir:'/var/backups/memry',at:'03:30',timezone:'UTC',offsite:false,
+    last_success:{at:'2026-10-04T03:30:02+00:00',size:5242880,verified:true,offsite:null},
+    last_failure:{at:'2026-10-03T03:30:00+00:00',error:'old trouble'}},
+  footprint:{db_bytes:4194304,wal_bytes:1024,auth_db_bytes:32768,memories_in_use:120,memories_history:7,
+    memories_forgotten:3,entities:40,tags:12,episodes:90,disk_free_bytes:10737418240,disk_total_bytes:53687091200},
+  response_times:{count:150,window:200,median_ms:12.5,p95_ms:80.1},
+  host:{hostname:'vmi123',python:'3.12.7',started_at:'2026-10-01T00:00:00+00:00',uptime_s:93784,
+    host_uptime_s:900000,llm:'openai:gpt-6-luna',embedder:'openai:text-embedding-3-small',decider:'jev:system-one'}};
+const out=renderAbout(server);
+for(const title of ['Backups','Footprint','Response time','Host'])
+  check(out.includes('<h3 class="about-h">'+title+'</h3>'),'section '+title);
+check(out.includes('/var/backups/memry on the host')&&out.includes('Seen as /backups inside the container'),'host path, container path noted');
+check(out.includes('daily at 03:30 (UTC)'),'cadence');
+check(out.includes('5.0 MB')&&out.includes('verified'),'last good copy with size and verified');
+check(!out.includes('old trouble'),'a failure older than the last good copy is not shown');
+check(out.includes('does not survive losing its disk'),'offsite off says what that means');
+check(out.includes('120 in use, 7 old versions, 3 forgotten'),'memory counts');
+check(out.includes('4.0 MB plus 1.0 KB write-ahead log'),'database and WAL size');
+check(out.includes('10.0 GB of 50.0 GB'),'disk free');
+check(out.includes('12.5 ms median, 80.1 ms p95'),'response times');
+check(out.includes('vmi123')&&out.includes('3.12.7')&&out.includes('1 d 2 h'),'host, python, uptime');
+check(out.includes('openai:gpt-6-luna, openai:text-embedding-3-small, jev:system-one'),'models by name');
+check(!/[\u2013\u2014]/.test(out),'no long dashes');
+const failed=renderAbout({...server,backups:{...server.backups,
+  last_failure:{at:'2026-10-05T03:30:00+00:00',error:'disk full'}}});
+check(failed.includes('disk full')&&failed.includes('The copy before it is kept'),'a newer failure shows');
+const off=renderAbout({...server,backups:{enabled:false,at:'03:30',timezone:'UTC'}});
+check(off.includes('Set MEMRY_SNAPSHOT_DIR'),'backups off says how to turn them on');
+const account=renderAbout({version:'0.2.46',scope:'account',counts:{memories_in_use:3}});
+check(account.includes('0.2.46')&&!account.includes('Backups')&&!account.includes('Host'),'an account sees the version only');
+check(renderAbout({error:'unauthorized'})==='','an error renders nothing');
+"""
+    _run_node(contract)

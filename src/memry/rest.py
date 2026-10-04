@@ -39,7 +39,8 @@ import html
 import json
 import logging
 import os
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any
 from urllib.parse import parse_qs
@@ -60,6 +61,7 @@ from starlette.responses import (
 )
 from starlette.routing import Mount, Route
 
+from .about import ResponseTimeMiddleware, ResponseWindow, about_payload
 from .accounts import SESSION_TTL, AccountStore, default_auth_db_path
 from .config import Config, require_models
 from .enrichment import EnrichmentWorker
@@ -69,6 +71,7 @@ from .models import TOPIC_TYPE
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
 from .oauth import MEMRY_SCOPE, MemryOAuthProvider
 from .principal import ADMIN, Principal
+from .snapshot import SnapshotScheduler
 from .store import MemoryStore
 
 SESSION_COOKIE = "memry_session"
@@ -241,6 +244,7 @@ button.toggle.active{border-color:var(--accent);color:var(--accent)}
 .apanel .step:last-child{border-bottom:none}
 .apanel .step h3{margin:0 0 .25rem;font-size:.95rem;font-weight:600}
 .apanel .step p{margin:0;line-height:1.5;color:var(--dim)}
+.apanel .about-h{margin:1.1rem 0 .2rem;font-size:.95rem;font-weight:600}
 .glossary{margin:.2rem 0;display:grid;grid-template-columns:1fr;gap:0}
 @media(min-width:44rem){.glossary{grid-template-columns:11rem 1fr;column-gap:1rem}}
 .glossary dt{font-weight:600;padding:.45rem 0 0}
@@ -430,6 +434,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
 <section class="apanel" id="apanel-server" hidden>
   <p class="hint">What this particular Memry is running.</p>
   <div id="serverinfo"></div>
+  <div id="aboutinfo"></div>
 </section>
 </div></div>
 <div class="modal" id="knowmodal"><div class="sheet">
@@ -1600,7 +1605,76 @@ function showAbout(tab){
     document.getElementById('apanel-'+name).hidden=name!==tab;
     document.getElementById('atab-'+name).setAttribute('aria-pressed',name===tab);
   }
-  if(tab==='server')renderServerInfo();
+  if(tab==='server'){renderServerInfo();loadAboutInfo()}
+}
+// -- About > This server: backups, footprint, response times, host ----------
+function fmtBytes(n){
+  if(n===null||n===undefined)return '';
+  const units=['B','KB','MB','GB','TB'];let i=0;
+  while(n>=1024&&i<units.length-1){n/=1024;i++}
+  return (i?n.toFixed(1):String(n))+' '+units[i];
+}
+function fmtSpan(s){
+  if(s===null||s===undefined)return '';
+  s=Math.round(s);
+  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  return d?`${d} d ${h} h`:h?`${h} h ${m} min`:`${m} min`;
+}
+function fmtWhen(iso){
+  if(!iso)return '';
+  const d=new Date(iso);
+  return isNaN(d.getTime())?String(iso):d.toLocaleString();
+}
+function aboutSection(title,rows){
+  const body=rows.filter(r=>r[1]!==undefined&&r[1]!==null&&r[1]!=='')
+    .map(([k,v,note])=>`<div class="tagrow"><span class="name"><b>${esc(k)}</b>
+      <div class="hint">${esc(String(v))}${note?'. '+esc(note):''}</div></span></div>`).join('');
+  return body?`<h3 class="about-h">${esc(title)}</h3>`+body:'';
+}
+function renderAbout(a){
+  if(!a||a.error)return '';
+  if(a.scope!=='server')return aboutSection('Version',[['Memry',a.version]]);
+  const b=a.backups||{},f=a.footprint||{},r=a.response_times||{},h=a.host||{};
+  const ok=b.last_success,fail=b.last_failure;
+  const failedSince=fail&&(!ok||new Date(fail.at)>new Date(ok.at));
+  const off=ok&&ok.offsite;
+  const backups=b.enabled?[
+    ['Location',b.host_dir?b.host_dir+' on the host':b.dir,
+      b.host_dir?'Seen as '+b.dir+' inside the container':'Outside the data directory, where Memry writes nothing else'],
+    ['Cadence','daily at '+b.at+' ('+b.timezone+')'],
+    ['Last good copy',ok?`${fmtWhen(ok.at)}, ${fmtBytes(ok.size)}, ${ok.verified?'verified':'not verified'}`:'none yet'],
+    ['Last failure',failedSince?`${fmtWhen(fail.at)}: ${fail.error}`:'','The copy before it is kept'],
+    ['Offsite copy',b.offsite?(off?(off.ok?'on, uploaded '+fmtWhen(off.at):'on, the last upload failed: '+off.error):'on'):'off',
+      b.offsite?'':'Only the copy on this server, which does not survive losing its disk'],
+  ]:[['Nightly copy','off','Set MEMRY_SNAPSHOT_DIR to a directory outside the data directory to keep one']];
+  const footprint=[
+    ['Database',f.db_bytes===null||f.db_bytes===undefined?'':fmtBytes(f.db_bytes)
+      +(f.wal_bytes?' plus '+fmtBytes(f.wal_bytes)+' write-ahead log':'')],
+    ['Accounts database',fmtBytes(f.auth_db_bytes)],
+    ['Memories',`${f.memories_in_use??0} in use, ${f.memories_history??0} old versions, ${f.memories_forgotten??0} forgotten`],
+    ['Entities',`${f.entities??0} people and things, ${f.tags??0} tags`],
+    ['Raw messages',f.episodes],
+    ['Disk free',f.disk_free_bytes===null||f.disk_free_bytes===undefined?'':fmtBytes(f.disk_free_bytes)+' of '+fmtBytes(f.disk_total_bytes),'On the data volume'],
+  ];
+  const timing=[
+    ['Median and p95',r.count?`${r.median_ms} ms median, ${r.p95_ms} ms p95`:'no requests yet',
+      r.count?`Time to the first byte over the last ${r.count} requests, /health left out`:''],
+    ['Measured since',fmtWhen(h.started_at)],
+  ];
+  const host=[
+    ['Hostname',h.hostname],
+    ['Memry version',a.version],
+    ['Python',h.python],
+    ['Running for',fmtSpan(h.uptime_s),h.host_uptime_s?'The machine has been up '+fmtSpan(h.host_uptime_s):''],
+    ['Models',[h.llm,h.embedder,h.decider].filter(Boolean).join(', '),'Text model, embeddings, decisions'],
+  ];
+  return aboutSection('Backups',backups)+aboutSection('Footprint',footprint)
+    +aboutSection('Response time',timing)+aboutSection('Host',host);
+}
+async function loadAboutInfo(){
+  const box=document.getElementById('aboutinfo');
+  try{box.innerHTML=renderAbout(await api('/api/v1/about'))}
+  catch(e){box.innerHTML=''}
 }
 function renderServerInfo(){
   const s=serverInfo||{};
@@ -2682,6 +2756,22 @@ FILTER_KEYS = ("when", "about", "happened", "said", "entity", "entity_type", "ta
                "contains", "memory_type")
 
 
+def seconds_until_upkeep(at: str) -> float:
+    """Seconds from now until the next HH:MM in UTC; a malformed value
+    falls back to 02:05."""
+    try:
+        hour, minute = (int(part) for part in at.strip().split(":"))
+        datetime.now(timezone.utc).replace(hour=hour, minute=minute)
+    except ValueError:
+        hour, minute = 2, 5
+    now = datetime.now(timezone.utc)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+
 def create_app(
     store: MemoryStore | None = None, *, accounts: AccountStore | None = None
 ) -> Starlette:
@@ -2704,6 +2794,10 @@ def create_app(
     )
     mcp.settings.streamable_http_path = "/"
     mcp_app = mcp.streamable_http_app()
+    # About: the server's start, and the response times of recent requests
+    response_window = ResponseWindow()
+    started_at = datetime.now(timezone.utc)
+    started_monotonic = time.monotonic()
 
     def _unauthorized() -> JSONResponse:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -3741,6 +3835,15 @@ def create_app(
             }
         return JSONResponse(json.loads(json.dumps(data, default=str)))
 
+    async def about(request: Request) -> Response:
+        """Backups, footprint, response times and host, for the About panel.
+        An account or tenant gets the version and its own counts only."""
+        data = await run_in_threadpool(partial(
+            about_payload, store, principal=_p(request), window=response_window,
+            started_at=started_at, started_monotonic=started_monotonic,
+        ))
+        return JSONResponse(data)
+
     # -- entities ---------------------------------------------------------
     async def list_entities(request: Request) -> Response:
         q = request.query_params
@@ -4045,11 +4148,14 @@ def create_app(
         ``MemoryStore.run_upkeep_cycle`` so the dashboard's "run now" and the
         tests exercise the same code.
         """
-        dedup_interval = max(store.config.dedup_interval_days, 0.001)
-        check_every = max(min(dedup_interval * 86400, 6 * 3600), 60)
         max_per_cycle = 25
 
         while True:
+            # Once a night, at MEMRY_UPKEEP_AT (default 02:05 UTC, before the
+            # 03:30 snapshot), never at start: a cycle right after a deploy
+            # judged about 1000 entity pairs and held requests up for 25
+            # minutes on a live server.
+            await asyncio.sleep(seconds_until_upkeep(os.environ.get("MEMRY_UPKEEP_AT", "02:05")))
             try:
                 now = datetime.now(timezone.utc)
                 processed = 0
@@ -4068,7 +4174,7 @@ def create_app(
                         processed += 1 if ran else 0
             except Exception:  # a scheduler hiccup must never take the server down
                 pass
-            await asyncio.sleep(check_every)
+            await asyncio.sleep(60)  # past the minute, so one night runs one cycle
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette):
@@ -4077,14 +4183,18 @@ def create_app(
         # Always started: each cycle consults the runtime switches, so a pass
         # toggled on from the dashboard begins running without a restart.
         maintenance_task = asyncio.create_task(_maintenance_scheduler())
+        # The nightly snapshot (memry.snapshot), when MEMRY_SNAPSHOT_DIR is set.
+        snapshot_task: asyncio.Task | None = None
+        if store.config.snapshot.dir and store.config.db_path != ":memory:":
+            snapshot_task = asyncio.create_task(SnapshotScheduler(store.config).run_forever())
         try:
             async with mcp.session_manager.run():
                 yield
         finally:
-            for task in (enrichment_task, maintenance_task):
+            for task in (enrichment_task, maintenance_task, snapshot_task):
                 if task is not None:
                     task.cancel()
-            for task in (enrichment_task, maintenance_task):
+            for task in (enrichment_task, maintenance_task, snapshot_task):
                 if task is not None:
                     with contextlib.suppress(BaseException):
                         await task
@@ -4137,6 +4247,7 @@ def create_app(
         Route("/api/v1/search", guarded(search), methods=["POST"]),
         Route("/api/v1/context", guarded(context), methods=["POST"]),
         Route("/api/v1/stats", guarded(stats), methods=["GET"]),
+        Route("/api/v1/about", guarded(about), methods=["GET"]),
         Route("/api/v1/entities", guarded(list_entities), methods=["GET"]),
         Route("/api/v1/entities/merge", guarded(merge_entities_route), methods=["POST"]),
         Route("/api/v1/entities/proposals", guarded(list_proposals), methods=["GET"]),
@@ -4188,7 +4299,10 @@ def create_app(
         ]
     routes.append(Mount("/mcp", app=guarded_mcp_app))
     return Starlette(
-        routes=routes, lifespan=lifespan, middleware=[Middleware(_NormalizeMcpPath)]
+        routes=routes, lifespan=lifespan, middleware=[
+            Middleware(ResponseTimeMiddleware, window=response_window),
+            Middleware(_NormalizeMcpPath),
+        ],
     )
 
 

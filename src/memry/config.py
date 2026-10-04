@@ -264,6 +264,32 @@ class AnnConfig(BaseModel):
     overfetch: int = 8
 
 
+class SnapshotConfig(BaseModel):
+    """The nightly copy of the database (``memry.snapshot``).
+
+    ``dir`` unset means no snapshots. It must be a directory Memry never writes
+    to otherwise: not the data directory, so a fault that damages the live file
+    cannot reach the copy. ``at`` is a time of day on the server's clock (the
+    container's TZ; UTC unless set). ``host_dir`` is only shown: where ``dir``
+    lives on the host when it is a bind mount.
+
+    The offsite copy is optional and off unless ``offsite_url`` and
+    ``offsite_bucket`` are set: any S3-compatible store (Cloudflare R2,
+    Backblaze B2, Contabo Object Storage). A local copy on the same disk does
+    not survive losing that disk; the offsite copy does.
+    """
+
+    dir: str | None = None
+    at: str = "03:30"
+    host_dir: str | None = None
+    offsite_url: str | None = None
+    offsite_bucket: str | None = None
+    offsite_key_id: str | None = None
+    offsite_secret: str | None = None
+    offsite_region: str = "auto"
+    offsite_prefix: str = "memry/"
+
+
 class TenantConfig(BaseModel):
     """One tenant of a multi-tenant server: its own API key, its own
     transparently-namespaced memory space."""
@@ -296,6 +322,7 @@ class Config(BaseModel):
     decay: DecayConfig = Field(default_factory=DecayConfig)
     supersede: SupersedeConfig = Field(default_factory=SupersedeConfig)
     ann: AnnConfig = Field(default_factory=AnnConfig)
+    snapshot: SnapshotConfig = Field(default_factory=SnapshotConfig)
 
     # ------------------------------------------------------------------
     @classmethod
@@ -327,6 +354,8 @@ class Config(BaseModel):
             d["api_key"] = "***"
         for tenant in d.get("tenants", []):
             tenant["api_key"] = "***"
+        if d["snapshot"].get("offsite_secret"):
+            d["snapshot"]["offsite_secret"] = "***"
         return d
 
 
@@ -421,6 +450,15 @@ def _from_env() -> dict[str, Any]:
     put(None, "public_url", e("MEMRY_PUBLIC_URL"))
 
     put("decay", "durability", _bool(e("MEMRY_DURABILITY")))
+    put("snapshot", "dir", e("MEMRY_SNAPSHOT_DIR"))
+    put("snapshot", "at", e("MEMRY_SNAPSHOT_AT"))
+    put("snapshot", "host_dir", e("MEMRY_SNAPSHOT_HOST_DIR"))
+    put("snapshot", "offsite_url", e("MEMRY_SNAPSHOT_OFFSITE_URL"))
+    put("snapshot", "offsite_bucket", e("MEMRY_SNAPSHOT_OFFSITE_BUCKET"))
+    put("snapshot", "offsite_key_id", e("MEMRY_SNAPSHOT_OFFSITE_KEY_ID"))
+    put("snapshot", "offsite_secret", e("MEMRY_SNAPSHOT_OFFSITE_SECRET"))
+    put("snapshot", "offsite_region", e("MEMRY_SNAPSHOT_OFFSITE_REGION"))
+    put("snapshot", "offsite_prefix", e("MEMRY_SNAPSHOT_OFFSITE_PREFIX"))
     tenants_json = e("MEMRY_TENANTS")
     if tenants_json:
         try:

@@ -325,3 +325,25 @@ def test_merges_are_listed_and_undone_over_rest_and_the_cli(monkeypatch, tmp_pat
     assert json.loads(capsys.readouterr().out)["undone"] is True
     assert main(["entities", "unmerge", world["bau"].id]) == 1
     assert json.loads(capsys.readouterr().out)["undone"] is False
+
+
+def test_a_merge_restarts_only_the_pairs_the_merged_entity_brought(tmp_path):
+    """The kept entity's own open pairs keep their funnel step after a merge;
+    only the pairs that moved over from the merged entity start again. All of
+    them restarting re-judged about 1000 pairs after one owner merge."""
+    from memry.backends.local import LocalBackend
+    from memry.models import Entity, MergeProposal
+
+    backend = LocalBackend(str(tmp_path / "m.db"))
+    a, b, x, y = (backend.insert_entity(Entity(name=n, normalized=n.lower(),
+                                               entity_type="person", user_id="u"))
+                  for n in ("Ana", "Ana Pop", "Xenia", "Yara"))
+    own = backend.add_proposal(MergeProposal(entity_a=a.id, entity_b=x.id, user_id="u"))
+    brought = backend.add_proposal(MergeProposal(entity_a=b.id, entity_b=y.id, user_id="u"))
+    for proposal in (own, brought):
+        backend.update_proposal_judgement(proposal.id, confidence=0.5, reason="judge: wait",
+                                          compared_step=10, different=0.3)
+    assert backend.merge_entities(a.id, b.id)
+    steps = {p.id: p.compared_step for p in backend.proposals_of([a.id])}
+    assert steps[own.id] == 10
+    assert steps[brought.id] == 0

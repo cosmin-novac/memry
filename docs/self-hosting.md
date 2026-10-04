@@ -95,9 +95,144 @@ walkthrough (cloud-init, DNS, backups, uninstall): [deploy-vps.md](deploy-vps.md
    tells you why. If a private network or a reverse proxy that does its own auth
    (Caddy/Traefik/nginx) really protects the port, set `MEMRY_ALLOW_OPEN=1` to override.
 3. **Backups** - a complete server backup must capture `memry.db` and `auth.db`
-   together, including any live SQLite `-wal`/`-shm` files. A directory/volume snapshot
-   does that. `memry export` is a lossless knowledge backup, but it does not include
+   together, including any live SQLite `-wal`/`-shm` files. The
+   [nightly snapshot](#nightly-snapshot) does that, and so does a directory or volume
+   snapshot. `memry export` is a lossless knowledge backup, but it does not include
    accounts, sessions, OAuth clients, or tokens from `auth.db`.
+
+## Nightly snapshot
+
+Set `MEMRY_SNAPSHOT_DIR` and the server keeps one copy of `memry.db` (and `auth.db` when it
+exists) in that directory, made once a day. The VPS compose file sets it for you, to
+`/var/backups/memry` on the host.
+
+How a run goes:
+
+1. Memry copies each file with SQLite's online backup API, from a connection of its own,
+   1,024 pages at a time with a 5 ms pause between steps. The server keeps reading and
+   writing during the copy, and the copy never takes Memry's own backend lock.
+2. The copy goes to a temporary file in the snapshot directory. Memry flushes it to disk
+   and checks it: `PRAGMA integrity_check` has to answer `ok`, and the counts of memories,
+   entities and episodes have to read from the copy.
+3. Only then does Memry replace the previous copy (`os.replace`, atomic on one filesystem)
+   and write `snapshot.json`: when, which Memry version, each file's size and sha256, the
+   counts, and how long the run took.
+
+When a run fails, Memry keeps the previous copy and `snapshot.json` exactly as they were,
+removes only its temporary file, logs the error and writes it to `snapshot-failure.json`.
+The dashboard shows the failure under About > This server, and the server tries again an
+hour later.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `MEMRY_SNAPSHOT_DIR` | unset (off) | Directory for the copy. Pick one Memry never writes to otherwise. Memry refuses the data directory itself. |
+| `MEMRY_SNAPSHOT_AT` | `03:30` | Time of day, `HH:MM`, on the server's clock. |
+| `MEMRY_SNAPSHOT_HOST_DIR` | unset | Shown in the dashboard only: where `MEMRY_SNAPSHOT_DIR` is on the host when it is a bind mount. |
+
+The server runs the snapshot once a day from `MEMRY_SNAPSHOT_AT` on, and skips the day when
+a copy already succeeded that day. When the last good copy is more than 26 hours old, or
+there is none, the server makes one about 90 seconds after it starts.
+
+`MEMRY_SNAPSHOT_AT` is read on the server's local clock. In Docker that is the container's
+`TZ`, and a container without `TZ` runs on UTC, so `03:30` means 03:30 UTC (05:30 in Berlin
+in summer). The VPS compose file passes `MEMRY_TZ` from `.env` on as `TZ`. A POSIX rule such
+as `MEMRY_TZ=CET-1CEST,M3.5.0,M10.5.0/3` always works; a zone name such as `Europe/Berlin`
+works only if the image has zone data. The About panel shows the zone in force next to the
+time.
+
+Memry copies the two files one after the other, a moment apart. `auth.db` holds accounts,
+keys and sessions, which change rarely, so the pair is a usable restore point.
+
+### Checking a snapshot, and making one by hand
+
+```bash
+memry snapshot                 # make one now, into MEMRY_SNAPSHOT_DIR
+memry snapshot --to /some/dir  # make one into another directory
+memry snapshot --check         # verify the copy against snapshot.json; writes nothing
+```
+
+`--check` reads each file, compares its size and sha256 with `snapshot.json` and runs
+`PRAGMA integrity_check`. It exits 0 when the copy is sound, and 1 with the problems listed
+when it is not. In the VPS deployment, run it inside the container:
+
+```bash
+docker compose --env-file /opt/memry/.env -f /opt/memry/app/deploy/vps/docker-compose.yml \
+  exec memry memry snapshot --check
+```
+
+### Restoring the database from the snapshot
+
+1. Check the copy first: `memry snapshot --check` (inside the container, as above).
+2. Stop the server. On the VPS:
+   `docker compose --env-file /opt/memry/.env -f /opt/memry/app/deploy/vps/docker-compose.yml stop memry`
+3. Copy the files back into the data directory and move the old WAL files beside them out
+   of the way. On the VPS the data directory is the `memry_memry-data` volume:
+
+   ```bash
+   DATA="$(docker volume inspect -f '{{ .Mountpoint }}' memry_memry-data)"
+   mkdir -p /root/memry-replaced && mv "$DATA"/*.db* /root/memry-replaced/
+   cp /var/backups/memry/memry.db "$DATA/memry.db"
+   cp /var/backups/memry/auth.db "$DATA/auth.db"     # when the snapshot has one
+   ```
+
+   The `-wal` and `-shm` files belong to the database you are replacing. Left in place,
+   SQLite would try to apply them to the restored file. Moving them aside keeps them until
+   you are sure the restore worked.
+4. Start the server with the same command and `up -d memry`, then open the dashboard and
+   look at your memories.
+
+`tests/test_snapshot.py` restores a snapshot into a new directory this way, opens it and
+compares the counts.
+
+### Offsite copy in an S3-compatible bucket (optional, off by default)
+
+A copy on the same disk as the database survives a damaged file, a bad migration or a
+mistaken delete. It does not survive losing the disk. The memry.tech server has one virtual
+disk and runs local-only for now; the offsite copy is there for when that changes.
+
+When `MEMRY_SNAPSHOT_OFFSITE_URL` and `MEMRY_SNAPSHOT_OFFSITE_BUCKET` are set, Memry also
+gzips each good local snapshot and uploads it to an S3-compatible bucket. Memry uploads each
+file to a temporary key, reads its size and sha256 back, copies it to the final key on the
+storage side and deletes the temporary key. If any step fails, the object already in the
+bucket stays as it was, and the local snapshot stands either way. `snapshot.json` goes up
+last. Memry records the result (ok, or the error) in the local `snapshot.json` and shows it
+in About. Memry signs the requests itself (AWS Signature Version 4 over httpx), so you need
+no extra package.
+
+| Setting | Example | Notes |
+|---|---|---|
+| `MEMRY_SNAPSHOT_OFFSITE_URL` | `https://<account-id>.r2.cloudflarestorage.com` | The S3 endpoint, without the bucket. |
+| `MEMRY_SNAPSHOT_OFFSITE_BUCKET` | `memry-backups` | The bucket name. |
+| `MEMRY_SNAPSHOT_OFFSITE_KEY_ID` | | Access key ID. |
+| `MEMRY_SNAPSHOT_OFFSITE_SECRET` | | Secret access key. `memry config` shows it as `***`. |
+| `MEMRY_SNAPSHOT_OFFSITE_REGION` | `auto` | R2 takes `auto`; B2 and Contabo take their region, such as `eu-central-003` or `eu2`. |
+| `MEMRY_SNAPSHOT_OFFSITE_PREFIX` | `memry/` | Key prefix. The objects are `memry/memry.db.gz`, `memry/auth.db.gz` and `memry/snapshot.json`. |
+
+Cloudflare R2 is the suggested store: 10 GB of storage is free and downloads cost nothing.
+To set it up:
+
+1. In the Cloudflare dashboard, open R2 Object Storage and create a bucket, for example
+   `memry-backups`. Note your account ID from the R2 overview page.
+2. Under R2 > Manage API tokens, create an API token with "Object Read & Write"
+   permission, limited to that one bucket. Copy the Access Key ID and the Secret Access
+   Key; Cloudflare shows the secret once.
+3. Add to `/opt/memry/.env`:
+
+   ```bash
+   MEMRY_SNAPSHOT_OFFSITE_URL=https://<account-id>.r2.cloudflarestorage.com
+   MEMRY_SNAPSHOT_OFFSITE_BUCKET=memry-backups
+   MEMRY_SNAPSHOT_OFFSITE_KEY_ID=<access key id>
+   MEMRY_SNAPSHOT_OFFSITE_SECRET=<secret access key>
+   ```
+
+4. Recreate the container (`up -d memry`) and run `memry snapshot` inside it once. Its
+   output ends with an `offsite` entry that says `"ok": true`, and the bucket then holds
+   the objects.
+
+Backblaze B2 (`https://s3.<region>.backblazeb2.com`) and Contabo Object Storage
+(`https://<region>.contabostorage.com`) work the same way with their own keys. To restore
+from the bucket, download `memry.db.gz` (and `auth.db.gz`), unzip them with `gunzip`, and
+follow the restore steps above.
 
 ## Multi-tenant mode
 
@@ -370,6 +505,7 @@ No external queue service is required.
 ```bash
 memry stats                   # counts, providers, db path
 memry export > backup.json    # knowledge only: IDs, provenance, entities, relations, history
+memry snapshot --check        # verify the nightly snapshot against its manifest
 memry tags-to-things --dry-run   # tags to topic entities (done at first open): count only
 memry split-memories --dry-run   # memories that hold several facts: print each split, write nothing
 memry learn-owner --dry-run      # who "the user" is, from what was said: print it, write nothing
@@ -720,3 +856,7 @@ provider's veto to its dates the same way. A wrong
 `when` is worse than none, so the veto applies whenever a decision provider is configured.
 Requiring the provider to say "event" was tried first and lost a fifth of the real events
 for no gain in precision.
+
+### When upkeep runs
+
+The server runs the upkeep cycle once a night at 02:05 UTC (`MEMRY_UPKEEP_AT`, HH:MM in UTC), before the 03:30 snapshot, and never at start. Each pass still keeps its own interval (the identity pass weekly), so the nightly cycle runs only what is due. A night the server is down is skipped. "Run now" under Upkeep runs a pass at once. A cycle right after a deploy once judged about 1000 entity pairs and held requests up for 25 minutes.

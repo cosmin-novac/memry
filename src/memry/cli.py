@@ -11,6 +11,7 @@
     memry reindex                 re-embed all memories
     memry backfill-property-vectors  property vectors for the linked search
     memry export / import         lossless backup/restore; legacy JSON imports
+    memry snapshot [--to DIR]     verified copy of the database files (--check to verify it)
     memry tags-to-things          give existing tags their topic entities (first open does it)
     memry split-memories          split memories that hold several facts (--dry-run first)
     memry adopt-unscoped          give memories without a namespace one (--dry-run first)
@@ -346,6 +347,18 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("import", help="restore a Memry backup or import legacy JSON/JSONL")
     p.add_argument("path")
 
+    p = sub.add_parser(
+        "snapshot",
+        help="copy the database files to the snapshot directory, verified, replacing the "
+             "previous copy only once the new one checks out",
+    )
+    p.add_argument("--to", default=None,
+                   help="directory for the copy (default: MEMRY_SNAPSHOT_DIR)")
+    p.add_argument("--check", action="store_true",
+                   help="verify the existing copy against its manifest; writes nothing")
+    p.add_argument("--no-offsite", action="store_true",
+                   help="skip the offsite upload even when it is configured")
+
     sub.add_parser("config", help="print resolved configuration (keys redacted)")
 
     p = sub.add_parser("eval", help="run the retrieval eval harness")
@@ -381,6 +394,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "account":
         return _account_command(args)
+
+    if args.command == "snapshot":
+        from .snapshot import check_snapshot, take_snapshot
+
+        cfg = Config.load()
+        directory = args.to or cfg.snapshot.dir
+        if not directory:
+            print("no snapshot directory: set MEMRY_SNAPSHOT_DIR or pass --to DIR", file=sys.stderr)
+            return 2
+        result = (check_snapshot(directory) if args.check
+                  else take_snapshot(cfg, directory, offsite=not args.no_offsite))
+        _print(result)
+        return 0 if result.get("ok") else 1
 
     if args.command == "eval":
         from .evals.harness import run_eval

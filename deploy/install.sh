@@ -18,7 +18,8 @@
 #
 # Re-running the same command updates Memry and keeps your configuration.
 # Layout: code in /opt/memry/app (disposable), config in /opt/memry/.env,
-# data in Docker volumes (memry_memry-data, memry_caddy-data).
+# data in Docker volumes (memry_memry-data, memry_caddy-data), the nightly
+# snapshot in /var/backups/memry (MEMRY_SNAPSHOT_HOST_DIR) on the host.
 
 set -euo pipefail
 
@@ -105,6 +106,16 @@ if [ -n "$missing" ]; then
   fail "$(printf '%b' "Set a text model and a decision model to run Memry. Not set yet:$missing\nAdd them to $ENV_FILE, or pass them to this installer:\n  curl ... | OPENAI_API_KEY=sk-... MEMRY_DECISION_PROVIDER=jev MEMRY_DECISION_API_KEY=... bash")"
 fi
 
+# --- Snapshot directory ------------------------------------------------------
+# The nightly copy of the database lives on the host, outside the Docker data
+# volume, so a fault in the live files cannot reach it. Root-only: it holds every
+# memory. A local copy does not survive losing the disk; see
+# docs/self-hosting.md#nightly-snapshot for the optional offsite copy.
+snapshot_dir="$(env_val MEMRY_SNAPSHOT_HOST_DIR)"
+snapshot_dir="${snapshot_dir:-/var/backups/memry}"
+mkdir -p "$snapshot_dir"
+chmod 700 "$snapshot_dir"
+
 # --- Launch ------------------------------------------------------------------
 compose() {
   docker compose --env-file "$ENV_FILE" -f "$APP_DIR/deploy/vps/docker-compose.yml" "$@"
@@ -148,6 +159,8 @@ say "  Config:      $ENV_FILE   (edit, then re-run this script or:"
 say "               docker compose --env-file $ENV_FILE -f $APP_DIR/deploy/vps/docker-compose.yml up -d)"
 say "  Update:      re-run this installer"
 say "  Logs:        docker compose --env-file $ENV_FILE -f $APP_DIR/deploy/vps/docker-compose.yml logs -f"
+say "  Snapshot:    $snapshot_dir   (nightly verified copy of the database; check it with"
+say "               docker compose --env-file $ENV_FILE -f $APP_DIR/deploy/vps/docker-compose.yml exec memry memry snapshot --check)"
 say ""
 if [ -z "$domain" ]; then
   say "  NOTE: no MEMRY_DOMAIN set - serving plain HTTP. Point a DNS A record at"

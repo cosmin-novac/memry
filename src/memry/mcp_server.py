@@ -356,6 +356,7 @@ def create_server(
     mcp = FastMCP(
         "memry",
         instructions=INSTRUCTIONS,
+        website_url="https://memry.tech",
         host=host,
         port=port,
         lifespan=_lifespan,
@@ -363,6 +364,10 @@ def create_server(
             enable_dns_rebinding_protection=False
         ),
     )
+    # FastMCP takes no version, so the handshake reported the MCP library's
+    # own ("1.28.1") as Memry's.
+    from . import __version__
+    mcp._mcp_server.version = __version__
     default_user = store.config.default_user_id
 
     def _principal() -> Principal:

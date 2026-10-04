@@ -4165,6 +4165,11 @@ class LocalBackend(MemoryBackend):
         dropped = self._one_row_per_pair_locked(keep_root, merge_root)
         if snapshot is not None:
             snapshot["dropped"] = dropped
+        moved = [row["id"] for row in self._db.execute(
+            "SELECT id FROM entity_proposals WHERE status = 'proposed' "
+            "AND (entity_a = ? OR entity_b = ?) AND entity_a != ? AND entity_b != ?",
+            (merge_root, merge_root, keep_root, keep_root),
+        ).fetchall()]
         self._db.execute(
             "UPDATE entity_proposals SET entity_a = ? "
             "WHERE entity_a = ? AND entity_b != ? AND status != 'confirmed'",
@@ -4175,12 +4180,15 @@ class LocalBackend(MemoryBackend):
             "WHERE entity_b = ? AND entity_a != ? AND status != 'confirmed'",
             (keep_root, merge_root, keep_root),
         )
-        # The merged entity carries both sides' memories now: its open
-        # pairs start the comparison funnel again on that evidence.
-        self._db.execute(
-            "UPDATE entity_proposals SET compared_step = 0 "
-            "WHERE status = 'proposed' AND (entity_a = ? OR entity_b = ?)",
-            (keep_root, keep_root),
+        # Only the pairs the merged entity brought start the funnel again:
+        # they were judged against its memories alone. The kept entity's own
+        # pairs keep their step, since the funnel compares a pair again once
+        # its smaller side reaches the next step anyway (``identity.rounds``).
+        # Restarting them all re-judged about 1000 pairs after one owner merge
+        # on a live store, 987 of them to the same "wait".
+        self._db.executemany(
+            "UPDATE entity_proposals SET compared_step = 0 WHERE id = ?",
+            [(proposal_id,) for proposal_id in moved],
         )
         self._db.execute(
             "UPDATE entities SET updated_at = ?, description_updated_at = NULL "

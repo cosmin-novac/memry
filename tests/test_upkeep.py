@@ -19,7 +19,8 @@ from memry.config import Config
 from memry.providers.decisions import Answer, Answers, Decider
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
-from memry.rest import create_app
+from memry import rest
+from memry.rest import create_app, seconds_until_upkeep
 from memry.store import MemoryStore
 
 
@@ -292,7 +293,8 @@ def client():
     s.close()
 
 
-def test_the_scheduler_leaves_an_empty_store_alone():
+def test_the_scheduler_leaves_an_empty_store_alone(monkeypatch):
+    monkeypatch.setattr(rest, "seconds_until_upkeep", lambda at: 0)
     """A cycle for user None covers every user at once. The scheduler used it
     when the store was empty, and a memory saved while that cycle waited for a
     thread was then compared with other users' memories."""
@@ -475,6 +477,7 @@ def test_the_upkeep_walk_does_each_namespace_once_and_never_mixes_them(store):
 
 
 def test_the_scheduler_walks_the_namespaces_exactly(store, monkeypatch):
+    monkeypatch.setattr(rest, "seconds_until_upkeep", lambda at: 0)
     """The server's scheduler asks for each namespace's tick with
     ``exact_user``, None included."""
     import time
@@ -489,3 +492,14 @@ def test_the_scheduler_walks_the_namespaces_exactly(store, monkeypatch):
             time.sleep(0.02)
     assert sorted((c["user_id"] or "", c["exact_user"]) for c in calls[:2]) == [
         ("", True), ("a", True)]
+
+
+def test_upkeep_waits_for_the_night_and_never_runs_at_start():
+    """The scheduler sleeps until the next 02:05 UTC (MEMRY_UPKEEP_AT): a cycle
+    right after a deploy held requests up for 25 minutes on a live server."""
+    from datetime import datetime, timezone
+    wait = seconds_until_upkeep("02:05")
+    assert 0 < wait <= 86400
+    now = datetime.now(timezone.utc)
+    assert (now.hour, now.minute) == (2, 5) or wait > 0
+    assert abs(seconds_until_upkeep("not a time") - seconds_until_upkeep("02:05")) < 1
