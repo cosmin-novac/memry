@@ -1577,15 +1577,23 @@ function layoutFrame(now){
       ctx.beginPath();ctx.arc(x,y,n.lr+2.5,0,Math.PI*2);ctx.stroke();
     }
     const lit=isSel||isHov||linked(n,sel)||(linked(n,hov)&&hoverMix>0.04);
-    if(n.lr>=13||n===L.centre||(n.g&&n.g.big&&n.g.hub===n)||lit)labels.push([n,A,lit]);
+    if(n.lr>=13||n===L.centre||(n.g&&n.g.big&&n.g.hub===n)||lit)labels.push([n,A,lit,isSel||isHov?2:(lit?1:0)]);
   }
   ctx.textAlign='center';ctx.textBaseline='top';
   ctx.font='500 9.5px ui-sans-serif,system-ui';
   if('letterSpacing'in ctx)ctx.letterSpacing='1.5px';
+  // A label is drawn only where no label is yet: the selected and the hovered
+  // entity first, then what they are linked to, then the rest, largest first.
+  labels.sort((a,b)=>b[3]-a[3]||b[0].count-a[0].count||(a[0].key<b[0].key?-1:1));
+  const placed=[];
   for(const [n,A,lit] of labels){
-    ctx.globalAlpha=Math.min(1,A+0.05);
     const label=n.label.length>18?n.label.slice(0,17)+'...':n.label;
-    haloText(label.toUpperCase()+' · '+n.count,clampTo(n.lx,-W/2+50,W/2-50),n.ly+n.lr+5,lit?TEXT:DIM);
+    const text=label.toUpperCase()+' · '+n.count,half=ctx.measureText(text).width/2+4;
+    const x=clampTo(n.lx,-W/2+half,W/2-half),y=n.ly+n.lr+5;
+    if(placed.some(box=>Math.abs(box[0]-x)<box[2]+half&&Math.abs(box[1]-y)<13))continue;
+    placed.push([x,y,half]);
+    ctx.globalAlpha=Math.min(1,A+0.05);
+    haloText(text,x,y,lit?TEXT:DIM);
   }
   ctx.globalAlpha=1;
   // what the rings, sectors and lanes stand for
