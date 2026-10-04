@@ -49,9 +49,13 @@ def test_the_extractor_is_told_who_the_user_is():
     save("The user prefers green tea", "the user")
     assert 'is the entity "the user"' in _extraction_prompts(llm)[-1]
     store.set_owner_name("ada", "ada")
-    save("The user sails on weekends", "the user")
-    # The owner entity exists now, and its name wins over the account's.
-    assert 'is the entity "the user"' in _extraction_prompts(llm)[-1]
+    save("The user sails on weekends", "ada")
+    # The owner entity made before the account named it takes the account's
+    # name, "the user" kept as one of its names.
+    assert 'is the entity "ada"' in _extraction_prompts(llm)[-1]
+    [owner] = store.entities(user_id="ada")
+    assert owner.metadata["owner"] is True and "the user" in store.backend.entity_aliases(owner.id)
+    assert len(store.backend.entity_memories(owner.id)) == 2
     store.close()
 
 
@@ -155,10 +159,12 @@ def test_a_pair_is_kept_apart_only_from_10_memories():
     store.close()
 
 
-def test_the_owner_is_compared_with_the_people_whose_memories_are_closest():
-    """An owner named "the user" shares no name with anyone."""
+def test_a_named_owner_is_compared_with_the_people_whose_memories_are_closest():
+    """An owner named after an account's login shares no name with anyone. An
+    owner without a name is compared with nobody (test_owner_identity)."""
     store, save, _, judge = _store(lambda state: (0.5, 0.1))
-    save("the user sails a blue boat around Stockholm harbour", "the user")
+    store.set_owner_name("ada", "sailor42")
+    save("sailor42 sails a blue boat around Stockholm harbour", "sailor42")
     for name, text in (("Ada Lindqvist", "Ada Lindqvist sails a blue boat around Stockholm harbour"),
                        ("Bob", "Bob repairs bicycles in Lyon"),
                        ("Chen", "Chen teaches chemistry at a school in Taipei"),
@@ -168,8 +174,8 @@ def test_the_owner_is_compared_with_the_people_whose_memories_are_closest():
     judge.states.clear()
     store.resolve_entities(user_id="ada")
     compared = {tuple(sorted(_names(s))) for s in judge.states}
-    assert ("Ada Lindqvist", "the user") in compared
-    assert len({pair for pair in compared if "the user" in pair}) == 3
+    assert ("Ada Lindqvist", "sailor42") in compared
+    assert len({pair for pair in compared if "sailor42" in pair}) == 3
     store.close()
 
 

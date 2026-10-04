@@ -357,6 +357,7 @@ memry stats                   # counts, providers, db path
 memry export > backup.json    # knowledge only: IDs, provenance, entities, relations, history
 memry tags-to-things --dry-run   # tags to topic entities (done at first open): count only
 memry split-memories --dry-run   # memories that hold several facts: print each split, write nothing
+memry learn-owner --dry-run      # who "the user" is, from what was said: print it, write nothing
 ```
 
 A memory should hold one fact. Before merges were kept to one fact, a store could grow
@@ -421,6 +422,36 @@ memry adopt-unscoped             # the move; a second run finds nothing to do
   both.
 - Nothing is deleted. A backup with rows without a namespace restores into the default
   namespace; into the store it came from, run `adopt-unscoped` first.
+
+Each namespace has an owner entity, the person the memories belong to. It takes the
+account's name where an account named it, and is otherwise called "the user" until a
+conversation states who the user is: the user gives their name, signs, is called by it, or
+a memory says it ("The user's name is Cos."). The owner is then folded into the person who
+carries that name (the person keeps it and becomes the owner; undo under Archive > Merged
+names), or renamed to it when nobody does. The identity judge is never asked about an
+owner still called "the user": "the user" is a role, and on a real store the judge read the
+owner and the person it was as two people. Once named, the owner is compared like anyone.
+The first name stated holds; a later different one is recorded and changes nothing unless
+it corrects the first ("Cosima, not Cosmin"). An account's name wins over a stated one.
+
+For a store saved before extraction reported stated names, `memry learn-owner [--user USER]
+[--dry-run]` looks for them in what the namespace holds, and the upkeep cycle runs it once
+per namespace on its own while the owner is "the user":
+
+```bash
+memry learn-owner --dry-run   # the statements found, the person chosen, what would be folded
+memry learn-owner             # fold or rename; a second run finds the owner named
+```
+
+- Patterns pick out the memories, in use and forgotten, and the saved turns that may say
+  the user's name ("my name is", "the user's name is", "I'm", "call me", a turn in role
+  user that carries a speaker's name). With none, nothing is asked and nothing changes.
+- Otherwise one text-model call per namespace reads them against the namespace's people,
+  with their aliases and memory counts, and says which person they say the owner is, or
+  none. Without a text model, only statements that say the name outright count.
+- The first open after upgrading also opens again the judge's earlier answers on pairs of
+  an owner still called "the user" with a person, so they no longer keep the two apart, and
+  keeps one row for each pair of entities. Pairs you decided stay as you decided them.
 
 Tags are entities of type `topic`. A database or backup from before that change keeps its
 tags in the `categories` column and the legacy `topics`/`memory_topics` tables, which every

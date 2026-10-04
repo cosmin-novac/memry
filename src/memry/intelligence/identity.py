@@ -73,6 +73,7 @@ import numpy as np
 from ..backends.base import MemoryBackend
 from ..models import TOPIC_TYPE, Entity, Memory, Scope
 from ..providers.decisions import Choice, Decider
+from .extraction import OWNER_PLACEHOLDER
 
 PAIR_QUESTION = Choice(
     instructions=(
@@ -229,9 +230,10 @@ CONTEXT_QUIET_HOURS = 1.0
 #: Memories within this many hours of a memory, in its session (or, without
 #: one, with its client and context label), count as the same conversation.
 SESSION_HOURS = 3.0
-#: People compared with the store owner on their memories alone, besides the
-#: ones whose names are worth comparing: an account named "admin", or none,
-#: shares no name with the owner's.
+#: People compared with a named store owner on their memories alone, besides
+#: the ones whose names are worth comparing: an account named "admin" shares
+#: no name with the person it is. An owner without a name is compared with
+#: nobody (``unnamed_owner``).
 OWNER_CANDIDATES = 3
 
 
@@ -951,6 +953,29 @@ def _in_context(
 
 def is_owner(entity: Entity | Mention) -> bool:
     return isinstance(entity, Entity) and bool((entity.metadata or {}).get("owner"))
+
+
+def unnamed_owner(entity: Entity | Mention | None) -> bool:
+    """Whether this is the store owner while it has no name: still called "the
+    user" (``extraction.OWNER_PLACEHOLDER``). "the user" is a role, so whether
+    it is a named person is a question of what was said, not of how alike two
+    sets of memories are: the judge is never asked about it. On a real store
+    the owner (61 memories) against the person it was, "Cosmin" (363), read as
+    two people at P(different) 0.94-0.95, and the pair was kept apart for good.
+    Who the owner is gets stated instead (``MemoryStore.learn_owner_name``)."""
+    return (entity is not None and is_owner(entity)
+            and _fold(entity.name).strip() == OWNER_PLACEHOLDER)
+
+
+#: What the reason of a pair a person decided says ("kept apart by you",
+#: "undone by you", "merged by you"); the judge's reasons start with its name
+#: ("jev: different") and a rule's say the rule.
+BY_A_PERSON = "by you"
+
+
+def decided_by_a_person(reason: str | None) -> bool:
+    """Whether a pair's reason says a person decided it (``BY_A_PERSON``)."""
+    return BY_A_PERSON in (reason or "")
 
 
 def is_topic(entity: Entity | Mention) -> bool:

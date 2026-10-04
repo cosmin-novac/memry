@@ -15,6 +15,7 @@
     memry tags-to-things          give existing tags their topic entities (first open does it)
     memry split-memories          split memories that hold several facts (--dry-run first)
     memry adopt-unscoped          give memories without a namespace one (--dry-run first)
+    memry learn-owner             learn who "the user" is from what was said (--dry-run first)
     memry config                  print resolved configuration
     memry eval --dataset <path>   run the retrieval eval harness
 """
@@ -301,6 +302,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="report what would move and fold, writing nothing")
 
+    p = sub.add_parser(
+        "learn-owner",
+        help='learn who the owner still called "the user" is from the memories and saved '
+             "turns that state it (at most one text-model call per namespace); the owner "
+             "is folded into that person or takes the name (undo under Archive > Merged names)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the evidence, the person chosen and what would be folded or "
+                        "renamed, writing nothing")
+
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
     p = sub.add_parser(
@@ -555,6 +567,9 @@ def main(argv: list[str] | None = None) -> int:
                       file=sys.stderr)
         elif args.command == "adopt-unscoped":
             _print(store.adopt_unscoped(into=args.into, dry_run=args.dry_run))
+        elif args.command == "learn-owner":
+            _print([store.learn_owner(user_id=uid, dry_run=args.dry_run)
+                    for uid in _namespaces(store, args.user)])
         elif args.command == "backfill-property-vectors":
             namespaces = _namespaces(store, args.user)
             _print([{"user": uid,

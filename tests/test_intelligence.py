@@ -114,6 +114,15 @@ _AGENT_NOTES = (
     "  about the assistant's own bookkeeping, not about the user or the world. The\n"
     "  shared context given with the conversation is there to read it by; never\n"
     "  store it as a fact\n")
+#: The rule asking for the user's name where the conversation states it, and
+#: what it adds to the JSON shape and to the empty answer.
+_USER_NAME = (
+    "- user_name: the user's own name, only when the conversation states it: the\n"
+    '  user gives it ("I\'m Cos", "my name is", a signature), the assistant calls the\n'
+    "  user by it, or a line says what the user's name is. Never guess it, and never\n"
+    "  give the name of someone the user only talks about. null otherwise.\n")
+_USER_NAME_SHAPE = (('], "user_name": str|null}.', ']}.'),
+                    ('{"facts": [], "user_name": null}', '{"facts": []}'))
 #: sha256 of the system prompt for _DAY before the shared-content rule came in.
 _SYSTEM_BEFORE = "b11b82895f4fd93438b422c12467bc6244d26a0816456049e1854b7aee16a6a4"
 
@@ -121,8 +130,13 @@ _SYSTEM_BEFORE = "b11b82895f4fd93438b422c12467bc6244d26a0816456049e1854b7aee16a6
 def _without_later_rules(system: str) -> str:
     """The system prompt with the rules added since ``_SYSTEM_BEFORE`` taken
     out again: the shared-content rule, the rules that keep specifics with the
-    narrowed small-talk exclusion, the sources rule with its field, and the
-    rule that leaves out the assistant's own memory notes."""
+    narrowed small-talk exclusion, the sources rule with its field, the
+    rule that leaves out the assistant's own memory notes, and the user's
+    name with its field."""
+    assert _USER_NAME in system and all(old in system for old, _ in _USER_NAME_SHAPE)
+    system = system.replace(_USER_NAME, "")
+    for old, new in _USER_NAME_SHAPE:
+        system = system.replace(old, new)
     for part in (_SHARED, _DID, _SPECIFICS, _SMALL_TALK[0], _SOURCES, _SOURCES_SHAPE[0],
                  _AGENT_NOTES):
         assert part in system, part[:40]
@@ -166,8 +180,9 @@ def test_a_user_and_assistant_conversation_is_asked_as_before():
     """Earlier measurements of extraction rest on this prompt. Its changes since:
     the shared-content rule, the rules that keep specifics (with the small-talk
     exclusion narrowed), the numbered lines with the sources rule (each fact
-    names the lines it rests on), and the rule that leaves out the assistant's
-    own notes on how it uses the memory."""
+    names the lines it rests on), the rule that leaves out the assistant's
+    own notes on how it uses the memory, and the user's name where the
+    conversation states it (``user_name``)."""
     import hashlib
 
     system, user = _asked(
