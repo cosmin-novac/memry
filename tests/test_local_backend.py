@@ -123,6 +123,9 @@ def test_knowledge_map_aggregates_all_memories_without_content():
     entities = {node["label"]: node for node in data["entities"]}
     assert entities["Ada"]["count"] == 2
     assert entities["Ada"]["type_counts"] == {"semantic": 1, "procedural": 1}
+    # the day the newest memory about it was said, for the map's time layouts
+    assert entities["Ada"]["last_said"] == max(first.created_at, second.created_at)
+    assert entities["RAG"]["last_said"] == first.created_at
     assert entities["RAG"]["entity_type"] == "concept"
     key = {node["label"]: node["key"] for node in tagged["entities"]}
     tag_edges = {frozenset((edge["a"], edge["b"])): edge["weight"]

@@ -1649,7 +1649,8 @@ class LocalBackend(MemoryBackend):
             entity_rows = self._db.execute(
                 "SELECT e1.id, e1.name, "
                 "COALESCE(NULLIF(e1.entity_type, ''), 'untyped') AS entity_type, "
-                "m.memory_type, COUNT(DISTINCT m.id) AS count "
+                "m.memory_type, COUNT(DISTINCT m.id) AS count, "
+                "MAX(m.created_at) AS last_said "
                 "FROM entity_mentions em "
                 "JOIN entities e1 ON e1.id = em.entity_id "
                 "JOIN memories m ON m.id = em.memory_id "
@@ -1691,10 +1692,13 @@ class LocalBackend(MemoryBackend):
                     "entity_type": row["entity_type"],
                     "count": 0,
                     "type_counts": {},
+                    "last_said": "",
                 },
             )
             node["count"] += row["count"]
             node["type_counts"][row["memory_type"]] = row["count"]
+            # the day the newest memory about it was said: the map's time layouts
+            node["last_said"] = max(node["last_said"], str(row["last_said"] or ""))
 
         return {
             "memories": total,
