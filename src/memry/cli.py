@@ -14,6 +14,7 @@
     memry export / import         lossless backup/restore; legacy JSON imports
     memry tags-to-things          give existing tags their topic entities (first open does it)
     memry split-memories          split memories that hold several facts (--dry-run first)
+    memry adopt-unscoped          give memories without a namespace one (--dry-run first)
     memry config                  print resolved configuration
     memry eval --dataset <path>   run the retrieval eval harness
 """
@@ -290,6 +291,16 @@ def main(argv: list[str] | None = None) -> int:
                    help="make exactly the splits of a plan from --plan-out, asking no "
                         "model; a memory that left use or changed since is skipped")
 
+    p = sub.add_parser(
+        "adopt-unscoped",
+        help="move every memory without a namespace, with its entities, relations and "
+             "upkeep state, into one (default: the default namespace), in one transaction",
+    )
+    p.add_argument("--into", default=None, metavar="NAMESPACE",
+                   help="the namespace they go to (default: the configured default user)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="report what would move and fold, writing nothing")
+
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
     p = sub.add_parser(
@@ -542,6 +553,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"plan of {len(plan_file['splits'])} splits written to {args.plan_out}; "
                       f"make exactly these with: memry split-memories --plan-in {args.plan_out}",
                       file=sys.stderr)
+        elif args.command == "adopt-unscoped":
+            _print(store.adopt_unscoped(into=args.into, dry_run=args.dry_run))
         elif args.command == "backfill-property-vectors":
             namespaces = _namespaces(store, args.user)
             _print([{"user": uid,

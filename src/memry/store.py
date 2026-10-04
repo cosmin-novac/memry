@@ -335,6 +335,16 @@ class _Owner:
         self.user_id = user_id
 
 
+#: The tables of a backup whose rows carry a namespace (``import_backup``).
+_NAMESPACED_BACKUP_TABLES = (
+    "episodes", "memories", "topics", "entities", "entity_proposals", "relations")
+
+
+# The keys of a namespace's upkeep state. None and "" share one key: a store
+# from before every write had a namespace keeps its state there, which
+# ``MemoryStore.adopt_unscoped`` carries over to the namespace its memories
+# go to. No write makes a memory without a namespace now, so only such a
+# store reads them; they stay as they are so that its state is not orphaned.
 def _dedup_run_key(user_id: str | None) -> str:
     return f"entity_dedup:v2:last_run:{user_id or ''}"
 
@@ -675,7 +685,11 @@ class MemoryStore:
         against, and the when-confirmation reads as the day of writing,
         instead of the clock. All three are for replaying dated
         conversations, as the benchmarks do.
+
+        No ``user_id`` (None or "") saves to the default namespace
+        (``_namespace``), as the servers do.
         """
+        user_id = self._namespace(user_id)
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         messages = _as_messages(content)
         # One time for every message of the save: a save is its run and its
@@ -813,8 +827,10 @@ class MemoryStore:
         ``created_at``, ``memory_metadata`` and ``now`` mean what they mean for
         ``add``: they apply to the pending memory and are kept with the work
         marker for the distillation that follows. The quiet period counts from
-        when the save was queued, whatever ``created_at`` says.
+        when the save was queued, whatever ``created_at`` says. No
+        ``user_id`` saves to the default namespace, as for ``add``.
         """
+        user_id = self._namespace(user_id)
         if isinstance(content, str):
             content = content.strip()
         queued_at = utcnow()
@@ -1288,7 +1304,7 @@ class MemoryStore:
         near-identical memories already in the target user scope are skipped by
         default without creating orphan episodes.
         """
-        default_uid = user_id or self.config.default_user_id
+        default_uid = self._namespace(user_id)
         prepared: list[dict[str, Any]] = []
         skipped = 0
         for row in rows:
@@ -1414,8 +1430,82 @@ class MemoryStore:
     def import_backup(
         self, backup: dict[str, Any], *, owner_prefix: str | None = None
     ) -> dict[str, Any]:
-        """Restore a Memry backup exactly and transactionally."""
+        """Restore a Memry backup exactly and transactionally, but for one
+        thing: a row of it without a namespace (a backup of a store from
+        before every write had one) is restored into the default namespace
+        (``_namespace``). Restored into the store it came from before
+        ``adopt_unscoped`` ran there, such a row conflicts with itself and
+        the restore is refused: adopt first."""
+        tables = backup.get("tables") if isinstance(backup, dict) else None
+        if isinstance(tables, dict):
+            tables = dict(tables)
+            for table in _NAMESPACED_BACKUP_TABLES:
+                rows = tables.get(table)
+                if isinstance(rows, list):
+                    tables[table] = [
+                        {**row, "user_id": self._namespace(row.get("user_id"))}
+                        if isinstance(row, dict) and "user_id" in row
+                        and not row.get("user_id") else row
+                        for row in rows]
+            backup = {**backup, "tables": tables}
         return self.backend.import_backup(backup, owner_prefix=owner_prefix)
+
+    def _namespace(self, user_id: str | None) -> str:
+        """The namespace a write goes to: ``user_id``, else the default one
+        (``config.default_user_id``). No memory lives without a namespace:
+        a memory of none was read with every namespace's (no user means all
+        users in a read) and walked as one of its own, and "" was a
+        namespace apart from None that looked like none."""
+        return user_id or self.config.default_user_id or "default"
+
+    def adopt_unscoped(
+        self, *, into: str | None = None, dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Give the rows a store holds without a namespace (from before every
+        write had one) the namespace ``into`` (default: the default
+        namespace), in one transaction: memories, their episodes, entities,
+        relations, pairs, merges and retired names
+        (``backend.adopt_unscoped``, which says how tags and same-named
+        things of ``into`` take them). Their upkeep state (when each pass
+        ran, the queues, who the owner is) goes with them where ``into`` has
+        none of its own; where it has, its own is kept and theirs is
+        dropped. ``dry_run`` reports what would move, fold and carry, and
+        writes nothing. A second run finds nothing to do."""
+        into = self._namespace(into)
+        if not self.backend.supports_transactions:
+            raise ValueError("this storage backend cannot keep the move together "
+                             "(no transactions)")
+        state = self._unscoped_state(into)
+        if dry_run:
+            report = self.backend.adopt_unscoped(into, dry_run=True)
+        else:
+            with self.backend.transaction():
+                report = self.backend.adopt_unscoped(into)
+                for source, target, value, kept in state:
+                    if kept is None:
+                        self.backend.set_meta(target, value)
+                    self.backend.set_meta(source, "")  # carried, or dropped for theirs
+        kept_ids = report.pop("kept_ids", [])
+        report["state_carried"] = sorted(s[1] for s in state if s[3] is None)
+        report["state_kept"] = sorted(s[1] for s in state if s[3] is not None)
+        if kept_ids and not dry_run:
+            self._names_changed(kept_ids)  # merged names: property vectors after
+        return report
+
+    def _unscoped_state(self, into: str) -> list[tuple[str, str, str, str | None]]:
+        """The upkeep state kept for no namespace (None and "" share its
+        keys) that has a value: (its key, the key of ``into``, its value,
+        the value ``into`` has, None when it has none)."""
+        keys = [key for key in self.backend.meta_items("upkeep:") if key.endswith(":")]
+        keys += [_dedup_run_key(None), _consolidation_run_key(None)]
+        out = []
+        for key in keys:
+            value = self.backend.get_meta(key)
+            if not value:
+                continue
+            target = key + into
+            out.append((key, target, value, self.backend.get_meta(target) or None))
+        return out
 
     @staticmethod
     def _clear_enrichment_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -1583,6 +1673,9 @@ class MemoryStore:
         first_scope = active[0].scope()
         if any(memory.scope() != first_scope for memory in active[1:]):
             raise ValueError("cannot distill memories from different scopes together")
+        # a save queued before every write had a namespace: its facts get one
+        first_scope = first_scope.model_copy(
+            update={"user_id": self._namespace(first_scope.user_id)})
         if not self.llm.available:
             raise ValueError("no LLM configured; distillation needs one")
 

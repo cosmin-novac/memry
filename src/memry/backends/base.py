@@ -750,6 +750,14 @@ class MemoryBackend(ABC):
     def get_meta(self, key: str) -> str | None:
         return None
 
+    def meta_items(self, prefix: str) -> dict[str, str]:
+        """The meta keys starting with ``prefix``, with their values."""
+        return {}
+
+    def adopt_unscoped(self, into: str, *, dry_run: bool = False) -> dict[str, Any]:
+        """Move every row without a namespace into ``into`` (LocalBackend)."""
+        raise NotImplementedError("this backend cannot move rows between namespaces")
+
     def set_meta(self, key: str, value: str) -> None:
         return None
 

@@ -418,6 +418,12 @@ _BACKUP_TABLE_KEYS: dict[str, tuple[str, ...]] = {
     "relations": ("id",),
 }
 _BACKUP_ORDER = tuple(_BACKUP_TABLE_KEYS)
+#: The tables whose rows carry a namespace, but for the legacy tag index
+#: (``topics``), which ``adopt_unscoped`` moves apart.
+_NAMESPACED_TABLES = (
+    "episodes", "memories", "entities", "entity_proposals", "relations",
+    "retired_entities", "entity_merges",
+)
 _BACKUP_USER_TABLES = {
     "episodes", "memories", "topics", "entities", "entity_proposals", "relations",
 }
@@ -2714,6 +2720,119 @@ class LocalBackend(MemoryBackend):
                 "SELECT DISTINCT user_id FROM memories"
             ).fetchall()
         return [r["user_id"] for r in rows]
+
+    def adopt_unscoped(self, into: str, *, dry_run: bool = False) -> dict[str, Any]:
+        """Move every row without a namespace (None, or "") into ``into``, in
+        one transaction (``transaction``; a caller's joins it).
+
+        A tag of the same name in ``into`` takes the unscoped tag's memories
+        (folded as tags merge, ``_merge_entities_locked``): one active tag
+        per namespace and name is an index, so it could not be moved beside
+        it. Unscoped tags of one name, some None and some "", become one the
+        same way. A named thing of ``into`` with the same name and type as
+        an unscoped one, and the only one, takes it after the move, merged
+        as a person's merge is (recorded, undone under Archive > Merged
+        names); any other name both have is left to the identity passes. A
+        row of the legacy tag index whose name ``into`` holds gives its links
+        to that row and goes, as a tag merge does it (``retag_topics``).
+        Every memory moved has its tags filed again. Nothing else is
+        removed. ``dry_run`` counts and writes nothing; once nothing is
+        unscoped, a run changes nothing."""
+        if not into:
+            raise ValueError("adopting the unscoped rows needs a namespace to adopt them into")
+        unscoped = "(user_id IS NULL OR user_id = '')"
+        with self._lock:
+            tables = {table: self._db.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {unscoped}").fetchone()[0]
+                for table in (*_NAMESPACED_TABLES, "topics")}
+            tags = {row["normalized"]: row["id"] for row in self._db.execute(
+                "SELECT id, normalized FROM entities WHERE entity_type = ? "
+                "AND merged_into IS NULL AND user_id = ?", (TOPIC_TYPE, into)).fetchall()}
+            tag_folds: list[tuple[str, str, str]] = []
+            for row in self._db.execute(
+                    "SELECT id, name, normalized FROM entities WHERE entity_type = ? "
+                    f"AND merged_into IS NULL AND {unscoped} ORDER BY created_at, id",
+                    (TOPIC_TYPE,)).fetchall():
+                if row["normalized"] in tags:
+                    tag_folds.append((tags[row["normalized"]], row["id"], row["name"]))
+                else:
+                    tags[row["normalized"]] = row["id"]  # it moves in as the tag
+            named: dict[tuple[str, str | None], list[str]] = {}
+            for row in self._db.execute(
+                    "SELECT id, normalized, entity_type FROM entities "
+                    f"WHERE {_kind_clause('named')} AND merged_into IS NULL AND user_id = ?",
+                    (into,)).fetchall():
+                named.setdefault((row["normalized"], row["entity_type"]), []).append(row["id"])
+            names_into = {normalized for normalized, _ in named}
+            entity_folds: list[tuple[str, str, str, str]] = []
+            left: list[str] = []
+            for row in self._db.execute(
+                    "SELECT id, name, normalized, entity_type FROM entities "
+                    f"WHERE {_kind_clause('named')} AND merged_into IS NULL AND {unscoped} "
+                    "ORDER BY created_at, id").fetchall():
+                twins = named.get((row["normalized"], row["entity_type"]), [])
+                if row["entity_type"] and len(twins) == 1:
+                    entity_folds.append((twins[0], row["id"], row["name"], row["entity_type"]))
+                elif row["normalized"] in names_into:
+                    left.append(row["name"])
+            legacy = self._db.execute(
+                f"SELECT id, normalized, agent_id, run_id FROM topics WHERE {unscoped} "
+                "ORDER BY created_at, id").fetchall()
+            report: dict[str, Any] = {
+                "into": into, "dry_run": dry_run, "tables": tables,
+                "tags_folded": [name for _, _, name in tag_folds],
+                "things_folded": [f"{name} ({kind})" for _, _, name, kind in entity_folds],
+                "things_left_for_review": left,
+                "kept_ids": sorted({keep for keep, _, _, _ in entity_folds}),
+            }
+            if dry_run:
+                report["legacy_tags_folded"] = len(legacy) - len(
+                    {(r["agent_id"], r["run_id"], r["normalized"]) for r in legacy} - {
+                        (r["agent_id"], r["run_id"], r["normalized"]) for r in
+                        self._db.execute("SELECT agent_id, run_id, normalized FROM topics "
+                                         "WHERE user_id = ?", (into,)).fetchall()})
+                return report
+            with self.transaction():
+                for keep, merge, _ in tag_folds:
+                    self._merge_entities_locked(keep, merge)
+                folded = 0
+                for row in legacy:
+                    twin = self._db.execute(
+                        "SELECT id FROM topics WHERE user_id = ? AND agent_id IS ? "
+                        "AND run_id IS ? AND normalized = ?",
+                        (into, row["agent_id"], row["run_id"], row["normalized"])).fetchone()
+                    if twin is None:
+                        self._db.execute("UPDATE topics SET user_id = ? WHERE id = ?",
+                                         (into, row["id"]))
+                        continue
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO memory_topics (memory_id, topic_id) "
+                        "SELECT memory_id, ? FROM memory_topics WHERE topic_id = ?",
+                        (twin["id"], row["id"]))
+                    self._db.execute("DELETE FROM memory_topics WHERE topic_id = ?", (row["id"],))
+                    self._db.execute("DELETE FROM topics WHERE id = ?", (row["id"],))
+                    folded += 1
+                report["legacy_tags_folded"] = folded
+                moved = [row["id"] for row in self._db.execute(
+                    f"SELECT id FROM memories WHERE {unscoped}").fetchall()]
+                for table in _NAMESPACED_TABLES:
+                    self._db.execute(f"UPDATE {table} SET user_id = ? WHERE {unscoped}", (into,))
+                for keep, merge, _, _ in entity_folds:
+                    self._merge_entities_locked(keep, merge)
+                cache: dict[Any, Any] = {}
+                for start in range(0, len(moved), 500):
+                    chunk = moved[start:start + 500]
+                    self._refile_locked(
+                        f"id IN ({','.join('?' * len(chunk))})", tuple(chunk), cache=cache)
+        return report
+
+    def meta_items(self, prefix: str) -> dict[str, str]:
+        """The meta keys starting with ``prefix``, with their values."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT key, value FROM meta WHERE substr(key, 1, ?) = ?",
+                (len(prefix), prefix)).fetchall()
+        return {row["key"]: row["value"] for row in rows}
 
     def get_meta(self, key: str) -> str | None:
         with self._lock:

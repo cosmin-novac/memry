@@ -140,8 +140,9 @@ The product and dashboard call deterministic classification labels such as `live
 or `2026 taxes` **tags**. The existing Python/REST field remains `categories`, and the memory's
 JSON `categories` list stays the record every filter, backup and export reads. Each tag is also
 an entity of type `topic` (one active one per namespace and normalized tag, held by a
-partial unique index, created on first use; the namespace is `user_id` exactly, so `""` is
-a user of its own, apart from the memories without one) and each tagged memory mentions
+partial unique index, created on first use; the namespace is `user_id` exactly, so in an
+older store `""` is a user of its own, apart from the memories without one; a write gives
+both the default namespace now) and each tagged memory mentions
 it, so tags, people, products and projects are one kind of thing with one merge machinery:
 a tag merge is an entity merge plus a rewrite of the `categories` column.
 
@@ -616,9 +617,9 @@ provider cost bounded.
 The one-time and repair commands run from the CLI on one user or every user:
 `repair-dates` (each memory's `updated_at` from its audit trail), `restore-context` (the
 context label from the episodes), `backfill-relations`, `backfill-entity-types`,
-`backfill-property-vectors`, `tags-to-things` and `split-memories`. All but
-`backfill-property-vectors` and `tags-to-things` also have a REST route under
-`/api/v1`. `restore-context`, `tags-to-things` and `split-memories` take `--dry-run`
+`backfill-property-vectors`, `tags-to-things`, `split-memories` and `adopt-unscoped`.
+All but `backfill-property-vectors`, `tags-to-things` and `adopt-unscoped` also have a REST
+route under `/api/v1`. `restore-context`, `tags-to-things` and `split-memories` take `--dry-run`
 (`{"dry_run": true}`) to see first what they would do.
 
 `split-memories` (`POST /api/v1/memories/split`, `intelligence/split.py`,
@@ -677,6 +678,18 @@ them before a merge was kept to one fact (section 4, MORE):
   a namespace as one of them (`Scope.exact_user`), not as all memories at once: those are
   never upkept, deduplicated or consolidated together with anyone else's. The Mem0 adapter
   cannot ask for "no user" and refuses such a scope.
+- Every write has a namespace: `MemoryStore._namespace` gives a write without a user
+  (None or `""`) `config.default_user_id`, in `add`, `add_deferred`, `import_verbatim`,
+  `import_backup` and the distillation of a save queued before. Reads keep no user as every
+  namespace. `adopt-unscoped` (`MemoryStore.adopt_unscoped`, `LocalBackend.adopt_unscoped`)
+  moves an older store's rows without one into a namespace in one transaction: a tag of
+  the same name there takes the moved tag (folded as tags merge, since one active tag per
+  namespace and name is an index), the only same-named thing of the same type takes the
+  moved one by a recorded merge after the move, a legacy `topics` row the target holds
+  gives it its links, the moved memories' tags are filed again, and the upkeep state kept
+  under the empty key goes to the target where it has none. `--dry-run` counts and writes
+  nothing; a second run changes nothing. The upkeep keys of None and `""` stay one key, so
+  an older store's state is not orphaned before the move.
 - The dashboard shows no split run, only a split made, under Archive with its undo. The
   response of `POST /api/v1/memories/split` counts the memories held back by reason:
   `no_entity`, `lost_entity`, a fact without its subject, a lossy split, and, for a plan,

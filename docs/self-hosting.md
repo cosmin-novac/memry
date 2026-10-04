@@ -399,6 +399,29 @@ Undo a split under Archive (the memory comes back and its facts are forgotten), 
 `POST /api/v1/memories/split` with `{"user_id": ..., "dry_run": true, "min_words": ...}`.
 It costs one text-model call for each memory asked, and one more for each memory split.
 
+Every memory has a namespace. A write that names no user (the CLI's `memry add` without
+`-u`, a library call, a backup row without one) goes to the default namespace
+(`MEMRY_DEFAULT_USER`, `default`), as the REST and MCP servers always did. A read without a
+user still means every namespace. A store from before this may hold memories without a
+namespace; `memry adopt-unscoped [--into NAMESPACE] [--dry-run]` moves them, with their
+turns, entities, relations and upkeep state, into one (the default namespace unless
+`--into` names another), in one transaction:
+
+```bash
+memry adopt-unscoped --dry-run   # counts per table, the tags and names that would fold
+memry adopt-unscoped             # the move; a second run finds nothing to do
+```
+
+- A tag the target already has takes the memories of the moved one.
+- A person or thing the target has under the same name and type, and only one, takes the
+  moved one as a merge you can undo under Archive > Merged names. Any other name both have
+  is left for the usual identity passes, and the report lists it.
+- Upkeep state (when each pass ran, the queues, the owner's name) goes with the memories
+  where the target has none of its own; where it has, its own is kept. The report lists
+  both.
+- Nothing is deleted. A backup with rows without a namespace restores into the default
+  namespace; into the store it came from, run `adopt-unscoped` first.
+
 Tags are entities of type `topic`. A database or backup from before that change keeps its
 tags in the `categories` column and the legacy `topics`/`memory_topics` tables, which every
 filter still reads. The first open of such a database gives each tag its topic entity and
@@ -512,7 +535,7 @@ the same scoring on your own store.
 | Field | Meaning |
 |---|---|
 | `content` or `messages` | The text to save, or a list of `{"role": ..., "content": ...}` messages, one turn each. A `role` other than `user`, `assistant`, `system`, `developer`, `tool` or `function` is the speaker's name (`{"role": "Ada", "content": "I got the job"}`), and so is a `name` field. Memry shows each turn with that name as its speaker. Anything other than a text or a list of objects gets a `400`. |
-| `user_id`, `agent_id`, `run_id` | The namespace, agent and run the memories belong to. Without `user_id`, Memry uses `MEMRY_DEFAULT_USER_ID`. |
+| `user_id`, `agent_id`, `run_id` | The namespace, agent and run the memories belong to. Without `user_id`, Memry uses `MEMRY_DEFAULT_USER` (`default`). |
 | `infer` | With `true` (the default), Memry extracts facts and reconciles them with what the store has. With `false`, Memry keeps the text as one memory. |
 | `defer` | With `infer` and `defer` both `true`, Memry stores what was said at once, replies `202` and extracts the facts in the background after two minutes of quiet. A `messages` list keeps one turn per message with its speaker, as without `defer`, and extraction reads it the same way. Until then it is searchable as one memory with a `Speaker: text` line per message. |
 | `said_at` | The day the content was said, as `YYYY-MM-DD` or an ISO date and time (read in UTC). Leave it out for what is said now. |
