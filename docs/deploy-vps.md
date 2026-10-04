@@ -131,8 +131,32 @@ The `memry_memry-data` volume contains two durable SQLite files when accounts ar
 - `memry.db` - knowledge, search indexes, provenance, relations, and history;
 - `auth.db` - accounts, password hashes, sessions, OAuth clients, and tokens.
 
-A complete server backup must capture both files from the same point in time. Prefer a
-snapshot of the whole `memry_memry-data` volume. If your provider cannot snapshot Docker
+The server keeps a nightly copy of both files in `/var/backups/memry` on the host, outside
+the Docker volume: the compose file mounts that directory at `/backups` and sets
+`MEMRY_SNAPSHOT_DIR=/backups`, and the installer creates it root-only (0700). Memry checks
+each copy before it replaces the one before, so a failed night keeps the previous copy.
+About > This server in the dashboard shows the last good copy and any failure. After a
+deploy, check the first one:
+
+```bash
+ls -l /var/backups/memry        # memry.db, auth.db, snapshot.json
+docker compose --env-file /opt/memry/.env \
+  -f /opt/memry/app/deploy/vps/docker-compose.yml \
+  exec memry memry snapshot --check
+```
+
+The first copy appears about 90 seconds after the container starts, and then every night at
+03:30 on the container's clock (UTC unless you set `MEMRY_TZ`). Set `MEMRY_SNAPSHOT_AT` in
+`.env` for another time, and `MEMRY_SNAPSHOT_DIR=` (empty) to turn it off. The restore steps
+are in [self-hosting.md](self-hosting.md#restoring-the-database-from-the-snapshot).
+
+That copy is on the same disk as the database. It covers a damaged file, a bad migration or
+a mistaken delete, and does not cover losing the disk. For that, turn on the optional
+offsite copy to Cloudflare R2 or another S3-compatible bucket
+([self-hosting.md](self-hosting.md#offsite-copy-in-an-s3-compatible-bucket-optional-off-by-default)),
+or take provider snapshots of the whole server.
+
+For a copy at a moment you choose, take a snapshot of the whole `memry_memry-data` volume. If your provider cannot snapshot Docker
 volumes, stop the Memry service, copy both database files (and any `-wal`/`-shm` files),
 then start it again. Do not treat a live copy of only `memry.db` as a full backup.
 
@@ -151,8 +175,8 @@ A nightly knowledge export can use:
 0 3 * * * docker compose --env-file /opt/memry/.env -f /opt/memry/app/deploy/vps/docker-compose.yml exec -T memry memry export > /root/memry-knowledge-$(date +\%F).json
 ```
 
-Schedule the coordinated volume snapshot separately; the cron line above is not a complete
-account-enabled server backup.
+The cron line above is not a complete account-enabled server backup; the nightly snapshot
+is.
 
 ## Uninstall
 

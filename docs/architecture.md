@@ -1013,6 +1013,22 @@ The cost is operational: a complete server backup must include both `memry.db` a
 the same Docker data volume, so one coordinated directory or volume snapshot captures
 both. `memry export` is a lossless knowledge backup only; it does not contain login data.
 
+### The nightly snapshot
+
+`memry.snapshot` keeps one copy of both files in `MEMRY_SNAPSHOT_DIR`, a directory Memry
+writes nothing else to. The server's lifespan runs it once a day as its own asyncio task,
+with the copy in a thread. Each file is copied with SQLite's online backup API from a
+separate connection, a few pages per step, so the copy never holds the backend lock and the
+server keeps writing. The copy is written to a temporary file, flushed, and checked with
+`PRAGMA integrity_check` and a read of the counts before `os.replace` puts it in place and
+`snapshot.json` records sizes, sha256 and counts. A failed run keeps the previous copy and
+manifest and writes `snapshot-failure.json`. `memry.offsite` can upload each good snapshot
+to an S3-compatible bucket (temporary key, size and sha256 read back, server-side copy to the
+final key), signing with SigV4 over httpx; it is off unless configured, and memry.tech runs
+local-only for now. `memry.about` serves the About panel (`GET /api/v1/about`): backups,
+file sizes, the median and p95 of the last 200 response times, and the host, for
+administrators only.
+
 ## 7. Technologies used
 
 This inventory lists technologies actually imported, executed, or shipped by the
@@ -1104,7 +1120,8 @@ up as a red run within a week instead of in a user's terminal.
 
 - One Memry process owns a production database. Multiple write replicas are unsupported.
 - Complete backups must capture `memry.db` and `auth.db` together; ANN sidecars may be discarded and
-  rebuilt.
+  rebuilt. The nightly snapshot keeps one local copy; on a one-disk server it does not survive
+  losing that disk unless the offsite copy is on.
 - The Mem0 adapter is comparison/import-only and is not a supported runtime persistence path.
 - There is no external IdP/SSO integration, per-key rate limiter, external queue
   service, separate vector database, or distributed cache.

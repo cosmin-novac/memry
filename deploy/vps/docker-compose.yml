@@ -29,8 +29,26 @@ services:
       # Set to your public https URL to turn on OAuth for accounts (see
       # docs/self-hosting.md#accounts-and-oauth). Unset = OAuth off.
       MEMRY_PUBLIC_URL: ${MEMRY_PUBLIC_URL:-}
+      # Nightly verified copy of memry.db and auth.db (docs/self-hosting.md#nightly-snapshot),
+      # written to /backups: the host directory mounted below, outside the Docker
+      # data volume. MEMRY_SNAPSHOT_DIR= (empty) in .env turns it off.
+      MEMRY_SNAPSHOT_DIR: ${MEMRY_SNAPSHOT_DIR-/backups}
+      MEMRY_SNAPSHOT_AT: ${MEMRY_SNAPSHOT_AT:-03:30}
+      MEMRY_SNAPSHOT_HOST_DIR: ${MEMRY_SNAPSHOT_HOST_DIR:-/var/backups/memry}
+      # The clock MEMRY_SNAPSHOT_AT is read on. Empty is UTC.
+      TZ: ${MEMRY_TZ:-}
+      # Optional offsite copy to an S3-compatible bucket (Cloudflare R2, Backblaze
+      # B2, Contabo Object Storage). Off unless URL and bucket are set.
+      MEMRY_SNAPSHOT_OFFSITE_URL: ${MEMRY_SNAPSHOT_OFFSITE_URL:-}
+      MEMRY_SNAPSHOT_OFFSITE_BUCKET: ${MEMRY_SNAPSHOT_OFFSITE_BUCKET:-}
+      MEMRY_SNAPSHOT_OFFSITE_KEY_ID: ${MEMRY_SNAPSHOT_OFFSITE_KEY_ID:-}
+      MEMRY_SNAPSHOT_OFFSITE_SECRET: ${MEMRY_SNAPSHOT_OFFSITE_SECRET:-}
+      MEMRY_SNAPSHOT_OFFSITE_REGION: ${MEMRY_SNAPSHOT_OFFSITE_REGION:-}
+      MEMRY_SNAPSHOT_OFFSITE_PREFIX: ${MEMRY_SNAPSHOT_OFFSITE_PREFIX:-}
     volumes:
       - memry-data:/data
+      # the nightly snapshot; deploy/install.sh creates it root-only (0700)
+      - ${MEMRY_SNAPSHOT_HOST_DIR:-/var/backups/memry}:/backups
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health')"]
       interval: 15s
