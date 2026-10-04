@@ -34,8 +34,10 @@ class _Judge(NoneDecider):
     calibrated = True
     reconcile_bars = {"SAME": 0.85, "MORE": 0.8, "CHANGED": 0.5, "WRONG": 0.5}
 
-    def __init__(self, action: str, confidence: float, standing: dict | None) -> None:
+    def __init__(self, action: str, confidence: float, standing: dict | None,
+                 probabilities: dict | None = None) -> None:
         self.action, self.confidence, self.standing = action, confidence, standing
+        self.probabilities = probabilities
         self.asked_standing: list[bool] = []
 
     def decide(self, state, questions):
@@ -43,8 +45,9 @@ class _Judge(NoneDecider):
             return Answers({})
         self.asked_standing.append("standing" in questions)
         rest = (1 - self.confidence) / 4
-        probabilities = {a: (self.confidence if a == self.action else rest)
-                         for a in ("NEW", "SAME", "MORE", "CHANGED", "WRONG")}
+        probabilities = self.probabilities or {
+            a: (self.confidence if a == self.action else rest)
+            for a in ("NEW", "SAME", "MORE", "CHANGED", "WRONG")}
         answers = {"action": Answer(self.action, probabilities, self.confidence, True)}
         if "standing" in questions and self.standing:
             best = max(self.standing, key=self.standing.get)
@@ -158,6 +161,58 @@ def test_what_an_important_memory_meets(new, old, importance, answer, outcome):
     store.close()
 
 
+def _p(changed, wrong, more, new=0.0, same=0.0):
+    rest = round(1 - changed - wrong - more - new - same, 4)
+    return {"CHANGED": changed, "WRONG": wrong, "MORE": more, "NEW": new + rest, "SAME": same}
+
+
+def _reading(state):
+    return {"state": state, "still": (1 - state) / 2, "stable": (1 - state) / 2}
+
+
+#: Jev's answers to the 7 questions of the live queue on 4 October 2026 (the
+#: top answer and its confidence, and P(state), as it gave them), each with
+#: the rest of the distribution reconstructed where it gave only the top: a
+#: low CHANGED to a listing deleted or a task stopped had most of the rest on
+#: WRONG. On the top answer alone items 1, 3, 4 and 6 stayed in the queue.
+LIVE = [
+    ("CHANGED", 0.37, _reading(0.97), _p(0.37, 0.50, 0.08, 0.03), "update"),
+    ("CHANGED", 0.95, _reading(1.00), _p(0.95, 0.03, 0.01), "update"),
+    ("CHANGED", 0.65, _reading(0.97), _p(0.65, 0.25, 0.06, 0.03), "update"),
+    ("CHANGED", 0.35, _reading(0.98), _p(0.35, 0.52, 0.09, 0.02), "update"),
+    ("WRONG", 0.90, _reading(0.62), _p(0.06, 0.90, 0.02), "update"),
+    ("WRONG", 0.72, _reading(0.96), _p(0.15, 0.72, 0.08, 0.03), "update"),
+    ("MORE", 0.20, _reading(0.30), _p(0.20, 0.20, 0.20, 0.20, 0.20), "both"),
+]
+
+
+@pytest.mark.parametrize("i", range(len(LIVE)), ids=[f"live-{i + 1}" for i in range(len(LIVE))])
+def test_the_live_answers_settle_on_whether_the_state_still_holds(i):
+    """A state is replaced when P(it no longer holds), CHANGED and WRONG
+    together, reaches 0.8, whatever the top answer was."""
+    new, old, importance = QUEUE[i][:3]
+    action, confidence, standing, probabilities, outcome = LIVE[i]
+    store, llm = _store(_Judge(action, confidence, standing, probabilities))
+    old_memory, new_memory = _saved(store, llm, old, importance, new)
+    queue = store._upkeep_get("conflict:pending", "ada", [])
+    assert queue == []
+    if outcome == "update":
+        assert old_memory.superseded_by == new_memory.id
+        [event] = [e for e in store.backend.history(old_memory.id) if e.event == "SUPERSEDE"]
+        assert event.kind == "update" and "no longer holds" in event.reason
+    else:
+        assert old_memory.invalid_at is None and new_memory.invalid_at is None
+    store.close()
+
+
+def test_a_state_still_asks_when_changed_and_wrong_together_stay_under_the_bar():
+    store, llm = _store(_Judge("CHANGED", 0.45, _reading(0.97), _p(0.45, 0.25, 0.22, 0.05)))
+    old, new = _saved(store, llm, QUEUE[0][1], 0.9, QUEUE[0][0])
+    assert old.invalid_at is None
+    assert [q["with"] for q in store._upkeep_get("conflict:pending", "ada", [])] == [old.id]
+    store.close()
+
+
 def test_a_memory_nothing_protects_asks_nothing_more():
     """The question of what the memory is costs tokens: it is asked only
     where one of the memories compared is protected."""
@@ -200,6 +255,7 @@ def test_the_queue_is_decided_again_on_a_dry_run_then_applied():
     store.decider.decide = answering
     rows = {row["id"]: row for u in ("ada", "bea") for row in store.redecide_conflicts(user_id=u)}
     assert (rows[new.id]["before"], rows[new.id]["now"]) == ("ask", "replace")
+    assert rows[new.id]["answer"]["no_longer_holds"] == pytest.approx(0.895)
     assert (rows[other_new.id]["before"], rows[other_new.id]["now"]) == ("ask", "both")
     assert not any(row["applied"] for row in rows.values())
     assert [len(store._upkeep_get("conflict:pending", u, [])) for u in ("ada", "bea")] == [1, 1]
