@@ -77,10 +77,13 @@ was said, and the decision model gives one of five answers:
 - **WRONG**: the old memory was never true (a correction). Memry retires it.
 
 A memory kept as history is still found by search, shown with the day it was
-said and `[until <date>]`, the day it stopped holding. When the old memory is
-rated important or was said in two or more saves, or the decision model is
-unsure of a CHANGED or a WRONG, Memry keeps both memories in use and lists the
-pair under Upkeep for you to decide. Section 4 of
+said and `[until <date>]`, the day it stopped holding. When the decision model
+is unsure of a CHANGED or a WRONG, Memry keeps both memories in use and lists the
+pair under Upkeep for you to decide. So it does when the old memory is rated
+important or was said in two or more saves, unless the decision model reads it as
+a state that has since moved on (a listing deleted, a task stopped), which it
+then replaces as history, or as still true beside the new fact, which it keeps
+without asking. Section 4 of
 [architecture.md](architecture.md) has the details.
 
 `infer=false` skips extraction and reconciliation entirely and stores the text

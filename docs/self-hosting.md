@@ -263,12 +263,28 @@ for comparison.
 **When a contradiction may replace a memory.** Replacing is the one reconcile action that
 takes a fact out of use, and it rests on one model reading one text. So it only happens
 on its own when the memory it would replace is rated below 0.8 in importance, was stated
-in a single save, and, with a typed decision provider, the judgement is at least 0.9
-sure. Otherwise both memories stay in use and the pair waits under **Upkeep >
-Contradictions**, where you say which is right or that both are. A replacement that did
+in a single save, and, with a typed decision provider, the judgement reaches its bar.
+A memory rated important or stated in several saves is still replaced without asking when
+the decision provider reads it, in the same call, as a changeable state that has since
+moved on (a listing deleted, a task stopped, a document uploaded) and is at least 0.8
+sure: importance says how much a fact matters, not how risky replacing it is, and the old
+memory stays as history. Read as still true beside the new fact, both are kept and nobody
+is asked. A lasting fact or a standing rule (health, identity, a relationship, "never do
+X"), an unsure reading, and any answer of the text model alone still wait under **Upkeep
+> Contradictions**, where you say which is right or that both are. A replacement that did
 go ahead is listed under **Upkeep > Archive > Replaced by a newer memory** and can be
-undone there. The three thresholds are `MEMRY_SUPERSEDE_PROTECT_IMPORTANCE`,
-`MEMRY_SUPERSEDE_PROTECT_SOURCES` and `MEMRY_SUPERSEDE_CONFIDENCE`.
+undone there. The thresholds are `MEMRY_SUPERSEDE_PROTECT_IMPORTANCE`,
+`MEMRY_SUPERSEDE_PROTECT_SOURCES`, `MEMRY_SUPERSEDE_CONFIDENCE` and
+`MEMRY_SUPERSEDE_STATE_CONFIDENCE` (0.8).
+
+Questions already waiting can be asked again under the new rule:
+
+```bash
+memry reconcile-queue           # per question: the judge's answer, the old and the new decision
+memry reconcile-queue --apply   # act on the new decisions; undo a replacement under Archive
+```
+
+It costs one decision-provider call per question and writes nothing without `--apply`.
 
 **Re-ranking** has the decision provider judge the first 20 of a search in one call and
 orders the results by that judgement. When it first asked whether a memory "helps answer

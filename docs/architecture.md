@@ -645,7 +645,24 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    memory is rated important or was stated in two or more separate saves: the saves behind
    its evidence (the episodes it was made from and those of each save that said it again),
    a save being its run and its time, which every message of one save shares. A fact from
-   one save counts once however many of its messages it rests on. An exact duplicate (normalized text) is SAME
+   one save counts once however many of its messages it rests on. Importance says how much
+   a fact matters, not how risky replacing it is, so where such a protected memory is among
+   those compared, the decision provider is also asked, in the same call, what it is
+   (`STANDING_QUESTION`, about 92 words, asked only then): still true beside the new fact,
+   a changeable state or status as it stood when said (a listing active, a task running, a
+   document present or missing, a plan in progress), or a lasting fact or standing rule
+   (health, identity, origin, a relationship, "never do X"). Read as a state at 0.6 or more
+   (`STANDING_BAR`), with the answer at 0.8 or more (`supersede.state_confidence`, or its
+   own bar where higher), the change replaces the memory without asking, as an update kept
+   as history even where the judge said WRONG; read as still true, both stay in use and
+   nobody is asked; a lasting fact, a standing rule, an unsure reading and the text model's
+   answers (no probabilities) wait under Upkeep as before. A partial change ("the task
+   stopped", of a memory that also listed its criteria) replaces the whole memory: what
+   stays true is still read in its history, and a memory that holds one fact
+   (`split_memories`) does not mix the two. `memry reconcile-queue [--user U] [--apply]`
+   asks the decision provider again about each question waiting under Upkeep and prints
+   what the old rule and this one decide, writing nothing without `--apply`; with it a
+   replacement is made by Memry with its reason and undone under Archive. An exact duplicate (normalized text) is SAME
    with no model asked, unless it is an event (either memory episodic, or with an occurrence
    time) said on another day, which the judge decides. Each SUPERSEDE event records its `kind`
    (contradiction, update, consolidation, distillation or split), which the Archive and

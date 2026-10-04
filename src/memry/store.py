@@ -122,7 +122,13 @@ from .intelligence.extraction import (
 from .intelligence.reconcile import (
     CONFLICT_KEY,
     UPDATE_SUPERSEDE_REASON,
+    _decide_action,
+    bar_for,
+    held_back,
     reconcile_candidate,
+    reconcile_state,
+    replacement_verdict,
+    saves_of,
 )
 from .intelligence.structure import (
     ANCHOR_TYPES,
@@ -3252,7 +3258,13 @@ class MemoryStore:
     def _decide_conflict(
         self, item_id: str, decision: str, *,
         user_id: str | None, owner_prefix: str | None,
+        actor: str = "user", why: str | None = None, update: bool | None = None,
     ) -> bool:
+        """Settle one queued contradiction: "accept" (the new one replaces the
+        old), "decline" (the new one is wrong) or "other" (both are true).
+        ``actor``, ``why`` and ``update`` are for a decision Memry makes itself
+        (``redecide_conflicts``): who decided, the reason recorded, and
+        whether a replacement is an update (kept as history)."""
         found = next(
             (row for row in self._open_conflicts(user_id) if row[0]["id"] == item_id),
             None,
@@ -3266,14 +3278,15 @@ class MemoryStore:
         # a confirmed replacement is an update's, which keeps the old one as
         # history and which the Archive's undo reverses keeping both
         # (``undo_replacement``)
-        update = _conflict_mark(new).get("kind") == "update"
+        if update is None:
+            update = _conflict_mark(new).get("kind") == "update"
         if decision == "accept":  # the new one is right
             self.backend.invalidate_memory(old.id, superseded_by=new.id)
             self.backend.add_event(MemoryEvent(
                 memory_id=old.id, event="SUPERSEDE", old_content=old.content,
-                new_content=new.content, actor="user",
-                reason=(f"you confirmed that memory {new.id} updates it" if update
-                        else f"you confirmed that memory {new.id} replaces it"),
+                new_content=new.content, actor=actor,
+                reason=why or (f"you confirmed that memory {new.id} updates it" if update
+                               else f"you confirmed that memory {new.id} replaces it"),
                 kind="update" if update else "contradiction",
             ))
         elif decision == "decline":  # the old one is right
@@ -3287,8 +3300,8 @@ class MemoryStore:
         else:  # both are true
             self.backend.add_event(MemoryEvent(
                 memory_id=new.id, event="NONE", new_content=new.content,
-                actor="user",
-                reason=f"you kept it beside memory {old.id}: both are true",
+                actor=actor,
+                reason=why or f"you kept it beside memory {old.id}: both are true",
             ))
         self._clear_conflict_mark(new)
         self._upkeep_set(
@@ -3297,6 +3310,61 @@ class MemoryStore:
              if e["id"] != item_id],
         )
         return True
+
+    def redecide_conflicts(
+        self, *, user_id: str | None = None, apply: bool = False
+    ) -> list[dict[str, Any]]:
+        """Ask the decision provider again about each queued contradiction
+        and say, per item, what the rule it was held under decides
+        (``reconcile.held_back``: importance holds it) and what the rule of
+        now decides (``reconcile.replacement_verdict``: a protected state that
+        moved on is replaced at a raised bar, a memory still true is kept
+        beside, a lasting fact or rule still asks). One provider call per
+        item; nothing is written unless ``apply``. With ``apply`` a "replace"
+        or "update" supersedes the old memory as a person's yes would, by
+        Memry and with the reason, listed under Archive and undone there; a
+        "both" keeps both and clears the question; an "ask" stays."""
+        cfg = self.config.supersede
+        out: list[dict[str, Any]] = []
+        for entry, new, old in self._open_conflicts(user_id):
+            row: dict[str, Any] = {
+                "id": new.id, "with": old.id, "new": new.content, "old": old.content,
+                "importance": old.importance, "queued": entry.get("reason")}
+            state = reconcile_state([old], new.content, new.created_at)
+            try:
+                judged = _decide_action(self.decider, state, 1, standing=True)
+            except Exception as exc:  # one item's outage leaves the others
+                judged = None
+                row["error"] = str(exc)
+            if judged is None:
+                row.update(answer=None, before="ask", now="ask",
+                           why="the decision provider gave no answer")
+                out.append(row)
+                continue
+            action = judged["action"]
+            saves = saves_of(self.backend, old)
+            bar = bar_for(self.decider, action, cfg)
+            row["answer"] = {"action": action, "confidence": judged.get("confidence"),
+                             "standing": judged.get("standing")}
+            if action in ("CHANGED", "WRONG"):
+                held = held_back(old, judged, cfg, bar=bar, saves=saves)
+                row["before"] = "ask" if held else "replace"
+                row["now"], row["why"] = replacement_verdict(
+                    action, judged, old, cfg, bar=bar, saves=saves)
+                if row["now"] == "replace" and action == "WRONG":
+                    row["now"] = "contradiction"
+            else:  # NEW, SAME or MORE: no conflict between the two
+                row["before"] = row["now"] = "both"
+                row["why"] = f"the judge answered {action}: no conflict"
+            row["applied"] = False
+            if apply and row["now"] != "ask":
+                why = f"Memry decided again ({row['answer']['action']}): {row['why']}"
+                row["applied"] = self._decide_conflict(
+                    new.id, "other" if row["now"] == "both" else "accept",
+                    user_id=user_id, owner_prefix=None, actor="system", why=why,
+                    update=row["now"] in ("replace", "update"))
+            out.append(row)
+        return out
 
     def replaced(
         self, *, user_id: str | None = None, limit: int = 200

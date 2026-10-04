@@ -48,7 +48,18 @@ or a MORE is stored as NEW; a doubtful CHANGED or WRONG keeps both memories
 in use, the new one marked as a conflict for a person to settle under Upkeep.
 CHANGED, WRONG and a MORE with no merged text also wait for a person where
 much is at stake (``held_back``): a memory rated important, or stated in
-several separate saves.
+several separate saves. Importance says how much a fact matters, not how risky
+replacing it is, and a memory superseded as an update loses nothing: it stays
+as history and the Archive undoes it. So where a protected memory is involved
+the decision provider is also asked what that memory is (``STANDING_QUESTION``,
+in the same call), and ``replacement_verdict`` decides: a changeable state the
+new fact reports has moved on (a listing active, a task running, a document
+present) is replaced at a raised bar, as an update even where the judge said
+WRONG; a memory read as still true beside the new fact is kept beside it,
+silently; a lasting fact or a standing rule (health, identity, a relationship,
+"never do X") still waits for a person, as does anything the judge is unsure
+of. The text model's answers carry no probabilities, so on that path the
+protections hold as before.
 
 The judge is the decision provider (``ACTION_QUESTION``), or, where it
 abstains, the text model (``RECONCILE_SYSTEM``), whose answers carry no
@@ -178,6 +189,30 @@ ACTION_QUESTION = Choice(
     },
 )
 
+#: Asked in the same call as ``ACTION_QUESTION`` when one of the memories is
+#: protected (``protection``): what the memory the new fact would replace is.
+#: Importance alone held every replacement of an important memory, ordinary
+#: dated changes of state too: of 7 questions a real store's Upkeep queue held
+#: on 4 October 2026, all held for importance 0.8-0.9, 6 were a listing,
+#: task or document whose state had moved on and one was no conflict at all.
+#: About 110 tokens, only on calls that involve a protected memory.
+STANDING_QUESTION = Choice(
+    instructions=("Take the existing memory the NEW fact changes, corrects or comes closest "
+                  "to. What is it, beside the NEW fact?"),
+    criteria={
+        "still": ("Still true: the NEW fact agrees with it, adds to it, or reports something "
+                  "that happened beside it."),
+        "state": ("A changeable state or status as it stood when it was said (active, "
+                  "running, present, missing, planned, in progress, a count or price then), "
+                  "which the NEW fact reports has since changed or was seen otherwise."),
+        "stable": ("A lasting fact (health, identity, origin, a trait, preference or "
+                   "relationship) or a standing rule, which the NEW fact goes against."),
+    },
+)
+#: P from which a standing answer is believed. Provisional: not measured yet;
+#: ``memry reconcile-queue`` shows the real judge's answers on a live queue.
+STANDING_BAR = 0.6
+
 TARGET_INSTRUCTIONS = ("Which existing memory does the NEW fact restate, add to, change or "
                        "correct? If it is new information, the most similar one.")
 
@@ -207,9 +242,10 @@ def reconcile_state(memories: list[Memory], new: str, new_said: str | None) -> s
 
 
 def _decide_action(
-    decider: Decider, state: str, count: int
+    decider: Decider, state: str, count: int, *, standing: bool = False,
 ) -> dict[str, Any] | None:
-    """Which answer, and about which memory, as two typed questions in one call.
+    """Which answer, and about which memory, as two typed questions in one call;
+    with ``standing``, also what that memory is (``STANDING_QUESTION``).
 
     Only the answer and the target come from here. Writing the merged text of
     a MORE is a writing task and stays with the text model, so this is a
@@ -224,6 +260,8 @@ def _decide_action(
             instructions=TARGET_INSTRUCTIONS,
             criteria={str(i): f"memory [{i}]" for i in range(count)},
         )
+    if standing:
+        questions["standing"] = STANDING_QUESTION
     answers = decider.decide(state, questions)
     action = answers["action"]
     if not action.available or action.value not in ACTIONS:
@@ -233,6 +271,7 @@ def _decide_action(
     else:
         chosen = answers["target"]
         target = int(chosen.value) if chosen.available else None
+    read = answers["standing"] if standing else None
     return {
         "action": action.value,
         "target": target,
@@ -240,6 +279,8 @@ def _decide_action(
         "reason": f"{decider.name}: {action.value} at {action.confidence:.2f}",
         "confidence": action.confidence,
         "probabilities": action.probabilities,
+        "standing": (dict(read.probabilities) if read is not None and read.available
+                     and read.probabilities else None),
     }
 
 
@@ -388,6 +429,64 @@ def saves_of(backend: MemoryBackend, memory: Memory) -> int:
     return len(saves) + sum(1 for i in ids if i not in found)
 
 
+def protection(target: Memory, cfg: SupersedeConfig, saves: int) -> str | None:
+    """Why a memory is protected from being replaced on one answer, or None:
+    rated important, or stated in several separate saves."""
+    if target.importance >= cfg.protect_importance:
+        return (
+            f"the memory it would replace is rated important "
+            f"({target.importance:.2f})"
+        )
+    if saves >= cfg.protect_sources:
+        return f"the memory it would replace was stated in {saves} separate saves"
+    return None
+
+
+def standing_of(decision: dict[str, Any]) -> str | None:
+    """What the judge read the memory as (``STANDING_QUESTION``): "still",
+    "state" or "stable" at ``STANDING_BAR`` or above, else None."""
+    read = decision.get("standing") or {}
+    if not read:
+        return None
+    best = max(read, key=read.get)
+    return best if float(read[best]) >= STANDING_BAR else None
+
+
+def replacement_verdict(
+    action: str, decision: dict[str, Any], target: Memory, cfg: SupersedeConfig,
+    *, bar: float | None, saves: int,
+) -> tuple[str, str]:
+    """What a CHANGED, WRONG or MORE without merged text does to ``target``,
+    and why: "replace" (as the answer's kind), "update" (a WRONG on a state
+    that moved on, replaced as an update, kept as history), "both" (no
+    conflict: both stay in use, nobody is asked) or "ask" (both stay, and a
+    person settles it under Upkeep; the why is ``held_back``'s).
+
+    A protected memory (``protection``) is replaced only when the judge read
+    it as a changeable state that moved on and its answer reaches the raised
+    bar (``cfg.state_confidence``, or the answer's own bar where higher). Read
+    as still true, it is kept beside the new fact. A lasting fact, a standing
+    rule, an unsure reading, or an answer with no reading (the text model's)
+    is held as before. Partial changes ("the task stopped", of a memory that
+    also gave its criteria) replace the whole memory: what stays true is
+    still read in its history, and a memory that holds one fact
+    (``split_memories``) does not mix the two."""
+    guarded = protection(target, cfg, saves)
+    if guarded and action in ("CHANGED", "WRONG"):
+        reading = standing_of(decision)
+        confidence = decision.get("confidence")
+        raised = max(cfg.state_confidence, bar if bar is not None else cfg.confidence)
+        if reading == "still":
+            return "both", f"the judge read memory {target.id} as still true beside it"
+        if (reading == "state" and isinstance(confidence, (int, float))
+                and confidence >= raised):
+            why = (f"a state that moved on ({confidence:.2f}, at or over {raised:.2f}), "
+                   f"replaced although {guarded}")
+            return ("update" if action == "WRONG" else "replace"), why
+    held = held_back(target, decision, cfg, bar=bar, saves=saves)
+    return ("ask", held) if held else ("replace", "")
+
+
 def held_back(
     target: Memory, decision: dict[str, Any], cfg: SupersedeConfig,
     *, bar: float | None = None, saves: int | None = None,
@@ -402,14 +501,10 @@ def held_back(
     does a typed judgement under its ``bar`` (``cfg.confidence`` when not
     given) act on its own.
     """
-    if target.importance >= cfg.protect_importance:
-        return (
-            f"the memory it would replace is rated important "
-            f"({target.importance:.2f})"
-        )
-    sources = saves if saves is not None else len(target.source_episode_ids or [])
-    if sources >= cfg.protect_sources:
-        return f"the memory it would replace was stated in {sources} separate saves"
+    guarded = protection(target, cfg, saves if saves is not None
+                         else len(target.source_episode_ids or []))
+    if guarded:
+        return guarded
     confidence = decision.get("confidence")
     limit = cfg.confidence if bar is None else bar
     if isinstance(confidence, (int, float)) and confidence < limit:
@@ -440,12 +535,13 @@ def another_occurrence(memory: Memory, candidate: CandidateFact, said_at: str) -
 
 def _judge(
     candidate: CandidateFact, similar: list[SearchResult], decider: Decider | None,
-    llm: LLM, said_at: str,
+    llm: LLM, said_at: str, standing: bool = False,
 ) -> dict[str, Any]:
     """The decision provider's answer, or the text model's where it abstains,
-    or NEW."""
+    or NEW. ``standing`` asks the provider what the memory is as well."""
     state = reconcile_state([r.memory for r in similar], candidate.content, said_at)
-    judged = _decide_action(decider, state, len(similar)) if decider else None
+    judged = (_decide_action(decider, state, len(similar), standing=standing)
+              if decider else None)
     if judged is not None:
         return judged
     if llm.available:
@@ -504,8 +600,13 @@ def reconcile_candidate(
             return _restated(backend, memory, candidate, scope, episode_ids, stamped,
                              "exact duplicate")
 
-    decision = _judge(candidate, similar, decider, llm, said) if similar else {
-        "action": "NEW", "target": None, "content": None, "reason": "new information"}
+    # what the memory is, asked of a decision provider only where one of them
+    # is protected: no token is spent on it otherwise
+    standing = bool(decider is not None and decider.available and any(
+        protection(r.memory, cfg, saves_of(backend, r.memory)) for r in similar))
+    decision = (_judge(candidate, similar, decider, llm, said, standing=standing) if similar
+                else {"action": "NEW", "target": None, "content": None,
+                      "reason": "new information"})
     action = str(decision.get("action") or "NEW")
     target_idx = decision.get("target")
     target: Memory | None = None
@@ -551,8 +652,20 @@ def reconcile_candidate(
         # the new memory supersedes it instead, held back as a change would be.
 
     kind = SUPERSEDE_KIND.get(action) if target is not None else None
-    held = (held_back(target, decision, cfg, bar=bar, saves=saves_of(backend, target))
-            if kind and target is not None else None)
+    held = None
+    if kind and target is not None:
+        verdict, why = replacement_verdict(action, decision, target, cfg, bar=bar,
+                                           saves=saves_of(backend, target))
+        if verdict == "both":
+            reason = f"{action} of memory {target.id}, but {why}: both kept. {reason}".strip()
+            kind, target = None, None
+        elif verdict == "ask":
+            held = why
+        else:
+            if verdict == "update":
+                kind = "update"
+            if why:
+                reason = f"{reason} ({why})".strip()
     metadata = dict(candidate.metadata or {})
     if held and target is not None and kind:
         metadata[CONFLICT_KEY] = {
@@ -618,7 +731,7 @@ def reconcile_candidate(
                 reason=(
                     f"{UPDATE_SUPERSEDE_REASON}: kept and superseded. {reason}".strip()
                     if action == "MORE"
-                    else f"no longer true: {reason}".strip() if action == "CHANGED"
+                    else f"no longer true: {reason}".strip() if kind == "update"
                     else reason or "contradicted by new information"
                 ),
                 kind=kind,

@@ -91,8 +91,10 @@ h1{font-size:1.3rem;margin:.2rem 0 1rem}h1 span{color:var(--accent)}
 h1 .datalinks{float:right;font-size:.75rem;font-weight:400;color:var(--dim)}
 h1 .datalinks a{color:var(--dim);text-decoration:none;border-bottom:1px dotted var(--dim);cursor:help}
 h1 .datalinks a:hover{color:var(--accent);border-bottom-color:var(--accent)}
-h1 .datalinks .knowledge-link{display:inline-block;background:var(--accent);color:#04211c;border:1px solid transparent;border-radius:999px;padding:.22rem .55rem;font-weight:700;cursor:pointer;box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 28%,transparent)}
+h1 .datalinks .knowledge-link{display:inline-flex;align-items:center;justify-content:center;gap:.3rem;line-height:1.2;vertical-align:middle;background:var(--accent);color:#04211c;border:1px solid transparent;border-radius:999px;padding:.22rem .55rem;font-weight:700;cursor:pointer;box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 28%,transparent)}
 h1 .datalinks .knowledge-link:hover{color:#04211c;border-color:transparent;filter:brightness(1.08)}
+h1 .datalinks .knowledge-link .badge{min-width:1rem;padding:0 .3rem;border-radius:999px;background:#04211c;color:var(--accent);font-size:.68rem;line-height:1rem;text-align:center}
+h1 .datalinks .knowledge-link .badge[hidden]{display:none}
 .bar{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem}
 input,button,textarea,select{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem}
 .qwrap{position:relative;flex:1;min-width:12rem;display:flex}
@@ -185,6 +187,40 @@ button.toggle.active{border-color:var(--accent);color:var(--accent)}
 .mem{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.7rem .9rem;margin-bottom:.5rem}
 .mem .meta{color:var(--dim);font-size:.78rem;margin-top:.35rem;display:flex;gap:.8rem;flex-wrap:wrap}
 .mem .del,.mem .edit{float:right;border:none;background:none;color:var(--dim)}.mem .del:hover{color:var(--warn)}.mem .edit:hover{color:var(--accent)}
+/* The memory list is a table on a wide screen: the text takes about half the
+   row, then what it is about, its tags, when, and the numbers. A header click
+   sorts the rows. On a narrow screen each row folds back into a card. */
+#list.memtable{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:.5rem}
+@media(min-width:75rem){#list.memtable{margin-inline:calc(50% - min(36rem,50vw - 1.5rem))}}
+.mrow,.mhead{display:grid;grid-template-columns:var(--memcols);gap:.3rem .7rem;align-items:start;padding:.55rem .8rem;border-bottom:1px solid var(--line)}
+.mrow:last-child{border-bottom:none}.mrow:hover{background:color-mix(in srgb,var(--accent) 4%,transparent)}
+.mhead{padding-block:.35rem;color:var(--dim);font-size:.72rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;align-items:center}
+.mhead>div{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+.msort{border:none;background:none;padding:0;color:inherit;font:inherit;letter-spacing:inherit;text-transform:inherit;white-space:nowrap}
+.msort:hover,.msort.on{color:var(--accent)}
+.mrow .c-text{line-height:1.4;overflow-wrap:anywhere}.mrow .meta{color:var(--dim);font-size:.72rem;margin-top:.3rem;display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}
+.mrow .c-ent,.mrow .c-tags{display:flex;gap:.3rem;flex-wrap:wrap;min-width:0}
+.mrow .entity-chip{max-width:100%;overflow-wrap:anywhere;text-align:left}
+.mrow .c-ns,.mrow .c-date,.mrow .c-imp,.mrow .c-score{color:var(--dim);font-size:.78rem;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.mrow .c-date{display:flex;flex-direction:column;align-items:flex-start;gap:.2rem}.mrow .c-date .when-chip{font-size:.72rem}
+.mrow .c-imp,.mrow .c-score,.mhead .c-imp,.mhead .c-score{justify-content:flex-end;text-align:right}
+.mrow .c-act{display:flex;justify-content:flex-end}
+.mrow .del,.mrow .edit{border:none;background:none;color:var(--dim);padding:.05rem .3rem}.mrow .del:hover{color:var(--warn)}.mrow .edit:hover{color:var(--accent)}
+.memtable>.mem{margin:0;border:none;border-bottom:1px solid var(--line);border-radius:0}
+.memtable>#morebar{margin:0;padding:.55rem .8rem}
+@media(max-width:56rem){
+  #list.memtable{background:none;border:none;border-radius:0}
+  .mhead{grid-template-columns:none;display:flex;flex-wrap:wrap;gap:.3rem .9rem;border:none;padding:0 .2rem .45rem}
+  .mhead>div:empty,.mhead .c-ent,.mhead .c-tags,.mhead .c-ns{display:none}
+  .mrow{display:flex;flex-wrap:wrap;gap:.35rem .8rem;position:relative;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.7rem .9rem;margin-bottom:.5rem}
+  .mrow:last-child{border-bottom:1px solid var(--line)}
+  .mrow .c-text{flex:1 0 100%;padding-right:3.4rem}.mrow .c-act{position:absolute;top:.55rem;right:.6rem}
+  .mrow .c-ent:empty,.mrow .c-tags:empty,.mrow .c-score:empty{display:none}
+  .mrow .c-date{flex-direction:row;flex-wrap:wrap}
+  .mrow .c-imp::before{content:'imp '}.mrow .c-score::before{content:'score '}
+  .memtable>.mem{border:1px solid var(--line);border-radius:10px;margin-bottom:.5rem}
+  .memtable>#morebar{padding:0}
+}
 .tag{border:1px solid var(--line);border-radius:999px;padding:0 .5rem}
 .memory-type{display:inline-flex;align-items:center;gap:.3rem;border-color:currentColor;font-weight:600}
 .memory-type.semantic{color:var(--semantic)}.memory-type.procedural{color:var(--procedural)}
@@ -489,20 +525,26 @@ const moreBar=()=>haveMore
 // `appendFrom` renders only the newly arrived tail. Rebuilding the whole list
 // on every "load more" is quadratic: reaching 10k memories a hundred at a time
 // would re-render half a million cards. Appending costs only what arrived.
+// A sorted list, or one that gains a namespace or score column, is redrawn whole.
 function render(items,appendFrom){
   current=items;drawMap();
   const el=document.getElementById('list');
   if(!items.length&&!haveMore){
+    el.classList.remove('memtable');
     el.innerHTML='<div class="empty">'+(searchActive?'No memories match this search.':'No memories yet.')+'</div>';return;
   }
+  const multiNs=new Set(items.map(m=>m.user_id||'')).size>1,scored=items.some(m=>m.score!==undefined);
+  const reshaped=multiNs!==listMultiNs||scored!==listScored;
+  listMultiNs=multiNs;listScored=scored;
+  el.classList.add('memtable');el.style.setProperty('--memcols',memColumns());
   const card=m=>m.id===editingId?editCard(m):viewCard(m);
-  if(appendFrom!==undefined&&appendFrom>0){
+  if(appendFrom!==undefined&&appendFrom>0&&!memSort&&!reshaped){
     document.getElementById('morebar')?.remove();
     el.insertAdjacentHTML('beforeend',
       items.slice(appendFrom).map(card).join('')+moreBar());
     return;
   }
-  el.innerHTML=items.map(card).join('')+moreBar();
+  el.innerHTML=memHead()+sortedMemories(items).map(card).join('')+moreBar();
 }
 function normalizedMemoryType(m){
   const type=String(m.memory_type||m.type||'semantic').toLowerCase();
@@ -546,19 +588,84 @@ function whenChip(m){
 function entityChip(entity){
   return `<button class="entity-chip" title="show the memories about ${esc(entity.name)}" onclick='filterByEntity(${jsArg(entity)})'>${esc(entity.name)} <span class="chip-type">${esc(typeLabel(entity.entity_type))}</span></button>`;
 }
+// ---- the memory list as a table ---------------------------------------------
+// A header click sorts the rows loaded so far: first in the order that reads
+// best (A to Z, newest, highest), a second click reverses it, a third goes
+// back to the order the list came in (search rank, or newest saved first).
+// The choice sticks per browser. A row with no value for the key goes last.
+const MEM_SORT_KEY='memry_memory_sort';
+const saidDate=m=>m.created_at||m.updated_at||'';
+const MEM_SORTS={
+  text:{first:1,value:m=>String(m.content||'').toLowerCase()},
+  type:{first:1,value:m=>normalizedMemoryType(m)},
+  said:{first:-1,value:m=>saidDate(m)||null},
+  happened:{first:-1,value:m=>m.next_occurrence||(m.when&&m.when.start)||null},
+  imp:{first:-1,value:m=>m.importance??0.5},
+  score:{first:-1,value:m=>m.score??null}
+};
+let memSort=null,listMultiNs=false,listScored=false;
+try{
+  const saved=JSON.parse(localStorage.getItem(MEM_SORT_KEY)||'null');
+  if(saved&&MEM_SORTS[saved.key]&&(saved.dir===1||saved.dir===-1))memSort=saved;
+}catch(error){}
+function sortedMemories(items){
+  const sort=memSort&&MEM_SORTS[memSort.key];
+  if(!sort)return items;
+  return items.map((m,i)=>[m,sort.value(m),i]).sort((a,b)=>{
+    if(a[1]===b[1])return a[2]-b[2];
+    if(a[1]===null)return 1;
+    if(b[1]===null)return -1;
+    const order=typeof a[1]==='string'?a[1].localeCompare(b[1]):a[1]-b[1];
+    return order*memSort.dir||a[2]-b[2];
+  }).map(row=>row[0]);
+}
+function sortMemories(key){
+  const first=MEM_SORTS[key].first;
+  if(!memSort||memSort.key!==key)memSort={key,dir:first};
+  else if(memSort.dir===first)memSort={key,dir:-first};
+  else memSort=null;
+  try{
+    if(memSort)localStorage.setItem(MEM_SORT_KEY,JSON.stringify(memSort));
+    else localStorage.removeItem(MEM_SORT_KEY);
+  }catch(error){}
+  render(current);
+}
+// The namespace column shows only when the rows come from more than one, the
+// score column only for search results.
+function memColumns(){
+  return ['minmax(0,3fr)','minmax(0,1.2fr)','minmax(0,1fr)',listMultiNs?'minmax(4rem,.6fr)':'',
+          '7.4rem','2.6rem',listScored?'3.2rem':'','3.4rem'].filter(Boolean).join(' ');
+}
+function memHead(){
+  const th=(key,label,title)=>{
+    const on=memSort&&memSort.key===key;
+    return `<button class="msort${on?' on':''}" title="${title}" aria-pressed="${on?'true':'false'}" onclick="sortMemories('${key}')">${label}${on?(memSort.dir>0?' ↑':' ↓'):''}</button>`;
+  };
+  return `<div class="mhead">
+   <div class="c-text">${th('text','Memory','sort by the text, A to Z')}${th('type','type','sort by memory type')}</div>
+   <div class="c-ent">About</div><div class="c-tags">Tags</div>
+   ${listMultiNs?'<div class="c-ns">Namespace</div>':''}
+   <div class="c-date">${th('said','said','sort by the day it was said')}${th('happened','happened','sort by when the thing itself happens')}</div>
+   <div class="c-imp">${th('imp','imp','sort by importance')}</div>
+   ${listScored?`<div class="c-score">${th('score','score','sort by search score')}</div>`:''}
+   <div class="c-act"></div></div>`;
+}
 function viewCard(m){
-  return `<div class="mem"><button class="del" title="forget" onclick="del('${m.id}')">✕</button>
-   <button class="edit" title="edit" onclick="startEdit('${m.id}')">✎</button>
-   <div>${esc(m.content)}</div>
-   <div class="meta">${memoryTypeBadge(m)}${whenChip(m)}
-   ${(m.entity_links||[]).map(entityChip).join('')}
-   <span>@${esc(m.user_id||'(no user)')}</span>
-   <span>imp ${(m.importance??0.5).toFixed(2)}</span>
-   ${m.score!==undefined?`<span>score ${m.score.toFixed(3)}</span>`:''}
-   <span>${(m.updated_at||m.created_at||'').slice(0,10)}</span>
+  const links=m.entity_links||[],said=saidDate(m),edited=m.updated_at||'';
+  const saidTitle='said '+said.slice(0,10)+(edited&&edited.slice(0,10)!==said.slice(0,10)?', edited '+edited.slice(0,10):'');
+  return `<div class="mrow">
+   <div class="c-text"><div>${esc(m.content)}</div>
+   <div class="meta">${memoryTypeBadge(m)}
    ${m.invalid_at?'<span style="color:var(--warn)">invalidated</span>':''}
    ${m.saving?'<span class="cnt" title="the edit is saved; entity links are being refreshed">saving...</span>':''}
-   ${m.metadata&&m.metadata.pending_distillation&&!m.invalid_at?(m.metadata._enrichment?`<span title="The exact text is saved and searchable while background enrichment runs.">${esc(m.metadata._enrichment.status||'enrichment pending')}</span>`:`<button class="distill" onclick="distill('${m.id}')" title="Saved verbatim because extraction was skipped. Distill into discrete facts now.">not distilled ↻</button>`):''}</div></div>`;
+   ${m.metadata&&m.metadata.pending_distillation&&!m.invalid_at?(m.metadata._enrichment?`<span title="The exact text is saved and searchable while background enrichment runs.">${esc(m.metadata._enrichment.status||'enrichment pending')}</span>`:`<button class="distill" onclick="distill('${m.id}')" title="Saved verbatim because extraction was skipped. Distill into discrete facts now.">not distilled ↻</button>`):''}</div></div>
+   <div class="c-ent">${links.filter(link=>link.entity_type!==TAG_TYPE).map(entityChip).join('')}</div>
+   <div class="c-tags">${links.filter(link=>link.entity_type===TAG_TYPE).map(entityChip).join('')}</div>
+   ${listMultiNs?`<div class="c-ns">@${esc(m.user_id||'(no user)')}</div>`:''}
+   <div class="c-date"><span title="${saidTitle}">${said.slice(0,10)}</span>${whenChip(m)}</div>
+   <div class="c-imp" title="importance">${(m.importance??0.5).toFixed(2)}</div>
+   ${listScored?`<div class="c-score" title="search score">${m.score!==undefined?m.score.toFixed(3):''}</div>`:''}
+   <div class="c-act"><button class="edit" title="edit" onclick="startEdit('${m.id}')">✎</button><button class="del" title="forget" onclick="del('${m.id}')">✕</button></div></div>`;
 }
 function editCard(m){
   return `<div class="mem">

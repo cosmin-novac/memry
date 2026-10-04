@@ -15,6 +15,7 @@
     memry split-memories          split memories that hold several facts (--dry-run first)
     memry adopt-unscoped          give memories without a namespace one (--dry-run first)
     memry learn-owner             learn who "the user" is from what was said (--dry-run first)
+    memry reconcile-queue         re-ask the judge about queued contradictions (--apply to act)
     memry config                  print resolved configuration
     memry eval --dataset <path>   run the retrieval eval harness
 """
@@ -309,6 +310,17 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the evidence, the person chosen and what would be folded or "
                         "renamed, writing nothing")
 
+    p = sub.add_parser(
+        "reconcile-queue",
+        help="ask the decision provider again about each contradiction waiting under Upkeep "
+             "and print what the old rule and the new rule decide (one call per item); "
+             "writes nothing without --apply",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+    p.add_argument("--apply", action="store_true",
+                   help="act on the new rule's decisions: replace (undo under Archive) or "
+                        "keep both; questions it still asks stay")
+
     sub.add_parser("reindex", help="re-embed all memories with the current embedder")
 
     p = sub.add_parser(
@@ -560,6 +572,13 @@ def main(argv: list[str] | None = None) -> int:
                       file=sys.stderr)
         elif args.command == "adopt-unscoped":
             _print(store.adopt_unscoped(into=args.into, dry_run=args.dry_run))
+        elif args.command == "reconcile-queue":
+            if not store.decider.available:
+                print("no decision provider configured; this asks one", file=sys.stderr)
+                return 1
+            _print([{"user": uid, "items": store.redecide_conflicts(user_id=uid,
+                                                                    apply=args.apply)}
+                    for uid in _namespaces(store, args.user)])
         elif args.command == "learn-owner":
             _print([store.learn_owner(user_id=uid, dry_run=args.dry_run)
                     for uid in _namespaces(store, args.user)])
