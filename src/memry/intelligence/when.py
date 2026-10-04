@@ -319,6 +319,62 @@ def describe_when(when: Any, now: Any = None) -> str:
     return f"happened {span}"
 
 
+def span(when: Any) -> tuple[date, date, str] | None:
+    """The first and last day of a one-off "when", and how precisely it is
+    known: "day" (one day, a time of day included), "month" (the first to
+    the last day of one month), "year" (1 January to 31 December) or
+    "range". Extraction writes "in April 2025" as the whole month, so the
+    month is all the memory knows, not its first day. None for a recurring
+    or yearless "when", or none at all."""
+    data = parse_when(when)
+    if data is None or data.get("recurrence"):
+        return None
+    first = _day_of(*_point(data["start"]))  # type: ignore[misc]
+    last = _day_of(*_point(data.get("end") or data["start"]))  # type: ignore[misc]
+    if first is None or last is None:
+        return None
+    if first == last:
+        return first, last, "day"
+    if first.day == 1 and (first.year, first.month) == (last.year, last.month) \
+            and last.day == calendar.monthrange(last.year, last.month)[1]:
+        return first, last, "month"
+    if (first.month, first.day, last.month, last.day) == (1, 1, 12, 31) \
+            and first.year == last.year:
+        return first, last, "year"
+    return first, last, "range"
+
+
+def coarser_than(when: Any, start: date | None, end: date | None) -> str | None:
+    """How a "when" known only to a month or a year reads when it is coarser
+    than the period asked ([start, end], either open): "2025-04 (month)",
+    "2025 (year)". A memory dated "April 2025" matches a question about
+    1 April, but it does not say it happened that day, and the label says
+    so. None when the "when" lies inside the period, or is a day or a range,
+    whose own dates say as much."""
+    known = span(when)
+    if known is None or known[2] not in ("month", "year"):
+        return None
+    first, last, precision = known
+    if (start is None or start <= first) and (end is None or last <= end):
+        return None
+    return f"{first.isoformat()[:7] if precision == 'month' else first.year} ({precision})"
+
+
+def describe_when_asked(
+    when: Any, start: date | None, end: date | None, now: Any = None
+) -> str:
+    """``describe_when``, with a month or a year written as one
+    (``coarser_than``) where it is coarser than the period a search asked
+    for: "happened 2025-04 (month)", not "happened 2025-04-01 to
+    2025-04-30", which reads as if the first day were known."""
+    phrase = describe_when(when, now)
+    label = coarser_than(when, start, end)
+    if not label or not phrase:
+        return phrase
+    first, last, _ = span(when)  # type: ignore[misc]
+    return phrase.replace(f"{first.isoformat()} to {last.isoformat()}", label)
+
+
 # ----------------------------------------------------------------------
 # backfill: reading a "when" out of memories written before it existed
 # ----------------------------------------------------------------------

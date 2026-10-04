@@ -610,12 +610,57 @@ When a fact changes or someone corrects it, save the new statement and leave the
 old memory as it is. Memry keeps the old value as dated history, or retires it
 when it was wrong.
 
-## Searching by tag and date
+## Search filters
 
-Beyond relevance search, both `search_memories`/`POST /api/v1/search` and
-`list_memories`/`GET /api/v1/memories` accept a `categories` (tag) filter and a `since`/
-`until` date window (`YYYY-MM-DD`, the `until` day inclusive). Pass an empty query with just
-a tag or date to browse rather than rank, e.g. "everything tagged `travel` since 2026-01-01".
+Memry does not guess dates or names from the words of a question. The caller states them,
+and every filter is applied before anything is ranked: the text ranking, the linked pool,
+the judged pool, the set call and the context all read only the memories the filters
+admit, so a memory filtered out never comes back because it matches the words better.
+
+The agent tools (`search_memories`, `get_memory_context`, `list_memories`) take two:
+
+| Filter | What it matches |
+|---|---|
+| `when` | The time a question is about: a day `2025-04-01`, a month `2025-04`, a year `2025`, or a range `2025-04-01..2025-06-30` (ends may be months or years, `2025-04..2025-06`, or left open, `2025-04..`). A memory matches when its occurrence time (`metadata["when"]`, below) overlaps the period, or, for a memory without one, when the day it was saved lies inside it. |
+| `about` | One or more names, comma-separated, of people, projects, things or tags. Each is resolved in the caller's namespace, case aside, through entity names, aliases and merges, and as a tag; a memory matches any of them. |
+
+A phrase in double quotes inside the query (`the "Blue Fig" dinner`) must appear in the
+memory exactly, case aside. So "Was habe ich am 01. April 2025 gemacht?" is
+`when="2025-04-01"`, and "what did Bochra work on?" is `about="Bochra Saffar"`.
+
+Overlap means a memory dated only to April 2025 matches a question about 1 April. Its row
+then says so: `"happened": "happened 2025-04 (month)"` (and `[happened 2025-04 (month)]`
+in a context), so an agent does not claim it happened that day. A name found nowhere is
+never dropped silently: the result carries a `note` naming it, with the closest names the
+namespace holds. When filters match nothing, a filtered result says which filters were
+applied, and for a time asked about it lists up to three memories nearest that time under
+`nearest`, each with how many days `before` or `after` it lies. A call using `when`,
+`about` or a quoted phrase answers `{filters, memories, note?, nearest?}`; a call without
+them answers the plain list as before. An empty query with filters browses what they
+admit, newest first by the time asked about, else by the day said.
+
+The REST endpoints take the same filters and finer ones, for scripts and the dashboard,
+in the body of `POST /api/v1/search` and `POST /api/v1/context` and the query string of
+`GET /api/v1/memories`:
+
+| Filter | What it matches |
+|---|---|
+| `happened` | A period as for `when`, on the occurrence time alone; a memory without one never matches. |
+| `said` | A period, on the day a memory was said, the day its row shows as `said`. |
+| `entity` | Names of people, projects or things (not tags), resolved as for `about`. |
+| `entity_type` | Memories linked to at least one entity of a type: `person`, `organization`, `project`, `product`, `place`, `event`, `document`, `code`, `concept`, `other`. Tags are filtered with `tag`. |
+| `tag` | Tag names, comma-separated or a list. |
+| `contains` | An exact phrase, case aside, matched as written: quotes, `%` and `_` are not syntax. |
+| `memory_type` | `semantic`, `episodic`, `procedural` or `working`. |
+
+A search naming any of these answers `{results, filters, note?, nearest?}`; one naming
+none answers the plain list. A malformed value is a 400 that says what the filter accepts.
+On `GET /api/v1/memories` a name found nowhere is a 404 with the close names, as an
+unknown `entity_id` is.
+
+The older parameters still work and are no longer advertised to agents: `categories` (tags),
+`entity_id` (entity ids), `since`/`until` (`YYYY-MM-DD`, on the day a memory was first
+saved) and `when_since`/`when_until` (below). They are pre-filters too.
 
 ## When a memory happens
 
@@ -636,12 +681,15 @@ move, or a decision made on a date. A price observed on a day, a test log and a
 specification all carry dates without occurring, so a date in the text on its own does not
 produce a `when`.
 
-`search_memories`/`POST /api/v1/search` and `list_memories`/`GET /api/v1/memories` take
-`when_since`/`when_until` (`YYYY-MM-DD`, both days inclusive) beside `since`/`until`. They
-match on the occurrence time, and a memory without one never matches, which is what makes
-"what is on this weekend" answerable. A recurring `when` matches when any of its
-occurrences falls in the window. The REST memory payload carries `when` and the computed
-`next_occurrence`, and the dashboard memory card shows the same in a small chip.
+The `when` and `happened` filters (above) read it, as do the older `when_since`/`when_until`
+(`YYYY-MM-DD`, both days inclusive), which is what makes "what is on this weekend"
+answerable. A recurring `when` matches when any of its occurrences falls in the period.
+"In April 2025" is stored as the whole month, `2025-04-01` to `2025-04-30`, and a whole
+year the same way. The REST memory payload carries `when` and the computed
+`next_occurrence`, and the dashboard memory card shows the same in a small chip. The
+dashboard timeline places a memory dated to a whole month or year at the start of that
+period and labels it "April 2025" or "2025"; a memory with a day or a time shows that day
+and time.
 
 To read occurrence times out of memories saved before this existed:
 

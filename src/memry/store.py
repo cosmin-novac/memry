@@ -15,8 +15,9 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timedelta, timezone
+import difflib
 import hashlib
 import json
 import logging
@@ -45,6 +46,8 @@ from .intelligence.context import (
     entities_text,
     estimate_tokens,
     fitting,
+    memory_line,
+    said_at,
     turn_line,
 )
 from .intelligence.decay import (
@@ -140,6 +143,8 @@ from .intelligence.structure import (
     same_name_plan,
 )
 from .intelligence.when import confirm_whens, extract_when, overlaps as when_overlaps
+from .intelligence.when import parse_when, span as when_span
+from .filters import Filters, admits as filters_admit
 from .models import (
     MEMORY_TYPES,
     AddAction,
@@ -526,6 +531,74 @@ def _when_within(
     )
 
 
+def _asked_time(memory: Memory, filters: Filters) -> tuple[date, date] | None:
+    """The first and last day of a memory as the time asked about reads it:
+    when the thing happened (a one-off "when", ``intelligence.when.span``),
+    and for ``when``, which falls back to it, the day it was said
+    (``created_at``) where the memory has no occurrence time."""
+    when = (memory.metadata or {}).get(WHEN_KEY)
+    known = when_span(when)
+    if known is not None:
+        return known[0], known[1]
+    if filters.when is not None and parse_when(when) is None:
+        try:
+            day = date.fromisoformat((memory.created_at or "")[:10])
+        except ValueError:
+            return None
+        return day, day
+    return None
+
+
+def _folded(
+    filters: Filters, categories: list[str] | None, entity_id: str | list[str] | None,
+    since: str | None, until: str | None, when_since: str | None, when_until: str | None,
+) -> tuple[Any, ...]:
+    """The legacy filter arguments with ``filters``' own folded in: its tags
+    with ``categories``, its entity ids (given, and resolved from names)
+    with ``entity_id`` (any of them, as several ids always read), and its
+    legacy date windows where the argument is not set."""
+    tags = list(dict.fromkeys([*(categories or []), *filters.tags])) or None
+    asked = [entity_id] if isinstance(entity_id, str) else list(entity_id or [])
+    ids = list(dict.fromkeys([*asked, *filters.entity_ids, *filters.resolved_entity_ids]))
+    return (tags, (ids[0] if len(ids) == 1 else ids) or None,
+            since or filters.since or None, until or filters.until or None,
+            when_since or filters.when_since or None, when_until or filters.when_until or None)
+
+
+def _filtered_order(memory: Memory, filters: Filters) -> str:
+    """The key a filtered browse orders by, newest first: the time asked
+    about where a filter asks one (``_asked_time``), else the day said."""
+    if filters.period is not None:
+        asked = _asked_time(memory, filters)
+        return asked[0].isoformat() if asked else ""
+    return said_at(memory) or ""
+
+
+@dataclass
+class FilteredSearch:
+    """A search with filters as a tool or an endpoint answers it: the
+    results, the filters as resolved (with their notes: an unknown name and
+    the names close to it), and for a time asked about that matched nothing
+    the nearest dated memories, (memory, days away, "before" | "after")."""
+
+    results: list[SearchResult]
+    filters: Filters
+    nearest: list[tuple[Memory, int, str]] = field(default_factory=list)
+
+    @property
+    def note(self) -> str:
+        """What the caller should be told beside the results: the notes of
+        the filters, and for no result which filters were applied, so
+        "nothing" reads as "nothing matched these", not "nothing known"."""
+        parts = list(self.filters.notes)
+        if not self.results and self.filters.active:
+            parts.append(f"No memory matches the filters ({self.filters.describe()}).")
+            if self.nearest:
+                parts.append("The memories nearest that time are listed as nearest, "
+                             "with how many days before or after it; none is inside it.")
+        return " ".join(parts)
+
+
 @dataclass(frozen=True)
 class _Reads:
     """What a search reads (stage 2 of ``MemoryStore.search``), kept to by
@@ -533,7 +606,11 @@ class _Reads:
     set call's. In SQL, as ``MemoryBackend.keyword_search`` reads: the scope
     searched (a run's memories are those said in it), the memories in use
     and those kept as history (every memory with ``include_invalid``), the
-    tags and the entities asked for. Here, the date windows (``admits``)."""
+    tags and the entities asked for, and ``among``: the memories the filters
+    read from each memory admit (``filters.Filters.scans``: the periods, the
+    text, the memory and entity types), found once before anything is
+    ranked (``MemoryStore._admitted``). Here, the date windows (``admits``).
+    """
 
     scope: Scope
     include_invalid: bool = False
@@ -543,13 +620,22 @@ class _Reads:
     until: str | None = None
     when_since: str | None = None
     when_until: str | None = None
+    among: frozenset[str] | None = None
 
     def admits(self, memory: Memory) -> bool:
-        """Whether a memory was saved inside ``since``/``until`` and what it
-        tells happens inside ``when_since``/``when_until``."""
-        return ((not (self.since or self.until)
-                 or _within(memory.created_at, self.since, self.until))
+        """Whether a memory is one of ``among``, was saved inside
+        ``since``/``until`` and tells what happens inside
+        ``when_since``/``when_until``."""
+        return ((self.among is None or memory.id in self.among)
+                and (not (self.since or self.until)
+                     or _within(memory.created_at, self.since, self.until))
                 and _when_within(memory, self.when_since, self.when_until))
+
+    def kept_to(self) -> dict[str, Any]:
+        """``among`` as the backend reads it, in SQL with the scope, the
+        tags and the entities, so no stage takes its first N from memories
+        the filters drop; nothing when there is no such set."""
+        return {} if self.among is None else {"among": self.among}
 
     def entity_memories(
         self, backend: MemoryBackend, entity_id: str, limit: int
@@ -559,7 +645,7 @@ class _Reads:
         return [memory for memory in backend.entity_memories(
                     entity_id, limit=limit, include_invalid=self.include_invalid,
                     scope=self.scope, history=True, categories=self.categories,
-                    mentioning=self.entity_id)
+                    mentioning=self.entity_id, **self.kept_to())
                 if self.admits(memory)]
 
 
@@ -1867,6 +1953,7 @@ class MemoryStore:
         when_until: str | None = None,
         relational: bool = True,
         evidence: bool = True,
+        filters: Filters | None = None,
     ) -> list[SearchResult]:
         """The memories that best answer ``query``, best first.
 
@@ -1897,8 +1984,20 @@ class MemoryStore:
            up to ``SET_RESULT_CAP``), then the evidence: with ``evidence``
            each result carries the source turns it is the best ranked of the
            results to rest on, chosen within ``retrieval.evidence_tokens``
-           (``evidence``)."""
+           (``evidence``).
+
+        ``filters`` (``filters.Filters``) are hard pre-filters like the
+        others: those read in SQL join ``categories`` and ``entity_id``, and
+        the rest are read once over the scope (``_admitted``) into the set
+        of memories every stage keeps to (``_Reads.among``), so a memory
+        they drop is never a candidate, however well it matches."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        if filters is not None:
+            filters = self.resolve_filters(filters, user_id=user_id, agent_id=agent_id)
+            if filters.matches_nothing:
+                return []
+            categories, entity_id, since, until, when_since, when_until = _folded(
+                filters, categories, entity_id, since, until, when_since, when_until)
         if entity_id:
             entity_id = self._resolve_entity_filter(entity_id)
             if not entity_id:
@@ -1909,11 +2008,21 @@ class MemoryStore:
                 user_id=user_id, agent_id=agent_id, run_id=run_id,
                 include_invalid=include_invalid, limit=limit,
                 categories=categories, entity_id=entity_id, since=since, until=until,
-                when_since=when_since, when_until=when_until,
+                when_since=when_since, when_until=when_until, filters=filters,
             )
             return [SearchResult(memory=m, score=0.0) for m in memories]
+        among = None
+        if since or until or when_since or when_until or (filters and filters.scans):
+            # a run's memories are those said in it, which the SQL of every
+            # stage reads; the set is taken over the user and agent
+            among = frozenset(m.id for m in self._admitted(
+                Scope(user_id=user_id, agent_id=agent_id), include_invalid=True,
+                categories=categories, entity_id=entity_id, since=since, until=until,
+                when_since=when_since, when_until=when_until, filters=filters))
+            if not among:
+                return []
         reads = _Reads(scope, include_invalid, categories, entity_id, since, until,
-                       when_since, when_until)
+                       when_since, when_until, among)
         # 1. the seeds, the question as it is read, and whether it is judged
         plan = self._plan(query, reads, relational)
         # 2. the candidates: the text ranking, as deep for every search
@@ -1949,6 +2058,7 @@ class MemoryStore:
             limit=min(max(limit * 8, 40), 500), cfg=self.config.retrieval,
             include_invalid=reads.include_invalid, categories=reads.categories,
             entity_id=reads.entity_id, history=True, query_vector=query_vector,
+            **reads.kept_to(),
         ) if reads.admits(r.memory)]
 
     def _seeds(self, query: str, scope: Scope) -> tuple[list[str], bool]:
@@ -2505,7 +2615,7 @@ class MemoryStore:
         # how many memories each has where the search looks, as ``filed`` is read
         sizes = self.backend.entity_memory_counts(
             shared, scope=reads.scope, history=True, categories=reads.categories,
-            mentioning=reads.entity_id) if shared else {}
+            mentioning=reads.entity_id, **reads.kept_to()) if shared else {}
         walk: dict[str, float] = defaultdict(float)
         memories: dict[str, Memory] = {}
         for topic_id in shared:
@@ -2577,7 +2687,8 @@ class MemoryStore:
                                           limit=max(count, SET_NEAREST) + len(taken),
                                           include_invalid=reads.include_invalid,
                                           categories=reads.categories,
-                                          entity_id=reads.entity_id, history=True)
+                                          entity_id=reads.entity_id, history=True,
+                                          **reads.kept_to())
         near = [memory for memory, _ in hits
                 if memory.id not in taken and reads.admits(memory)]
         picked, rest = near[: count // 2], near[count // 2:]
@@ -2731,6 +2842,8 @@ class MemoryStore:
         run_id: str | None = None,
         token_budget: int = CONTEXT_TOKENS,
         limit: int = 20,
+        filters: Filters | None = None,
+        owner_prefix: str | None = None,
     ) -> ContextResult:
         """The memories found for ``query`` that fit ``token_budget``, rendered
         for a model (``intelligence.context``), after the descriptions of the
@@ -2738,24 +2851,47 @@ class MemoryStore:
         ``context.description_budget``). The memories that fit take the budget
         but a share for their evidence (``retrieval.evidence_tokens``, at most
         half of what is left), and their source turns that best match the
-        query fill that share (``evidence``)."""
-        results = self.search(
-            query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit,
-            evidence=False,
-        )
-        entities = self.described_entities(
+        query fill that share (``evidence``).
+
+        With ``filters`` only memories they admit are shown, so no entity
+        description (written from all of an entity's memories) is: the
+        context opens with the filters applied and their notes, a memory
+        dated coarser than the time asked about says so ("[happened 2025-04
+        (month)]"), and when nothing matched, the memories nearest that
+        time follow, each with when it happened (``nearest_dated``)."""
+        header = ""
+        period = None
+        if filters is not None and filters.active:
+            found = self.search_filtered(query, filters, user_id=user_id, agent_id=agent_id,
+                                         run_id=run_id, limit=limit, evidence=False,
+                                         owner_prefix=owner_prefix)
+            results, filters, period = found.results, found.filters, found.filters.period
+            header = f"Filters applied: {filters.describe()}."
+            if found.note:
+                header += " " + found.note
+            if found.nearest:
+                header += "\nNearest memories by time:\n" + "\n".join(
+                    f"- {memory_line(memory, asked=self._asked_bounds(period))} "
+                    f"({days} days {side})" for memory, days, side in found.nearest)
+        else:
+            results = self.search(
+                query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit,
+                evidence=False,
+            )
+        entities = [] if header else self.described_entities(
             query, user_id=user_id, agent_id=agent_id, run_id=run_id,
             token_budget=description_budget(token_budget),
         )
-        entity_text = entities_text(entities)
+        entity_text = header or entities_text(entities)
         entity_memory_ids = [memory.id for entity in entities
                              for memory in self.backend.entity_memories(entity.id, limit=20)]
         remaining = max(0, token_budget - estimate_tokens(entity_text))
         share = min(max(self.config.retrieval.evidence_tokens, 0), remaining // 2)
-        shown = fitting(results, remaining - share)
+        shown = fitting(results, remaining - share, self._asked_bounds(period))
         turns = self.evidence(query, shown, user_id=user_id, agent_id=agent_id,
                               run_id=run_id, token_budget=share)
-        memory_context = build_context(shown, token_budget=remaining, evidence=turns)
+        memory_context = build_context(shown, token_budget=remaining, evidence=turns,
+                                       asked=self._asked_bounds(period))
         parts = [part for part in (entity_text, memory_context.text) if part]
         combined = "\n\n".join(parts)
         memory_ids = list(dict.fromkeys([*entity_memory_ids, *memory_context.memory_ids]))
@@ -2765,6 +2901,12 @@ class MemoryStore:
             token_estimate=estimate_tokens(combined) if combined else 0,
             episode_ids=memory_context.episode_ids,
         )
+
+    @staticmethod
+    def _asked_bounds(period: Any) -> tuple[date | None, date | None] | None:
+        """A period's first and last day, as a memory line marks a date
+        coarser than it (``intelligence.when.describe_when_asked``)."""
+        return (period.start, period.end) if period is not None else None
 
     def described_entities(
         self,
@@ -2799,6 +2941,160 @@ class MemoryStore:
             return self.backend.resolve_entity_id(entity_id)
         resolved = [self.backend.resolve_entity_id(e) for e in entity_id if e]
         return [e for e in resolved if e] or None
+
+    def resolve_filters(
+        self, filters: Filters, *, user_id: str | None = None, agent_id: str | None = None,
+        owner_prefix: str | None = None,
+    ) -> Filters:
+        """``filters`` with their names resolved in the namespace searched:
+        each ``entity`` name, case aside, through entity names, aliases and
+        merges (``find_entities_by_aliases``, which lands on the surviving
+        entity), each ``about`` name the same way or as a tag, to the
+        memories it reaches. A name found nowhere is not dropped, which would
+        quietly widen the search: it gets a note with the closest names the
+        namespace holds, and a filter whose every name is unknown matches
+        nothing. Resolving twice changes nothing."""
+        if filters.resolved:
+            return filters
+        names = Scope(user_id=user_id)
+        scope = Scope(user_id=user_id, agent_id=agent_id)
+        notes: list[str] = []
+
+        def entities_named(name: str) -> list[str]:
+            found = self.backend.find_entities_by_aliases([" ".join(name.split()).lower()],
+                                                          names)
+            return [e.id for e in found if _owned(e, owner_prefix)]
+
+        def unknown(name: str, what: str) -> None:
+            close = self._close_names(name, names, owner_prefix)
+            hint = f" Close names: {', '.join(close)}." if close else ""
+            notes.append(f'No {what} is named "{name}" in this memory store; '
+                         f"it matched nothing.{hint}")
+
+        resolved: list[str] = []
+        for name in filters.entities:
+            ids = entities_named(name)
+            if not ids:
+                unknown(name, "person, project or thing")
+            resolved += ids
+        about: set[str] | None = None
+        if filters.about:
+            about = set()
+            for name in filters.about:
+                ids = entities_named(name)
+                for entity_id in ids:
+                    about.update(m.id for m in self.backend.entity_memories(
+                        entity_id, limit=10**9, include_invalid=True, scope=scope))
+                tagged = [m for m in self.backend.list_memories(
+                              scope, include_invalid=True, limit=10**9, categories=[name])
+                          if _owned(m, owner_prefix)]
+                about.update(m.id for m in tagged)
+                if not ids and not tagged:
+                    unknown(name, "person, project, thing or tag")
+        nothing = ((bool(filters.entities) and not resolved and not filters.entity_ids)
+                   or (about is not None and not about))
+        return replace(filters, resolved=True,
+                       resolved_entity_ids=tuple(dict.fromkeys(resolved)),
+                       about_ids=frozenset(about) if about is not None else None,
+                       notes=filters.notes + tuple(notes), matches_nothing=nothing)
+
+    def _close_names(
+        self, name: str, scope: Scope, owner_prefix: str | None, limit: int = 3
+    ) -> list[str]:
+        """The names in the namespace closest to an unknown one, entity names
+        and tags alike: by edit similarity, then those that begin with a word
+        of it or that it begins with ("Bochra" for "Bochra Saffar")."""
+        stored = {e.name for e in self.backend.list_entities(scope, limit=5000, kind="any")
+                  if _owned(e, owner_prefix)}
+        by_fold = {n.casefold(): n for n in stored}
+        asked = name.casefold()
+        close = difflib.get_close_matches(asked, list(by_fold), n=limit, cutoff=0.6)
+        close += [key for key in sorted(by_fold)
+                  if key not in close and any(key.startswith(word) or word.startswith(key)
+                                              for word in asked.split() if len(word) > 2)]
+        return [by_fold[key] for key in close[:limit]]
+
+    def _admitted(
+        self, scope: Scope, *, include_invalid: bool, categories: list[str] | None,
+        entity_id: str | list[str] | None, since: str | None = None,
+        until: str | None = None, when_since: str | None = None,
+        when_until: str | None = None, filters: Filters | None = None,
+    ) -> list[Memory]:
+        """Every memory of ``scope`` the filters admit: the tags and entities
+        in SQL, then the date windows, ``about``, the periods, the exact
+        phrases and the memory type read from each memory, then the entity
+        types from its links. What a filtered browse lists, and the set a
+        filtered search keeps every stage to (``_Reads.among``)."""
+        rows = self.backend.list_memories(
+            scope, include_invalid=include_invalid, limit=10**9, categories=categories,
+            entity_id=entity_id)
+        if since or until:
+            rows = [m for m in rows if _within(m.created_at, since, until)]
+        if when_since or when_until:
+            rows = [m for m in rows if _when_within(m, when_since, when_until)]
+        if filters is None:
+            return rows
+        if filters.about_ids is not None:
+            rows = [m for m in rows if m.id in filters.about_ids]
+        rows = [m for m in rows if filters_admit(filters, m)]
+        if filters.entity_types and rows:
+            linked = self.backend.entities_of_memories([m.id for m in rows], kind="named")
+            wanted = set(filters.entity_types)
+            rows = [m for m in rows
+                    if any(e.entity_type in wanted for e in linked.get(m.id, []))]
+        return rows
+
+    def nearest_dated(
+        self, filters: Filters, *, user_id: str | None = None, agent_id: str | None = None,
+        limit: int = 3,
+    ) -> list[tuple[Memory, int, str]]:
+        """For a time asked about that nothing matched: the ``limit``
+        memories nearest it, before or after, that pass every other filter,
+        as (memory, days away, "before" | "after"), the nearest first. So an
+        agent can answer "nothing on that day; in April 2025 ..." instead of
+        "nothing"."""
+        filters = self.resolve_filters(filters, user_id=user_id, agent_id=agent_id)
+        period = filters.period
+        if period is None or filters.matches_nothing:
+            return []
+        rest = filters.without_period()
+        entity_id = list(dict.fromkeys([*rest.entity_ids, *rest.resolved_entity_ids])) or None
+        if entity_id:
+            entity_id = self._resolve_entity_filter(entity_id)
+        found: list[tuple[Memory, int, str]] = []
+        for memory in self._admitted(Scope(user_id=user_id, agent_id=agent_id),
+                                     include_invalid=False, categories=list(rest.tags) or None,
+                                     entity_id=entity_id, filters=rest):
+            asked = _asked_time(memory, filters)
+            if asked is None:
+                continue
+            if period.start is not None and asked[1] < period.start:
+                found.append((memory, (period.start - asked[1]).days, "before"))
+            elif period.end is not None and asked[0] > period.end:
+                found.append((memory, (asked[0] - period.end).days, "after"))
+        found.sort(key=lambda item: (item[1], item[0].id))
+        return found[:limit]
+
+    def search_filtered(
+        self, query: str, filters: Filters, *, user_id: str | None = None,
+        agent_id: str | None = None, run_id: str | None = None, limit: int = 10,
+        include_invalid: bool = False, owner_prefix: str | None = None,
+        evidence: bool = True, legacy: dict[str, Any] | None = None,
+    ) -> FilteredSearch:
+        """``search`` with ``filters``, as the tools and endpoints answer it
+        (``FilteredSearch``): the results, the notes of the filters, and for
+        a time asked about that matched nothing, the nearest dated memories
+        (``nearest_dated``). An empty query browses what the filters admit.
+        ``legacy`` are ``search``'s own filter arguments (``categories``,
+        ``entity_id``, ``since``, ...), checked by the caller."""
+        filters = self.resolve_filters(filters, user_id=user_id, agent_id=agent_id,
+                                       owner_prefix=owner_prefix)
+        results = self.search(query, user_id=user_id, agent_id=agent_id, run_id=run_id,
+                              limit=limit, include_invalid=include_invalid,
+                              filters=filters, evidence=evidence, **(legacy or {}))
+        nearest = (self.nearest_dated(filters, user_id=user_id, agent_id=agent_id)
+                   if not results and filters.period is not None else [])
+        return FilteredSearch(results=results, filters=filters, nearest=nearest)
 
     def get(self, memory_id: str, *, owner_prefix: str | None = None) -> Memory | None:
         memory = self.backend.get_memory(memory_id)
@@ -2981,16 +3277,36 @@ class MemoryStore:
         when_since: str | None = None,
         when_until: str | None = None,
         exact_user: bool = False,
+        filters: Filters | None = None,
     ) -> list[Memory]:
         """The memories in scope, newest change first. ``exact_user``: no
         ``user_id`` means the memories without a user, not every user's
-        (``Scope.exact_user``)."""
+        (``Scope.exact_user``).
+
+        With ``filters`` (``filters.Filters``) the memories they admit, the
+        newest first by the time asked about where a filter asks one
+        (``when`` or ``happened``: when the thing happened, else when it was
+        said) and otherwise by the day said."""
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id,
                       exact_user=exact_user)
+        if filters is not None:
+            filters = self.resolve_filters(filters, user_id=user_id, agent_id=agent_id)
+            if filters.matches_nothing:
+                return []
+            categories, entity_id, since, until, when_since, when_until = _folded(
+                filters, categories, entity_id, since, until, when_since, when_until)
         if entity_id:
             entity_id = self._resolve_entity_filter(entity_id)
             if not entity_id:
                 return []
+        if filters is not None and filters.active:
+            rows = self._admitted(
+                scope, include_invalid=include_invalid, categories=categories,
+                entity_id=entity_id, since=since, until=until, when_since=when_since,
+                when_until=when_until, filters=filters)
+            rows.sort(key=lambda m: m.id)
+            rows.sort(key=lambda m: _filtered_order(m, filters), reverse=True)
+            return rows[offset : offset + limit]
         if not (since or until or when_since or when_until):
             return self.backend.list_memories(
                 scope, include_invalid=include_invalid, limit=limit, offset=offset,

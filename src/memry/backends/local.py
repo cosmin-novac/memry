@@ -621,9 +621,20 @@ def _entity_clause(
     )
 
 
+def _among_clause(among: Any, memory_id: str) -> tuple[str, list[Any]]:
+    """Filter to a set of memory ids (``among``, None for no such filter):
+    the memories a search's filters admit (``MemoryStore._admitted``), read
+    in SQL with the scope, so no first N is taken from memories they drop.
+    One JSON parameter, however many ids, so no variable limit is reached."""
+    if among is None:
+        return "1=1", []
+    return f"{memory_id} IN (SELECT value FROM json_each(?))", [json.dumps(sorted(among))]
+
+
 def _entity_reads_clause(
     *, include_invalid: bool, scope: Scope | None, history: bool,
     categories: list[str] | None, mentioning: str | list[str] | None,
+    among: Any = None,
 ) -> tuple[str, list[Any]]:
     """Which of an entity's memories (``m``) a lookup reads, as a search reads
     its text ranking (``keyword_search``): those in use, with ``history`` also
@@ -636,8 +647,9 @@ def _entity_reads_clause(
                    else " AND m.invalid_at IS NULL")
     cat_clause, cat_params = _category_clause(categories, "m.id")
     entity_clause, entity_params = _entity_clause(mentioning, "m.id")
-    return (f"{clause} AND {cat_clause} AND {entity_clause}",
-            [*params, *cat_params, *entity_params])
+    among_clause, among_params = _among_clause(among, "m.id")
+    return (f"{clause} AND {cat_clause} AND {entity_clause} AND {among_clause}",
+            [*params, *cat_params, *entity_params, *among_params])
 
 
 def _kind_clause(kind: str, prefix: str = "") -> str:
@@ -1732,12 +1744,14 @@ class LocalBackend(MemoryBackend):
         categories: list[str] | None = None,
         entity_id: str | None = None,
         history: bool = False,
+        among: Any = None,
     ) -> list[tuple[Memory, float]]:
         clause, params = _search_scope_clause(scope, "memories")
         cat_clause, cat_params = _category_clause(categories, "memories.id")
         entity_clause, entity_params = _entity_clause(entity_id, "memories.id")
-        filters = f"{clause} AND {cat_clause} AND {entity_clause}"
-        filter_params = (*params, *cat_params, *entity_params)
+        among_clause, among_params = _among_clause(among, "memories.id")
+        filters = f"{clause} AND {cat_clause} AND {entity_clause} AND {among_clause}"
+        filter_params = (*params, *cat_params, *entity_params, *among_params)
         found = self._vector_rows(
             embedding, embedding_model, limit,
             filters if include_invalid else f"{filters} AND memories.invalid_at IS NULL",
@@ -1796,6 +1810,7 @@ class LocalBackend(MemoryBackend):
         categories: list[str] | None = None,
         entity_id: str | None = None,
         history: bool = False,
+        among: Any = None,
     ) -> list[tuple[Memory, float]]:
         """BM25 over the memories, each word of the question weighed by how
         rare it is in everything the store holds: its memories and the turns
@@ -1817,13 +1832,15 @@ class LocalBackend(MemoryBackend):
         clause, params = _search_scope_clause(scope, "m")
         cat_clause, cat_params = _category_clause(categories, "m.id")
         entity_clause, entity_params = _entity_clause(entity_id, "m.id")
+        among_clause, among_params = _among_clause(among, "m.id")
         if not include_invalid:
             clause += (f" AND (m.invalid_at IS NULL OR ({_history_clause('m')}))" if history
                        else " AND m.invalid_at IS NULL")
         with self._lock:
             scores = self._keyword_scores(
-                asked, limit, f"{clause} AND {cat_clause} AND {entity_clause}",
-                [*params, *cat_params, *entity_params])
+                asked, limit,
+                f"{clause} AND {cat_clause} AND {entity_clause} AND {among_clause}",
+                [*params, *cat_params, *entity_params, *among_params])
             best = sorted(scores, key=lambda memory_id: (-scores[memory_id], memory_id))[:limit]
             rows = []
             for start in range(0, len(best), 500):
@@ -3524,10 +3541,11 @@ class LocalBackend(MemoryBackend):
         self, entity_id: str, limit: int = 10, *, include_invalid: bool = False,
         scope: Scope | None = None, history: bool = False,
         categories: list[str] | None = None, mentioning: str | list[str] | None = None,
+        among: Any = None,
     ) -> list[Memory]:
         clause, params = _entity_reads_clause(
             include_invalid=include_invalid, scope=scope, history=history,
-            categories=categories, mentioning=mentioning)
+            categories=categories, mentioning=mentioning, among=among)
         with self._lock:
             rows = self._db.execute(
                 f"SELECT DISTINCT {', '.join('m.' + c.strip() for c in _MEMORY_COLS.split(','))} "
@@ -3624,12 +3642,13 @@ class LocalBackend(MemoryBackend):
     def entity_memory_counts(
         self, entity_ids: list[str], *, scope: Scope | None = None, history: bool = False,
         categories: list[str] | None = None, mentioning: str | list[str] | None = None,
+        among: Any = None,
     ) -> dict[str, int]:
         out = dict.fromkeys(entity_ids, 0)
         ids = list(out)
         clause, params = _entity_reads_clause(
             include_invalid=False, scope=scope, history=history, categories=categories,
-            mentioning=mentioning)
+            mentioning=mentioning, among=among)
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
             with self._lock:
