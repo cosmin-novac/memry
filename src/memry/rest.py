@@ -259,7 +259,10 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 #mapwrap:fullscreen,#mapwrap.maxed{padding:0;border:0;border-radius:0;background:var(--bg)}
 #mapwrap:fullscreen #map,#mapwrap.maxed #map{border-radius:0}
 #mapwrap.maxed{position:fixed;inset:0;z-index:99999}
-.gx-ctrl{position:absolute;top:.6rem;right:.6rem;display:flex;gap:.4rem;align-items:flex-start;z-index:3}
+.gx-ctrl{position:absolute;top:.6rem;right:.6rem;display:flex;gap:.4rem;align-items:flex-start;z-index:3;flex-wrap:wrap;justify-content:flex-end;max-width:calc(100% - 1.2rem)}
+.gx-layouts{display:flex}.gx-layouts button{border-radius:0;margin-left:-1px}
+.gx-layouts button:first-child{border-radius:7px 0 0 7px;margin-left:0}.gx-layouts button:last-child{border-radius:0 7px 7px 0}
+.gx-layouts button[aria-pressed="true"]{position:relative;color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
 .gx-ctrl button,.gx-types summary{background:color-mix(in srgb,var(--panel) 68%,transparent);border:1px solid var(--line);color:var(--dim);border-radius:7px;padding:.3rem .5rem;font-size:.72rem;cursor:pointer;backdrop-filter:blur(5px);line-height:1;list-style:none}
 .gx-ctrl button:hover,.gx-types summary:hover{color:var(--accent);border-color:var(--accent)}
 .gx-types[open] summary{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
@@ -346,6 +349,12 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
 </div>
 <div id="mapwrap" hidden><canvas id="map"></canvas>
 <div class="gx-ctrl">
+  <span class="gx-layouts" id="mapLayouts" role="group" aria-label="Map layout">
+    <button type="button" data-layout="islands" title="Entities that share memories sit together. Every marker is one memory.">Islands</button>
+    <button type="button" data-layout="heat" title="Distance from the middle is the time since the newest memory about an entity.">Heat core</button>
+    <button type="button" data-layout="lanes" title="One lane per group, the newest memories on the right.">Lanes</button>
+    <button type="button" data-layout="galaxy" title="Rings by how many memories mention an entity.">Galaxy</button>
+  </span>
   <details class="gx-types" id="mapEntityFilter">
     <summary id="mapEntitiesBtn" title="Choose which types of entity the map shows. Tags are one of the types, off until you turn them on.">Entities</summary>
     <div class="gx-type-menu">
@@ -919,8 +928,8 @@ function drawMap(){
   const wrap=document.getElementById('mapwrap'),empty=document.getElementById('mapempty');
   const visible=panels.map&&!knowledgeMapSuspended&&mapData&&mapData.memories;
   wrap.hidden=!visible;syncMapEntityDetailVisibility();
-  if(!visible){G=null;empty.hidden=true;if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return}
-  G=buildGalaxy(mapData);sizeGalaxy();renderMapEntityTypes();
+  if(!visible){G=null;buildLayout();empty.hidden=true;if(gRAF){cancelAnimationFrame(gRAF);gRAF=0}return}
+  G=buildGalaxy(mapData);sizeGalaxy();buildLayout();renderMapEntityTypes();
   empty.hidden=!!G;
   if(!G){
     empty.textContent='No entities match the selected types.';
@@ -959,9 +968,11 @@ function galaxyRead(){
   const selectedNode=activeMapKey?G.byKey[activeMapKey]:null;
   const hoveredNode=!selectedNode&&hoverMapKey?G.byKey[hoverMapKey]:null;
   const shownLinks=displayedGalaxyEdges(G,selectedNode,hoveredNode).length;
-  const linkNote=G.edges.length?' · '+shownLinks+'/'+G.edges.length+' links shown':'';
+  const grouped=mapLayout!=='galaxy'&&L;
+  const linkNote=grouped?' · '+L.big.length+(L.big.length===1?' group':' groups')
+    :(G.edges.length?' · '+shownLinks+'/'+G.edges.length+' links shown':'');
   statEl.textContent=G.nodes.length+(G.nodes.length===1?' entity':' entities')+' · '+G.total+' linked memories'+linkNote
-    +(G.fb?' · core = largest':'');
+    +(G.fb&&!grouped?' · core = largest':'');
 }
 // The static part of the scene (ground, nebulae, sun, dust band) is rendered
 // once per size and theme and blitted every frame.
@@ -1031,6 +1042,7 @@ function planetSprite(n,c,dark,dpr){
 }
 function galaxyFrame(now){
   if(!G){gRAF=0;return}
+  if(mapLayout!=='galaxy'&&L){layoutFrame(now);return}
   if(G.lod&&!reducedMotion&&now-gLastFrame<LOD_FRAME_MS){gRAF=requestAnimationFrame(galaxyFrame);return}
   gLastFrame=now;
   const canvas=document.getElementById('map'),ctx=canvas.getContext('2d');
@@ -1249,10 +1261,391 @@ function drawMemoryMarker(ctx,type,x,y,size){
   }else ctx.arc(x,y,size,0,Math.PI*2);
   ctx.fill();
 }
+// ---- map layouts: islands, heat core, lanes --------------------------------
+// The same entities as the galaxy, placed by what they share instead of by how
+// many memories they have, and every memory drawn as one marker inside its
+// entity. Nothing is placed by hand. Groups come from which entities share
+// memories (label propagation over the links) and a group is named after its
+// largest entity. Positions and groups are kept between reloads, a new entity
+// starts beside the one it is most linked to, and an entity changes group only
+// when its links clearly point elsewhere, so the map a person has learned
+// stays put while the store changes under it.
+//   islands: a group sits together, its largest entities in the middle
+//   heat:    distance from the middle is the time since the newest memory
+//   lanes:   heat unrolled, one lane per group, the newest on the right
+const MAP_LAYOUTS=['islands','heat','lanes','galaxy'];
+let mapLayout='islands';
+try{const saved=localStorage.getItem('memry_map_layout');if(MAP_LAYOUTS.includes(saved))mapLayout=saved}catch(error){}
+const layoutPos=new Map(),layoutGroupOf=new Map();  // by node key, kept across rebuilds
+let L=null;
+const clampTo=(value,lo,hi)=>lo>hi?0:Math.max(lo,Math.min(hi,value));
+const LAYOUT_AGES=[[1,'1 day'],[7,'1 week'],[30,'1 month'],[90,'3 months'],[365,'1 year'],[1095,'3 years']];
+// The group of every node, as the key of the node the group grew from.
+// ``prior`` holds the groups of an earlier build: with it only new nodes are
+// placed and a known node moves only on a clear majority. The centre is the
+// one entity linked to a third of the map or more (the person the store is
+// about); it would pull every group into one, so it votes for nobody.
+function layoutGroups(nodes,edges,prior){
+  const index=new Map(nodes.map((node,i)=>[node.key,i])),links=nodes.map(()=>[]);
+  for(const edge of edges){
+    const a=index.get(edge.a),b=index.get(edge.b);
+    if(a===undefined||b===undefined||a===b)continue;
+    links[a].push([b,edge.weight]);links[b].push([a,edge.weight]);
+  }
+  let centre=-1;
+  const wide=Math.max(4,(nodes.length-1)/3);
+  nodes.forEach((node,i)=>{
+    if(links[i].length>=wide&&(centre<0||links[i].length>links[centre].length))centre=i;
+  });
+  const label=nodes.map(node=>prior.get(node.key)||null);
+  const best=i=>{
+    const sum=new Map();
+    for(const [j,weight] of links[i]){
+      if(j===centre||!label[j])continue;
+      sum.set(label[j],(sum.get(label[j])||0)+weight);
+    }
+    let top=null,weight=0;
+    for(const [key,value] of sum)if(value>weight||(value===weight&&key<top)){top=key;weight=value}
+    return{top,weight,own:label[i]?(sum.get(label[i])||0):0};
+  };
+  // Smallest first: the tail takes the group of its hub before the hub is
+  // asked, so a hub is held in place by its own tail and two hubs that share
+  // a few memories stay two groups.
+  const order=nodes.map((_,i)=>i).filter(i=>i!==centre)
+    .sort((a,b)=>nodes[a].count-nodes[b].count||(nodes[a].key<nodes[b].key?-1:1));
+  if(!label.some(Boolean)){
+    nodes.forEach((node,i)=>{label[i]=node.key});
+    for(let round=0;round<20;round++){
+      let changed=0;
+      for(const i of order){
+        const vote=best(i);
+        if(vote.top&&vote.top!==label[i]&&vote.weight>vote.own){label[i]=vote.top;changed++}
+      }
+      if(!changed)break;
+    }
+  }else for(const i of order){
+    const vote=best(i);
+    if(!label[i])label[i]=vote.top||nodes[i].key;
+    else if(vote.top&&vote.top!==label[i]&&vote.weight>1.5*vote.own+1)label[i]=vote.top;
+  }
+  if(centre>=0)label[centre]=best(centre).top||nodes[centre].key;
+  return{label,centre,links};
+}
+function saveLayout(){
+  for(const node of L.nodes)layoutPos.set(node.key,[node.lx,node.ly]);
+  for(const group of L.groups)layoutPos.set('group:'+group.key,[group.x,group.y]);
+}
+function buildLayout(){
+  if(L)saveLayout();
+  if(!G){L=null;return}
+  const nodes=G.nodes,W=G.W,H=G.H;
+  const grouped=layoutGroups(nodes,mapData.entity_edges,layoutGroupOf);
+  const centre=grouped.centre>=0?nodes[grouped.centre]:null;
+  const total=nodes.reduce((sum,node)=>sum+node.count,0);
+  // one marker per memory: the spacing that lets them all fit a quarter of the canvas
+  const step=Math.min(4.2,Math.sqrt(0.25*W*H/(Math.PI*total))),dot=step/1.8;
+  const now=Date.now(),groups=new Map();
+  let oldest=30;
+  nodes.forEach((node,i)=>{
+    node.group=grouped.label[i];layoutGroupOf.set(node.key,node.group);
+    node.lr=Math.max(2.5,step*Math.sqrt(node.count)+dot);
+    const said=Date.parse(node.last_said||'');
+    node.age=isNaN(said)?null:Math.max(0,(now-said)/864e5);
+    if(node.age!==null)oldest=Math.max(oldest,node.age);
+    node.u=(node.seed%9973)/9973;
+    if(node===centre)return;
+    let group=groups.get(node.group);
+    if(!group){group={key:node.group,members:[],x:NaN,y:0,hr:0};groups.set(node.group,group)}
+    group.members.push(node);node.g=group;
+  });
+  for(const group of groups.values()){
+    group.hub=group.members.reduce((a,b)=>b.count>a.count?b:a);
+    group.big=group.members.length>=4;
+    group.area=group.members.reduce((sum,node)=>sum+node.lr*node.lr,0);
+    group.R=Math.sqrt(group.area)*1.2+5;
+    const kept=layoutPos.get('group:'+group.key);
+    if(kept){group.x=kept[0];group.y=kept[1]}
+  }
+  const sorted=[...groups.values()].sort((a,b)=>b.R-a.R||(a.key<b.key?-1:1));
+  const first=!nodes.some(node=>layoutPos.has(node.key));
+  sorted.forEach((group,i)=>{
+    if(!isNaN(group.x))return;
+    if(first){group.x=Math.cos(i*2.4)*W*0.3;group.y=Math.sin(i*2.4)*H*0.3;return}
+    const angle=(hashCode(group.key)%628)/100,reach=(centre?centre.lr:0)+group.R+20;
+    group.x=Math.cos(angle)*reach;group.y=Math.sin(angle)*reach;
+  });
+  nodes.forEach((node,i)=>{
+    const kept=layoutPos.get(node.key);
+    if(kept){node.lx=kept[0];node.ly=kept[1];return}
+    // a new entity starts beside the one it shares the most memories with
+    let near=null,strongest=0;
+    if(!first)for(const [j,weight] of grouped.links[i]){
+      if(j!==grouped.centre&&weight>strongest&&layoutPos.has(nodes[j].key)){
+        strongest=weight;near=layoutPos.get(nodes[j].key);
+      }
+    }
+    const rnd=mulberry(node.seed+7);
+    const base=near||(node.g?[node.g.x,node.g.y]:[0,0]),spread=near?8:(node.g?node.g.R:1);
+    node.lx=base[0]+(rnd()-0.5)*spread;node.ly=base[1]+(rnd()-0.5)*spread;
+  });
+  // heat sectors and lanes: one per group of four or more, the rest share "other"
+  const big=sorted.filter(group=>group.big).sort((a,b)=>a.key<b.key?-1:1);
+  const slots=big.map(group=>(group.slot={name:group.hub.label,area:group.area}));
+  const other={name:'other',area:0};
+  for(const group of groups.values())if(!group.big){group.slot=other;other.area+=group.area}
+  if(other.area||!slots.length)slots.push(other);
+  const share=slot=>Math.pow(slot.area||1,0.7),sum=slots.reduce((a,slot)=>a+share(slot),0);
+  const Rm=H/2-30,ax=Math.min(1.8,(W/2-16)/Rm);
+  let angle=-Math.PI/2,y=44-H/2;
+  for(const slot of slots){
+    const part=share(slot)/sum;
+    slot.a0=angle+0.03;slot.a1=angle+Math.PI*2*part-0.03;angle+=Math.PI*2*part;
+    slot.y0=y;slot.y1=y+(H-72)*part;y=slot.y1;
+  }
+  if(centre)centre.slot=(groups.get(centre.group)||{}).slot||slots[0];
+  L={nodes,groups:[...groups.values()],big,slots,centre,step,dot,
+    dots:step>=1.15&&total<=20000,Rm,ax,r0:(centre?centre.lr:8)+12,
+    xl:-W/2+22,xr:W/2-30,logMax:Math.log1p(oldest),oldest,frames:first?0:180,sig:''};
+  if(first){const settle=nodes.length<=600?220:70;for(let i=0;i<settle;i++)layoutTick()}
+}
+const layoutAgeF=node=>node.age===null?1:Math.min(1,Math.log1p(node.age)/L.logMax);
+// One step: every entity eases toward its place in the current layout, then
+// overlapping entities are pushed apart. Run for a few seconds after a change.
+function layoutTick(){
+  const W=G.W,H=G.H,islands=mapLayout!=='heat'&&mapLayout!=='lanes';
+  const pinned=mapLayout==='lanes'?null:L.centre,cr=pinned?pinned.lr:0;
+  if(islands){
+    const gs=L.groups,kx=0.006*Math.min(1,H/W*1.3),ky=0.006*Math.min(1,W/H);
+    for(const group of gs){group.x-=group.x*kx;group.y-=group.y*ky}
+    for(let i=0;i<gs.length;i++){
+      const a=gs[i];
+      if(pinned){const q=Math.hypot(a.x,a.y)||1,min=a.R+cr+6;if(q<min){a.x*=min/q;a.y*=min/q}}
+      for(let j=i+1;j<gs.length;j++){
+        const b=gs[j],dx=b.x-a.x,dy=b.y-a.y,q=Math.hypot(dx,dy)||1,min=a.R+b.R+6;
+        if(q<min){const push=(min-q)/q*0.5;a.x-=dx*push;a.y-=dy*push;b.x+=dx*push;b.y+=dy*push}
+      }
+      a.x=clampTo(a.x,-W/2+a.R,W/2-a.R);a.y=clampTo(a.y,-H/2+a.R+26,H/2-a.R-22);
+    }
+  }
+  for(const node of L.nodes){
+    if(node===pinned){node.lx=0;node.ly=0;continue}
+    let tx,ty,ease=0.09;
+    if(islands){tx=node.g.x;ty=node.g.y;ease=0.015+0.06*Math.min(1,node.lr/22)}
+    else{
+      const slot=node.g?node.g.slot:node.slot,f=layoutAgeF(node);
+      if(mapLayout==='heat'){
+        const angle=slot.a0+node.u*(slot.a1-slot.a0),rad=L.r0+(L.Rm-L.r0)*f;
+        tx=Math.cos(angle)*rad*L.ax;ty=Math.sin(angle)*rad;
+      }else{tx=L.xr-(L.xr-L.xl)*f;ty=slot.y0+(0.14+0.72*node.u)*(slot.y1-slot.y0)}
+    }
+    node.lx+=(tx-node.lx)*ease;node.ly+=(ty-node.ly)*ease;
+  }
+  const ns=L.nodes,count=ns.length,passes=count>900?1:2;
+  for(let pass=0;pass<passes;pass++)for(let i=0;i<count;i++){
+    const a=ns[i];
+    for(let j=i+1;j<count;j++){
+      const b=ns[j],dx=b.lx-a.lx,dy=b.ly-a.ly,min=a.lr+b.lr+1.5;
+      if(dx>min||dx<-min||dy>min||dy<-min)continue;
+      const q2=dx*dx+dy*dy;if(q2>=min*min)continue;
+      const q=Math.sqrt(q2)||0.01,push=(min-q)/q;
+      if(a===pinned){b.lx+=dx*push;b.ly+=dy*push}
+      else if(b===pinned){a.lx-=dx*push;a.ly-=dy*push}
+      else{a.lx-=dx*push*0.5;a.ly-=dy*push*0.5;b.lx+=dx*push*0.5;b.ly+=dy*push*0.5}
+    }
+  }
+  for(const node of ns){
+    if(node===pinned)continue;
+    node.lx=clampTo(node.lx,-W/2+node.lr,W/2-node.lr);node.ly=clampTo(node.ly,-H/2+node.lr,H/2-node.lr);
+  }
+  for(const group of L.big){
+    let reach=0;
+    for(const node of group.members)reach=Math.max(reach,Math.hypot(node.lx-group.x,node.ly-group.y)+node.lr);
+    group.hr+=(reach+5-group.hr)*0.2;
+  }
+}
+function addMarkerPath(ctx,type,x,y,size){
+  if(size<1.3){ctx.rect(x-size,y-size,size*2,size*2);return}
+  if(type==='procedural')ctx.rect(x-size,y-size,size*2,size*2);
+  else if(type==='episodic'){
+    ctx.moveTo(x,y-size*1.25);ctx.lineTo(x+size*1.1,y+size);ctx.lineTo(x-size*1.1,y+size);ctx.closePath();
+  }else if(type==='working'){
+    ctx.moveTo(x,y-size*1.3);ctx.lineTo(x+size*1.3,y);ctx.lineTo(x,y+size*1.3);ctx.lineTo(x-size*1.3,y);ctx.closePath();
+  }else{ctx.moveTo(x+size,y);ctx.arc(x,y,size,0,Math.PI*2)}
+}
+function layoutFrame(now){
+  const canvas=document.getElementById('map'),ctx=canvas.getContext('2d');
+  const W=G.W,H=G.H,dpr=window.devicePixelRatio||1;
+  const rootStyle=getComputedStyle(document.documentElement);
+  const css=name=>rootStyle.getPropertyValue(name).trim();
+  const bg=css('--bg')||'#0b0e14',dark=parseInt(bg.slice(5,7)||'14',16)<120;
+  const TEXT=css('--text')||'#dbe4f0',DIM=css('--dim')||'#8494ab';
+  const WARM=css('--warn')||'#f0a35e',ACCENT=css('--accent')||'#5eead4';
+  const STAR=dark?'#c9d6ea':'#33415c';
+  const TYPE={semantic:css('--semantic')||ACCENT,procedural:css('--procedural')||ACCENT,
+    episodic:css('--episodic')||WARM,working:css('--working')||DIM};
+  if(hoverMapKey){hoverFocusTag=hoverMapKey;hoverFocusMix=1;hoverFadeStarted=0}
+  else if(hoverFocusTag){
+    hoverFocusMix=reducedMotion||!hoverFadeStarted?0:Math.max(0,1-(now-hoverFadeStarted)/HOVER_FADE_MS);
+    if(!hoverFocusMix)hoverFocusTag=null;
+  }
+  const next=()=>{gRAF=!reducedMotion&&panels.map&&mapVisible?requestAnimationFrame(galaxyFrame):0};
+  if(reducedMotion)while(L.frames>0){layoutTick();L.frames--}
+  const moving=L.frames>0;
+  if(moving){layoutTick();L.frames--}
+  // Nothing moved and nothing changed: keep the picture that is there.
+  const sig=[mapLayout,W,H,dark,hoverFocusTag,hoverFocusMix.toFixed(2),activeMapKey].join('|');
+  if(!moving&&sig===L.sig&&!gPulses.length){next();return}
+  L.sig=sig;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  ctx.drawImage(galaxyBackdrop(W,H,dark,WARM,STAR,dpr),0,0,W,H);
+  ctx.save();ctx.translate(W/2,H/2);
+  ctx.lineCap='round';ctx.lineJoin='round';
+  const ageAt=days=>Math.log1p(days)/L.logMax,marks=LAYOUT_AGES.filter(mark=>mark[0]<L.oldest);
+  const haloColor=dark?'rgba(4,6,12,0.9)':'rgba(245,247,250,0.94)';
+  const haloText=(text,x,y,color)=>{
+    ctx.lineWidth=4;ctx.strokeStyle=haloColor;ctx.strokeText(text,x,y);ctx.fillStyle=color;ctx.fillText(text,x,y);
+  };
+  ctx.lineWidth=1;ctx.strokeStyle=hexA(DIM,0.3);
+  if(mapLayout==='islands'){
+    ctx.setLineDash([3,4]);
+    for(const group of L.big){ctx.beginPath();ctx.arc(group.x,group.y,group.hr,0,Math.PI*2);ctx.stroke()}
+    ctx.setLineDash([]);
+  }else if(mapLayout==='heat'){
+    for(const mark of marks){
+      const rad=L.r0+(L.Rm-L.r0)*ageAt(mark[0]);
+      ctx.beginPath();ctx.ellipse(0,0,rad*L.ax,rad,0,0,Math.PI*2);ctx.stroke();
+    }
+    for(const slot of L.slots){
+      const a=slot.a0-0.03;
+      ctx.beginPath();ctx.moveTo(Math.cos(a)*L.r0*L.ax,Math.sin(a)*L.r0);
+      ctx.lineTo(Math.cos(a)*L.Rm*L.ax,Math.sin(a)*L.Rm);ctx.stroke();
+    }
+  }else{
+    for(const mark of marks){
+      const x=L.xr-(L.xr-L.xl)*ageAt(mark[0]);
+      ctx.beginPath();ctx.moveTo(x,40-H/2);ctx.lineTo(x,H/2-26);ctx.stroke();
+    }
+    for(const slot of L.slots){ctx.beginPath();ctx.moveTo(-W/2,slot.y0);ctx.lineTo(W/2,slot.y0);ctx.stroke()}
+  }
+  const sel=activeMapKey?G.byKey[activeMapKey]:null;
+  const hov=hoverFocusTag?G.byKey[hoverFocusTag]:null;
+  const hoverMix=hov?hoverFocusMix:0;
+  const linked=(n,f)=>!!f&&(n===f||(G.neigh[f.key]&&G.neigh[f.key].has(n.key)));
+  const focusEmph=(n,f)=>!f?1:(n===f?1:(linked(n,f)?0.92:0.16));
+  const emph=n=>{let A=focusEmph(n,sel);if(hov)A+=(focusEmph(n,hov)-A)*hoverMix;return A};
+  // links are drawn for the selected and the hovered entity only
+  for(const [focus,mix] of [[sel,1],[hov,hoverMix]]){
+    if(!focus||mix<0.02)continue;
+    for(const edge of G.edgesByNode[focus.key]||[]){
+      const a=G.nodes[edge.a],b=G.nodes[edge.b];
+      ctx.globalAlpha=(0.22+0.16*edge.weight)*mix;
+      ctx.strokeStyle=focus===sel?ACCENT:TEXT;ctx.lineWidth=0.6+0.5*edge.weight;
+      ctx.beginPath();ctx.moveTo(a.lx,a.ly);ctx.lineTo(b.lx,b.ly);ctx.stroke();
+    }
+  }
+  ctx.globalAlpha=1;
+  const order=hov?[...L.nodes.filter(node=>node!==hov),hov]:L.nodes;
+  const labels=[];
+  for(const n of order){
+    const x=n.lx,y=n.ly,A=emph(n);
+    n.px=W/2+x;n.py=H/2+y;
+    ctx.globalAlpha=A;
+    ctx.fillStyle=hexA(TEXT,n===L.centre?0.1:0.05);
+    ctx.beginPath();ctx.arc(x,y,n.lr,0,Math.PI*2);ctx.fill();
+    if(L.dots){
+      // one marker per memory on a sunflower spiral, the types mixed by their share
+      const types=n.dotTypes??=memoryMarkerTypes(n.typeCounts,n.count);
+      for(const type of Object.keys(n.typeCounts)){
+        ctx.beginPath();
+        for(let i=0;i<types.length;i++){
+          if(types[i]!==type)continue;
+          const rad=L.step*Math.sqrt(i+0.5),angle=i*2.39996;
+          addMarkerPath(ctx,type,x+Math.cos(angle)*rad,y+Math.sin(angle)*rad,L.dot);
+        }
+        ctx.fillStyle=TYPE[type]||DIM;ctx.fill();
+      }
+    }else{
+      // too many memories for a marker each: a disc in the colour of its main type
+      const main=Object.keys(n.typeCounts).sort((a,b)=>n.typeCounts[b]-n.typeCounts[a])[0];
+      ctx.globalAlpha=A*0.8;ctx.fillStyle=TYPE[main]||DIM;
+      ctx.beginPath();ctx.arc(x,y,Math.max(1.5,n.lr-1),0,Math.PI*2);ctx.fill();ctx.globalAlpha=A;
+    }
+    const isSel=activeMapKey===n.key,isHov=n===hov&&hoverMix>0.04;
+    if(isSel||isHov){
+      ctx.strokeStyle=isSel?ACCENT:TEXT;ctx.lineWidth=1.4;
+      ctx.beginPath();ctx.arc(x,y,n.lr+2.5,0,Math.PI*2);ctx.stroke();
+    }
+    const lit=isSel||isHov||linked(n,sel)||(linked(n,hov)&&hoverMix>0.04);
+    if(n.lr>=13||n===L.centre||(n.g&&n.g.big&&n.g.hub===n)||lit)labels.push([n,A,lit]);
+  }
+  ctx.textAlign='center';ctx.textBaseline='top';
+  ctx.font='500 9.5px ui-sans-serif,system-ui';
+  if('letterSpacing'in ctx)ctx.letterSpacing='1.5px';
+  for(const [n,A,lit] of labels){
+    ctx.globalAlpha=Math.min(1,A+0.05);
+    const label=n.label.length>18?n.label.slice(0,17)+'...':n.label;
+    haloText(label.toUpperCase()+' · '+n.count,clampTo(n.lx,-W/2+50,W/2-50),n.ly+n.lr+5,lit?TEXT:DIM);
+  }
+  ctx.globalAlpha=1;
+  // what the rings, sectors and lanes stand for
+  if(mapLayout==='heat'){
+    for(const mark of marks)haloText(mark[1],0,-(L.r0+(L.Rm-L.r0)*ageAt(mark[0]))-5,DIM);
+    for(const slot of L.slots){
+      const mid=(slot.a0+slot.a1)/2;
+      haloText(slot.name.toUpperCase(),clampTo(Math.cos(mid)*L.Rm*L.ax*0.92,-W/2+70,W/2-70),
+        clampTo(Math.sin(mid)*L.Rm*0.92,-H/2+44,H/2-40),ACCENT);
+    }
+  }else if(mapLayout==='lanes'){
+    for(const mark of marks)haloText(mark[1],L.xr-(L.xr-L.xl)*ageAt(mark[0]),H/2-24,DIM);
+    haloText('now',L.xr,H/2-24,DIM);
+    ctx.textAlign='left';
+    for(const slot of L.slots)haloText(slot.name.toUpperCase(),-W/2+12,slot.y0+5,ACCENT);
+  }
+  if('letterSpacing'in ctx)ctx.letterSpacing='0px';
+  ctx.restore();
+  for(let i=gPulses.length-1;i>=0;i--){
+    const pulse=gPulses[i],age=(now-pulse.start)/700;
+    if(age>1){gPulses.splice(i,1);continue}
+    ctx.globalAlpha=(1-age)*0.6;ctx.strokeStyle=ACCENT;ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.arc(pulse.x,pulse.y,pulse.r+age*30,0,Math.PI*2);ctx.stroke();
+  }
+  ctx.globalAlpha=1;
+  next();
+}
+function syncMapLayoutButtons(){
+  document.querySelectorAll('#mapLayouts button').forEach(button=>
+    button.setAttribute('aria-pressed',String(button.dataset.layout===mapLayout)));
+}
+function setMapLayout(layout){
+  if(!MAP_LAYOUTS.includes(layout))return;
+  mapLayout=layout;
+  try{localStorage.setItem('memry_map_layout',layout)}catch(error){}
+  syncMapLayoutButtons();
+  if(L){L.frames=220;L.sig=''}
+  if(G){
+    galaxyRead();
+    if(reducedMotion)galaxyFrame(performance.now());
+    else if(!gRAF)gRAF=requestAnimationFrame(galaxyFrame);
+  }
+}
+document.getElementById('mapLayouts').addEventListener('click',event=>{
+  const button=event.target.closest('button[data-layout]');
+  if(button)setMapLayout(button.dataset.layout);
+});
+syncMapLayoutButtons();
 function hitNode(event){
   if(!G)return null;
   const rect=document.getElementById('map').getBoundingClientRect();
   const x=event.clientX-rect.left,y=event.clientY-rect.top;
+  if(mapLayout!=='galaxy'&&L){
+    let found=null;
+    for(const node of G.nodes){
+      const d=Math.hypot(node.px-x,node.py-y);
+      if(d<Math.max(node.lr+3,8)&&(!found||node.lr<found.lr))found=node;
+    }
+    return found;
+  }
   let best=null,bd=1e9;
   for(const node of G.nodes){
     const px=G.CX+node.rFrac*G.RX*Math.cos(node.ang),py=G.CY+node.rFrac*G.RY*Math.sin(node.ang);
@@ -1419,7 +1812,8 @@ document.getElementById('map').addEventListener('click',event=>{
   if(node){
     const rootStyle=getComputedStyle(document.documentElement);
     const dark=parseInt((rootStyle.getPropertyValue('--bg').trim()||'#0b0e14').slice(5,7)||'14',16)<120;
-    gPulses.push({x:G.CX+node.rFrac*G.RX*Math.cos(node.ang),y:G.CY+node.rFrac*G.RY*Math.sin(node.ang),
+    if(mapLayout!=='galaxy'&&L)gPulses.push({x:node.px,y:node.py,r:node.lr,start:performance.now(),tone:gTone(node,dark)});
+    else gPulses.push({x:G.CX+node.rFrac*G.RX*Math.cos(node.ang),y:G.CY+node.rFrac*G.RY*Math.sin(node.ang),
       r:node.radius,start:performance.now(),tone:gTone(node,dark)});
     applyMapNodeFilter(node).catch(()=>alert('Could not filter memories from the map.'));
   }

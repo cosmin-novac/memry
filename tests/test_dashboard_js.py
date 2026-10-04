@@ -1365,3 +1365,94 @@ check(account.includes('0.2.46')&&!account.includes('Backups')&&!account.include
 check(renderAbout({error:'unauthorized'})==='','an error renders nothing');
 """
     _run_node(contract)
+
+
+def test_map_layouts_group_by_links_and_stay_put_when_the_store_changes():
+    """Islands, heat core and lanes: groups come from the links alone, the
+    entity everything mentions is the centre and votes for nobody, and a
+    rebuild after new memories keeps every known entity where it was."""
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+    for control in ('id="mapLayouts"', 'data-layout="islands"', 'data-layout="heat"',
+                    'data-layout="lanes"', 'data-layout="galaxy"'):
+        assert control in html, control
+    assert "if(mapLayout!=='galaxy'&&L){layoutFrame(now);return}" in source
+    helpers = source[source.index("const hashCode=") : source.index("const reducedMotion=")]
+    layouts = source[source.index("const MAP_LAYOUTS=") : source.index("function addMarkerPath(")]
+    contract = helpers + """
+const stored={};
+const localStorage={getItem:key=>stored[key]??null,setItem:(key,value)=>{stored[key]=value}};
+let G=null,mapData=null;
+""" + layouts + """
+function check(condition,message){if(!condition)throw new Error(message)}
+const day=864e5,iso=days=>new Date(Date.now()-days*day).toISOString();
+const entities=[{key:'entity:me',label:'Me',count:200,last_said:iso(0)}],edges=[];
+const hubs=['a','b','c','d'];
+hubs.forEach((hub,h)=>{
+  entities.push({key:'entity:'+hub,label:'Hub '+hub,count:60,last_said:iso(1+h)});
+  edges.push({a:'entity:me',b:'entity:'+hub,weight:20});
+  for(let i=0;i<30;i++){
+    const key='entity:'+hub+i;
+    entities.push({key,label:hub+i,count:2+(i%5),last_said:iso(20+i*10)});
+    edges.push({a:'entity:'+hub,b:key,weight:2});
+    if(i%2)edges.push({a:'entity:me',b:key,weight:1});
+    if(i%7===0)edges.push({a:key,b:'entity:'+hubs[(h+1)%4]+i,weight:1});
+  }
+});
+// hubs share memories with each other, less than each shares with its own tail
+for(let i=0;i<4;i++)for(let j=i+1;j<4;j++)edges.push({a:'entity:'+hubs[i],b:'entity:'+hubs[j],weight:6});
+const graph=list=>({W:900,H:520,nodes:list.map(raw=>({...raw,typeCounts:{semantic:raw.count},seed:hashCode(raw.key)}))});
+const groupOf=key=>G.nodes.find(node=>node.key===key).group;
+
+mapData={entity_edges:edges};G=graph(entities);buildLayout();
+check(L.centre&&L.centre.key==='entity:me','the entity linked to everything is the centre');
+check(L.big.length===4,'four groups of four or more, got '+L.big.length);
+for(const hub of hubs)for(let i=0;i<30;i++)
+  check(groupOf('entity:'+hub+i)===groupOf('entity:'+hub),hub+i+' sits with its hub');
+check(new Set(hubs.map(hub=>groupOf('entity:'+hub))).size===4,'hubs that share a few memories stay apart');
+check(L.big.map(group=>group.hub.label).sort().join()==='Hub a,Hub b,Hub c,Hub d','a group is named after its largest entity');
+for(const node of G.nodes){
+  check(Number.isFinite(node.lx)&&Number.isFinite(node.ly),'a place for '+node.key);
+  check(Math.abs(node.lx)<=450&&Math.abs(node.ly)<=260,node.key+' is on the canvas');
+}
+let overlaps=0;
+G.nodes.forEach((a,i)=>G.nodes.slice(i+1).forEach(b=>{
+  if(Math.hypot(a.lx-b.lx,a.ly-b.ly)<(a.lr+b.lr)*0.8)overlaps++}));
+check(overlaps<=3,'entities do not sit on each other: '+overlaps);
+
+// the store changes: a new entity about hub b, and more memories for b7
+const before=new Map(G.nodes.map(node=>[node.key,[node.lx,node.ly,node.group]]));
+const grown=entities.map(raw=>raw.key==='entity:b7'?{...raw,count:raw.count+5}:raw)
+  .concat([{key:'entity:new',label:'New',count:3,last_said:iso(0)}]);
+mapData={entity_edges:edges.concat([{a:'entity:b',b:'entity:new',weight:3}])};
+G=graph(grown);
+const settle=L.frames;buildLayout();
+check(groupOf('entity:new')===groupOf('entity:b'),'a new entity joins the group it is linked to');
+const hubB=before.get('entity:b'),fresh=G.nodes.find(node=>node.key==='entity:new');
+check(Math.hypot(fresh.lx-hubB[0],fresh.ly-hubB[1])<=8,'and starts beside it');
+for(const node of G.nodes){
+  const was=before.get(node.key);if(!was)continue;
+  check(node.group===was[2],node.key+' keeps its group');
+  check(node.lx===was[0]&&node.ly===was[1],node.key+' starts where it was');
+}
+check(L.frames>0,'the map settles over the next frames instead of jumping');
+while(L.frames>0){layoutTick();L.frames--}
+let moved=0;
+for(const node of G.nodes){
+  const was=before.get(node.key);
+  if(was)moved=Math.max(moved,Math.hypot(node.lx-was[0],node.ly-was[1]));
+}
+check(moved<60,'one new entity does not reshuffle the map: '+moved.toFixed(1));
+
+// heat core: the newest memories are nearest the middle
+mapLayout='heat';for(let i=0;i<260;i++)layoutTick();
+const reach=key=>{const node=G.nodes.find(n=>n.key===key);return Math.hypot(node.lx/L.ax,node.ly)};
+check(reach('entity:a')<reach('entity:a29'),'an entity touched yesterday is nearer than one touched long ago');
+// lanes: the newest on the right
+mapLayout='lanes';for(let i=0;i<260;i++)layoutTick();
+const at=key=>G.nodes.find(n=>n.key===key).lx;
+check(at('entity:a')>at('entity:a29'),'newer is further right');
+"""
+    result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+

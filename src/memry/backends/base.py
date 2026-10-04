@@ -246,9 +246,12 @@ class MemoryBackend(ABC):
                         "entity_type": entity.entity_type or "untyped",
                         "count": 0,
                         "type_counts": {},
+                        "last_said": "",
                     },
                 )
                 node["count"] += 1
+                node["last_said"] = max(
+                    node["last_said"], str(getattr(memory, "created_at", "") or ""))
                 counts = node["type_counts"]
                 counts[memory_type] = counts.get(memory_type, 0) + 1
             unique = sorted({f"entity:{entity.id}" for entity in entities})
