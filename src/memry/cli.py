@@ -8,7 +8,6 @@
     memry context "task" -u ada   build a context block
     memry history <memory_id>     audit trail for one memory
     memry stats                   store statistics
-    memry sweep                   decay sweep (soft-forget stale memories)
     memry reindex                 re-embed all memories
     memry backfill-property-vectors  property vectors for the linked search
     memry export / import         lossless backup/restore; legacy JSON imports
@@ -243,9 +242,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("memory_id")
 
     sub.add_parser("stats", help="store statistics")
-
-    p = sub.add_parser("sweep", help="decay sweep: soft-forget stale memories")
-    p.add_argument("--threshold", type=float, default=0.1)
 
     p = sub.add_parser(
         "backfill-relations",
@@ -482,9 +478,6 @@ def main(argv: list[str] | None = None) -> int:
             _print([e.model_dump() for e in store.history(args.memory_id)])
         elif args.command == "stats":
             _print(store.stats())
-        elif args.command == "sweep":
-            forgotten = store.decay_sweep(threshold=args.threshold)
-            _print({"forgotten": forgotten, "count": len(forgotten)})
         elif args.command == "backfill-relations":
             if not store.llm.available:
                 print("no LLM configured; relation backfill needs one", file=sys.stderr)

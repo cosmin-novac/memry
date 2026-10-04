@@ -785,7 +785,7 @@ class MemoryBackend(ABC):
     # -- maintenance ------------------------------------------------------
     @abstractmethod
     def all_memories_iter(self, include_invalid: bool = True) -> list[Memory]:
-        """All memories, for reindexing/decay sweeps."""
+        """All memories, for reindexing."""
 
     @abstractmethod
     def stats(self) -> dict[str, Any]: ...

@@ -90,7 +90,7 @@ those limits are visible and intentional.
 |---|---|---|
 | Public surfaces | Python API, CLI, REST, dashboard, MCP | They call `MemoryStore`; they do not implement memory behavior independently. |
 | `MemoryStore` | Ownership checks, write/read workflows, knowledge operations | It is the product facade and the main invariant boundary. |
-| Intelligence | Extraction, reconciliation, entity resolution, relation extraction, topic abstraction, descriptions, decay, consolidation | Derived outputs remain rebuildable from evidence. |
+| Intelligence | Extraction, reconciliation, entity resolution, relation extraction, topic abstraction, descriptions, consolidation | Derived outputs remain rebuildable from evidence. Nothing forgets a memory for its age. |
 | Retrieval | FTS5/BM25, vectors, reciprocal-rank fusion, recency/importance, the linked search over entity links | Invalidated evidence is excluded by default and work is bounded. |
 | Providers | LLM and embedding integrations | External providers are optional; zero-key fallbacks remain functional. |
 | Production persistence | `LocalBackend` | SQLite is the sole production source of truth. |
@@ -268,8 +268,9 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `owner.py
    names that the text may mean (a rare shared name word, or initials), and the owner's
    name ("the user" until the account names it or a conversation states it). It writes a
    stored name as stored when a fact names that entity, and lists the owner under the
-   owner's name. It also reports the user's own name (`user_name`) when the conversation
-   states it, and only then (see "Who the owner is" below).
+   owner's name. While the owner has no name it also reports the user's own name
+   (`user_name`) when the conversation states it, and only then (see "Who the owner is"
+   below).
 2. **Save time (`resolve_mentions`).** Each extracted name is looked up across the whole
    namespace (not only the save's session): entities with that name or alias, plus up to
    five from the name index (a rare shared word, similar spelling, a typo, initials, a
@@ -353,7 +354,11 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `owner.py
    picture of the entity: what it is, its roles, relationships, preferences and the facts
    that stay true. It leaves one-off events, past or planned, to the memories, and
    mentions one only as far as it tells what the entity is, without its date
-   (`entities.DESCRIPTION_SYSTEM`).
+   (`entities.DESCRIPTION_SYSTEM`). An entity with fewer than 2 memories in use
+   (`entities.DESCRIPTION_MIN_MEMORIES`) gets none: no text-model call, nothing stored,
+   and nothing shown in context or on the entity page, since the memory speaks for itself
+   and a description would only repeat it. One stored when it had more memories stays
+   stored but is not shown until it has 2 again.
 
 Merge proposals never reach the Upkeep queue when a calibrated judge decides pairs.
 A merge keeps what decided it on its proposal: the two entities (the one merged away stays
@@ -387,6 +392,12 @@ name. Once the owner has a name it is compared like any person.
   name ("I'm Cos", "my name is", a signature), the assistant calls the user by it, or a
   line says it ("The user's name is Cos."); never as a guess. A save whose turns in role
   user carry one speaker's name (`name`) names the owner too. Neither costs an extra call.
+  The question (a rule in the prompt and a field in the answer, about 80 prompt and 6
+  output tokens) is asked only while the owner is called "the user" and no account names
+  it. For a named owner the prompt and schema are byte for byte those without it, which
+  keeps the provider's prompt cache; so a conversation giving a named owner another name
+  goes unnoticed at save. Corrections are rare, and `learn_owner_name` still takes one
+  from any caller.
 - **What a stated name does** (`MemoryStore.learn_owner_name`, after the save's facts are
   written). While the owner is called "the user", it is folded into the person who carries
   the name, through the merge any pair goes through: the person keeps the name and becomes

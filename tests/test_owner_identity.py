@@ -177,12 +177,31 @@ def test_a_named_turn_in_role_user_names_the_owner():
     store.close()
 
 
+def _extraction_systems(llm) -> list[str]:
+    return [system for system, user in llm.calls if user.startswith("Conversation:")]
+
+
+def test_the_users_name_is_asked_only_while_the_owner_has_no_name():
+    store, llm, _ = _store()
+    _save(store, llm, "The user sails", "the user")
+    assert "- user_name:" in _extraction_systems(llm)[-1]
+    _save(store, llm, "The user's name is Ada.", "the user", user_name="Ada")
+    _save(store, llm, "Ada bought a boat", "Ada")
+    assert "user_name" not in _extraction_systems(llm)[-1]
+    # a named owner's save that states another name is not asked, and changes nothing
+    _save(store, llm, "My name is Bea.", "Ada", user_name="Bea")
+    assert store.owner_name("ada") == "Ada"
+    assert store._upkeep_get("owner_stated", "ada", None)["name"] == "Ada"
+    store.close()
+
+
 def test_the_accounts_name_wins():
     store, llm, _ = _store()
     store.set_owner_name("ada", "Ada Quint")
     _save(store, llm, "Ada Quint sails", "Ada Quint")
-    _save(store, llm, "The user's name is Bea.", "Ada Quint", user_name="Bea")
-    assert store.owner_name("ada") == "Ada Quint"
+    assert "user_name" not in _extraction_systems(llm)[-1]  # an account named the owner
+    outcome = store.learn_owner_name("ada", "Bea", evidence={"text": "I'm Bea"})
+    assert outcome["action"] == "recorded" and store.owner_name("ada") == "Ada Quint"
     state = store._upkeep_get("owner_stated", "ada", None)
     assert state["conflicts"][0]["name"] == "Bea" and "wins" in state["conflicts"][0]["why"]
     store.close()

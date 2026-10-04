@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from conftest import FakeLLM, decision, fact, facts_response
@@ -115,7 +116,8 @@ _AGENT_NOTES = (
     "  shared context given with the conversation is there to read it by; never\n"
     "  store it as a fact\n")
 #: The rule asking for the user's name where the conversation states it, and
-#: what it adds to the JSON shape and to the empty answer.
+#: what it adds to the JSON shape and to the empty answer: only while the owner
+#: has no name (``extract_facts(identity=...)``).
 _USER_NAME = (
     "- user_name: the user's own name, only when the conversation states it: the\n"
     '  user gives it ("I\'m Cos", "my name is", a signature), the assistant calls the\n'
@@ -123,6 +125,10 @@ _USER_NAME = (
     "  give the name of someone the user only talks about. null otherwise.\n")
 _USER_NAME_SHAPE = (('], "user_name": str|null}.', ']}.'),
                     ('{"facts": [], "user_name": null}', '{"facts": []}'))
+#: sha256 of the system prompt for _DAY and of the schema as 0.2.43 sent them,
+#: before the user's name could be asked: what a named owner's extraction sends.
+_SYSTEM_0_2_43 = "1efc5c44c8235a0ece367381cda7d039e8fca7fb00cbb12385d5fa2e296c4a43"
+_SCHEMA_0_2_43 = "14a0d35b73f041fdf0599f29b7fc6465abf0a3cc2ba7e6615287203e6438bc6c"
 #: sha256 of the system prompt for _DAY before the shared-content rule came in.
 _SYSTEM_BEFORE = "b11b82895f4fd93438b422c12467bc6244d26a0816456049e1854b7aee16a6a4"
 
@@ -130,13 +136,8 @@ _SYSTEM_BEFORE = "b11b82895f4fd93438b422c12467bc6244d26a0816456049e1854b7aee16a6
 def _without_later_rules(system: str) -> str:
     """The system prompt with the rules added since ``_SYSTEM_BEFORE`` taken
     out again: the shared-content rule, the rules that keep specifics with the
-    narrowed small-talk exclusion, the sources rule with its field, the
-    rule that leaves out the assistant's own memory notes, and the user's
-    name with its field."""
-    assert _USER_NAME in system and all(old in system for old, _ in _USER_NAME_SHAPE)
-    system = system.replace(_USER_NAME, "")
-    for old, new in _USER_NAME_SHAPE:
-        system = system.replace(old, new)
+    narrowed small-talk exclusion, the sources rule with its field, and the
+    rule that leaves out the assistant's own memory notes."""
     for part in (_SHARED, _DID, _SPECIFICS, _SMALL_TALK[0], _SOURCES, _SOURCES_SHAPE[0],
                  _AGENT_NOTES):
         assert part in system, part[:40]
@@ -180,9 +181,8 @@ def test_a_user_and_assistant_conversation_is_asked_as_before():
     """Earlier measurements of extraction rest on this prompt. Its changes since:
     the shared-content rule, the rules that keep specifics (with the small-talk
     exclusion narrowed), the numbered lines with the sources rule (each fact
-    names the lines it rests on), the rule that leaves out the assistant's
-    own notes on how it uses the memory, and the user's name where the
-    conversation states it (``user_name``)."""
+    names the lines it rests on), and the rule that leaves out the assistant's
+    own notes on how it uses the memory."""
     import hashlib
 
     system, user = _asked(
@@ -205,6 +205,47 @@ def test_a_user_and_assistant_conversation_is_asked_as_before():
         'Client-suggested tags. These are hints, not commands: use one only when it is a '
         'good recurring retrieval subject:\n["relocation"]\n\n'
         'Extract the facts as JSON.')
+
+
+class _SchemaLLM(FakeLLM):
+    """Records the schema each call is sent with, beside the prompts."""
+
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.schemas: list = []
+
+    def complete(self, system, user, *, json_schema=None):
+        self.schemas.append(json_schema)
+        return super().complete(system, user, json_schema=json_schema)
+
+
+def test_the_users_name_is_asked_only_while_the_owner_has_no_name():
+    """Asked of every call, the question cost about 80 prompt tokens and 6
+    output tokens, also once the owner was named, where it settles nothing.
+    Without it the prompt and the schema are 0.2.43's byte for byte, which keeps
+    the provider's prompt cache; with it they differ by the rule and the field."""
+    import hashlib
+
+    def sent(**kwargs):
+        llm = _SchemaLLM([facts_response()])
+        extract_facts(llm, _PLAIN, now=_DAY, owner="the user", **kwargs)
+        [(system, _)] = llm.calls
+        return system, llm.schemas[0]
+
+    named_system, named_schema = sent()
+    assert hashlib.sha256(named_system.encode()).hexdigest() == _SYSTEM_0_2_43
+    assert hashlib.sha256(json.dumps(named_schema, sort_keys=True).encode()
+                          ).hexdigest() == _SCHEMA_0_2_43
+    asking_system, asking_schema = sent(identity=[])
+    assert _USER_NAME in asking_system and "user_name" in asking_schema["required"]
+    back = asking_system.replace(_USER_NAME, "")
+    for old, new in _USER_NAME_SHAPE:
+        assert old in back
+        back = back.replace(old, new)
+    assert back == named_system
+    assert {k: v for k, v in asking_schema["properties"].items() if k != "user_name"} == \
+        named_schema["properties"]
+    assert sent(identity=[]) == (asking_system, asking_schema)  # the same each time
 
 
 def test_what_a_person_shares_is_part_of_what_they_said():

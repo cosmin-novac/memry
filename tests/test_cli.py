@@ -92,12 +92,16 @@ def test_export_import_roundtrip(capsys, tmp_path):
     assert result["unchanged"] > 0
 
 
-def test_reindex_and_sweep(capsys):
-    run(capsys, "add", "sweep me", "-u", "ada")
+def test_reindex(capsys):
+    run(capsys, "add", "reindex me", "-u", "ada")
     _, out = run(capsys, "reindex")
     assert json.loads(out)["reindexed"] >= 1
-    _, out = run(capsys, "sweep", "--threshold", "0.0")
-    assert json.loads(out)["count"] == 0  # fresh memories survive a 0-threshold sweep
+
+
+def test_there_is_no_forgetting_sweep(capsys):
+    """Nothing forgets a memory for its age: the sweep was retired."""
+    with pytest.raises(SystemExit):
+        main(["sweep"])
 
 
 def test_backfill_property_vectors_embeds_what_is_missing_in_every_namespace(capsys):

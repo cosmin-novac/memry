@@ -375,9 +375,9 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <dt>Relation</dt><dd>A link between two entities, like "Ada works on Helios". Search follows these to reach answers that share no words with your question.</dd>
     <dt>Invalidated</dt><dd>A memory that is no longer treated as true, but is still on file. Happens when you delete it, or when something you said later contradicted it. It stops appearing in search; it does not stop existing.</dd>
     <dt>Superseded</dt><dd>An invalidated memory that was replaced by a specific newer one - the old version of a fact you updated. It stays attached to its replacement as history. When the replacement came from a contradiction or an update (a value that changed, or a detail merged in), it is listed under Archive, where you can undo it. An old version an update replaced is still found by search, after the current one, with the date it held until. Memry never replaces an important memory without asking you first.</dd>
-    <dt>Forgotten</dt><dd>An invalidated memory that nothing replaced - you deleted it, or it faded out. These are listed on their own tab, where you can restore one or delete it permanently.</dd>
+    <dt>Forgotten</dt><dd>An invalidated memory that nothing replaced - you deleted it, or an older version of Memry let it fade out. Nothing is forgotten for its age now. These are listed on their own tab, where you can restore one or delete it permanently.</dd>
     <dt>Importance</dt><dd>How much weight a memory carries in results, from 0 to 1. Set when it is saved.</dd>
-    <dt>Decay</dt><dd>The slow drop in a memory's pull on results as it ages. Dated events fade fastest, standing rules barely at all.</dd>
+    <dt>Recency</dt><dd>Newer memories get a small lift in results, so an older one weighs a little less. Age never removes a memory.</dd>
     <dt>Consolidation</dt><dd>Merging several memories that say the same thing into one that keeps every detail. The originals become forgotten, not deleted.</dd>
     <dt>Merge proposal</dt><dd>Two entities that might be the same, waiting for you to say yes or no.</dd>
     <dt>Embedding</dt><dd>A memory turned into numbers so that similar meanings sit near each other. This is what makes "blood test" find "liver results".</dd>
@@ -2005,7 +2005,7 @@ function placeBlock(detail){
   return lines.length?`<div class="hint">${lines.join('<br>')}</div>`:'';
 }
 function entityIdentityBlock(entity,aliases){
-  return `<div class="description">${esc(entity.description||'No active evidence to summarize yet.')}</div>
+  return `${entity.description?`<div class="description">${esc(entity.description)}</div>`:''}
     <div class="alias-list">${aliases.map(alias=>`<span>${esc(alias)}</span>`).join('')||'<span>No aliases yet.</span>'}</div>`;
 }
 async function openEntity(id){
@@ -3184,11 +3184,12 @@ def create_app(
                     interval_days=every, needs_llm=False,
                 ),
                 entry(
-                    "durability", "How long facts stay relevant",
-                    "Estimates whether each memory matters for days, months or "
-                    "years, and forgetting uses that instead of one rate per "
-                    "memory type. Needs a decision provider, and is off unless "
-                    "MEMRY_DURABILITY is set.",
+                    "durability", "How long facts stay relevant (estimate only)",
+                    "Records an estimate per memory of whether it matters for days, "
+                    "months or years. Nothing acts on it yet: no memory is forgotten "
+                    "for its age, and search does not read it. It is kept for a "
+                    "planned experiment on relevance per entity. Needs a decision "
+                    "provider, and is off unless MEMRY_DURABILITY=1.",
                     needs_decider=True,
                 ),
                 entry(

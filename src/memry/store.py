@@ -49,13 +49,13 @@ from .intelligence.context import (
 )
 from .intelligence.decay import (
     DURABILITY_KEY,
-    decay_sweep,
     score_durability,
 )
 from .intelligence.entities import (
     _gate,
     classify_entity_types,
     DESCRIPTION_FACTS,
+    DESCRIPTION_MIN_MEMORIES,
     judge_entity_referents,
     non_referent_reason,
     screen_names,
@@ -410,11 +410,12 @@ def _forgetting_trigger(event: Any) -> str:
     if event.actor == "user":
         return "You deleted it."
     if event.actor == "decay":
+        # the forgetting sweep of versions before 0.2.44; nothing forgets by age now
         score = re.search(r"importance ([0-9.]+) < ([0-9.]+)", reason)
         if score:
-            return (f"The forgetting sweep removed it: its importance had faded to "
-                    f"{score.group(1)}, below the {score.group(2)} it needs to stay.")
-        return "The forgetting sweep removed it: its importance had faded too far."
+            return (f"The forgetting sweep, since retired, removed it: its importance had "
+                    f"faded to {score.group(1)}, below the {score.group(2)} it needed to stay.")
+        return "The forgetting sweep, since retired, removed it: its importance had faded too far."
     if event.event == "SUPERSEDE" and "into 0 fact" in reason:
         return ("It was a raw saved message, and distilling it produced nothing new: "
                 "every fact in it was already stored, or there was nothing to keep.")
@@ -809,7 +810,11 @@ class MemoryStore:
         these messages speak of them (``owner_name``), each fact's time then
         checked against ``now``. A deferred save is extracted as it would have
         been saved directly. ``stated`` receives the user's name where the
-        messages state it (``extraction.extract_facts``)."""
+        messages state it (``extraction.extract_facts``), asked only while the
+        owner has no name (``_owner_unnamed``): for a named owner the prompt
+        and schema are those without the question, so a conversation that
+        gives a named owner another name goes unnoticed at save. Corrections
+        are rare, and the question cost every call about 80 prompt tokens."""
         said = "\n".join(str(m.get("content") or "") for m in messages)
         candidates = extract_facts(
             self.llm,
@@ -820,7 +825,8 @@ class MemoryStore:
             tag_hints=tag_hints,
             owner=self.owner_name(scope.user_id, messages),
             entity_names=self._entity_vocabulary(scope, said),
-            identity=stated,
+            identity=stated if stated is not None and self._owner_unnamed(scope.user_id)
+            else None,
         )
         self._confirm_candidate_whens(candidates, now=now)
         return candidates
@@ -3145,7 +3151,7 @@ class MemoryStore:
         ):
             if memory.invalid_at is None or memory.superseded_by:
                 continue
-            # Whatever ended it: a delete (yours, or the forgetting sweep), or
+            # Whatever ended it: a delete (yours, or the retired forgetting sweep), or
             # a distillation that put nothing in its place. Looking for DELETE
             # alone is what left "forgotten by system" with no explanation.
             removal = next(
@@ -4108,12 +4114,28 @@ class MemoryStore:
             summary["proposals"] = proposals
         return summary
 
+    def _undescribed(self, entity: Entity) -> Entity:
+        """``entity`` shown without a description while it has fewer than
+        ``DESCRIPTION_MIN_MEMORIES`` memories in use: the memory speaks for
+        itself. One stored from when it had more stays stored, unshown, for
+        when it has them again."""
+        if entity.description is None or (
+                self.backend.count_entity_memories(entity.id) >= DESCRIPTION_MIN_MEMORIES):
+            return entity
+        return entity.model_copy(update={"description": None})
+
     def _refresh_entity_description(
         self, entity_id: str, *, force: bool = False
     ) -> Entity | None:
+        """The entity with its description, built or rebuilt where it is stale.
+        With fewer than ``DESCRIPTION_MIN_MEMORIES`` memories in use there is
+        none: no model is asked, nothing is stored, and one stored before is
+        not shown (``_undescribed``)."""
         entity = self.backend.get_entity(entity_id)
         if entity is None or not entity.is_active:
             return None
+        if self.backend.count_entity_memories(entity_id) < DESCRIPTION_MIN_MEMORIES:
+            return entity.model_copy(update={"description": None})
         evidence_updated_at = self.backend.entity_evidence_updated_at(entity_id)
         if (
             not force
@@ -4157,6 +4179,8 @@ class MemoryStore:
             entity = self._refresh_entity_description(entity_id)
             if entity is None:
                 return None
+        else:
+            entity = self._undescribed(entity)
         # Relations belong to the entity being looked at, not to a list of every
         # edge in the store: an edge only means something next to the thing it
         # connects. These are also what relational retrieval traverses, so
@@ -4596,6 +4620,13 @@ class MemoryStore:
                 str(s).strip().casefold() == name.casefold() for s in surfaces):
             return None
         return self._new_owner(scope.user_id, name)
+
+    def _owner_unnamed(self, user_id: str | None) -> bool:
+        """Whether the owner still has no name: called "the user", with no
+        account name. Only then does extraction ask who the user is."""
+        account = self._upkeep_get("owner_name", user_id, None)
+        return (self.owner_name(user_id) == OWNER_PLACEHOLDER
+                and not (account and clean_stated_name(account)))
 
     def _new_owner(self, user_id: str | None, name: str) -> Entity:
         owner = self.backend.insert_entity(Entity(
@@ -5418,15 +5449,15 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """Record how long each memory is worth keeping, for memories missing it.
 
-        Decay runs on a half-life per memory type, which treats "the train was
-        delayed this morning" and "allergic to penicillin" the same because both
-        are semantic. A per-fact estimate replaces that guess; anything still
-        unscored keeps the old behaviour.
+        An estimate per fact (days, months or years) that nothing acts on yet:
+        no memory is forgotten by age, and search does not read it. It is kept
+        for a planned experiment on relevance per entity, where "the train was
+        delayed this morning" and "allergic to penicillin" should not count
+        alike.
 
         Off unless ``decay.durability`` is set, whoever asks (the scheduler,
         "run now", the REST route). The score is housekeeping: it is written
-        without moving the memory's ``updated_at``, which drives recency and
-        decay age.
+        without moving the memory's ``updated_at``, which drives recency.
         """
         outcome: dict[str, Any] = {"scored": 0, "skipped": 0, "provider": self.decider.name}
         if not self.pass_allowed("durability"):
@@ -6124,9 +6155,6 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # maintenance
     # ------------------------------------------------------------------
-    def decay_sweep(self, threshold: float = 0.1) -> list[str]:
-        return decay_sweep(self.backend, self.config.decay, threshold=threshold)
-
     def reindex(self) -> int:
         """Re-embed every memory with the currently configured embedder, then
         rebuild the ANN sidecar (when available)."""

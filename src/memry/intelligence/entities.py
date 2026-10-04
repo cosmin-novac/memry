@@ -137,6 +137,12 @@ DESCRIPTION_SYSTEM = (
 )
 
 
+#: Fewest memories in use an entity needs before it gets a description. With
+#: one, the description says what that memory says, at the cost of a text-model
+#: call, and is shown beside the memory it repeats: the memory speaks for itself.
+DESCRIPTION_MIN_MEMORIES = 2
+
+
 def _bound_description(value: str) -> str:
     text = " ".join(value.split()).strip()
     words = text.split()
@@ -157,9 +163,11 @@ def synthesize_entity_description(
 
     ``facts`` are the memories' own texts, not the lines a model answering
     from them reads (``context.memory_line``): the description leaves
-    one-off events and their dates to those lines (``DESCRIPTION_SYSTEM``)."""
+    one-off events and their dates to those lines (``DESCRIPTION_SYSTEM``).
+    Fewer than ``DESCRIPTION_MIN_MEMORIES`` facts make no description, and
+    no model is asked."""
     clean_facts = [" ".join(fact.split()).strip() for fact in facts if fact.strip()]
-    if not clean_facts:
+    if len(clean_facts) < DESCRIPTION_MIN_MEMORIES:
         return ""
     fallback = _bound_description(" ".join(clean_facts[:6]))
     if not llm.available:

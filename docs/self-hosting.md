@@ -230,7 +230,7 @@ merge-proposal review under **Upkeep** matters as much as it did before.
 | Entity identity | The verdict and the confidence the automatic-merge gate reads. |
 | Entity typing | One question per name in a single call, instead of one call per batch through the text model. |
 | Reconcile | The action and its target. The text model writes the merged sentence for an UPDATE; without one, the old memory is kept and superseded by the new one, so no text is lost. A contradiction only replaces a memory on its own where little is at stake; see below. |
-| How long facts stay relevant | A per-fact estimate, which forgetting prefers over one decay rate per memory type. Off unless `MEMRY_DURABILITY=1` (`decay.durability`), for the scheduler and "run now" alike; the score does not move a memory's `updated_at`. |
+| How long facts stay relevant | A per-fact estimate (days, months or years), recorded on each memory and acted on by nothing yet: no memory is forgotten for its age, and search does not read it. It is kept for a planned experiment on relevance per entity. Off unless `MEMRY_DURABILITY=1` (`decay.durability`), for the scheduler and "run now" alike; the score does not move a memory's `updated_at`. |
 | Consolidation | A cheap check first, so the text model is only asked to write a merge when there is one. Word-for-word duplicates merge on their own; a merge the model proposed waits under Upkeep, because that judgement has not been measured. |
 | Tag drift | Two tags that may be one are a merge proposal like two names. They merge on their own when the provider, shown each with its 10 most recent memories and asked in both orders, puts P(same subject) at its tag bar or more (0.55 for Jev; a text model is not asked). Without a calibrated judge the pair waits under Upkeep with the other merge proposals. |
 | Search re-ranking | On with Jev, off otherwise. `MEMRY_DECISION_RERANK=0` turns it off; `=1` turns it on for a text model measured to help (gpt-5.6-luna, gpt-5-mini), and is refused for one that was not. Where it is on, `retrieval.relational_relevance` "auto" (the default) has the provider judge the first 20 of every search, filtered or not, in the linked search's order when the question names a hub and in the text ranking's otherwise, and the results are ordered by that judgement. `"vector"` judges no search: a question naming a hub is ordered by the property vectors, and one naming none by the text ranking. |
@@ -352,7 +352,6 @@ No external queue service is required.
 ## Maintenance
 
 ```bash
-memry sweep --threshold 0.1   # soft-forget stale, low-importance memories
 memry stats                   # counts, providers, db path
 memry export > backup.json    # knowledge only: IDs, provenance, entities, relations, history
 memry tags-to-things --dry-run   # tags to topic entities (done at first open): count only
@@ -426,7 +425,8 @@ memry adopt-unscoped             # the move; a second run finds nothing to do
 Each namespace has an owner entity, the person the memories belong to. It takes the
 account's name where an account named it, and is otherwise called "the user" until a
 conversation states who the user is: the user gives their name, signs, is called by it, or
-a memory says it ("The user's name is Cos."). The owner is then folded into the person who
+a memory says it ("The user's name is Cos."). Extraction asks for the name only while the
+owner is "the user", so a named owner's saves pay nothing for it. The owner is then folded into the person who
 carries that name (the person keeps it and becomes the owner; undo under Archive > Merged
 names), or renamed to it when nobody does. The identity judge is never asked about an
 owner still called "the user": "the user" is a role, and on a real store the judge read the
@@ -464,8 +464,12 @@ only reads the legacy tables, and a second run changes nothing.
 When accounts or OAuth are enabled, also back up `auth.db` with `memry.db`. The JSON export
 does not contain login data.
 
-A weekly `sweep` in cron/Task Scheduler keeps long-running stores lean; forgotten memories
-are invalidated (auditable, recoverable), never destroyed.
+Nothing forgets a memory for its age. `memry sweep`, which invalidated memories whose
+importance had decayed below a threshold, was retired in 0.2.44: a fact must not leave
+search because it is old. A memory leaves use when you delete it, when a later one
+replaces it, or when consolidation merges it, and each of those is recorded and can be
+undone. Memories an older version let fade out stay under Forgotten, where they can be
+restored.
 
 ## Managing topics and entities
 
@@ -489,7 +493,8 @@ under that tag only. A database that recorded parents keeps those rows, and noth
 them.
 
 Entities open as hubs with aliases, a bounded description, and active
-supporting memories. Relations are listed under the entity they describe and can open their
+supporting memories. An entity with one memory in use has no description: the memory says
+it, and no text-model call is spent on repeating it. Relations are listed under the entity they describe and can open their
 members.
 
 Upkeep runs on its own and asks only for what it will not decide: it lists the entity

@@ -339,7 +339,9 @@ def test_reconstruct_context(verbatim_store):
     assert ctx.memory_ids
 
 
-def test_decay_sweep_forgets_stale(verbatim_store):
+def test_nothing_forgets_a_memory_for_its_age(verbatim_store):
+    """The forgetting sweep was retired: an old, unimportant memory stays in
+    use through every upkeep pass."""
     from datetime import datetime, timedelta, timezone
 
     verbatim_store.add("old trivial detail", user_id="ada", infer=False, importance=0.2)
@@ -348,9 +350,9 @@ def test_decay_sweep_forgets_stale(verbatim_store):
     verbatim_store.backend._db.execute(
         "UPDATE memories SET updated_at = ? WHERE id = ?", (old_ts, memory.id)
     )
-    forgotten = verbatim_store.decay_sweep(threshold=0.1)
-    assert memory.id in forgotten
-    assert verbatim_store.get_all(user_id="ada") == []
+    assert not hasattr(verbatim_store, "decay_sweep")
+    verbatim_store.run_upkeep_cycle(user_id="ada")
+    assert [m.id for m in verbatim_store.get_all(user_id="ada")] == [memory.id]
 
 
 def test_reindex(verbatim_store):
