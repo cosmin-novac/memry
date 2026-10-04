@@ -170,14 +170,22 @@ class Scope(BaseModel):
     """Memory scoping, mem0-compatible: any combination of user/agent/run.
 
     A ``None`` field means "don't filter on this dimension".
+
+    ``exact_user``: a ``user_id`` of None means the memories without a user,
+    not every user's. A walk over the namespaces (``distinct_user_ids``,
+    which holds None when some memories have no user) needs it, or its pass
+    for None takes in every namespace and each named one is done twice.
     """
 
     user_id: str | None = None
     agent_id: str | None = None
     run_id: str | None = None
+    #: left out of a dump: a backup's scope reads as it did before the flag
+    exact_user: bool = Field(default=False, exclude=True)
 
     def is_empty(self) -> bool:
-        return self.user_id is None and self.agent_id is None and self.run_id is None
+        return (self.user_id is None and self.agent_id is None and self.run_id is None
+                and not self.exact_user)
 
 
 class Episode(BaseModel):

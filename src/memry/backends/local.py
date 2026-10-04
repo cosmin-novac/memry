@@ -9,6 +9,7 @@ history. WAL mode + a process-wide lock make it safe for the MCP/REST servers.
 from __future__ import annotations
 
 import base64
+import contextlib
 import heapq
 import json
 import math
@@ -16,7 +17,7 @@ import re
 import sqlite3
 import threading
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -417,6 +418,12 @@ _BACKUP_TABLE_KEYS: dict[str, tuple[str, ...]] = {
     "relations": ("id",),
 }
 _BACKUP_ORDER = tuple(_BACKUP_TABLE_KEYS)
+#: The tables whose rows carry a namespace, but for the legacy tag index
+#: (``topics``), which ``adopt_unscoped`` moves apart.
+_NAMESPACED_TABLES = (
+    "episodes", "memories", "entities", "entity_proposals", "relations",
+    "retired_entities", "entity_merges",
+)
 _BACKUP_USER_TABLES = {
     "episodes", "memories", "topics", "entities", "entity_proposals", "relations",
 }
@@ -530,12 +537,21 @@ def _band_bounds(
 def _scope_clause(scope: Scope, prefix: str = "") -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
+    if scope.exact_user and scope.user_id is None:
+        clauses.append(f"{prefix}user_id IS NULL")
     for field in ("user_id", "agent_id", "run_id"):
         value = getattr(scope, field)
         if value is not None:
             clauses.append(f"{prefix}{field} = ?")
             params.append(value)
     return (" AND ".join(clauses) if clauses else "1=1"), params
+
+
+def _user_scope(scope: Scope) -> Scope:
+    """``scope`` narrowed to its user, the agent and run left out; a user of
+    None stays the memories without one when the scope says so
+    (``exact_user``)."""
+    return Scope(user_id=scope.user_id, exact_user=scope.exact_user)
 
 
 def _search_scope_clause(scope: Scope, memory: str) -> tuple[str, list[Any]]:
@@ -546,7 +562,8 @@ def _search_scope_clause(scope: Scope, memory: str) -> tuple[str, list[Any]]:
     another run, reconcile's SAME, or a merged text carrying the sources of
     the memory it replaced)."""
     clause, params = _scope_clause(
-        Scope(user_id=scope.user_id, agent_id=scope.agent_id), prefix=f"{memory}.")
+        Scope(user_id=scope.user_id, agent_id=scope.agent_id, exact_user=scope.exact_user),
+        prefix=f"{memory}.")
     if scope.run_id is None:
         return clause, params
     return (
@@ -697,10 +714,15 @@ def _row_to_memory(row: sqlite3.Row) -> Memory:
 
 
 class LocalBackend(MemoryBackend):
+    supports_transactions = True
+
     def __init__(self, db_path: str = ":memory:", ann: AnnConfig | None = None) -> None:
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        # open ``transaction`` blocks of the thread holding the lock: while one
+        # is open, ``_commit`` leaves the writes for the block to commit
+        self._tx_depth = 0
         self._db = sqlite3.connect(db_path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -726,7 +748,7 @@ class LocalBackend(MemoryBackend):
         self._migrate_tags_to_topic_entities()
         self._refile_merged_tags()
         self._name_index = self._ensure_entity_names()
-        self._db.commit()
+        self._commit()
         # each full-text index's terms, with how many rows hold each
         # (``_word_counts``); of this connection only
         for table in ("memories_fts", "episodes_fts"):
@@ -877,7 +899,7 @@ class LocalBackend(MemoryBackend):
         ).fetchone() is not None
         if _ACTIVE_TOPIC_INDEX in indexes and _ACTIVE_TOPIC_INDEX_V1 not in indexes and refiled:
             return
-        self._db.commit()  # the open's earlier steps, apart from this transaction
+        self._commit()  # the open's earlier steps, apart from this transaction
         # One transaction: DDL outside one would be committed on its own, and
         # a stop between the drop and the create lost the old index's trace.
         self._db.execute("BEGIN")
@@ -886,7 +908,7 @@ class LocalBackend(MemoryBackend):
         except Exception:
             self._db.rollback()
             raise
-        self._db.commit()
+        self._commit()
         if not refiled or _ACTIVE_TOPIC_INDEX_V1 in indexes:
             if self._db.execute(
                 "SELECT 1 FROM memories WHERE user_id = '' LIMIT 1"
@@ -897,7 +919,7 @@ class LocalBackend(MemoryBackend):
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                 (_ACTIVE_TOPIC_MARKER, utcnow()),
             )
-            self._db.commit()
+            self._commit()
 
     def _replace_active_topic_index_locked(self, old_index: bool) -> None:
         """Inside the open's transaction: drop the index keyed
@@ -949,13 +971,55 @@ class LocalBackend(MemoryBackend):
         ).fetchone()
         if marker:
             return
-        self._db.commit()  # the open's earlier steps, before the first user's commit
+        self._commit()  # the open's earlier steps, before the first user's commit
         self.tags_to_topics(all_users=True)
         self._db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema:tag-entities:v1', ?)",
             (utcnow(),),
         )
-        self._db.commit()
+        self._commit()
+
+    # -- transactions ---------------------------------------------------
+    def _commit(self) -> None:
+        """Commit a method's writes, unless a ``transaction`` is open: then
+        they are committed with the rest of it, at its end."""
+        if not self._tx_depth:
+            self._db.commit()
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Every write made inside is committed at the end, or none is.
+
+        The lock is held throughout, so another thread's write cannot land
+        in the middle and be committed or rolled back with these; it is an
+        RLock, so the write methods called inside take it again. They leave
+        their commit to the block (``_commit``); a block inside another joins
+        it. On an error the writes are rolled back and the ANN sidecars are
+        rebuilt from SQLite at their next use, since they took the vectors
+        added and dropped meanwhile and are not part of the rollback."""
+        with self._lock:
+            outer = self._tx_depth == 0
+            if outer:
+                if self._db.in_transaction:
+                    self._db.commit()  # earlier writes, apart from this transaction
+                self._db.execute("BEGIN")
+            self._tx_depth += 1
+            try:
+                yield
+            except BaseException:
+                if outer:
+                    self._tx_depth = 0
+                    self._db.rollback()
+                    for sidecar in self._anns.values():
+                        sidecar.mark_stale()
+                raise
+            else:
+                if outer:
+                    self._tx_depth = 0
+                    self._db.commit()
+            finally:
+                if not outer:
+                    self._tx_depth -= 1
 
     # -- ANN sidecar ----------------------------------------------------
     def _ann_index(self, model_id: str, dimensions: int) -> HnswSidecar | None:
@@ -1019,7 +1083,7 @@ class LocalBackend(MemoryBackend):
                 "AND m.invalid_at IS NULL",
                 (model_id,),
             ).fetchall()
-            self._db.commit()
+            self._commit()
         key = (model_id, dimensions)
         sidecar = self._anns.get(key)
         if sidecar is None:
@@ -1049,7 +1113,7 @@ class LocalBackend(MemoryBackend):
                     for e in episodes
                 ],
             )
-            self._db.commit()
+            self._commit()
 
     def list_episodes(self, scope: Scope, limit: int = 100) -> list[Episode]:
         clause, params = _scope_clause(scope)
@@ -1083,7 +1147,7 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             self._db.executemany(
                 "UPDATE episodes SET embedding = ?, embedding_model = ? WHERE id = ?", rows)
-            self._db.commit()
+            self._commit()
 
     def episode_vectors_of(
         self, episode_ids: list[str], embedding_model: str
@@ -1226,7 +1290,7 @@ class LocalBackend(MemoryBackend):
             )
             if embedding and memory.embedding_model:
                 self._ann_add(memory.id, embedding, memory.embedding_model)
-            self._db.commit()
+            self._commit()
         return memory
 
     def update_memory(
@@ -1329,7 +1393,7 @@ class LocalBackend(MemoryBackend):
                     "WHERE id IN (SELECT entity_id FROM entity_mentions WHERE memory_id = ?)",
                     (utcnow(), memory_id),
                 )
-            self._db.commit()
+            self._commit()
         if cur.rowcount == 0:
             return None
         return self.get_memory(memory_id)
@@ -1360,7 +1424,7 @@ class LocalBackend(MemoryBackend):
             self._db.execute(
                 "UPDATE memories SET updated_at = ? WHERE id = ?", (updated_at, memory_id)
             )
-            self._db.commit()
+            self._commit()
 
     def revalidate_memory(self, memory_id: str) -> Memory | None:
         """Undo an invalidation: the memory is believed true again.
@@ -1401,7 +1465,7 @@ class LocalBackend(MemoryBackend):
                 "UPDATE relations SET invalid_at = NULL WHERE memory_id = ?",
                 (memory_id,),
             )
-            self._db.commit()
+            self._commit()
         return self.get_memory(memory_id)
 
     def invalidate_memory(
@@ -1438,7 +1502,7 @@ class LocalBackend(MemoryBackend):
                     "WHERE memory_id = ? AND invalid_at IS NULL",
                     (stamp, memory_id),
                 )
-            self._db.commit()
+            self._commit()
         if cur.rowcount == 0:
             return None
         return self.get_memory(memory_id)
@@ -1459,7 +1523,7 @@ class LocalBackend(MemoryBackend):
                     "WHERE id IN (SELECT entity_id FROM entity_mentions WHERE memory_id = ?)",
                     (stamp, memory_id),
                 )
-            self._db.commit()
+            self._commit()
         return self.get_memory(memory_id) if cur.rowcount else None
 
     def delete_memory(self, memory_id: str) -> bool:
@@ -1500,7 +1564,7 @@ class LocalBackend(MemoryBackend):
                         f"WHERE id IN ({placeholders})",
                         (utcnow(), *entity_ids),
                     )
-            self._db.commit()
+            self._commit()
         return cur.rowcount > 0
 
     def replaced_by(self, memory_id: str) -> list[Memory]:
@@ -1969,7 +2033,7 @@ class LocalBackend(MemoryBackend):
                     event.kind,
                 ),
             )
-            self._db.commit()
+            self._commit()
 
     def history(self, memory_id: str) -> list[MemoryEvent]:
         with self._lock:
@@ -2029,7 +2093,7 @@ class LocalBackend(MemoryBackend):
             # still a name the user may recognise, so it lands in the trash
             # rather than going away for good.
             purged = sum(self._retire_locked(entity_id, reason) for entity_id in ids)
-            self._db.commit()
+            self._commit()
         return purged
 
     def retag_topics(
@@ -2099,7 +2163,7 @@ class LocalBackend(MemoryBackend):
             if not add:
                 # a deleted tag's topic goes with its last mention, retired as
                 # any entity is (snapshot kept), tags merged into it with it
-                entity_clause, entity_params = clause(Scope(user_id=scope.user_id), prefix="e.")
+                entity_clause, entity_params = clause(_user_scope(scope), prefix="e.")
                 for row in self._db.execute(
                     "SELECT e.id FROM entities e WHERE e.entity_type = ? "
                     f"AND e.merged_into IS NULL AND {entity_clause} "
@@ -2108,7 +2172,7 @@ class LocalBackend(MemoryBackend):
                     (TOPIC_TYPE, *entity_params, *sorted(normalized)),
                 ).fetchall():
                     self._retire_locked(row["id"], "tag deleted")
-            self._db.commit()
+            self._commit()
         return changed
 
     def tag_namespaces(self, names: Iterable[str]) -> list[str | None]:
@@ -2421,7 +2485,7 @@ class LocalBackend(MemoryBackend):
             "SELECT 1 FROM meta WHERE key = ?", (_TAG_SURVIVORS_MARKER,)
         ).fetchone():
             return
-        self._db.commit()  # the open's earlier steps, before the first user's commit
+        self._commit()  # the open's earlier steps, before the first user's commit
         users = [
             row["user_id"] for row in self._db.execute(
                 "SELECT DISTINCT user_id FROM entities "
@@ -2458,12 +2522,12 @@ class LocalBackend(MemoryBackend):
                 except Exception:
                     self._db.rollback()
                     raise
-                self._db.commit()
+                self._commit()
         self._db.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
             (_TAG_SURVIVORS_MARKER, utcnow()),
         )
-        self._db.commit()
+        self._commit()
 
     def _ensure_entity_names(self) -> bool:
         """Make the index of the entities' names (``_ENTITY_NAMES_SCHEMA``) and
@@ -2521,7 +2585,7 @@ class LocalBackend(MemoryBackend):
                 elif create:
                     entity_id, _ = self._create_topic_locked(normalized, scope.user_id)
             if self._db.in_transaction:  # created, or an insert another process won
-                self._db.commit()
+                self._commit()
         return self.get_entity(entity_id) if entity_id else None
 
     def tag_filing(self, names: Iterable[str], scope: Scope) -> dict[str, str]:
@@ -2566,7 +2630,7 @@ class LocalBackend(MemoryBackend):
         """Active memories per tag, from the topic entities' mentions: each
         tag's direct count (no rollup), largest first, then by name."""
         clause = _exact_scope_clause if exact_user else _scope_clause
-        entity_clause, entity_params = clause(Scope(user_id=scope.user_id), prefix="e.")
+        entity_clause, entity_params = clause(_user_scope(scope), prefix="e.")
         memory_clause, memory_params = clause(scope, prefix="m.")
         with self._lock:
             rows = self._db.execute(
@@ -2585,7 +2649,7 @@ class LocalBackend(MemoryBackend):
     ) -> list[tuple[str, str]]:
         """``(tag, memory_id)`` for every active memory mentioning a tag."""
         clause = _exact_scope_clause if exact_user else _scope_clause
-        entity_clause, entity_params = clause(Scope(user_id=scope.user_id), prefix="e.")
+        entity_clause, entity_params = clause(_user_scope(scope), prefix="e.")
         memory_clause, memory_params = clause(scope, prefix="m.")
         with self._lock:
             rows = self._db.execute(
@@ -2634,7 +2698,7 @@ class LocalBackend(MemoryBackend):
                 if dry_run:
                     self._db.rollback()
                 else:
-                    self._db.commit()
+                    self._commit()
             report.append({**counts, "dry_run": dry_run})
         return report
 
@@ -2657,6 +2721,119 @@ class LocalBackend(MemoryBackend):
             ).fetchall()
         return [r["user_id"] for r in rows]
 
+    def adopt_unscoped(self, into: str, *, dry_run: bool = False) -> dict[str, Any]:
+        """Move every row without a namespace (None, or "") into ``into``, in
+        one transaction (``transaction``; a caller's joins it).
+
+        A tag of the same name in ``into`` takes the unscoped tag's memories
+        (folded as tags merge, ``_merge_entities_locked``): one active tag
+        per namespace and name is an index, so it could not be moved beside
+        it. Unscoped tags of one name, some None and some "", become one the
+        same way. A named thing of ``into`` with the same name and type as
+        an unscoped one, and the only one, takes it after the move, merged
+        as a person's merge is (recorded, undone under Archive > Merged
+        names); any other name both have is left to the identity passes. A
+        row of the legacy tag index whose name ``into`` holds gives its links
+        to that row and goes, as a tag merge does it (``retag_topics``).
+        Every memory moved has its tags filed again. Nothing else is
+        removed. ``dry_run`` counts and writes nothing; once nothing is
+        unscoped, a run changes nothing."""
+        if not into:
+            raise ValueError("adopting the unscoped rows needs a namespace to adopt them into")
+        unscoped = "(user_id IS NULL OR user_id = '')"
+        with self._lock:
+            tables = {table: self._db.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {unscoped}").fetchone()[0]
+                for table in (*_NAMESPACED_TABLES, "topics")}
+            tags = {row["normalized"]: row["id"] for row in self._db.execute(
+                "SELECT id, normalized FROM entities WHERE entity_type = ? "
+                "AND merged_into IS NULL AND user_id = ?", (TOPIC_TYPE, into)).fetchall()}
+            tag_folds: list[tuple[str, str, str]] = []
+            for row in self._db.execute(
+                    "SELECT id, name, normalized FROM entities WHERE entity_type = ? "
+                    f"AND merged_into IS NULL AND {unscoped} ORDER BY created_at, id",
+                    (TOPIC_TYPE,)).fetchall():
+                if row["normalized"] in tags:
+                    tag_folds.append((tags[row["normalized"]], row["id"], row["name"]))
+                else:
+                    tags[row["normalized"]] = row["id"]  # it moves in as the tag
+            named: dict[tuple[str, str | None], list[str]] = {}
+            for row in self._db.execute(
+                    "SELECT id, normalized, entity_type FROM entities "
+                    f"WHERE {_kind_clause('named')} AND merged_into IS NULL AND user_id = ?",
+                    (into,)).fetchall():
+                named.setdefault((row["normalized"], row["entity_type"]), []).append(row["id"])
+            names_into = {normalized for normalized, _ in named}
+            entity_folds: list[tuple[str, str, str, str]] = []
+            left: list[str] = []
+            for row in self._db.execute(
+                    "SELECT id, name, normalized, entity_type FROM entities "
+                    f"WHERE {_kind_clause('named')} AND merged_into IS NULL AND {unscoped} "
+                    "ORDER BY created_at, id").fetchall():
+                twins = named.get((row["normalized"], row["entity_type"]), [])
+                if row["entity_type"] and len(twins) == 1:
+                    entity_folds.append((twins[0], row["id"], row["name"], row["entity_type"]))
+                elif row["normalized"] in names_into:
+                    left.append(row["name"])
+            legacy = self._db.execute(
+                f"SELECT id, normalized, agent_id, run_id FROM topics WHERE {unscoped} "
+                "ORDER BY created_at, id").fetchall()
+            report: dict[str, Any] = {
+                "into": into, "dry_run": dry_run, "tables": tables,
+                "tags_folded": [name for _, _, name in tag_folds],
+                "things_folded": [f"{name} ({kind})" for _, _, name, kind in entity_folds],
+                "things_left_for_review": left,
+                "kept_ids": sorted({keep for keep, _, _, _ in entity_folds}),
+            }
+            if dry_run:
+                report["legacy_tags_folded"] = len(legacy) - len(
+                    {(r["agent_id"], r["run_id"], r["normalized"]) for r in legacy} - {
+                        (r["agent_id"], r["run_id"], r["normalized"]) for r in
+                        self._db.execute("SELECT agent_id, run_id, normalized FROM topics "
+                                         "WHERE user_id = ?", (into,)).fetchall()})
+                return report
+            with self.transaction():
+                for keep, merge, _ in tag_folds:
+                    self._merge_entities_locked(keep, merge)
+                folded = 0
+                for row in legacy:
+                    twin = self._db.execute(
+                        "SELECT id FROM topics WHERE user_id = ? AND agent_id IS ? "
+                        "AND run_id IS ? AND normalized = ?",
+                        (into, row["agent_id"], row["run_id"], row["normalized"])).fetchone()
+                    if twin is None:
+                        self._db.execute("UPDATE topics SET user_id = ? WHERE id = ?",
+                                         (into, row["id"]))
+                        continue
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO memory_topics (memory_id, topic_id) "
+                        "SELECT memory_id, ? FROM memory_topics WHERE topic_id = ?",
+                        (twin["id"], row["id"]))
+                    self._db.execute("DELETE FROM memory_topics WHERE topic_id = ?", (row["id"],))
+                    self._db.execute("DELETE FROM topics WHERE id = ?", (row["id"],))
+                    folded += 1
+                report["legacy_tags_folded"] = folded
+                moved = [row["id"] for row in self._db.execute(
+                    f"SELECT id FROM memories WHERE {unscoped}").fetchall()]
+                for table in _NAMESPACED_TABLES:
+                    self._db.execute(f"UPDATE {table} SET user_id = ? WHERE {unscoped}", (into,))
+                for keep, merge, _, _ in entity_folds:
+                    self._merge_entities_locked(keep, merge)
+                cache: dict[Any, Any] = {}
+                for start in range(0, len(moved), 500):
+                    chunk = moved[start:start + 500]
+                    self._refile_locked(
+                        f"id IN ({','.join('?' * len(chunk))})", tuple(chunk), cache=cache)
+        return report
+
+    def meta_items(self, prefix: str) -> dict[str, str]:
+        """The meta keys starting with ``prefix``, with their values."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT key, value FROM meta WHERE substr(key, 1, ?) = ?",
+                (len(prefix), prefix)).fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
     def get_meta(self, key: str) -> str | None:
         with self._lock:
             row = self._db.execute(
@@ -2669,7 +2846,7 @@ class LocalBackend(MemoryBackend):
             self._db.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)
             )
-            self._db.commit()
+            self._commit()
 
     # -- typed relations ---------------------------------------------------
     @staticmethod
@@ -2698,11 +2875,11 @@ class LocalBackend(MemoryBackend):
                  relation.user_id, relation.memory_id, relation.created_at,
                  relation.valid_from, relation.invalid_at),
             )
-            self._db.commit()
+            self._commit()
         return relation
 
     def list_relations(self, scope: Scope, *, limit: int = 1000) -> list[Relation]:
-        clause, params = _scope_clause(Scope(user_id=scope.user_id))
+        clause, params = _scope_clause(_user_scope(scope))
         with self._lock:
             rows = self._db.execute(
                 f"SELECT * FROM relations WHERE {clause} AND invalid_at IS NULL "
@@ -2801,7 +2978,7 @@ class LocalBackend(MemoryBackend):
                   hashes.get(mid))
                  for mid, v in vectors.items()],
             )
-            self._db.commit()
+            self._commit()
 
     def property_vectors_of(
         self, memory_ids: list[str], embedding_model: str | None = None
@@ -2845,7 +3022,7 @@ class LocalBackend(MemoryBackend):
                     f"WHERE memory_id IN ({','.join('?' * len(chunk))})",
                     chunk,
                 )
-            self._db.commit()
+            self._commit()
 
     def session_memories(
         self, memory: Memory, *, hours: float = 3.0, limit: int = 50
@@ -2930,7 +3107,7 @@ class LocalBackend(MemoryBackend):
             aliases = entity.metadata.get("aliases", [])
             if aliases:
                 self._has_metadata_aliases = True
-            self._db.commit()
+            self._commit()
         return entity
 
     def get_entity(self, entity_id: str) -> Entity | None:
@@ -3082,7 +3259,7 @@ class LocalBackend(MemoryBackend):
         word = word.strip()
         if not word:
             return 0, 0
-        person = Scope(user_id=scope.user_id)
+        person = _user_scope(scope)
         memory_clause, memory_params = _scope_clause(person, prefix="m.")
         turn_clause, turn_params = _scope_clause(person, prefix="e.")
         phrase = f'"{word}"'
@@ -3160,7 +3337,7 @@ class LocalBackend(MemoryBackend):
                     (json.dumps(metadata), utcnow(), entity_id),
                 )
                 self._has_metadata_aliases = True
-                self._db.commit()
+                self._commit()
         if added and self.names_changed is not None:
             self.names_changed([entity_id])
         return self.get_entity(entity_id)
@@ -3207,7 +3384,7 @@ class LocalBackend(MemoryBackend):
                     entity_id,
                 ),
             )
-            self._db.commit()
+            self._commit()
         if display != old_name and self.names_changed is not None:
             self.names_changed([entity_id])
         return self.get_entity(entity_id)
@@ -3221,7 +3398,7 @@ class LocalBackend(MemoryBackend):
                 "WHERE id = ? AND merged_into IS NULL",
                 (description, generated_at, entity_id),
             )
-            self._db.commit()
+            self._commit()
         return self.get_entity(entity_id) if cur.rowcount else None
 
     def entity_evidence_updated_at(self, entity_id: str) -> str | None:
@@ -3266,7 +3443,7 @@ class LocalBackend(MemoryBackend):
                 ).fetchone()
                 if row is not None and row["entity_type"] != mention.entity_type:
                     self._settle_types_locked([mention.entity_id])
-            self._db.commit()
+            self._commit()
         wording = mention.surface.strip().lower()
         if wording and wording not in known and self.names_changed is not None:
             self.names_changed([mention.entity_id])
@@ -3379,7 +3556,7 @@ class LocalBackend(MemoryBackend):
                 "description_updated_at = NULL WHERE id = ?",
                 (entity_type, utcnow(), entity_id),
             )
-            self._db.commit()
+            self._commit()
 
     def set_entity_metadata(self, entity_id: str, metadata: dict[str, Any]) -> None:
         with self._lock:
@@ -3387,7 +3564,7 @@ class LocalBackend(MemoryBackend):
                 "UPDATE entities SET metadata = ? WHERE id = ?",
                 (json.dumps(metadata), entity_id),
             )
-            self._db.commit()
+            self._commit()
 
     def entity_memory_links(
         self, scope: Scope, *, kind: str = "named"
@@ -3494,7 +3671,7 @@ class LocalBackend(MemoryBackend):
                 return False
             # tombstones redirecting here would dangle; they carry nothing
             self._remove_entity_rows_locked(entity_id)
-            self._db.commit()
+            self._commit()
         return True
 
     # -- retirement: removal with a way back --------------------------------
@@ -3721,7 +3898,7 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             retired = self._retire_locked(entity_id, reason)
             if retired:
-                self._db.commit()
+                self._commit()
             return retired
 
     def _insert_row_locked(self, table: str, row: dict[str, Any]) -> None:
@@ -3822,7 +3999,7 @@ class LocalBackend(MemoryBackend):
             self._db.execute(
                 "DELETE FROM retired_entities WHERE entity_id = ?", (entity_id,)
             )
-            self._db.commit()
+            self._commit()
         # its names read "it" in its memories again
         if self.names_changed is not None:
             self.names_changed([entity_id])
@@ -3868,7 +4045,7 @@ class LocalBackend(MemoryBackend):
         """Retired entities, newest first. The snapshot itself stays behind."""
         # The trash row carries the namespace only; agent/run live in the
         # snapshot, and nothing lists retired names per agent or run.
-        clause, params = _scope_clause(Scope(user_id=scope.user_id))
+        clause, params = _scope_clause(_user_scope(scope))
         with self._lock:
             rows = self._db.execute(
                 "SELECT entity_id, user_id, name, entity_type, reason, retired_at "
@@ -3891,7 +4068,7 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             folded = self._merge_entities_locked(keep_id, merge_id)
             if folded:
-                self._db.commit()
+                self._commit()
             elif folded is None and self._db.in_transaction:
                 self._db.rollback()
         if folded and self.names_changed is not None:
@@ -4111,7 +4288,7 @@ class LocalBackend(MemoryBackend):
         """Merges that can be undone, newest first: the entity merged away and
         the one it went into, by id and by name as they are now, when, and
         what decided it (the reason on their pair)."""
-        clause, params = _scope_clause(Scope(user_id=scope.user_id), prefix="g.")
+        clause, params = _scope_clause(_user_scope(scope), prefix="g.")
         with self._lock:
             rows = self._db.execute(
                 "SELECT g.merge_id AS entity_id, g.keep_id, g.user_id, g.merged_at, "
@@ -4272,7 +4449,7 @@ class LocalBackend(MemoryBackend):
                 (json.dumps(metadata), snapshot["keep"]["entity_type"], now, keep_id))
             self._settle_types_locked([keep_id, entity_id])
             self._db.execute("DELETE FROM entity_merges WHERE id = ?", (record["id"],))
-            self._db.commit()
+            self._commit()
         if self.names_changed is not None:
             self.names_changed([keep_id, entity_id])
         return True
@@ -4291,7 +4468,7 @@ class LocalBackend(MemoryBackend):
                     json.dumps(proposal.belongs) if proposal.belongs is not None else None,
                 ),
             )
-            self._db.commit()
+            self._commit()
         return proposal
 
     def get_proposal(self, proposal_id: str) -> MergeProposal | None:
@@ -4344,7 +4521,7 @@ class LocalBackend(MemoryBackend):
                 (confidence, reason, compared_step, different,
                  json.dumps(belongs) if belongs is not None else None, proposal_id),
             )
-            self._db.commit()
+            self._commit()
 
     def set_proposal_status(
         self, proposal_id: str, status: str, reason: str | None = None
@@ -4355,7 +4532,7 @@ class LocalBackend(MemoryBackend):
                 "reason = COALESCE(?, reason) WHERE id = ?",
                 (status, utcnow(), reason, proposal_id),
             )
-            self._db.commit()
+            self._commit()
         return self.get_proposal(proposal_id) if cur.rowcount else None
 
     # -- lossless backup / restore ---------------------------------------
@@ -4565,7 +4742,7 @@ class LocalBackend(MemoryBackend):
                 self._db.execute(
                     "INSERT OR IGNORE INTO ann_keys (memory_id) SELECT id FROM memories WHERE embedding IS NOT NULL"
                 )
-                self._db.commit()
+                self._commit()
             except sqlite3.IntegrityError as exc:
                 self._db.rollback()
                 raise ValueError(f"backup conflicts with existing indexed data: {exc}") from exc
@@ -4695,7 +4872,7 @@ class LocalBackend(MemoryBackend):
             for row in self._db.execute("SELECT key FROM meta").fetchall():
                 if not row["key"].startswith(kept):
                     self._db.execute("DELETE FROM meta WHERE key = ?", (row["key"],))
-            self._db.commit()
+            self._commit()
         for sidecar in self._anns.values():
             sidecar.rebuild([])
 

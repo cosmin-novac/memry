@@ -8,8 +8,9 @@ utilities; it is not a runtime configuration choice.
 
 from __future__ import annotations
 
+import contextlib
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from typing import TYPE_CHECKING
@@ -725,6 +726,19 @@ class MemoryBackend(ABC):
         rule, or a person) in place of the answer it held."""
         return None
 
+    # -- transactions ------------------------------------------------------
+    #: Whether ``transaction`` keeps its writes together. A write that must
+    #: not be left half made (a split) refuses to run where it does not.
+    supports_transactions: bool = False
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """The writes made inside are kept together or not at all, where the
+        backend can (``supports_transactions``, LocalBackend). This default
+        keeps each write as it is made, so an adapter without transactions
+        still runs the same code, without the guarantee."""
+        yield
+
     # -- key/value meta ------------------------------------------------------
     # Default no-ops so adapters without their own storage (e.g. Mem0) stay
     # valid; LocalBackend implements persistence. An adapter that does not
@@ -735,6 +749,14 @@ class MemoryBackend(ABC):
 
     def get_meta(self, key: str) -> str | None:
         return None
+
+    def meta_items(self, prefix: str) -> dict[str, str]:
+        """The meta keys starting with ``prefix``, with their values."""
+        return {}
+
+    def adopt_unscoped(self, into: str, *, dry_run: bool = False) -> dict[str, Any]:
+        """Move every row without a namespace into ``into`` (LocalBackend)."""
+        raise NotImplementedError("this backend cannot move rows between namespaces")
 
     def set_meta(self, key: str, value: str) -> None:
         return None

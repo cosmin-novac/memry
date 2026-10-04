@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from conftest import FakeLLM
 
 from memry.cli import main
 
@@ -135,6 +136,105 @@ def test_backfill_property_vectors_embeds_what_is_missing_in_every_namespace(cap
         saved["bo"]: (_text_hash("it meets on Mondays"), label)}
     assert len(store.backend.list_memories(Scope(user_id="ada"))) == 2
     store.close()
+
+
+class _SentenceSplitter(FakeLLM):
+    """A text model for split-memories: a memory splits at its sentences,
+    and the audit misses nothing. ``refuse`` makes any call fail, for a run
+    that must ask nothing."""
+
+    refuse = False
+
+    def complete(self, system, user, *, json_schema=None):
+        from memry.intelligence.split import SPLIT_SYSTEM, sentences
+
+        if self.refuse:
+            raise AssertionError("the text model was asked")
+        self.calls.append(user)
+        if system == SPLIT_SYSTEM:
+            text = user.split("Memory:\n", 1)[1].split("\n\nSplit it", 1)[0]
+            return json.dumps({"facts": sentences(text)})
+        return json.dumps({"missing": []})
+
+
+def _split_cli(monkeypatch, llm):
+    """The CLI's store with ``llm`` and a small embedder; a new one each run,
+    as the CLI closes it."""
+    from memry.config import Config
+    from memry.providers.embeddings import HashEmbedder
+    from memry.store import MemoryStore
+
+    def make():
+        return MemoryStore(Config.load(), llm=llm, embedder=HashEmbedder(64))
+
+    monkeypatch.setattr("memry.cli._store", make)
+    return make
+
+
+def test_maintenance_commands_go_through_each_namespace_once(capsys, monkeypatch):
+    """No user means every user's memories: the pass for the memories
+    without one took in every namespace, and each named one was done again
+    after it (in production 1446 memories asked, then the 1440 of "default"
+    once more)."""
+    from memry.models import Memory
+
+    llm = _SentenceSplitter()
+    store = _split_cli(monkeypatch, llm)()
+    for user in (None, "a", "b"):
+        memory = store.backend.insert_memory(Memory(
+            content=f"Project {user} uses Go. Project {user} runs on one VPS.", user_id=user))
+        store.backend.set_memory_timestamp(memory.id, "2030-01-01T00:00:00+00:00")
+    store.close()
+
+    code, out = run(capsys, "repair-dates")
+    assert code == 0 and [row["fixed"] for row in json.loads(out)] == [1, 1, 1]
+    code, out = run(capsys, "split-memories", "--dry-run", "--json")
+    assert code == 0
+    assert sorted((r["user"] or "", r["in_use"], r["split"]) for r in json.loads(out)) == [
+        ("", 1, 1), ("a", 1, 1), ("b", 1, 1)]
+    assert len(llm.calls) == 6  # a split and an audit for each memory, once
+
+
+def test_split_memories_makes_exactly_the_reviewed_plan(capsys, monkeypatch, tmp_path):
+    """--dry-run --plan-out writes the proposed splits; --plan-in makes those,
+    asking the model nothing, each in its own namespace, and undo works on
+    them."""
+    from memry.models import Memory
+
+    llm = _SentenceSplitter()
+    store = _split_cli(monkeypatch, llm)()
+    texts = {None: "Project Kite uses Go. Project Kite runs on one VPS.",
+             "a": "Ada likes tea. Ada dislikes coffee."}
+    ids = {user: store.backend.insert_memory(Memory(content=text, user_id=user)).id
+           for user, text in texts.items()}
+    store.close()
+    path = tmp_path / "plan.json"
+
+    code, _ = run(capsys, "split-memories", "--plan-out", str(path))
+    assert code == 1 and not path.exists()  # a plan comes from a dry run
+    code, out = run(capsys, "split-memories", "--dry-run", "--plan-out", str(path))
+    assert code == 0 and "would be split" in out
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    assert plan["format"] == "memry-split-plan" and plan["version"] == 2
+    assert sorted((e["user"] or "", e["memory_id"]) for e in plan["splits"]) == [
+        ("", ids[None]), ("a", ids["a"])]
+
+    llm.refuse = True
+    code, out = run(capsys, "split-memories", "--plan-in", str(path), "--json")
+    assert code == 0
+    reports = json.loads(out)
+    assert sorted((r["user"] or "", r["split"], r["facts"], r["stale"]) for r in reports) == [
+        ("", 1, 2, 0), ("a", 1, 2, 0)]
+    store = _split_cli(monkeypatch, llm)()
+    assert sorted(m.content for m in store.get_all(limit=100)) == sorted(
+        ["Project Kite uses Go.", "Project Kite runs on one VPS.",
+         "Ada likes tea.", "Ada dislikes coffee."])
+    store.close()
+    # applied again, the memories are out of use: skipped, nothing written twice
+    code, out = run(capsys, "split-memories", "--plan-in", str(path))
+    assert code == 0 and "0 split into 0 facts as planned, 1 skipped" in out
+    code, out = run(capsys, "split-memories", "--undo", ids["a"])
+    assert code == 0 and json.loads(out)["undone"] is True
 
 
 def test_eval_command(capsys):

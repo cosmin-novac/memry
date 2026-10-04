@@ -335,6 +335,16 @@ class _Owner:
         self.user_id = user_id
 
 
+#: The tables of a backup whose rows carry a namespace (``import_backup``).
+_NAMESPACED_BACKUP_TABLES = (
+    "episodes", "memories", "topics", "entities", "entity_proposals", "relations")
+
+
+# The keys of a namespace's upkeep state. None and "" share one key: a store
+# from before every write had a namespace keeps its state there, which
+# ``MemoryStore.adopt_unscoped`` carries over to the namespace its memories
+# go to. No write makes a memory without a namespace now, so only such a
+# store reads them; they stay as they are so that its state is not orphaned.
 def _dedup_run_key(user_id: str | None) -> str:
     return f"entity_dedup:v2:last_run:{user_id or ''}"
 
@@ -675,7 +685,11 @@ class MemoryStore:
         against, and the when-confirmation reads as the day of writing,
         instead of the clock. All three are for replaying dated
         conversations, as the benchmarks do.
+
+        No ``user_id`` (None or "") saves to the default namespace
+        (``_namespace``), as the servers do.
         """
+        user_id = self._namespace(user_id)
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         messages = _as_messages(content)
         # One time for every message of the save: a save is its run and its
@@ -813,8 +827,10 @@ class MemoryStore:
         ``created_at``, ``memory_metadata`` and ``now`` mean what they mean for
         ``add``: they apply to the pending memory and are kept with the work
         marker for the distillation that follows. The quiet period counts from
-        when the save was queued, whatever ``created_at`` says.
+        when the save was queued, whatever ``created_at`` says. No
+        ``user_id`` saves to the default namespace, as for ``add``.
         """
+        user_id = self._namespace(user_id)
         if isinstance(content, str):
             content = content.strip()
         queued_at = utcnow()
@@ -1288,7 +1304,7 @@ class MemoryStore:
         near-identical memories already in the target user scope are skipped by
         default without creating orphan episodes.
         """
-        default_uid = user_id or self.config.default_user_id
+        default_uid = self._namespace(user_id)
         prepared: list[dict[str, Any]] = []
         skipped = 0
         for row in rows:
@@ -1414,8 +1430,82 @@ class MemoryStore:
     def import_backup(
         self, backup: dict[str, Any], *, owner_prefix: str | None = None
     ) -> dict[str, Any]:
-        """Restore a Memry backup exactly and transactionally."""
+        """Restore a Memry backup exactly and transactionally, but for one
+        thing: a row of it without a namespace (a backup of a store from
+        before every write had one) is restored into the default namespace
+        (``_namespace``). Restored into the store it came from before
+        ``adopt_unscoped`` ran there, such a row conflicts with itself and
+        the restore is refused: adopt first."""
+        tables = backup.get("tables") if isinstance(backup, dict) else None
+        if isinstance(tables, dict):
+            tables = dict(tables)
+            for table in _NAMESPACED_BACKUP_TABLES:
+                rows = tables.get(table)
+                if isinstance(rows, list):
+                    tables[table] = [
+                        {**row, "user_id": self._namespace(row.get("user_id"))}
+                        if isinstance(row, dict) and "user_id" in row
+                        and not row.get("user_id") else row
+                        for row in rows]
+            backup = {**backup, "tables": tables}
         return self.backend.import_backup(backup, owner_prefix=owner_prefix)
+
+    def _namespace(self, user_id: str | None) -> str:
+        """The namespace a write goes to: ``user_id``, else the default one
+        (``config.default_user_id``). No memory lives without a namespace:
+        a memory of none was read with every namespace's (no user means all
+        users in a read) and walked as one of its own, and "" was a
+        namespace apart from None that looked like none."""
+        return user_id or self.config.default_user_id or "default"
+
+    def adopt_unscoped(
+        self, *, into: str | None = None, dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Give the rows a store holds without a namespace (from before every
+        write had one) the namespace ``into`` (default: the default
+        namespace), in one transaction: memories, their episodes, entities,
+        relations, pairs, merges and retired names
+        (``backend.adopt_unscoped``, which says how tags and same-named
+        things of ``into`` take them). Their upkeep state (when each pass
+        ran, the queues, who the owner is) goes with them where ``into`` has
+        none of its own; where it has, its own is kept and theirs is
+        dropped. ``dry_run`` reports what would move, fold and carry, and
+        writes nothing. A second run finds nothing to do."""
+        into = self._namespace(into)
+        if not self.backend.supports_transactions:
+            raise ValueError("this storage backend cannot keep the move together "
+                             "(no transactions)")
+        state = self._unscoped_state(into)
+        if dry_run:
+            report = self.backend.adopt_unscoped(into, dry_run=True)
+        else:
+            with self.backend.transaction():
+                report = self.backend.adopt_unscoped(into)
+                for source, target, value, kept in state:
+                    if kept is None:
+                        self.backend.set_meta(target, value)
+                    self.backend.set_meta(source, "")  # carried, or dropped for theirs
+        kept_ids = report.pop("kept_ids", [])
+        report["state_carried"] = sorted(s[1] for s in state if s[3] is None)
+        report["state_kept"] = sorted(s[1] for s in state if s[3] is not None)
+        if kept_ids and not dry_run:
+            self._names_changed(kept_ids)  # merged names: property vectors after
+        return report
+
+    def _unscoped_state(self, into: str) -> list[tuple[str, str, str, str | None]]:
+        """The upkeep state kept for no namespace (None and "" share its
+        keys) that has a value: (its key, the key of ``into``, its value,
+        the value ``into`` has, None when it has none)."""
+        keys = [key for key in self.backend.meta_items("upkeep:") if key.endswith(":")]
+        keys += [_dedup_run_key(None), _consolidation_run_key(None)]
+        out = []
+        for key in keys:
+            value = self.backend.get_meta(key)
+            if not value:
+                continue
+            target = key + into
+            out.append((key, target, value, self.backend.get_meta(target) or None))
+        return out
 
     @staticmethod
     def _clear_enrichment_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -1583,6 +1673,9 @@ class MemoryStore:
         first_scope = active[0].scope()
         if any(memory.scope() != first_scope for memory in active[1:]):
             raise ValueError("cannot distill memories from different scopes together")
+        # a save queued before every write had a namespace: its facts get one
+        first_scope = first_scope.model_copy(
+            update={"user_id": self._namespace(first_scope.user_id)})
         if not self.llm.available:
             raise ValueError("no LLM configured; distillation needs one")
 
@@ -2520,7 +2613,8 @@ class MemoryStore:
         return masked
 
     def refresh_property_vectors(
-        self, *, user_id: str | None = None, memory_ids: list[str] | None = None
+        self, *, user_id: str | None = None, memory_ids: list[str] | None = None,
+        exact_user: bool = False,
     ) -> int:
         """Embed the property vector of each valid memory whose masked text is
         new, changed (a merge, a rename, a new home) or was embedded by another
@@ -2528,13 +2622,13 @@ class MemoryStore:
         row: search reads its ordinary vector, which is the same. With
         ``memory_ids`` only those memories (a save, an edit, a merge or a
         rename); otherwise every memory of the namespace that names an entity
-        or holds a row (the weekly upkeep, a backfill). Returns how many it
-        embedded."""
+        or holds a row (the weekly upkeep, a backfill; ``exact_user`` as in
+        ``get_all``). Returns how many it embedded."""
         if not self.embedder.dimensions:
             return 0
         entities: dict[str, list[str]] = defaultdict(list)
         if memory_ids is None:
-            scope = Scope(user_id=user_id)
+            scope = Scope(user_id=user_id, exact_user=exact_user)
             for entity_id, memory_id in self.backend.entity_memory_links(scope, kind="named"):
                 entities[memory_id].append(entity_id)
             listed = self.backend.list_memories(scope, limit=10_000_000)
@@ -2838,8 +2932,13 @@ class MemoryStore:
         until: str | None = None,
         when_since: str | None = None,
         when_until: str | None = None,
+        exact_user: bool = False,
     ) -> list[Memory]:
-        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        """The memories in scope, newest change first. ``exact_user``: no
+        ``user_id`` means the memories without a user, not every user's
+        (``Scope.exact_user``)."""
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id,
+                      exact_user=exact_user)
         if entity_id:
             entity_id = self._resolve_entity_filter(entity_id)
             if not entity_id:
@@ -3304,10 +3403,13 @@ class MemoryStore:
         include_merged: bool = False,
         limit: int = 100,
         kind: str = "named",
+        exact_user: bool = False,
     ) -> list[Entity]:
         """Entities in scope: named things by default, tags (topic entities)
-        with ``kind="topic"``, both with ``kind="any"``."""
-        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        with ``kind="topic"``, both with ``kind="any"``. ``exact_user`` as in
+        ``get_all``."""
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id,
+                      exact_user=exact_user)
         return self.backend.list_entities(
             scope, include_merged=include_merged, limit=limit, kind=kind)
 
@@ -3315,7 +3417,7 @@ class MemoryStore:
         return self.backend.list_relations(Scope(user_id=user_id), limit=limit)
 
     def restore_context_labels(
-        self, *, user_id: str | None = None, dry_run: bool = False
+        self, *, user_id: str | None = None, dry_run: bool = False, exact_user: bool = False,
     ) -> dict[str, Any]:
         """Give memories back the context label of the saves they came from.
 
@@ -3324,9 +3426,10 @@ class MemoryStore:
         keeps its episode ids. A memory without a label takes the labels of its
         episodes, distinct ones joined as distillation joins them. Only
         memories without a label are looked at, so a second run changes
-        nothing. Token-free. ``dry_run`` counts without writing."""
+        nothing. Token-free. ``dry_run`` counts without writing; ``exact_user``
+        as in ``get_all``."""
         missing = [
-            m for m in self.get_all(user_id=user_id, limit=1_000_000)
+            m for m in self.get_all(user_id=user_id, exact_user=exact_user, limit=1_000_000)
             if not _ingestion_context(m.metadata) and m.source_episode_ids
         ]
         episodes = self.backend.episodes_by_id(
@@ -3353,7 +3456,9 @@ class MemoryStore:
                 summary["restored"] += 1
         return summary
 
-    def repair_updated_at(self, *, user_id: str | None = None) -> dict[str, Any]:
+    def repair_updated_at(
+        self, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> dict[str, Any]:
         """Reconstruct each memory's updated_at from its audit trail.
 
         Housekeeping (tagging, relation backfill, re-embedding) used to bump
@@ -3364,9 +3469,11 @@ class MemoryStore:
         Times are compared as times (``later_ts``, ``same_ts``), as the write
         path compares them: a replayed save's "...T10:00:00Z" is earlier than
         a live "...T10:00:00.500000+00:00", though it sorts later as text.
+        ``exact_user`` as in ``get_all``.
         """
         fixed = 0
-        for memory in self.get_all(user_id=user_id, include_invalid=True, limit=1_000_000):
+        for memory in self.get_all(user_id=user_id, include_invalid=True,
+                                   exact_user=exact_user, limit=1_000_000):
             times = [
                 e.created_at for e in self.backend.history(memory.id)
                 if e.event in ("ADD", "UPDATE", "SUPERSEDE")
@@ -3381,6 +3488,7 @@ class MemoryStore:
 
     def split_memories(
         self, *, user_id: str | None = None, dry_run: bool = False, min_words: int = 0,
+        exact_user: bool = False, plan: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Split each memory in use that holds several facts into one memory
         per fact (``intelligence/split.py``).
@@ -3392,36 +3500,74 @@ class MemoryStore:
         text names, nor the owner (``split.without_subject``), is worse than
         the memory it came from, so its memory is kept whole, and
         the coverage audit a save gets reads the facts against the memory:
-        a split it finds lossy is not made either. Each fact becomes a memory
-        with the old one's dates (``created_at``, ``updated_at``,
-        ``valid_from``), sources, tags, importance, type, metadata ("when"
-        included), run and agent; each named entity the old one was linked to
-        is linked to the facts that name it (to all of them when none does),
-        and each of its relations rests on the fact naming both ends. The old
-        memory leaves use as a SUPERSEDE of kind "split", listed under
+        a split it finds lossy is not made either. The same call gives each
+        fact the entities of the memory it is about (``split.split_facts``):
+        named things and tags, also one the fact does not spell out (the
+        tallest bulls are elephants too). A fact keeps those and any its text
+        names (``split.fact_homes``); a split with a fact that would keep
+        none, or an entity no fact would keep, is not made either
+        (``no_entity``, ``lost_entity``). Each fact becomes a memory with the
+        old one's dates (``created_at``, ``updated_at``, ``valid_from``; a
+        date heading the whole memory is the ``valid_from``,
+        ``_split_valid_from``), sources, importance, type, metadata ("when"
+        included), run and agent, linked to the entities it keeps, and tagged
+        with the tags among them (``_split_tags``); each of the old memory's
+        relations rests on the fact keeping both ends. The old memory
+        leaves use as a SUPERSEDE of kind "split", listed under
         Archive, whose undo (``undo_replacement``) brings it back and forgets
-        the facts.
+        the facts. Each memory is split in one transaction (``_split_memory``):
+        one whose writes fail is left as it was, counted as failed.
 
         ``dry_run`` asks the model and writes nothing. The summary counts the
         memories in use, the candidates, those one fact, those split (or that
-        would be) and the facts they make, those kept because a fact would
-        not state its subject (``no_subject``) or a detail would be lost
-        (``lossy``), and lists each split and each kept."""
-        from .intelligence.split import is_candidate, split_facts, without_subject
+        would be) and the facts they make, those kept for their entities
+        (above), because a fact would not state its subject (``no_subject``)
+        or a detail would be lost (``lossy``), and lists each split and each
+        kept, with the entities each fact keeps (``about``, by id;
+        ``labels``, each id as a person reads it).
 
+        ``exact_user``: no ``user_id`` means the memories without a user, not
+        every user's (``Scope.exact_user``), for a walk over the namespaces.
+
+        ``plan``: the splits of a dry run a person read (``split.make_plan``,
+        ``split.plan_entries``), made as they are, with no call to the text
+        model. Asked again, the model answers a little differently, so a dry
+        run alone is only a preview. A planned memory is split into the
+        plan's facts only while it is in use in this namespace with the text
+        the plan judged, and into the entities the plan gave each fact (an
+        entity merged since is its survivor); one that left use, changed
+        since, or whose entities did, is skipped and listed (``stale``).
+
+        A real split (not ``dry_run``) refuses to run on a backend without
+        transactions (``supports_transactions``): each memory's writes are
+        made together or not at all."""
+        from .intelligence.split import (
+            entity_gaps, entity_label, fact_homes, is_candidate, split_facts,
+            without_subject)
+
+        if not dry_run and not self.backend.supports_transactions:
+            # without one, a failure midway leaves facts beside the memory
+            raise ValueError("this storage backend cannot keep one memory's writes "
+                             "together (no transactions), so a split could be left half "
+                             "made; only a dry run can run on it")
+        if plan is not None:
+            return self._apply_split_plan(plan, user_id=user_id, dry_run=dry_run,
+                                          exact_user=exact_user)
         if not self.llm.available:
             raise ValueError("no LLM configured; splitting memories needs one")
-        in_use = self.get_all(user_id=user_id, limit=1_000_000)
+        in_use = self.get_all(user_id=user_id, exact_user=exact_user, limit=1_000_000)
         candidates = [m for m in in_use if is_candidate(m, min_words=min_words)]
         summary: dict[str, Any] = {
             "user": user_id, "dry_run": dry_run, "in_use": len(in_use),
             "candidates": len(candidates), "one_fact": 0, "split": 0, "facts": 0,
-            "no_subject": 0, "lossy": 0, "failed": 0, "splits": [],
+            "no_entity": 0, "lost_entity": 0, "no_subject": 0, "lossy": 0, "failed": 0,
+            "splits": [],
         }
-        # what each memory is about: the names and aliases of its named entities
-        linked = {m.id: [name for entity in self.backend.entities_of_memory(m.id)
-                         for name in (entity.name, *self.backend.entity_aliases(entity.id))]
-                  for m in candidates}
+        # what each memory is about: its entities, each with its names
+        links = {m.id: self._split_links(m.id) for m in candidates}
+        # the names of its named things, a fact's subject when the text names one
+        linked = {mid: [name for entity, names in pairs if entity.entity_type != TOPIC_TYPE
+                        for name in names] for mid, pairs in links.items()}
         # who "the user" is: a fact may name the owner by their name instead
         owner_entity = self.owner_entity(user_id)
         owner = [name for name in (
@@ -3431,13 +3577,21 @@ class MemoryStore:
 
         def ask(memory: Memory) -> dict[str, Any] | Exception:
             try:
-                facts = split_facts(self.llm, memory)
+                pairs = links[memory.id]
+                answer = split_facts(self.llm, memory, [entity for entity, _ in pairs])
+                facts = [fact["text"] for fact in answer]
                 if len(facts) < 2:
                     return {"facts": facts}
+                about = fact_homes(facts, [fact["about"] for fact in answer],
+                                   [(entity.id, names) for entity, names in pairs])
+                homeless, lost = entity_gaps(about, [entity.id for entity, _ in pairs])
+                if homeless or lost:  # no audit for a split that is not made anyway
+                    return {"facts": facts, "about": about, "homeless": homeless,
+                            "lost": lost}
                 orphans = without_subject(facts, memory, linked[memory.id], owner)
-                if orphans:  # no audit for a split that is not made anyway
-                    return {"facts": facts, "orphans": orphans}
-                return {"facts": facts, "missing": verify_coverage(
+                if orphans:
+                    return {"facts": facts, "about": about, "orphans": orphans}
+                return {"facts": facts, "about": about, "missing": verify_coverage(
                     self.llm, [{"role": "user", "content": memory.content}], facts)}
             except Exception as exc:  # one failed call leaves that memory as it is
                 return exc
@@ -3455,8 +3609,22 @@ class MemoryStore:
             if len(facts) < 2:
                 summary["one_fact"] += 1
                 continue
-            entry: dict[str, Any] = {"memory_id": memory.id, "content": memory.content,
-                                     "facts": facts}
+            labels = {entity.id: entity_label(entity) for entity, _ in links[memory.id]}
+            entry: dict[str, Any] = {"memory_id": memory.id, "user": memory.user_id,
+                                     "content": memory.content, "facts": facts,
+                                     "about": answer["about"], "labels": labels}
+            if answer.get("homeless"):
+                summary["no_entity"] += 1
+                entry["not_split"] = ("a fact would keep none of the memory's entities: "
+                                      + "; ".join(facts[i] for i in answer["homeless"]))
+                summary["splits"].append(entry)
+                continue
+            if answer.get("lost"):
+                summary["lost_entity"] += 1
+                entry["not_split"] = ("an entity would be lost: "
+                                      + ", ".join(labels[i] for i in answer["lost"]))
+                summary["splits"].append(entry)
+                continue
             if answer.get("orphans"):
                 summary["no_subject"] += 1
                 entry["not_split"] = ("a fact would not state its subject: "
@@ -3468,15 +3636,142 @@ class MemoryStore:
                 entry["not_split"] = "the facts would lose: " + "; ".join(answer["missing"])
                 summary["splits"].append(entry)
                 continue
-            if not dry_run:
-                entry["memory_ids"] = self._split_memory(memory, facts)
-            summary["split"] += 1
-            summary["facts"] += len(facts)
+            self._split_entry(memory, entry, summary, dry_run=dry_run)
+        return summary
+
+    def _apply_split_plan(
+        self, plan: list[dict[str, Any]], *, user_id: str | None, dry_run: bool,
+        exact_user: bool,
+    ) -> dict[str, Any]:
+        """``split_memories`` with a ``plan``: no model is asked. A planned
+        memory is looked up among this namespace's memories in use, never by
+        its id alone, so a plan cannot reach another namespace's memory. One
+        not found there, whose text is not the text the plan judged, or that
+        waits for its extraction or for a person now, is skipped. So is one
+        whose entities changed: a planned entity that is gone, or that the
+        memory is no longer linked to (merged ones are followed to their
+        survivor), or an entity linked since that no fact would keep."""
+        from .intelligence.split import entity_gaps, entity_label, fact_homes, is_candidate
+
+        in_use = {m.id: m for m in self.get_all(
+            user_id=user_id, exact_user=exact_user, limit=1_000_000)}
+        summary: dict[str, Any] = {
+            "user": user_id, "dry_run": dry_run, "in_use": len(in_use),
+            "planned": len(plan), "split": 0, "facts": 0, "stale": 0, "failed": 0,
+            "splits": [],
+        }
+        for planned in plan:
+            memory = in_use.get(planned["memory_id"])
+            entry: dict[str, Any] = {"memory_id": planned["memory_id"], "user": user_id,
+                                     "content": planned["content"],
+                                     "facts": list(planned["facts"]),
+                                     "about": [list(ids) for ids in planned["about"]],
+                                     "labels": {}}
+            stale = None
+            if memory is None:
+                stale = "not in use in this namespace"
+            elif memory.content != planned["content"]:
+                stale = f"its text changed since the plan, to: {memory.content}"
+            elif not is_candidate(memory):
+                stale = "it waits for its extraction or for a person now"
+            else:
+                pairs = self._split_links(memory.id)
+                entry["labels"] = {entity.id: entity_label(entity) for entity, _ in pairs}
+                resolved = [[self.backend.resolve_entity_id(i) for i in ids]
+                            for ids in planned["about"]]
+                if any(i is None or i not in entry["labels"] for ids in resolved for i in ids):
+                    stale = "its entities changed since the plan"
+                else:
+                    entry["about"] = fact_homes(
+                        entry["facts"], resolved, [(e.id, names) for e, names in pairs])
+                    homeless, lost = entity_gaps(entry["about"], list(entry["labels"]))
+                    if homeless or lost:
+                        stale = "its entities changed since the plan"
+            if stale is None:
+                self._split_entry(memory, entry, summary, dry_run=dry_run)
+                continue
+            summary["stale"] += 1
+            entry["not_split"] = stale
             summary["splits"].append(entry)
         return summary
 
-    def _split_memory(self, memory: Memory, facts: list[str]) -> list[str]:
+    def _split_links(self, memory_id: str) -> list[tuple[Entity, list[str]]]:
+        """The entities a memory is linked to, as a split numbers them for
+        the model: its named things, then its tags, each with its names and
+        aliases."""
+        return [(entity, [entity.name, *self.backend.entity_aliases(entity.id)])
+                for kind in ("named", "topic")
+                for entity in self.backend.entities_of_memory(memory_id, kind=kind)]
+
+    def _split_tags(
+        self, memory: Memory, facts: list[str], about: list[list[str]],
+    ) -> list[list[str]]:
+        """Each fact's tags: of the memory's, those whose entity the fact
+        keeps, as the memory's column writes them. Every fact took them all,
+        and a conversation summary of five topics made five facts that each
+        ranked for all five. A tag with no entity the memory is linked to (a
+        column out of step with its mentions) goes on the facts whose text
+        names it, else on all of them; a tag entity the fact keeps that no
+        tag of the column names is added by its name."""
+        from .intelligence.split import names_in
+
+        scope = Scope(user_id=memory.user_id)
+        linked = {entity.id: entity
+                  for entity in self.backend.entities_of_memory(memory.id, kind="any")}
+        owner: dict[str, str | None] = {}
+        for tag in memory.categories:
+            entity = self.backend.topic_entity(tag, scope, create=False, follow_merged=True)
+            owner[tag] = entity.id if entity is not None and entity.id in linked else None
+        named = {tag: [i for i, fact in enumerate(facts) if names_in(fact, [tag])]
+                 or list(range(len(facts))) for tag, entity_id in owner.items()
+                 if entity_id is None}
+        out: list[list[str]] = []
+        for i, kept in enumerate(about):
+            tags = [tag for tag, entity_id in owner.items()
+                    if (entity_id in kept if entity_id else i in named[tag])]
+            tags += [linked[entity_id].name for entity_id in kept
+                     if entity_id in linked and linked[entity_id].entity_type == TOPIC_TYPE
+                     and entity_id not in owner.values()]
+            out.append(tags)
+        return out
+
+    def _split_entry(
+        self, memory: Memory, entry: dict[str, Any], summary: dict[str, Any], *,
+        dry_run: bool,
+    ) -> None:
+        """Make one split of ``split_memories`` (unless ``dry_run``) and count
+        it in ``summary``. Writes that fail leave the memory as it was
+        (``_split_memory``): counted as failed, and listed with the reason."""
+        if not dry_run:
+            try:
+                entry["memory_ids"] = self._split_memory(memory, entry["facts"],
+                                                         entry["about"])
+            except Exception as exc:
+                summary["failed"] += 1
+                log.warning("splitting memory %s failed: %s", memory.id, exc)
+                entry["not_split"] = f"the split failed, the memory is as it was: {exc}"
+                summary["splits"].append(entry)
+                return
+        summary["split"] += 1
+        summary["facts"] += len(entry["facts"])
+        summary["splits"].append(entry)
+
+    def _split_memory(
+        self, memory: Memory, facts: list[str], about: list[list[str]],
+    ) -> list[str]:
         """Replace ``memory`` with one memory per fact; return their ids.
+        ``about``: the ids of the entities each fact keeps (``fact_homes``).
+        Its named things are linked to it with the mention the memory had,
+        and its tags come with its column (``_split_tags``), as every write
+        files them.
+
+        The facts are embedded first, in one call, and every write is then
+        made in one transaction (``backend.transaction``). Each fact was once
+        embedded and saved in turn, and the old memory left use only after
+        the last: a failure or a stop midway left the facts saved so far in
+        use beside it, twins its undo could not find. Now it leaves the
+        memory as it was. A memory another writer took out of use meanwhile
+        is not split (ValueError).
 
         The ADD event of each fact is dated at the old memory's
         ``updated_at``, which the fact keeps, so ``repair_updated_at`` reads
@@ -3484,73 +3779,103 @@ class MemoryStore:
         from .intelligence.split import names_in
 
         now = utcnow()
+        valid_from = self._split_valid_from(memory)
         metadata = {key: value for key, value in (memory.metadata or {}).items()
                     if key not in (CONFLICT_KEY, "pending_distillation", _ENRICHMENT_KEY)}
         metadata["split_from"] = memory.id
-        linked: list[tuple[Entity, list[str], EntityMention | None]] = []
+        linked: list[tuple[Entity, EntityMention | None]] = []
         for entity in self.backend.entities_of_memory(memory.id):
-            names = [entity.name, *self.backend.entity_aliases(entity.id)]
             mention = next((m for m in self.backend.entity_mentions(entity.id)
                             if m.memory_id == memory.id), None)
-            linked.append((entity, names, mention))
-        # each named thing on the facts that name it, on all when none does
-        homes = {entity.id: [i for i, fact in enumerate(facts) if names_in(fact, names)]
-                 or list(range(len(facts))) for entity, names, _ in linked}
+            linked.append((entity, mention))
+        homes = {entity.id: [i for i, kept in enumerate(about) if entity.id in kept]
+                 for entity, _ in linked}
+        tags = self._split_tags(memory, facts, about)
         parts: list[Memory] = []
         for i, fact in enumerate(facts):
-            names = [entity.name for entity, _, _ in linked if i in homes[entity.id]]
-            part = Memory(
+            # the named things it keeps, and a name the memory listed that it states
+            names = [entity.name for entity, _ in linked if i in homes[entity.id]]
+            names += [name for name in memory.entities if names_in(fact, [name])
+                      and name.casefold() not in {n.casefold() for n in names}]
+            parts.append(Memory(
                 content=fact, memory_type=memory.memory_type, user_id=memory.user_id,
                 agent_id=memory.agent_id, run_id=memory.run_id, importance=memory.importance,
-                categories=list(memory.categories),
-                entities=[name for name in memory.entities if names_in(fact, [name])] or names,
+                categories=tags[i], entities=names,
                 metadata=dict(metadata), created_at=memory.created_at,
-                updated_at=memory.updated_at, valid_from=memory.valid_from,
+                updated_at=memory.updated_at, valid_from=valid_from,
                 source_episode_ids=list(memory.source_episode_ids),
-            )
-            embedding = self.embedder.embed([fact])[0] if self.embedder.dimensions else None
-            if embedding:
-                part.embedding_model = self.embedder.model_id
-            parts.append(self.backend.insert_memory(part, embedding=embedding))
-        for entity, _, mention in linked:
-            for i in homes[entity.id]:
-                self.backend.add_mention(EntityMention(
-                    entity_id=entity.id, memory_id=parts[i].id,
-                    surface=mention.surface if mention else entity.name,
-                    decided=mention.decided if mention else None,
-                    entity_type=mention.entity_type if mention else None))
-        relations = [r for r in self.backend.list_relations(
-            Scope(user_id=memory.user_id), limit=1_000_000)
-            if r.memory_id == memory.id and r.invalid_at is None]
+            ))
+        # the one call over the network, before the transaction holds the database
+        vectors = (self.embedder.embed(list(facts)) if self.embedder.dimensions
+                   else [None] * len(facts))
         ids = [part.id for part in parts]
-        # out of use first: its relations end with it, and each comes back on
-        # a fact (one live edge per triple)
-        self.backend.invalidate_memory(memory.id, superseded_by=ids[0], at=now)
-        retired = self.backend.get_memory(memory.id)
-        self.backend.update_memory(
-            memory.id, metadata={**(retired.metadata if retired else memory.metadata),
-                                 "split_into": ids}, touch=False)
-        for relation in relations:
-            ends = [homes.get(relation.subject, []), homes.get(relation.object, [])]
-            both = [i for i in ends[0] if i in ends[1]]
-            home = (both or ends[0] or ends[1] or [0])[0]
-            self.backend.add_relation(Relation(
-                subject=relation.subject, predicate=relation.predicate,
-                object=relation.object, user_id=relation.user_id, memory_id=ids[home],
-                created_at=now, valid_from=relation.valid_from))
-        for part in parts:
+        with self.backend.transaction():
+            relations = [r for r in self.backend.list_relations(
+                Scope(user_id=memory.user_id, exact_user=True), limit=1_000_000)
+                if r.memory_id == memory.id and r.invalid_at is None]
+            # out of use first: its relations end with it, and each comes back
+            # on a fact (one live edge per triple)
+            if self.backend.invalidate_memory(memory.id, superseded_by=ids[0], at=now) is None:
+                raise ValueError(f"memory {memory.id} left use before it was split")
+            for part, vector in zip(parts, vectors):
+                if vector:
+                    part.embedding_model = self.embedder.model_id
+                self.backend.insert_memory(part, embedding=vector or None)
+            for entity, mention in linked:
+                for i in homes[entity.id]:
+                    if entity.id in {e.id for e in self.backend.entities_of_memory(
+                            ids[i], kind="any")}:
+                        continue  # a tag of its column merged into this thing linked it
+                    self.backend.add_mention(EntityMention(
+                        entity_id=entity.id, memory_id=ids[i],
+                        surface=mention.surface if mention else entity.name,
+                        decided=mention.decided if mention else None,
+                        entity_type=mention.entity_type if mention else None))
+            retired = self.backend.get_memory(memory.id)
+            self.backend.update_memory(
+                memory.id, metadata={**(retired.metadata if retired else memory.metadata),
+                                     "split_into": ids}, touch=False)
+            for relation in relations:
+                ends = [homes.get(relation.subject, []), homes.get(relation.object, [])]
+                both = [i for i in ends[0] if i in ends[1]]
+                home = (both or ends[0] or ends[1] or [0])[0]
+                self.backend.add_relation(Relation(
+                    subject=relation.subject, predicate=relation.predicate,
+                    object=relation.object, user_id=relation.user_id, memory_id=ids[home],
+                    created_at=now, valid_from=relation.valid_from))
+            for part in parts:
+                self.backend.add_event(MemoryEvent(
+                    memory_id=part.id, event="ADD", new_content=part.content,
+                    reason=f"split on {now[:10]} from memory {memory.id}, one of its "
+                           f"{len(parts)} facts",
+                    created_at=memory.updated_at))
             self.backend.add_event(MemoryEvent(
-                memory_id=part.id, event="ADD", new_content=part.content,
-                reason=f"split on {now[:10]} from memory {memory.id}, one of its "
-                       f"{len(parts)} facts",
-                created_at=memory.updated_at))
-        self.backend.add_event(MemoryEvent(
-            memory_id=memory.id, event="SUPERSEDE", old_content=memory.content,
-            new_content="\n".join(facts),
-            reason=f"split into {len(parts)} facts, one memory each: {', '.join(ids)}",
-            kind="split", created_at=now))
+                memory_id=memory.id, event="SUPERSEDE", old_content=memory.content,
+                new_content="\n".join(facts),
+                reason=f"split into {len(parts)} facts, one memory each: {', '.join(ids)}",
+                kind="split", created_at=now))
         self._property_vectors_after_save(ids)
         return ids
+
+    @staticmethod
+    def _split_valid_from(memory: Memory) -> str | None:
+        """When the facts of a split hold from: the date heading the whole
+        memory ("Decision (2026-09-12): ..."), which the prompt keeps in the
+        first fact only (``split.heading_date``), else the memory's own
+        ``valid_from``. A save sets ``valid_from`` to when it was said, so a
+        decision written down three days after it was made held from three
+        days late in every fact. A memory with an occurrence time ("when")
+        keeps its ``valid_from``, and so does one already dated that day,
+        whose time is the more exact. Every fact takes the heading's date,
+        one about an event of its own date too: a fact's own date is not
+        read."""
+        from .intelligence.split import heading_date
+
+        heading = heading_date(memory.content)
+        if (heading is None or (memory.metadata or {}).get(WHEN_KEY)
+                or (memory.valid_from or "")[:10] == heading[:10]):
+            return memory.valid_from
+        return heading
 
     def _undo_split(
         self, memory: Memory, *, keep_new: bool, owner_prefix: str | None,
@@ -3582,19 +3907,20 @@ class MemoryStore:
         return True
 
     def backfill_relations(
-        self, *, user_id: str | None = None, limit: int = 100_000
+        self, *, user_id: str | None = None, limit: int = 100_000, exact_user: bool = False,
     ) -> dict[str, Any]:
         """One-time: extract typed relations from existing memories.
 
         Only memories with 2+ linked entities are considered (a relation needs
         two), each does one small focused LLM call, and each is marked done so a
-        re-run spends no tokens. Cheap and resumable by design.
+        re-run spends no tokens. Cheap and resumable by design. ``exact_user``
+        as in ``get_all``.
         """
         summary = {"scanned": 0, "processed": 0, "relations_added": 0, "skipped": 0}
         if not self.llm.available:
             summary["error"] = "no LLM configured"
             return summary
-        for memory in self.get_all(user_id=user_id, limit=limit):
+        for memory in self.get_all(user_id=user_id, exact_user=exact_user, limit=limit):
             summary["scanned"] += 1
             if memory.metadata.get("relations_backfilled"):
                 continue
@@ -3631,17 +3957,19 @@ class MemoryStore:
         return summary
 
     def backfill_entity_types(
-        self, *, user_id: str | None = None, batch: int = 40
+        self, *, user_id: str | None = None, batch: int = 40, exact_user: bool = False,
     ) -> dict[str, Any]:
         """Classify entities that were linked before typing existed. Batched:
         one LLM call per ``batch`` entities, so a whole namespace is a handful of
-        calls. Only untyped entities are touched, so re-runs cost nothing."""
+        calls. Only untyped entities are touched, so re-runs cost nothing.
+        ``exact_user`` as in ``get_all``."""
         summary = {"typed": 0}
         if not self.llm.available:
             summary["skipped"] = "no LLM configured"
             return summary
         untyped = [
-            e for e in self.backend.list_entities(Scope(user_id=user_id), limit=1_000_000)
+            e for e in self.backend.list_entities(
+                Scope(user_id=user_id, exact_user=exact_user), limit=1_000_000)
             if not e.entity_type
         ]
         for i in range(0, len(untyped), batch):
@@ -3907,7 +4235,7 @@ class MemoryStore:
         return True
 
     def entity_junk(
-        self, *, user_id: str | None = None, judge: bool = False
+        self, *, user_id: str | None = None, judge: bool = False, exact_user: bool = False,
     ) -> dict[str, Any]:
         """Entities that should never have been entities.
 
@@ -3919,7 +4247,7 @@ class MemoryStore:
           a reader can tell apart from real niche terms like a tax rule or an
           index name. Never removed automatically - the user confirms.
         """
-        entities = self.entities(user_id=user_id, limit=100_000)
+        entities = self.entities(user_id=user_id, limit=100_000, exact_user=exact_user)
         mechanical = []
         candidates = []
         for entity in entities:
@@ -4214,15 +4542,18 @@ class MemoryStore:
         self._upkeep_set("owner_entity", scope.user_id, owner.id)
         return owner
 
-    def resolve_entities(self, *, user_id: str | None = None) -> dict[str, int]:
+    def resolve_entities(
+        self, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> dict[str, int]:
         """Re-judge open proposals with accumulated evidence; auto-confirm only
         clear, high-confidence matches. Everything ambiguous stays proposed.
 
         Then drop entities nothing references. Extraction inevitably produces
         some records that never attach to anything, and without this they
         accumulate forever: a real store reached 206 such rows out of 519.
+        ``exact_user`` as in ``get_all``.
         """
-        scope = Scope(user_id=user_id)
+        scope = Scope(user_id=user_id, exact_user=exact_user)
         self._carry_tag_decisions(user_id)
         # Surface duplicates first: proposals are otherwise only made at write
         # time, so anything already duplicated has nothing scheduled to look at
@@ -4248,7 +4579,7 @@ class MemoryStore:
         # identity. Judgement cases stay for the user under Upkeep.
         # Each carries the rule that caught it, so the Forgotten list can say
         # why a name went rather than only that it did.
-        junk = self.entity_junk(user_id=user_id)["mechanical"]
+        junk = self.entity_junk(user_id=user_id, exact_user=exact_user)["mechanical"]
         outcome["junk_removed"] = sum(
             self.remove_entities([item["id"]], reason=item["reason"])
             for item in junk
@@ -4404,6 +4735,7 @@ class MemoryStore:
         apply: bool = True,
         only: list[list[str]] | None = None,
         exclude: set[frozenset[str]] | None = None,
+        exact_user: bool = False,
     ) -> dict[str, Any]:
         """Merge memories that record the same fact more than once.
 
@@ -4420,9 +4752,10 @@ class MemoryStore:
         place would have made an arbitrary member masquerade as the merge, with
         its own creation date and history; a distinct record says plainly that
         this text came from consolidating several. Nothing is destroyed, so the
-        audit trail and time-travel still resolve.
+        audit trail and time-travel still resolve. ``exact_user`` as in
+        ``get_all``.
         """
-        scope = Scope(user_id=user_id)
+        scope = Scope(user_id=user_id, exact_user=exact_user)
         wanted = {frozenset(group) for group in only} if only else None
         vectors = self.backend.memory_vectors(scope, limit=1_000_000)
         summary: dict[str, Any] = {
@@ -4530,11 +4863,14 @@ class MemoryStore:
                     self.backend.add_mention(EntityMention(
                         entity_id=entity.id, memory_id=memory_id, surface=entity.name))
 
-    def repair_consolidated(self, *, user_id: str | None = None) -> dict[str, int]:
+    def repair_consolidated(
+        self, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> dict[str, int]:
         """Memories consolidated before the merge kept their vector's model and
         their originals' mentions: re-embed those stored without a model (the
-        model that made them is unknown) and give back the mentions."""
-        scope = Scope(user_id=user_id)
+        model that made them is unknown) and give back the mentions.
+        ``exact_user`` as in ``get_all``."""
+        scope = Scope(user_id=user_id, exact_user=exact_user)
         embedded = 0
         unlabelled = self.backend.unlabelled_vector_ids(scope)
         if unlabelled and self.embedder.dimensions:
@@ -4639,7 +4975,8 @@ class MemoryStore:
     DURABILITY_BATCH = 64
 
     def score_memory_durability(
-        self, *, user_id: str | None = None, limit: int | None = None
+        self, *, user_id: str | None = None, limit: int | None = None,
+        exact_user: bool = False,
     ) -> dict[str, Any]:
         """Record how long each memory is worth keeping, for memories missing it.
 
@@ -4664,7 +5001,7 @@ class MemoryStore:
             return outcome
         batch = limit or self.DURABILITY_BATCH
         pending = [
-            m for m in self.get_all(user_id=user_id, limit=100_000)
+            m for m in self.get_all(user_id=user_id, limit=100_000, exact_user=exact_user)
             if DURABILITY_KEY not in (m.metadata or {})
         ][:batch]
         if not pending:
@@ -4730,8 +5067,8 @@ class MemoryStore:
     #: Names screened per pass; one typed question each, asked in parallel.
     SCREEN_BATCH = 1000
 
-    def _structure_inputs(self, user_id: str | None):
-        scope = Scope(user_id=user_id)
+    def _structure_inputs(self, user_id: str | None, exact_user: bool = False):
+        scope = Scope(user_id=user_id, exact_user=exact_user)
         entities = self.backend.list_entities(scope, limit=1_000_000)
         links = self.backend.entity_memory_links(scope)
         relations = [
@@ -4832,16 +5169,17 @@ class MemoryStore:
         return out
 
     def run_structure_pass(
-        self, *, user_id: str | None = None, dry_run: bool = False
+        self, *, user_id: str | None = None, dry_run: bool = False, exact_user: bool = False,
     ) -> dict[str, Any]:
         """Record where parts belong, and settle names that are shared.
 
         Nothing is deleted. A home is a note in the entity's metadata,
         recomputed every pass. A merge sets ``merged_into`` on the entity with
         less evidence, exactly as a confirmed proposal does. ``dry_run=True``
-        changes nothing and returns the full plan instead.
+        changes nothing and returns the full plan instead. ``exact_user`` as
+        in ``get_all``.
         """
-        entities, nodes, triples, judged = self._structure_inputs(user_id)
+        entities, nodes, triples, judged = self._structure_inputs(user_id, exact_user)
         homes = derive_homes(nodes, triples, judged)
         names = {node.id: node.name for node in nodes}
         outcome: dict[str, Any] = {
@@ -4866,7 +5204,8 @@ class MemoryStore:
                 metadata.pop("home", None)
             self.backend.set_entity_metadata(entity.id, metadata)
 
-        plan = same_name_plan(nodes, homes, self._held_apart(Scope(user_id=user_id)))
+        plan = same_name_plan(nodes, homes, self._held_apart(
+            Scope(user_id=user_id, exact_user=exact_user)))
         tally = {"merge": "merged", "ask": "asked", "separate": "separate"}
         for step in plan:
             outcome[tally[step["action"]]] += 1
@@ -4886,7 +5225,8 @@ class MemoryStore:
         return outcome
 
     def run_name_screen(
-        self, *, user_id: str | None = None, limit: int | None = None
+        self, *, user_id: str | None = None, limit: int | None = None,
+        exact_user: bool = False,
     ) -> dict[str, Any]:
         """Ask the decision provider what each not-yet-screened name is.
 
@@ -4900,7 +5240,7 @@ class MemoryStore:
         if not self.decider.available:
             outcome["skipped"] = -1
             return outcome
-        scope = Scope(user_id=user_id)
+        scope = Scope(user_id=user_id, exact_user=exact_user)
         # The store owner is a person by construction, whatever its name
         # ("the user" until the judge finds who it is).
         pending = [
@@ -4980,7 +5320,7 @@ class MemoryStore:
 
     def run_upkeep_pass(
         self, key: str, *, user_id: str | None = None, record: bool = True,
-        at: datetime | None = None,
+        at: datetime | None = None, exact_user: bool = False,
     ) -> dict[str, Any]:
         """Run one pass now, with the same code the scheduler uses.
 
@@ -4991,6 +5331,11 @@ class MemoryStore:
         A pass that is off (``maintenance_enabled``) runs nowhere: neither the
         scheduler nor "run now" starts it, and no run is recorded; the result
         says so (``ran`` False, with the reason).
+
+        ``exact_user``: no ``user_id`` means the memories and entities without
+        a user, not every user's (``Scope.exact_user``), as the scheduler's
+        walk over the namespaces needs; the tags of a namespace are its own
+        whatever it is (``merge_obvious_topics``).
         """
         if key not in self._MAINTENANCE_KEYS:
             raise ValueError(f"unknown pass: {key}")
@@ -5000,20 +5345,21 @@ class MemoryStore:
             stamp = at.isoformat(timespec="seconds") if at is not None else utcnow()
             if key == "dedup_entities":
                 self.merge_obvious_topics(user_id=user_id)
-                result = self.resolve_entities(user_id=user_id)
+                result = self.resolve_entities(user_id=user_id, exact_user=exact_user)
                 # A calibrated provider judges names one by one in their memory; the
                 # text model's batch review is the fallback when there is none.
                 if self.decider.available:
-                    result.update(self.run_name_screen(user_id=user_id))
+                    result.update(self.run_name_screen(user_id=user_id, exact_user=exact_user))
                 elif self.llm.available:
-                    result.update(self.run_entity_review(user_id=user_id))
+                    result.update(self.run_entity_review(user_id=user_id,
+                                                         exact_user=exact_user))
                 self.backend.set_meta(_dedup_run_key(user_id), stamp)
             elif key == "structure":
-                result = self.run_structure_pass(user_id=user_id)
+                result = self.run_structure_pass(user_id=user_id, exact_user=exact_user)
             elif key == "durability":
-                result = self.score_memory_durability(user_id=user_id)
+                result = self.score_memory_durability(user_id=user_id, exact_user=exact_user)
             elif key == "consolidation":
-                result = self.run_consolidation_pass(user_id=user_id)
+                result = self.run_consolidation_pass(user_id=user_id, exact_user=exact_user)
                 self.backend.set_meta(_consolidation_run_key(user_id), stamp)
             else:
                 raise ValueError(f"unknown pass: {key}")
@@ -5022,12 +5368,15 @@ class MemoryStore:
             return result
 
     def run_upkeep_cycle(
-        self, *, user_id: str | None = None, now: datetime | None = None
+        self, *, user_id: str | None = None, now: datetime | None = None,
+        exact_user: bool = False,
     ) -> dict[str, Any]:
         """One scheduler tick for one namespace: every pass that is on and due.
 
         Returns what ran, keyed by pass, so the scheduler can spread work over
-        cycles on a many-account server.
+        cycles on a many-account server. ``exact_user`` as in
+        ``run_upkeep_pass``: the scheduler walks the namespaces with it, so
+        its tick for None is the memories without a user, not everyone's.
         """
         now = now or datetime.now(timezone.utc)
         ran: dict[str, Any] = {}
@@ -5037,20 +5386,21 @@ class MemoryStore:
         dedup_due = _due(self.backend.get_meta(_dedup_run_key(user_id)), every, now)
         if self.maintenance_enabled("structure") and dedup_due:
             ran["structure"] = self.run_upkeep_pass(
-                "structure", user_id=user_id, at=now)
+                "structure", user_id=user_id, at=now, exact_user=exact_user)
         if self.maintenance_enabled("dedup_entities") and dedup_due:
             ran["dedup_entities"] = self.run_upkeep_pass(
-                "dedup_entities", user_id=user_id, at=now)
+                "dedup_entities", user_id=user_id, at=now, exact_user=exact_user)
         if (
             self.maintenance_enabled("consolidation") and self.llm.available
             and _due(self.backend.get_meta(_consolidation_run_key(user_id)), every, now)
         ):
             ran["consolidation"] = self.run_upkeep_pass(
-                "consolidation", user_id=user_id, at=now)
+                "consolidation", user_id=user_id, at=now, exact_user=exact_user)
         if self.maintenance_enabled("durability") and self.decider.available:
             # Cheap when nothing is unscored, so it runs every tick; only a
             # tick that scored something is worth remembering as a run.
-            result = self.run_upkeep_pass("durability", user_id=user_id, record=False)
+            result = self.run_upkeep_pass("durability", user_id=user_id, record=False,
+                                          exact_user=exact_user)
             if result.get("scored"):
                 self._upkeep_set("last:durability", user_id,
                                  {"at": now.isoformat(timespec="seconds"), "result": result})
@@ -5059,7 +5409,8 @@ class MemoryStore:
             # After this week's merges and new homes: re-embed the memories
             # whose masked names changed. Nothing to embed is no run.
             try:
-                embedded = self.refresh_property_vectors(user_id=user_id)
+                embedded = self.refresh_property_vectors(user_id=user_id,
+                                                         exact_user=exact_user)
             except Exception as exc:
                 log.warning("property vector refresh failed: %s", exc)
                 embedded = 0
@@ -5067,7 +5418,9 @@ class MemoryStore:
                 ran["property_vectors"] = {"embedded": embedded}
         return ran
 
-    def run_consolidation_pass(self, *, user_id: str | None = None) -> dict[str, Any]:
+    def run_consolidation_pass(
+        self, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> dict[str, Any]:
         """Merge exact duplicates on sight; queue what only a model vouched for.
 
         Entity identity was measured against a labelled set before it was
@@ -5076,12 +5429,12 @@ class MemoryStore:
         remembered, so the model is asked about each one once.
         """
         with self._pass_lock("consolidation", user_id):
-            repaired = self.repair_consolidated(user_id=user_id)
+            repaired = self.repair_consolidated(user_id=user_id, exact_user=exact_user)
             seen_lists = self._upkeep_get("consolidation:seen", user_id, [])
             seen = {frozenset(ids) for ids in seen_lists}
             result = self.consolidate_memories(
                 user_id=user_id, threshold=self.UPKEEP_CONSOLIDATION_THRESHOLD,
-                apply=False, exclude=seen,
+                apply=False, exclude=seen, exact_user=exact_user,
             )
             pending = self._upkeep_get("consolidation:pending", user_id, [])
             known = {frozenset(entry["memory_ids"]) for entry in pending}
@@ -5118,14 +5471,17 @@ class MemoryStore:
             self._upkeep_set("consolidation:pending", user_id, pending)
             return outcome
 
-    def run_entity_review(self, *, user_id: str | None = None) -> dict[str, Any]:
+    def run_entity_review(
+        self, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> dict[str, Any]:
         """Ask the model which concept names are not things; queue its verdicts.
 
         Nothing is removed here. A name the user chose to keep is never asked
         about again.
         """
         kept = set(self._upkeep_get("entity_review:kept", user_id, []))
-        judged = self.entity_junk(user_id=user_id, judge=True)["judged"]
+        judged = self.entity_junk(user_id=user_id, judge=True,
+                                  exact_user=exact_user)["judged"]
         pending = [
             {"id": j["id"], "name": j["name"]} for j in judged if j["id"] not in kept
         ]
@@ -5337,8 +5693,9 @@ class MemoryStore:
         rebuild = getattr(self.backend, "rebuild_ann", None)
         if rebuild is not None:
             rebuild(self.embedder.model_id, self.embedder.dimensions)
+        # one namespace at a time, None being the memories without a user
         for user_id in self.backend.distinct_user_ids() or [None]:
-            self.refresh_property_vectors(user_id=user_id)
+            self.refresh_property_vectors(user_id=user_id, exact_user=True)
         # the episodes' vectors, which evidence is chosen by (older stores had none)
         while episodes := self.backend.episodes_to_embed(self.embedder.model_id,
                                                          limit=batch_size):

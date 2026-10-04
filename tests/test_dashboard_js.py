@@ -21,7 +21,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from memry.config import Config
-from memry.models import Entity, EntityMention
+from memry.models import Entity, EntityMention, MergeProposal
 from memry.providers.embeddings import HashEmbedder
 from memry.providers.llm import NoneLLM
 from memry.rest import create_app
@@ -330,7 +330,7 @@ def test_selected_map_entity_shows_identity_and_cleanup_actions():
         "async function refreshAfterMapEntityCleanup", 1,
     )[0]
     knowledge_alias = source.split("async function addAlias(id){", 1)[1].split(
-        "async function decideProposal", 1,
+        "async function removeEntity", 1,
     )[0]
     assert "showMapEntityDetail" not in map_alias
     assert "openEntity" not in knowledge_alias
@@ -754,9 +754,11 @@ def test_upkeep_has_one_entities_view_and_the_map_one_mode():
     assert "api('/api/v1/entities/merge'" in _region(source, "async function applyCombine(", "// Where this")
     panel = _region(html, '<section class="kpanel" id="kpanel-entities"', "</section>")
     for control in ('id="entsearch"', 'id="enttypes"', 'id="entsel"',
-                    ">Combine selected...</button>", ">Backfill types</button>",
-                    ">Merge proposals</h2>", 'id="entitydetail"'):
+                    ">Combine selected...</button>", 'id="entitydetail"'):
         assert control in panel, control
+    # merge proposals are asked under Upkeep, and Backfill types runs from there
+    for gone in (">Merge proposals</h2>", 'id="proplist"', "Backfill types"):
+        assert gone not in panel, gone
     # two tags that may be one are a merge proposal like any pair
     assert "Suggest merges" not in html and 'id="tagsuggest"' not in html
     # the map offers tags as a type, off until turned on
@@ -791,7 +793,7 @@ const rows=[
   ...concepts];
 const reads={
   '/api/v1/entities?limit=100000&include_merged=true&kind=any':rows,
-  '/api/v1/relations?limit=2000':[],'/api/v1/entities/proposals?asked=true':[]};
+  '/api/v1/relations?limit=2000':[]};
 const api=async path=>reads[path];
 """ + _region(source, "// -- tags: deleted on every memory", "// Where this entity belongs") + r"""
 function check(condition,message){if(!condition)throw new Error(message)}
@@ -819,8 +821,15 @@ check(chips(entityListView(rows,{type:'event'})).endsWith('event=0'),'a type pic
   check(list.includes('life</button>')&&!list.includes('synthetic'),'a tag carries no synthetic badge');
   check(list.includes('show 1 more'),'the capped type offers the rest');
   check(nodes.entsel.textContent==='none selected','nothing checked yet');
-  pickEntity('t-travel',true);pickEntity('ada',true);
+  check(nodes.entcombinebtn.hidden===true,'no combine with nothing checked');
+  pickEntity('t-travel',true);
+  check(nodes.entcombinebtn.hidden===true,'no combine with one checked');
+  pickEntity('ada',true);
   check(nodes.entsel.textContent==='2 selected','the checked are counted');
+  check(nodes.entcombinebtn.hidden===false,'combine shows from the second check');
+  pickEntity('ada',false);
+  check(nodes.entcombinebtn.hidden===true,'and goes again below two');
+  pickEntity('ada',true);
   setEntityType('topic');
   check(!nodes.entlist.innerHTML.includes('Ada<')&&nodes.entlist.innerHTML.includes('travel<'),'filtered to tags');
   check(nodes.entlist.innerHTML.includes('value="t-travel" checked'),'a check survives the filter');
@@ -848,7 +857,7 @@ def test_a_tag_is_renamed_deleted_and_combined_from_the_entities_list():
         store.backend.add_mention(EntityMention(
             entity_id=jonas.id, memory_id=added.actions[0].memory_id, surface="Jonas"))
         reads_paths = ("/api/v1/entities?limit=100000&include_merged=true&kind=any",
-                       "/api/v1/relations?limit=2000", "/api/v1/entities/proposals?asked=true")
+                       "/api/v1/relations?limit=2000")
         with TestClient(create_app(store)) as client:
             html = client.get("/").text
             reads = {path: client.get(path).json() for path in reads_paths}
@@ -894,6 +903,7 @@ function check(condition,message){if(!condition)throw new Error(message)}
   document.getElementById('entcombinekeep').value=ids.trips;
   await applyCombine();
   check(nodes.entsel.textContent==='none selected','combined tags leave nothing checked');
+  check(nodes.entcombinebtn.hidden===true,'and no combine button');
   pickEntity(ids.Jonas,true);pickEntity(ids.running,true);
   await combineSelected();
   panel=nodes.entcombine.innerHTML;
@@ -1124,6 +1134,118 @@ function check(condition,message){if(!condition)throw new Error(message)}
   activeMapKey='entity:t1';await showMapEntityDetail('t1');
   html=nodes.mapentitydetail.innerHTML;
   check(html.includes('>delete tag</button>')&&!html.includes('add alias'),'the map panel of a tag too');
+})().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+    _run_node(contract)
+
+
+def test_every_element_the_script_looks_up_by_id_is_on_the_page():
+    """A lookup of an id that is gone returns null, and the next line throws:
+    the Merge proposals list moved to Upkeep, so nothing may still ask for it."""
+    html = _dashboard_html()
+    looked_up = set(re.findall(r"getElementById\('([\w-]+)'\)", html))
+    assert looked_up, "the script should look elements up by id"
+    missing = sorted(i for i in looked_up if f'id="{i}"' not in html)
+    assert not missing, missing
+    for gone in ("proplist", "decideProposal", "/api/v1/entities/proposals"):
+        assert gone not in html, gone
+
+
+def test_entity_merge_proposals_are_asked_under_upkeep():
+    """The Entities tab no longer lists merge proposals; Upkeep, Needs you,
+    Entities does, with merge and keep separate, from the same proposals."""
+    store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
+    try:
+        ada = store.backend.insert_entity(Entity(name="Ada", entity_type="person", user_id="default"))
+        ada_l = store.backend.insert_entity(
+            Entity(name="Ada L.", entity_type="person", user_id="default"))
+        proposal = store.backend.add_proposal(MergeProposal(
+            entity_a=ada.id, entity_b=ada_l.id, user_id="default", reason="similar names"))
+        with TestClient(create_app(store)) as client:
+            asked = client.get("/api/v1/entities/proposals?asked=true").json()
+            queue = client.get("/api/v1/maintenance").json()["queue"]
+    finally:
+        store.close()
+    assert [p["id"] for p in asked] == [proposal.id]
+    rows = [item for item in queue if item["kind"] == "proposal"]
+    assert [row["id"] for row in rows] == [proposal.id]
+    assert rows[0]["title"] == "Ada and Ada L."
+    assert (rows[0]["accept"], rows[0]["decline"]) == ("merge", "keep separate")
+    source = "\n".join(_scripts(_dashboard_html()))
+    assert "{kind:'proposal',label:'Entities'," in source
+
+
+def test_combine_keeps_a_real_name_over_the_owner_placeholder():
+    """Combining "the user" with Cosmin must not preselect "the user", even
+    with more memories: a real name comes first, then the most memories, and
+    the placeholder is still offered, last."""
+    from memry.intelligence.extraction import OWNER_PLACEHOLDER
+
+    source = "\n".join(_scripts(_dashboard_html()))
+    assert f"const OWNER_PLACEHOLDER='{OWNER_PLACEHOLDER}';" in source
+    contract = _lines(source, "function esc(s)", "function typeLabel(", "function jsArg(v)",
+                      "const TAG_TYPE=") + r"""
+let knowledgeNames={};
+const nodes={};
+const document={getElementById:id=>(nodes[id]??={innerHTML:'',textContent:'',value:'',dataset:{}})};
+const api=async()=>[];
+""" + _region(source, "// -- tags: deleted on every memory", "// Where this entity belongs") + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+const names=rows=>combineKeepOptions(rows).map(e=>e.name).join();
+const owner={id:'u',name:'the user',entity_type:'person',memories:40};
+const cosmin={id:'c',name:'Cosmin',entity_type:'person',memories:3};
+const cos={id:'k',name:'Cos',entity_type:'person',memories:9};
+const tag={id:'t',name:'work',entity_type:'topic',memories:50};
+check(names([owner,cosmin])==='Cosmin,the user','a real name before the placeholder: '+names([owner,cosmin]));
+check(names([{...owner,name:' The User '},cosmin])==='Cosmin, The User ','in any case');
+check(names([owner,cosmin,cos])==='Cos,Cosmin,the user','then the most memories');
+check(names([owner,tag])==='the user','the placeholder can still be kept');
+check(names([tag,{...tag,id:'t2',name:'job',memories:60}])==='job,work','two tags: the most memories');
+entityRows=[owner,cosmin];
+pickEntity('u',true);pickEntity('c',true);
+(async()=>{
+  await combineSelected();
+  const panel=nodes.entcombine.innerHTML;
+  check(panel.indexOf('value="c"')>-1&&panel.indexOf('value="c"')<panel.indexOf('value="u"'),
+        'Cosmin is the first option, so the one picked to keep');
+})().catch(e=>{console.error(e.message);process.exit(1)});
+"""
+    _run_node(contract)
+
+
+def test_backfill_types_runs_by_hand_from_upkeep_done_on_its_own():
+    html = _dashboard_html()
+    source = "\n".join(_scripts(html))
+    auto = _region(html, '<details id="upkeepauto"', "</details>")
+    assert 'id="upkeeplist"' in auto
+    contract = _lines(source, "function esc(s)") + "\n" + _region(
+        source, "const PASS_WORDS={", "// The queue is an inbox") + r"""
+const nodes={};
+const document={getElementById:id=>(nodes[id]??={innerHTML:'',textContent:'',dataset:{},
+  setAttribute(){},classList:{add(c){this.added=c}}})};
+const writes=[];let reply={typed:2};
+const api=async(path,opts={})=>{writes.push([opts.method||'GET',path]);return reply};
+const noop=async()=>{};const loadEntities=noop,loadMapData=noop;
+""" + _region(source, "function renderUpkeepPasses(", "async function togglePause(") \
+        + _region(source, "async function backfillTypes(", "async function add(") + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+const info={passes:[],llm_available:true,decider_available:false,merge_gate:2,paused:false};
+renderUpkeepPasses(info);
+let list=nodes.upkeeplist.innerHTML;
+check(list.includes('<b>Backfill types</b>')&&list.includes('onclick="backfillTypes(this)"'),'listed with a run button');
+check(list.includes('title="Ask the language model for the type of every person or thing that has none yet.">run now</button>'),'the tooltip it had');
+renderUpkeepPasses({...info,llm_available:false});
+list=nodes.upkeeplist.innerHTML;
+check(list.includes('needs a language model')&&!list.includes('backfillTypes('),'no model, no button');
+(async()=>{
+  const button={textContent:'run now',disabled:false};
+  await backfillTypes(button);
+  check(JSON.stringify(writes)==='[["POST","/api/v1/entities/backfill-types"]]','posts once: '+JSON.stringify(writes));
+  check(nodes['passlog-backfill-types'].textContent.endsWith(' - typed 2 names'),'says what it did');
+  check(button.textContent==='run now'&&!button.disabled,'the button is back');
+  reply={typed:0,skipped:'no LLM configured'};
+  await backfillTypes(button);
+  check(nodes['passlog-backfill-types'].textContent.endsWith(' - not run: no LLM configured'),'says why not');
 })().catch(e=>{console.error(e.message);process.exit(1)});
 """
     _run_node(contract)

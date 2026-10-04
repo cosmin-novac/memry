@@ -140,8 +140,9 @@ The product and dashboard call deterministic classification labels such as `live
 or `2026 taxes` **tags**. The existing Python/REST field remains `categories`, and the memory's
 JSON `categories` list stays the record every filter, backup and export reads. Each tag is also
 an entity of type `topic` (one active one per namespace and normalized tag, held by a
-partial unique index, created on first use; the namespace is `user_id` exactly, so `""` is
-a user of its own, apart from the memories without one) and each tagged memory mentions
+partial unique index, created on first use; the namespace is `user_id` exactly, so in an
+older store `""` is a user of its own, apart from the memories without one; a write gives
+both the default namespace now) and each tagged memory mentions
 it, so tags, people, products and projects are one kind of thing with one merge machinery:
 a tag merge is an entity merge plus a rewrite of the `categories` column.
 
@@ -616,9 +617,9 @@ provider cost bounded.
 The one-time and repair commands run from the CLI on one user or every user:
 `repair-dates` (each memory's `updated_at` from its audit trail), `restore-context` (the
 context label from the episodes), `backfill-relations`, `backfill-entity-types`,
-`backfill-property-vectors`, `tags-to-things` and `split-memories`. All but
-`backfill-property-vectors` and `tags-to-things` also have a REST route under
-`/api/v1`. `restore-context`, `tags-to-things` and `split-memories` take `--dry-run`
+`backfill-property-vectors`, `tags-to-things`, `split-memories` and `adopt-unscoped`.
+All but `backfill-property-vectors`, `tags-to-things` and `adopt-unscoped` also have a REST
+route under `/api/v1`. `restore-context`, `tags-to-things` and `split-memories` take `--dry-run`
 (`{"dry_run": true}`) to see first what they would do.
 
 `split-memories` (`POST /api/v1/memories/split`, `intelligence/split.py`,
@@ -642,10 +643,17 @@ them before a merge was kept to one fact (section 4, MORE):
   came from, so one such fact keeps the memory whole, and the report names the fact.
 - The coverage audit a save gets reads the facts against the memory. A split it finds
   lossy is not made; the report says what would have been lost.
+- The same call says what each fact is about: the memory's linked entities, named things
+  and tags, are numbered under it, and each fact comes back with the numbers of those it
+  is about, as many as apply, also one it does not spell out ("The tallest bulls in Etosha
+  stand 4 m." in a memory about elephants keeps Elephant, so the linked search still finds
+  it). A fact keeps those and any linked entity its text names. A split that would leave a
+  fact with none of the memory's entities, or one of them on no fact, is not made.
 - Each fact becomes a memory with the old one's `created_at`, `updated_at`, `valid_from`,
-  sources, tags, importance, type, metadata ("when" included), run and agent, and
-  `split_from`. The old memory's named entities are linked to the facts that name them (to
-  every fact when none does), and each relation rests on the fact that names both ends.
+  sources, importance, type, metadata ("when" included), run and agent, and
+  `split_from`. It is linked to the entities it keeps, its tags are the tags among them (a
+  five-topic summary gives each fact its own topic, not all five), and each relation rests
+  on the fact that keeps both ends.
   The ADD event of each fact is dated at the old memory's `updated_at`, so `repair-dates`
   reads the same times.
 - The old memory leaves use with a SUPERSEDE of kind `split` and `split_into` on it. Like a
@@ -654,7 +662,38 @@ them before a merge was kept to one fact (section 4, MORE):
   `memry split-memories --undo ID`) brings it back and forgets the facts that are still as
   they were made.
 - `--dry-run` asks the model and writes nothing; the CLI prints each memory with the facts
-  it would become, for a person to read before the real run.
+  it would become and what each is about, for a person to read before the real run. Asked
+  again, the model answers a little differently, so `--dry-run --plan-out PATH` keeps the
+  splits shown and `--plan-in PATH` makes exactly those, without the model. A planned
+  memory no longer in use, with a changed text, or with changed entities is skipped.
+- Each memory's split is written in one transaction (`MemoryBackend.transaction`), its facts
+  embedded first in one call: a failure or a stop leaves that memory as it was. A backend
+  without transactions (`supports_transactions`, false for the Mem0 adapter) refuses a real
+  split and runs only the dry run.
+- A memory that opens on a dated heading ("Decision (2026-09-12): ..." or "2026-09-12:
+  ...") gives its facts that date as `valid_from`; the date is written once, in the first
+  fact. A memory with an occurrence time ("when") keeps its dates. A fact's own date is not
+  read, so every fact takes the heading's.
+- Walking every namespace, the commands and the upkeep scheduler read the memories without
+  a namespace as one of them (`Scope.exact_user`), not as all memories at once: those are
+  never upkept, deduplicated or consolidated together with anyone else's. The Mem0 adapter
+  cannot ask for "no user" and refuses such a scope.
+- Every write has a namespace: `MemoryStore._namespace` gives a write without a user
+  (None or `""`) `config.default_user_id`, in `add`, `add_deferred`, `import_verbatim`,
+  `import_backup` and the distillation of a save queued before. Reads keep no user as every
+  namespace. `adopt-unscoped` (`MemoryStore.adopt_unscoped`, `LocalBackend.adopt_unscoped`)
+  moves an older store's rows without one into a namespace in one transaction: a tag of
+  the same name there takes the moved tag (folded as tags merge, since one active tag per
+  namespace and name is an index), the only same-named thing of the same type takes the
+  moved one by a recorded merge after the move, a legacy `topics` row the target holds
+  gives it its links, the moved memories' tags are filed again, and the upkeep state kept
+  under the empty key goes to the target where it has none. `--dry-run` counts and writes
+  nothing; a second run changes nothing. The upkeep keys of None and `""` stay one key, so
+  an older store's state is not orphaned before the move.
+- The dashboard shows no split run, only a split made, under Archive with its undo. The
+  response of `POST /api/v1/memories/split` counts the memories held back by reason:
+  `no_entity`, `lost_entity`, a fact without its subject, a lossy split, and, for a plan,
+  `stale`.
 
 ## 5. Read path
 

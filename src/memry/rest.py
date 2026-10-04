@@ -117,7 +117,7 @@ html.knowledge-open,body.knowledge-open{overflow:hidden}
 .modal.on{display:flex}
 .modal .sheet{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(97vw,96rem);padding:1.2rem 1.3rem}
 /* Entities: the selected one gets its own column beside the list, so choosing
-   an entity does not push its detail below the merge proposals. Below the
+   an entity does not push its detail below the list. Below the
    breakpoint it stacks and moves to the TOP, where a selection belongs. */
 .entity-split{display:grid;grid-template-columns:1fr;gap:1.1rem;align-items:start}
 @media(min-width:62rem){.entity-split{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)}}
@@ -403,8 +403,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <div class="entity-main">
       <div class="tagbar">
         <span class="sel" id="entsel">none selected</span>
-        <button onclick="combineSelected()" title="Make the checked entries one: pick the one to keep and the rest go into it. With a person or thing checked, only a person or thing can be kept.">Combine selected...</button>
-        <button onclick="backfillTypes()" title="Ask the language model for the type of every person or thing that has none yet.">Backfill types</button>
+        <button id="entcombinebtn" onclick="combineSelected()" title="Make the checked entries one: pick the one to keep and the rest go into it. With a person or thing checked, only a person or thing can be kept." hidden>Combine selected...</button>
         <input id="entsearch" type="search" placeholder="filter by name..." oninput="renderEntityList()"
                title="Show only the names that contain this." style="flex:1;min-width:7rem">
       </div>
@@ -412,7 +411,6 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
       <div class="ent-count" id="entcount"></div>
       <div class="ent-combine" id="entcombine" hidden></div>
       <div id="entlist"></div>
-      <h2 style="font-size:.95rem;margin-top:1.1rem">Merge proposals</h2><div id="proplist"></div>
     </div>
     <aside class="entity-side" id="entitydetail"></aside>
   </div>
@@ -1634,6 +1632,7 @@ const PASS_WORDS={
   queued:n=>`left ${n} for you`,
   skipped:n=>`could not judge ${n}`,
   removed:n=>`removed ${n}`,
+  typed:n=>`typed ${n} ${n===1?'name':'names'}`,
 };
 function describePass(result){
   if(!result||typeof result!=='object')return 'done';
@@ -1789,7 +1788,7 @@ function renderUpkeepPasses(info){
     return `<div class="tagrow" id="pass-${esc(p.key)}"><span class="name"><b>${esc(p.label)}</b> ${state}
       <div class="hint">${esc(p.detail)}${every}${last}</div>
       <div class="hint passlog" id="passlog-${esc(p.key)}"></div></span>${run}${toggle}</div>`;
-  }).join('');
+  }).join('')+backfillRow(info);
   const who=info.decider_available
     ? `Typed questions go to <b>${esc(info.decider)}</b>.`
     : 'No decision provider is configured, so the passes that need one are off.';
@@ -1802,6 +1801,15 @@ function renderUpkeepPasses(info){
   pause.setAttribute('aria-pressed',String(!!info.paused));
   const on=info.passes.filter(p=>p.automatic&&!missing(p)).length;
   document.getElementById('upkeepsummary').textContent=info.paused?'paused':`${on} of ${info.passes.length} passes on`;
+}
+// Backfill types is listed with the passes but never runs on its own: it is
+// for people and things saved before entities had a type.
+const BACKFILL_TITLE='Ask the language model for the type of every person or thing that has none yet.';
+function backfillRow(info){
+  const need=!info.llm_available;
+  return `<div class="tagrow" id="pass-backfill-types"><span class="name"><b>Backfill types</b> <span class="cnt">${need?'needs a language model':'by hand'}</span>
+      <div class="hint">${BACKFILL_TITLE} Only runs when asked.</div>
+      <div class="hint passlog" id="passlog-backfill-types"></div></span>${need?'':`<button class="act" onclick="backfillTypes(this)" title="${BACKFILL_TITLE}">run now</button>`}</div>`;
 }
 async function togglePause(){
   const paused=document.getElementById('upkeeppause').getAttribute('aria-pressed')!=='true';
@@ -1845,6 +1853,9 @@ async function deleteTagEntity(id){
 // again from what was loaded, so a type chip or the name filter costs no
 // request. A type can hold hundreds of names, so each is capped until asked.
 const ENTITY_ROW_CAP=12,ENTITY_TYPE_CAP=200;
+// The name the owner's entity carries until their own name is known
+// (OWNER_PLACEHOLDER in intelligence/extraction.py).
+const OWNER_PLACEHOLDER='the user';
 const DELETE_TAG_TITLE='Take this tag off every memory filed under it. The memories stay.';
 const HUB_TITLE='Hide the people and things that are not hubs. A name is a hub when the name screen called it a named thing, or it is a person, organization, project, product or place, or, without a verdict from the screen, two memories mention it. A name the screen called a value or a role is not. Tags stay listed.';
 function renameTitle(tag){
@@ -1857,10 +1868,10 @@ const tagNames={};
 function tagKey(entity){return String(entity.normalized||entity.name||'').trim().toLowerCase()}
 function rememberTag(entity){if(entity&&entity.entity_type===TAG_TYPE)tagNames[entity.id]=tagKey(entity)}
 async function loadEntities(){
-  const [entities,relations,proposals]=await Promise.all([
+  // Merge proposals are not listed here: Upkeep asks about them, under Needs you.
+  const [entities,relations]=await Promise.all([
     api('/api/v1/entities?limit=100000&include_merged=true&kind=any'),
-    api('/api/v1/relations?limit=2000'),
-    api('/api/v1/entities/proposals?asked=true')]);
+    api('/api/v1/relations?limit=2000')]);
   knowledgeNames={};
   entities.forEach(entity=>{knowledgeNames[entity.id]=entity.name;rememberTag(entity)});
   entityRows=entities.filter(entity=>!entity.merged_into);
@@ -1868,10 +1879,6 @@ async function loadEntities(){
   const live=new Set(entityRows.map(entity=>entity.id));
   entitySelected=new Set([...entitySelected].filter(id=>live.has(id)));
   renderEntityList();
-  document.getElementById('proplist').innerHTML=proposals.length?proposals.map(proposal=>`<div class="tagrow"><span class="name">
-    <b>${esc(knowledgeNames[proposal.entity_a]||proposal.entity_a)}</b> and <b>${esc(knowledgeNames[proposal.entity_b]||proposal.entity_b)}</b></span>
-    <button class="act" onclick='decideProposal(${JSON.stringify(proposal.id)},"confirm",this)'>merge</button>
-    <button class="act del" onclick='decideProposal(${JSON.stringify(proposal.id)},"reject",this)'>keep separate</button></div>`).join(''):'<div class="empty">Nothing to decide. Memry compares a waiting pair again once one of its two entities has more memories.</div>';
 }
 // What the tab shows of ``rows``: those whose name holds ``needle`` and, with
 // ``hubs``, only the people and things that are hubs (a tag is never one, and
@@ -1937,16 +1944,23 @@ function toggleEntityType(type){
 function toggleHubsOnly(){hubsOnly=!hubsOnly;renderEntityList()}
 // The combine panel offers what was checked when it opened, so a change closes it.
 function pickEntity(id,on){on?entitySelected.add(id):entitySelected.delete(id);closeCombine();updateEntitySel()}
+// Combine takes two or more, so its button shows only from the second check.
 function updateEntitySel(){
   const n=entitySelected.size;
   document.getElementById('entsel').textContent=n?`${n} selected`:'none selected';
+  document.getElementById('entcombinebtn').hidden=n<2;
 }
 // One is kept and the rest go into it (``/entities/merge``), tags too. The
 // store always files a tag combined with a person or thing under that one, so
 // with one among the checked only a person or thing is offered to keep.
+// The first option is the one picked to keep: a real name before the owner's
+// placeholder name, then the one with the most memories. The placeholder stays
+// on offer, last, for when it is kept on purpose.
 function combineKeepOptions(picked){
   const things=picked.filter(entity=>entity.entity_type!==TAG_TYPE);
-  return things.length?things:picked;
+  const placeholder=entity=>String(entity.name||'').trim().toLowerCase()===OWNER_PLACEHOLDER?1:0;
+  return (things.length?things:picked).slice()
+    .sort((a,b)=>placeholder(a)-placeholder(b)||(b.memories||0)-(a.memories||0));
 }
 async function combineSelected(){
   const picked=entityRows.filter(entity=>entitySelected.has(entity.id));
@@ -1972,7 +1986,7 @@ async function applyCombine(){
     if(result.error)refused.push(other.name+': '+result.error);
   }
   if(refused.length)alert('Not combined: '+refused.join('; '));
-  closeCombine();entitySelected.clear();
+  closeCombine();entitySelected.clear();updateEntitySel();
   await Promise.all([loadEntities(),loadStats(),loadMapData(),loadSearchFilters()]);
   await search();
   await openEntity(keepId);
@@ -2116,23 +2130,23 @@ async function confirmNotAnEntity(entityId,name,memories){
   if(result.error){alert(result.error);return false}
   return true;
 }
-async function decideProposal(id,decision,button){
-  if(button)button.disabled=true;
-  try{
-    const result=await api('/api/v1/entities/proposals/'+encodeURIComponent(id)+'/'+decision,{method:'POST',body:'{}'});
-    const ok=decision==='confirm'?result.confirmed:result.rejected;
-    if(!ok)alert('That proposal changed while this view was open. The list has been refreshed.');
-  }catch(error){alert('Could not update that merge proposal.');}
-  await Promise.all([loadEntities(),loadMapData()]);
-}
 async function showMemory(id){
   const memory=await api('/api/v1/memories/'+encodeURIComponent(id));
   closeKnowledge();activeMapKey=null;clearMapEntityDetail();haveMore=false;render([memory]);
 }
-async function backfillTypes(){
-  document.getElementById('entcount').textContent='classifying...';
-  await api('/api/v1/entities/backfill-types',{method:'POST',body:'{}'});
+async function backfillTypes(button){
+  const original=button.textContent;
+  button.disabled=true;button.textContent='running...';
+  let result=null,failed=null;
+  try{ result=await api('/api/v1/entities/backfill-types',{method:'POST',body:'{}'}); }
+  catch(err){ failed=String(err&&err.message||err); }
+  finally{ button.disabled=false;button.textContent=original; }
+  const when=new Date().toLocaleTimeString();
+  const said=failed?`failed: ${failed}`
+    :typeof result.skipped==='string'?`not run: ${result.skipped}`:describePass(result);
   await Promise.all([loadEntities(),loadMapData()]);
+  const log=document.getElementById('passlog-backfill-types');
+  if(log){ log.textContent=`${when} - ${said}`; log.classList.add(failed?'err':'ran'); }
 }
 async function add(infer){
   const t=document.getElementById('newmem').value.trim(); if(!t)return;
@@ -3324,7 +3338,21 @@ def create_app(
         per fact (the text model is asked about each memory of more than one
         sentence). ``{"dry_run": true}`` asks and writes nothing;
         ``min_words`` narrows the run. A split is undone under Archive
-        (``/memories/{id}/undo-replacement``)."""
+        (``/memories/{id}/undo-replacement``).
+
+        The answer is ``MemoryStore.split_memories``'s summary: ``user``,
+        ``dry_run``, the counts ``in_use``, ``candidates``, ``one_fact``,
+        ``split`` and ``facts``, the memories kept whole and why (``no_entity``:
+        a fact would keep none of the memory's entities; ``lost_entity``: an
+        entity would be on no fact; ``no_subject``: a fact would not state its
+        subject; ``lossy``: the facts would lose a detail), ``failed``, and
+        ``splits``: one entry per memory split or kept, with ``memory_id``,
+        ``content``, ``facts``, ``about`` (the entity ids each fact keeps),
+        ``labels`` (each id as a person reads it), ``not_split`` (the reason,
+        when kept) and ``memory_ids`` (the facts made, when written). The
+        dashboard shows no run of it; a split it made is listed under
+        Archive. 409 when no text model is configured, or for a real split
+        on a backend without transactions."""
         body = await request.json() if await request.body() else {}
         try:
             result = await run_in_threadpool(partial(
@@ -3808,15 +3836,16 @@ def create_app(
                 now = datetime.now(timezone.utc)
                 processed = 0
                 if not store.upkeep_paused():
-                    # No fallback to None when the store is empty. None
-                    # means every user at once, and a memory saved while that
-                    # cycle waited for a thread was then compared with
-                    # other users' memories.
+                    # No fallback to None when the store is empty: there is
+                    # nothing to do. None among the namespaces is the memories
+                    # without a user (exact_user); read as every user at
+                    # once, its tick compared everyone's memories with each
+                    # other's and then did each namespace a second time.
                     for uid in store.backend.distinct_user_ids():
                         if processed >= max_per_cycle:
                             break
                         ran = await run_in_threadpool(partial(
-                            store.run_upkeep_cycle, user_id=uid, now=now
+                            store.run_upkeep_cycle, user_id=uid, now=now, exact_user=True
                         ))
                         processed += 1 if ran else 0
             except Exception:  # a scheduler hiccup must never take the server down
