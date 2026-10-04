@@ -22,10 +22,11 @@ from pydantic import BaseModel, ConfigDict
 from .config import Config, require_models
 from .enrichment import EnrichmentWorker
 from .intelligence.context import said_at
-from .intelligence.when import describe_when
+from .filters import Filters
+from .intelligence.when import describe_when, describe_when_asked
 from .models import EventType, MemoryType, parse_said_at
 from .principal import ADMIN, Principal
-from .store import MemoryStore
+from .store import FilteredSearch, MemoryStore
 
 # ASGI scope key the HTTP server uses to hand the authenticated identity to
 # the tools below. See memry.rest.create_app.
@@ -46,6 +47,13 @@ of the subject:
 - when the user implies prior context ("as I mentioned", "my usual setup",
   "the project"). Recall is cheap and stops you contradicting or re-asking what
   you were already told.
+
+Filters narrow recall before ranking; Memry does not read them from the query.
+Pass when= for the time a question is about (a day, "2025-04", "2025" or
+"A..B") and about= for the people, projects, things or tags it is about:
+"Was habe ich am 01. April 2025 gemacht?" -> when="2025-04-01"; "what did
+Bochra work on?" -> about="Bochra Saffar". A phrase in double quotes in the
+query must appear exactly.
 
 In what comes back:
 - "[happened 2023-05-07] <text> (said 8 May 2023)" (search rows: "happened",
@@ -142,8 +150,16 @@ class SaveMemoriesOutput(BaseModel):
     warnings: list[str] | None = None
 
 
+class NearestRowOutput(MemoryRowOutput):
+    days: int
+    side: str
+
+
 class SearchMemoriesOutput(BaseModel):
     memories: list[MemoryRowOutput]
+    filters: dict[str, str] | None = None
+    note: str | None = None
+    nearest: list[NearestRowOutput] | None = None
 
 
 class MemoryContextOutput(BaseModel):
@@ -154,6 +170,9 @@ class MemoryContextOutput(BaseModel):
 
 class ListMemoriesOutput(BaseModel):
     memories: list[MemoryRowOutput]
+    filters: dict[str, str] | None = None
+    note: str | None = None
+    nearest: list[NearestRowOutput] | None = None
 
 
 class CategoryOutput(BaseModel):
@@ -234,13 +253,18 @@ def _tool_result(
     )
 
 
-def _memory_row(m: Any, score: float | None = None, evidence: Any = ()) -> dict[str, Any]:
+def _memory_row(
+    m: Any, score: float | None = None, evidence: Any = (), asked: Any = None
+) -> dict[str, Any]:
     """A memory as the tools return it. "said" is the day it was recorded
     (its last change; for one out of use, such as an update's old value kept
     as history, the day it began to hold, and ``invalid_at`` the day it held
     until) and "happened" when the thing it tells happens, where known: the
     dates the context builder labels (``context.memory_line``). "evidence"
-    are the source turns a search chose for it (``MemoryStore.evidence``)."""
+    are the source turns a search chose for it (``MemoryStore.evidence``).
+    ``asked``, the first and last day of the time a filter asked about,
+    writes a month or a year coarser than it as one ("happened 2025-04
+    (month)"), so a memory of April is not taken for one of the day asked."""
     row = {
         "id": m.id,
         "content": m.content,
@@ -251,7 +275,8 @@ def _memory_row(m: Any, score: float | None = None, evidence: Any = ()) -> dict[
         "updated_at": m.updated_at,
         "said": (said_at(m) or "")[:10],
     }
-    happened = describe_when((m.metadata or {}).get("when"))
+    when = (m.metadata or {}).get("when")
+    happened = describe_when_asked(when, *asked) if asked else describe_when(when)
     if happened:
         row["happened"] = happened
     if m.metadata.get("pending_distillation"):
@@ -269,6 +294,35 @@ def _memory_row(m: Any, score: float | None = None, evidence: Any = ()) -> dict[
         row["evidence"] = [{"said": t.said_at[:10], "speaker": t.speaker, "text": t.content}
                            for t in evidence]
     return row
+
+
+def _filtered_payload(found: FilteredSearch, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """A filtered search or listing as the tools return it: the filters
+    applied, a note when there is something to say (an unknown name and the
+    names close to it; for no result, that nothing matched these filters),
+    the rows, and for a time asked about that matched nothing, the nearest
+    dated memories with how many days before or after it they lie."""
+    payload: dict[str, Any] = {"filters": found.filters.applied(), "memories": rows}
+    if found.note:
+        payload["note"] = found.note
+    if found.nearest:
+        asked = _asked(found.filters)
+        payload["nearest"] = [{**_memory_row(memory, asked=asked), "days": days, "side": side}
+                              for memory, days, side in found.nearest]
+    return payload
+
+
+def _named(filters: Filters) -> bool:
+    """Whether a call used the filters agents are taught (``when``,
+    ``about``, a quoted phrase): those answer as an object with the filters
+    applied and a note; a call with only the deprecated ones keeps the plain
+    list its clients parse."""
+    return bool(filters.when or filters.about or filters.contains)
+
+
+def _asked(filters: Filters) -> tuple[Any, Any] | None:
+    period = filters.period
+    return (period.start, period.end) if period is not None else None
 
 
 def create_server(
@@ -453,6 +507,8 @@ def create_server(
         agent_id: str = "",
         run_id: str = "",
         limit: int = 8,
+        when: str = "",
+        about: str = "",
         categories: str = "",
         entity_id: str = "",
         since: str = "",
@@ -464,14 +520,19 @@ def create_server(
         start of a session AND whenever the conversation turns to a new topic,
         project, person, or decision - recall before you answer, so you don't
         contradict or re-ask what the user already told you. Returns the most
-        relevant memories, best first. You can also filter by topic, entity, and date:
-        restrict to categories (comma-separated), an exact entity ID, and/or a
-        date window with since/until (YYYY-MM-DD, e.g. since="2026-01-01"). Pass
-        an empty query with just categories or a date to browse rather than rank.
+        relevant memories, best first.
 
-        when_since/when_until (YYYY-MM-DD) filter on when the thing itself
-        happens rather than when it was saved, which is what answers "what is on
-        this weekend"; only memories that carry an occurrence time match.
+        Filters apply before ranking; state them, Memry does not read them
+        from the query. when: the time asked about, "2025-04-01", "2025-04",
+        "2025" or "2025-04-01..2025-06-30"; it matches when the thing happened,
+        else when it was said, and a memory dated only "2025-04 (month)"
+        matches a day in it. about: names of people, projects, things or tags,
+        comma-separated. A phrase in double quotes in the query must appear
+        exactly. "Was habe ich am 01. April 2025 gemacht?" -> when="2025-04-01";
+        "what did Bochra work on?" -> about="Bochra Saffar". An empty query
+        lists what the filters match; no match says so and shows the nearest
+        dated memories. (categories, entity_id, since, until, when_since,
+        when_until: deprecated.)
 
         Each row carries "said" (the day it was said), "happened" (when the
         thing happens, where known; do not read "said" as that day),
@@ -480,34 +541,32 @@ def create_server(
         rests on (said, speaker, text), which keep details the memory leaves
         out.
 
-        PASS categories WHENEVER YOU KNOW THE SUBJECT. You are holding the
-        conversation, so you know what it is about even when the user's words do
-        not say so. Scoping to the right topic measurably beats an unfiltered
-        search, and it helps most exactly where the query is vaguest ("what's
-        left to do?", "where did I land on this?") - those carry no topic as
-        text, so an unfiltered search has nothing to work with, while you do.
-        Use the specific topic ("liver health"), not a broad area ("health").
+        PASS about WHENEVER YOU KNOW THE SUBJECT, even when the user's words
+        do not say it: scoping to the right topic measurably beats an
+        unfiltered search, most of all for vague queries ("what's left to
+        do?"). Use the specific topic ("liver health"), not a broad area.
         """
-        category_list = [c.strip() for c in categories.split(",") if c.strip()] or None
-        results = await _threaded(
-            store.search,
+        filters = Filters.parse(
+            query=query, when=when, about=about, categories=categories,
+            entity_id=entity_id, since=since, until=until, when_since=when_since,
+            when_until=when_until)
+        found = await _threaded(
+            store.search_filtered,
             query=query,
+            filters=filters,
             user_id=_uid(user_id),
             agent_id=agent_id or None,
             run_id=run_id or None,
             limit=limit,
-            categories=category_list,
-            entity_id=entity_id or None,
-            since=since or None,
-            until=until or None,
-            when_since=when_since or None,
-            when_until=when_until or None,
+            owner_prefix=_principal().prefix,
         )
-        memory_rows = [_memory_row(r.memory, r.score, r.evidence) for r in results]
-        return _tool_result(
-            memory_rows,
-            SearchMemoriesOutput(memories=memory_rows),
-        )
+        asked = _asked(found.filters)
+        memory_rows = [_memory_row(r.memory, r.score, r.evidence, asked)
+                       for r in found.results]
+        if not _named(filters):
+            return _tool_result(memory_rows, SearchMemoriesOutput(memories=memory_rows))
+        payload = _filtered_payload(found, memory_rows)
+        return _tool_result(payload, SearchMemoriesOutput.model_validate(payload))
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -520,6 +579,8 @@ def create_server(
         query: str,
         user_id: str = "",
         token_budget: int = 1200,
+        when: str = "",
+        about: str = "",
     ) -> Annotated[CallToolResult, MemoryContextOutput]:
         """Get a ready-to-use context block of the most relevant memories for
         the current subject, packed to fit the given token budget. Prefer this
@@ -531,10 +592,17 @@ def create_server(
         A memory reads "[happened <date>] <text> (said <date>)": when the
         thing happens, where known, and the day it was said. "[until <date>]"
         marks a value that stopped holding that day. Under "What was said" are
-        the saved turns the memories rest on, with date and speaker."""
+        the saved turns the memories rest on, with date and speaker.
+
+        when and about filter before ranking, as in search_memories, and a
+        phrase in double quotes in the query must appear exactly:
+        "Was habe ich am 01. April 2025 gemacht?" -> when="2025-04-01"."""
+        filters = Filters.parse(query=query, when=when, about=about)
         ctx = await _threaded(
             store.reconstruct_context,
             query=query, user_id=_uid(user_id), token_budget=token_budget,
+            filters=filters if filters.active else None,
+            owner_prefix=_principal().prefix,
         )
         text = ctx.text or "(no relevant memories yet)"
         return _tool_result(
@@ -557,6 +625,8 @@ def create_server(
     async def list_memories(
         user_id: str = "",
         limit: int = 50,
+        when: str = "",
+        about: str = "",
         categories: str = "",
         entity_id: str = "",
         since: str = "",
@@ -564,23 +634,30 @@ def create_server(
         when_since: str = "",
         when_until: str = "",
     ) -> Annotated[CallToolResult, ListMemoriesOutput]:
-        """List memories, most recently updated first. Optionally filter by tag
-        (categories, comma-separated), exact entity ID, and/or a date window
-        (since/until as YYYY-MM-DD) to browse what was recorded about a topic or in a period.
-        when_since/when_until (YYYY-MM-DD) filter instead on when the thing
-        itself happens, and only reach memories that carry an occurrence time."""
-        category_list = [c.strip() for c in categories.split(",") if c.strip()] or None
-        memories = await _threaded(
-            store.get_all, user_id=_uid(user_id), limit=limit,
-            categories=category_list, entity_id=entity_id or None,
-            since=since or None, until=until or None,
-            when_since=when_since or None, when_until=when_until or None,
+        """List memories, most recently updated first. when and about filter
+        as in search_memories; with when, the newest by that time first.
+        (categories, entity_id, since, until, when_since, when_until:
+        deprecated.)"""
+        filters = Filters.parse(
+            when=when, about=about, categories=categories, entity_id=entity_id,
+            since=since, until=until, when_since=when_since, when_until=when_until)
+        if not _named(filters):
+            memories = await _threaded(
+                store.get_all, user_id=_uid(user_id), limit=limit,
+                categories=list(filters.tags) or None, entity_id=list(filters.entity_ids) or None,
+                since=since or None, until=until or None,
+                when_since=when_since or None, when_until=when_until or None,
+            )
+            memory_rows = [_memory_row(m) for m in memories]
+            return _tool_result(memory_rows, ListMemoriesOutput(memories=memory_rows))
+        found = await _threaded(
+            store.search_filtered, query="", filters=filters, user_id=_uid(user_id),
+            limit=limit, owner_prefix=_principal().prefix,
         )
-        memory_rows = [_memory_row(m) for m in memories]
-        return _tool_result(
-            memory_rows,
-            ListMemoriesOutput(memories=memory_rows),
-        )
+        asked = _asked(found.filters)
+        memory_rows = [_memory_row(r.memory, asked=asked) for r in found.results]
+        payload = _filtered_payload(found, memory_rows)
+        return _tool_result(payload, ListMemoriesOutput.model_validate(payload))
 
     @mcp.tool(
         annotations=ToolAnnotations(

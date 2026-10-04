@@ -154,8 +154,11 @@ troubleshooting: [docs/connect-chatgpt.md](docs/connect-chatgpt.md).
 
 The server exposes `save_memories`, `search_memories`, `get_memory_context`,
 `list_memories`, `list_categories`, `update_memory`, `delete_memory`,
-`memory_history`, and `memory_stats`. Agents are instructed to recall context
-at the start of a task and to send `save_memories` what was said in words close
+`memory_history`, and `memory_stats`. Recall takes two filters, applied before
+ranking: `when` (a day, month, year or range: "Was habe ich am 01. April 2025
+gemacht?" is `when="2025-04-01"`) and `about` (names of people, projects, things
+or tags); a phrase in double quotes in the query must appear exactly. Agents are
+instructed to recall context at the start of a task and to send `save_memories` what was said in words close
 to the original, one statement per line, with the speaker named when it is
 someone other than the user ("Ada: I got the job"). Memry extracts the facts
 and keeps the saved text as the source turns it shows with each memory in later

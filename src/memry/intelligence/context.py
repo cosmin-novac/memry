@@ -18,7 +18,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 from ..models import ContextResult, Entity, EvidenceTurn, Memory, SearchResult, parse_ts
-from .when import describe_when
+from .when import describe_when, describe_when_asked
 
 #: The tokens of the context an agent gets when it asks for no other budget
 #: (``MemoryStore.reconstruct_context``, MCP ``get_memory_context``).
@@ -61,7 +61,7 @@ def until_note(memory: Memory) -> str:
     return f"[until {said_date(memory.invalid_at)}]" if memory.invalid_at else ""
 
 
-def memory_line(memory: Memory, now: Any = None) -> str:
+def memory_line(memory: Memory, now: Any = None, asked: Any = None) -> str:
     """One memory as a model reads it: "[happened 2023-05-07] <text> (said 8
     May 2023)". The date it was said is when it was recorded (``said_at``),
     which is not when the thing it tells happened: that is written only where
@@ -69,8 +69,12 @@ def memory_line(memory: Memory, now: Any = None) -> str:
     reads a birthday or a dated plan as something that happened on the day it
     was written down. A memory kept as history ends in the day it held until,
     "(said 8 May 2023) [until 15 July 2023]" (``until_note``), so it is not
-    read as current."""
-    occurs = describe_when((memory.metadata or {}).get("when"), now)
+    read as current. ``asked``, the first and last day of the time a
+    filtered search asked about, writes a month or a year coarser than it as
+    one ("[happened 2025-04 (month)]", ``when.describe_when_asked``), so a
+    memory of April is not read as one of the day asked."""
+    when = (memory.metadata or {}).get("when")
+    occurs = describe_when_asked(when, *asked, now) if asked else describe_when(when, now)
     until = until_note(memory)
     return (f"{f'[{occurs}] ' if occurs else ''}{memory.content} "
             f"(said {said_date(said_at(memory))}){f' {until}' if until else ''}")
@@ -135,14 +139,16 @@ def entities_text(entities: Sequence[Entity]) -> str:
     return _ENTITY_HEADER + "\n".join(f"- {line}" for line in lines) if lines else ""
 
 
-def fitting(results: Sequence[SearchResult], token_budget: int) -> list[SearchResult]:
+def fitting(
+    results: Sequence[SearchResult], token_budget: int, asked: Any = None
+) -> list[SearchResult]:
     """The results that fit ``token_budget`` as ``build_context`` packs them:
     in rank order, stopping at the first that does not fit (a first result
     too long on its own is skipped)."""
     kept: list[SearchResult] = []
     used = estimate_tokens(_HEADER) + estimate_tokens(_FOOTER)
     for result in results:
-        cost = estimate_tokens(memory_line(result.memory)) + 1
+        cost = estimate_tokens(memory_line(result.memory, asked=asked)) + 1
         if used + cost > token_budget and kept:
             break
         if used + cost > token_budget:
@@ -157,17 +163,19 @@ def build_context(
     *,
     token_budget: int = CONTEXT_TOKENS,
     evidence: Sequence[EvidenceTurn] = (),
+    asked: Any = None,
 ) -> ContextResult:
     """The memories that fit, then ``evidence``, the turns already chosen for
-    them within their own budget (``MemoryStore.evidence``)."""
+    them within their own budget (``MemoryStore.evidence``). ``asked`` as
+    for ``memory_line``."""
     turns_cost = (estimate_tokens(_EVIDENCE_HEADER)
                   + sum(estimate_tokens(turn_line(t)) + 1 for t in evidence)) if evidence else 0
-    shown = fitting(results, token_budget - turns_cost)
+    shown = fitting(results, token_budget - turns_cost, asked)
     if not shown:
         return ContextResult(text="", memory_ids=[], token_estimate=0)
     kept = {r.memory.id for r in shown}
     turns = [t for t in evidence if kept.intersection(t.memory_ids)]
-    lines = memory_lines([r.memory for r in shown])
+    lines = [memory_line(r.memory, asked=asked) for r in shown]
     text = _HEADER + "\n".join(f"- {line}" for line in lines)
     if turns:
         text += _EVIDENCE_HEADER + "\n".join(f"- {turn_line(t)}" for t in turns)

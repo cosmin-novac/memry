@@ -5,16 +5,21 @@
 Endpoints:
     GET  /                       dashboard
     GET  /health
-    GET  /api/v1/memories        ?user_id=&limit=&include_invalid=
+    GET  /api/v1/memories        ?user_id=&limit=&include_invalid=&<filters>
     POST /api/v1/memories        {content|messages, user_id?, infer?, ...}
     GET  /api/v1/memories/{id}
     PATCH  /api/v1/memories/{id} {content?, importance?, categories?}
     DELETE /api/v1/memories/{id} ?hard=true
     GET  /api/v1/memories/{id}/history
-    POST /api/v1/search          {query, user_id?, limit?}
-    POST /api/v1/context         {query, user_id?, token_budget?}
+    POST /api/v1/search          {query, user_id?, limit?, <filters>}
+    POST /api/v1/context         {query, user_id?, token_budget?, <filters>}
     GET  /api/v1/stats
     /mcp                         MCP streamable-HTTP endpoint
+
+Filters (memry.filters), hard pre-filters applied before ranking: when,
+about, happened, said, entity, entity_type, tag, contains, memory_type, and
+a phrase in double quotes inside the query. A search sending any of the
+named ones answers {results, filters, note?, nearest?} instead of a list.
 
 Auth: set MEMRY_API_KEY to require ``Authorization: Bearer <key>`` on /api
 and /mcp. Without it the server is open - bind to localhost or a private net.
@@ -58,7 +63,8 @@ from starlette.routing import Mount, Route
 from .accounts import SESSION_TTL, AccountStore, default_auth_db_path
 from .config import Config, require_models
 from .enrichment import EnrichmentWorker
-from .intelligence.when import next_occurrence, parse_when
+from .filters import Filters
+from .intelligence.when import describe_when_asked, next_occurrence, parse_when
 from .models import TOPIC_TYPE
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
 from .oauth import MEMRY_SCOPE, MemryOAuthProvider
@@ -2426,6 +2432,29 @@ function timelineEntries(rows,todayISO){
   placeToday();
   return out;
 }
+// A memory known only to a month or a year ("in April 2025") is stored as the
+// whole of it, 2025-04-01 to 2025-04-30. It sits at the start of that period
+// but is labelled with it, "April 2025" or "2025", so its first day is not read
+// as the day it happened. Any other memory shows its own day and time.
+function timelinePrecision(m){
+  const w=m&&m.when;
+  if(!w||w.recurrence||!w.start||!w.end)return'';
+  const start=String(w.start),end=String(w.end),day=/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
+  if(!day.test(start)||!day.test(end))return'';
+  const year=Number(start.slice(0,4)),month=Number(start.slice(5,7));
+  const last=new Date(Date.UTC(year,month,0)).getUTCDate();
+  if(start.slice(8)==='01'&&end.slice(0,7)===start.slice(0,7)&&Number(end.slice(8))===last)
+    return'month';
+  if(start.slice(5)==='01-01'&&end===start.slice(0,4)+'-12-31')return'year';
+  return'';
+}
+function timelineLabel(m,at){
+  at=String(at);
+  const precision=timelinePrecision(m);
+  if(precision==='month')return timelineMonth(at);
+  if(precision==='year')return at.slice(0,4);
+  return at.slice(0,10)+(at.length>10?' '+at.slice(11,16):'');
+}
 function timelineRepeat(m){
   const w=m.when||{};
   if(!w.recurrence)return'';
@@ -2433,11 +2462,10 @@ function timelineRepeat(m){
   return'every '+(WHEN_UNITS[w.recurrence]||w.recurrence);
 }
 function timelineRow(entry){
-  const m=entry.memory,at=String(entry.at);
-  const day=at.slice(0,10),time=at.length>10?at.slice(11,16):'';
+  const m=entry.memory;
   const repeat=timelineRepeat(m);
   return `<button class="tl-row" onclick='openTimelineMemory(${JSON.stringify(String(m.id))})'>
-    <span class="tl-when">${esc(day)}${time?' '+esc(time):''}</span>
+    <span class="tl-when">${esc(timelineLabel(m,entry.at))}</span>
     <span class="tl-text">${esc(m.content)}</span>
     <span class="tl-side">${memoryTypeBadge(m)}${repeat?`<span class="tag when-chip">${esc(repeat)}</span>`:''}</span></button>`;
 }
@@ -2644,6 +2672,14 @@ class _NormalizeMcpPath:
                 # metadata document for the URL the client actually configured
                 scope[MCP_ORIGIN_KEY] = "/"
         await self.app(scope, receive, send)
+
+
+#: The filters the REST endpoints read (``memry.filters.Filters.parse``), by
+#: name in a search's or a context's body and in a listing's query string.
+#: The agent tools take ``when`` and ``about`` alone; these add the finer
+#: ones for scripts and the dashboard.
+FILTER_KEYS = ("when", "about", "happened", "said", "entity", "entity_type", "tag",
+               "contains", "memory_type")
 
 
 def create_app(
@@ -2892,11 +2928,62 @@ def create_app(
         ]
         return data
 
+    def _filters(source: Any, query: str = "") -> tuple[Filters | None, Response | None, bool]:
+        """The filters a request names (``FILTER_KEYS``), the phrases quoted
+        in its query among the exact ones, and whether it named any (which
+        a search answers as an object rather than a list). A malformed value
+        is a 400 that says what the parameter accepts."""
+        named = any(source.get(key) for key in FILTER_KEYS)
+        try:
+            filters = Filters.parse(query=query, **{key: source.get(key) or ""
+                                                    for key in FILTER_KEYS})
+        except ValueError as exc:
+            return None, JSONResponse({"error": str(exc)}, status_code=400), named
+        return filters, None, named
+
+    def _asked(filters: Filters) -> tuple[Any, Any] | None:
+        period = filters.period
+        return (period.start, period.end) if period is not None else None
+
+    def _filtered_memory(memory, asked) -> dict[str, Any]:
+        """``_memory_payload`` with "happened" as a filtered search reads it:
+        a month or a year coarser than the time asked about written as one
+        ("happened 2025-04 (month)")."""
+        data = _memory_payload(memory)
+        happened = describe_when_asked((memory.metadata or {}).get("when"), *(asked or (None, None)))
+        if happened:
+            data["happened"] = happened
+        return data
+
     async def list_memories(request: Request) -> Response:
         q = request.query_params
         entity_id, error = _resolve_entity_filter(request, q.get("entity_id"))
         if error:
             return error
+        filters, error, named = _filters(q)
+        if error:
+            return error
+        if named:
+            # A name found nowhere is a 404 that says so with the names
+            # close to it, as an unknown entity_id is: never a silently
+            # unfiltered list. A partly unknown list says it in a header.
+            user_id = _p(request).namespace(q.get("user_id"))
+            filters = await run_in_threadpool(partial(
+                store.resolve_filters, filters, user_id=user_id,
+                agent_id=q.get("agent_id"), owner_prefix=_p(request).prefix))
+            if filters.matches_nothing and filters.notes:
+                return JSONResponse({"error": " ".join(filters.notes)}, status_code=404)
+            memories = await run_in_threadpool(partial(
+                store.get_all, user_id=user_id, agent_id=q.get("agent_id"),
+                run_id=q.get("run_id"), include_invalid=q.get("include_invalid") == "true",
+                limit=int(q.get("limit", "100")), offset=int(q.get("offset", "0")),
+                categories=_parse_categories(q.get("categories")), entity_id=entity_id,
+                since=q.get("since") or None, until=q.get("until") or None,
+                when_since=q.get("when_since") or None, when_until=q.get("when_until") or None,
+                filters=filters))
+            asked = _asked(filters)
+            headers = {"X-Memry-Note": " ".join(filters.notes)} if filters.notes else None
+            return JSONResponse([_filtered_memory(m, asked) for m in memories], headers=headers)
         memories = store.get_all(
             user_id=_p(request).namespace(q.get("user_id")),
             agent_id=q.get("agent_id"),
@@ -3572,38 +3659,61 @@ def create_app(
         entity_id, error = _resolve_entity_filter(request, body.get("entity_id"))
         if error:
             return error
-        results = await run_in_threadpool(partial(
-            store.search,
-            body.get("query", ""),
+        query = body.get("query", "")
+        filters, error, named = _filters(body, query)
+        if error:
+            return error
+        found = await run_in_threadpool(partial(
+            store.search_filtered,
+            query,
+            filters,
             user_id=_p(request).namespace(body.get("user_id")),
             agent_id=body.get("agent_id"),
             run_id=body.get("run_id"),
             limit=int(body.get("limit", 10)),
             include_invalid=bool(body.get("include_invalid", False)),
-            categories=_parse_categories(body.get("categories")),
-            entity_id=entity_id,
-            since=body.get("since") or None,
-            until=body.get("until") or None,
-            when_since=body.get("when_since") or None,
-            when_until=body.get("when_until") or None,
+            owner_prefix=_p(request).prefix,
+            legacy={
+                "categories": _parse_categories(body.get("categories")),
+                "entity_id": entity_id,
+                "since": body.get("since") or None,
+                "until": body.get("until") or None,
+                "when_since": body.get("when_since") or None,
+                "when_until": body.get("when_until") or None,
+            },
         ))
-        return JSONResponse(
-            [
-                {"memory": _memory_payload(r.memory), "score": r.score, "signals": r.signals,
-                 "evidence": [turn.model_dump() for turn in r.evidence]}
-                for r in results
-            ]
-        )
+        asked = _asked(found.filters)
+        rows = [
+            {"memory": _filtered_memory(r.memory, asked) if named else _memory_payload(r.memory),
+             "score": r.score, "signals": r.signals,
+             "evidence": [turn.model_dump() for turn in r.evidence]}
+            for r in found.results
+        ]
+        if not named:
+            return JSONResponse(rows)
+        payload: dict[str, Any] = {"results": rows, "filters": found.filters.applied()}
+        if found.note:
+            payload["note"] = found.note
+        if found.nearest:
+            payload["nearest"] = [{"memory": _filtered_memory(m, asked), "days": days,
+                                   "side": side} for m, days, side in found.nearest]
+        return JSONResponse(payload)
 
     async def context(request: Request) -> Response:
         body = await request.json()
+        query = body.get("query", "")
+        filters, error, _ = _filters(body, query)
+        if error:
+            return error
         ctx = await run_in_threadpool(partial(
             store.reconstruct_context,
-            body.get("query", ""),
+            query,
             user_id=_p(request).namespace(body.get("user_id")),
             agent_id=body.get("agent_id"),
             run_id=body.get("run_id"),
             token_budget=int(body.get("token_budget", 1200)),
+            filters=filters if filters.active else None,
+            owner_prefix=_p(request).prefix,
         ))
         return JSONResponse(ctx.model_dump())
 

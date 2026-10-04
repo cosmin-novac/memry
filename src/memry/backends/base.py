@@ -278,6 +278,7 @@ class MemoryBackend(ABC):
         categories: list[str] | None = None,
         entity_id: str | None = None,
         history: bool = False,
+        among: Any = None,
     ) -> list[tuple[Memory, float]]:
         """Cosine similarity over stored vectors (same embedding model only),
         best first, a tie by memory id. Reads the memories in use; with
@@ -288,7 +289,9 @@ class MemoryBackend(ABC):
         A ``scope`` with a run reads the memories said in that run: the run's
         own, and those whose evidence (``source_episode_ids``) includes an
         episode of the run, such as a restatement recorded on a memory of
-        another run."""
+        another run. ``among`` (a set of memory ids, None for any) keeps the
+        search to the memories a search's filters admit, before ``limit``
+        counts (``MemoryStore._admitted``)."""
 
     @abstractmethod
     def keyword_search(
@@ -300,6 +303,7 @@ class MemoryBackend(ABC):
         categories: list[str] | None = None,
         entity_id: str | None = None,
         history: bool = False,
+        among: Any = None,
     ) -> list[tuple[Memory, float]]:
         """Full-text (BM25) search, each word of the question weighed by how
         rare it is in what the store holds, its memories and, where the
@@ -554,6 +558,7 @@ class MemoryBackend(ABC):
         self, entity_id: str, limit: int = 10, *, include_invalid: bool = False,
         scope: Scope | None = None, history: bool = False,
         categories: list[str] | None = None, mentioning: str | list[str] | None = None,
+        among: Any = None,
     ) -> list[Memory]:
         """Memories that mention this entity, newest first (``updated_at``, a
         tie by memory id, so memories of one time read alike in every build of
@@ -564,7 +569,8 @@ class MemoryBackend(ABC):
         and a run's memories as ``vector_search`` reads them, so a run's
         memories of an entity other runs mention far more are still read),
         ``categories`` (filed under one of them) and ``mentioning`` (a memory
-        that also mentions this entity, or any of several)."""
+        that also mentions this entity, or any of several) and ``among`` (one
+        of these memory ids, as ``vector_search`` reads it)."""
         return []
 
     def count_entity_memories(self, entity_id: str) -> int:
@@ -587,6 +593,7 @@ class MemoryBackend(ABC):
     def entity_memory_counts(
         self, entity_ids: list[str], *, scope: Scope | None = None, history: bool = False,
         categories: list[str] | None = None, mentioning: str | list[str] | None = None,
+        among: Any = None,
     ) -> dict[str, int]:
         """How many active memories mention each of these entities (with
         ``history`` also those kept as history), counting only those a search
@@ -594,7 +601,7 @@ class MemoryBackend(ABC):
         backend can."""
         return {entity_id: len(self.entity_memories(
                     entity_id, limit=100_000, scope=scope, history=history,
-                    categories=categories, mentioning=mentioning))
+                    categories=categories, mentioning=mentioning, among=among))
                 for entity_id in entity_ids}
 
     def topic_ids(self, entity_ids: Iterable[str]) -> set[str]:

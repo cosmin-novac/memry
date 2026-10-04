@@ -848,8 +848,20 @@ entity or date filter, whether its question names anything, and with `relational
    run (a run's memories are those said in it, section 4), history (the memories in use
    and those kept as history, below; every memory with `include_invalid`), the tags, the
    entity, and the date windows (`since`/`until` on when a memory was saved,
-   `when_since`/`when_until` on when what it tells happens). The tags, entity, run and
-   history are kept to in SQL before any limit counts.
+   `when_since`/`when_until` on when what it tells happens), and the filters a caller
+   states (`memry.filters.Filters`: `when`, `about` and a quoted phrase for agents, and
+   for REST also `happened`, `said`, `entity`, `entity_type`, `tag`, `contains`,
+   `memory_type`). The tags, entity, run and history are kept to in SQL before any limit
+   counts. The filters read from each memory (the periods, the phrases, the memory and
+   entity types, `about`) are read once over the user's memories before anything is
+   ranked (`MemoryStore._admitted`), and the set they admit goes into the SQL of every
+   stage as one more condition (`_Reads.among`, `m.id IN json_each(?)`): no stage takes
+   its first N from memories they drop, so a memory of April 2025 is found under 80 of
+   April 2027 that match the words better. Names are resolved in the caller's namespace
+   (`resolve_filters`); an unknown one matches nothing and says so, with the close names.
+   A filtered context shows no entity description, which is written from all of an
+   entity's memories, and an empty one lists the memories nearest the time asked about
+   (`nearest_dated`).
 3. **Order**. With seeds, the linked order: every candidate by how well it states the
    property asked (its property vector, the names of the entities the links reach read
    "it") times how strongly it is about the entity named (aboutness), a tie by memory id.

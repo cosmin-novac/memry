@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
+from typing import Any
 
 from .backends.base import MemoryBackend
 from .config import RetrievalConfig
@@ -36,13 +37,17 @@ def hybrid_search(
     now: datetime | None = None,
     history: bool = False,
     query_vector: list[float] | None = None,
+    among: Any = None,
 ) -> list[SearchResult]:
     """The memories in use that best match ``query``; with ``history`` also
     those superseded as an update, which held until then (``MemoryBackend.
     vector_search``); with ``include_invalid`` every memory.
 
     ``query_vector`` is the query's vector when the caller has it already
-    ([] for none: the words alone rank); None embeds the query here."""
+    ([] for none: the words alone rank); None embeds the query here.
+    ``among`` (a set of memory ids, None for any) keeps both rankings to the
+    memories a search's filters admit, before either takes its first N.
+    """
     cfg = cfg or RetrievalConfig()
     now = now or datetime.now(timezone.utc)
     n = max(limit * cfg.candidate_multiplier, limit)
@@ -64,13 +69,16 @@ def hybrid_search(
                 )
             }
             native = [(memory, score) for memory, score in native if memory.id in allowed]
+        if among is not None:
+            native = [(memory, score) for memory, score in native if memory.id in among]
         memories = {m.id: m for m, _ in native}
         fused = {m.id: s for m, s in native}
         signals_by_id = {m.id: {"native": s} for m, s in native}
     else:
+        kept = {} if among is None else {"among": among}
         keyword = backend.keyword_search(
             query, scope, n, include_invalid=include_invalid, categories=categories,
-            entity_id=entity_id, history=history,
+            entity_id=entity_id, history=history, **kept,
         )
         vector: list[tuple[Memory, float]] = []
         if embedder.dimensions:
@@ -80,7 +88,7 @@ def hybrid_search(
                     vector = backend.vector_search(
                         qvec, embedder.model_id, scope, n,
                         include_invalid=include_invalid, categories=categories,
-                        entity_id=entity_id, history=history,
+                        entity_id=entity_id, history=history, **kept,
                     )
             except Exception:
                 vector = []  # embedding service down -> degrade to keyword-only
