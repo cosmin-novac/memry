@@ -1505,7 +1505,11 @@ L.rowScroll=rows.max;
 const last=only[only.length-1];
 check(laneRowAt(G.H/2+rows.top+last.y-rows.max+last.h/2)===last.node,'scrolled to the end, the last row');
 const flat=laneRows(false).entries;
-check(flat.every(entry=>entry.kind==='row')&&flat[0].node.key==='entity:me','without clusters the busiest is on top');
+const newestAge=Math.min(...G.nodes.map(node=>node.age));
+check(flat.every(entry=>entry.kind==='row')&&flat[0].node.age===newestAge,'the entity said of most recently is on top');
+check(flat.every((entry,i)=>!i||flat[i-1].node.age<=entry.node.age),'and the rest follow by their newest memory');
+check(only.every((entry,i)=>!i||entry.node.g!==only[i-1].node.g||only[i-1].node.age<=entry.node.age),
+  'within a cluster too');
 """
     result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

@@ -1530,15 +1530,17 @@ function pointTarget(point,grouped){
   return[L.xr-(L.xr-L.xl)*f,slot.y0+(0.1+0.8*point.u)*(slot.y1-slot.y0)];
 }
 // Lanes without bundles: one row of equal height per entity, its memories as
-// markers along it on the day they were said. With clusters, the rows of a
-// cluster sit together under its name, the biggest cluster first; without,
-// the busiest entity is on top. More rows than fit scroll inside the map.
+// markers along it on the day they were said, the entity said of most
+// recently on top. With clusters, the rows of a cluster sit together under its
+// name, the cluster said of most recently first and "other" last. More rows
+// than fit scroll inside the map.
 const ROW_GUTTER=150,ROW_HEAD=16;
 function laneRows(grouped){
   const W=G.W,H=G.H,key=[grouped,W,H,L.nodes.length].join('|');
   if(L.rows&&L.rows.key===key)return L.rows;
-  const byCount=(a,b)=>b.count-a.count||(a.label<b.label?-1:1);
-  const total=nodes=>nodes.reduce((sum,node)=>sum+node.count,0);
+  const age=node=>node.age===null||node.age===undefined?Infinity:node.age;
+  const byRecent=(a,b)=>age(a)-age(b)||b.count-a.count||(a.label<b.label?-1:1);
+  const newest=nodes=>Math.min(...nodes.map(age));
   const blocks=[];
   if(grouped){
     const bySlot=new Map();
@@ -1548,9 +1550,9 @@ function laneRows(grouped){
       bySlot.get(slot).push(node);
     }
     [...bySlot.entries()]
-      .sort((a,b)=>(a[0].name==='other')-(b[0].name==='other')||total(b[1])-total(a[1]))
-      .forEach(([slot,nodes])=>blocks.push({name:slot.name||'other',nodes:nodes.sort(byCount)}));
-  }else blocks.push({name:'',nodes:[...L.nodes].sort(byCount)});
+      .sort((a,b)=>(a[0].name==='other')-(b[0].name==='other')||newest(a[1])-newest(b[1]))
+      .forEach(([slot,nodes])=>blocks.push({name:slot.name||'other',nodes:nodes.sort(byRecent)}));
+  }else blocks.push({name:'',nodes:[...L.nodes].sort(byRecent)});
   const top=LANE_TOP-H/2,span=H-LANE_TOP-LANE_BOTTOM;
   const heads=blocks.filter(block=>block.name).length;
   const h=clampTo((span-heads*ROW_HEAD)/Math.max(1,L.nodes.length),14,28);
