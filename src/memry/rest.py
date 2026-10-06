@@ -67,7 +67,7 @@ from .config import Config, require_models
 from .enrichment import EnrichmentWorker
 from .filters import Filters
 from .intelligence.when import describe_when_asked, next_occurrence, parse_when
-from .models import TOPIC_TYPE
+from .models import NAMED_ENTITY_TYPES, TOPIC_TYPE
 from .mcp_server import PRINCIPAL_SCOPE_KEY, create_server
 from .oauth import MEMRY_SCOPE, MemryOAuthProvider
 from .principal import ADMIN, Principal
@@ -260,8 +260,11 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 #mapwrap:fullscreen #map,#mapwrap.maxed #map{border-radius:0}
 #mapwrap.maxed{position:fixed;inset:0;z-index:99999}
 .gx-ctrl{position:absolute;top:.6rem;right:.6rem;display:flex;gap:.4rem;align-items:flex-start;z-index:3;flex-wrap:wrap;justify-content:flex-end;max-width:calc(100% - 1.2rem)}
-.gx-layouts{display:flex}.gx-layouts button{border-radius:0;margin-left:-1px}
-.gx-layouts button:first-child{border-radius:7px 0 0 7px;margin-left:0}.gx-layouts button:last-child{border-radius:0 7px 7px 0}
+.gx-layouts,.gx-seg{display:flex}
+.gx-ctrl .gx-layouts button,.gx-ctrl .gx-seg summary{border-radius:0;margin-left:-1px}
+.gx-ctrl .gx-layouts button:first-child,.gx-ctrl .gx-seg .gx-types:first-child summary{border-radius:7px 0 0 7px;margin-left:0}
+.gx-ctrl .gx-layouts button:last-child,.gx-ctrl .gx-seg .gx-types:last-child summary{border-radius:0 7px 7px 0}
+.gx-ctrl .gx-layouts button:hover,.gx-ctrl .gx-seg summary:hover,.gx-ctrl .gx-seg .gx-types[open] summary{position:relative;z-index:1}
 .gx-layouts button[aria-pressed="true"]{position:relative;color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
 .gx-ctrl button,.gx-types summary{background:color-mix(in srgb,var(--panel) 68%,transparent);border:1px solid var(--line);color:var(--dim);border-radius:7px;padding:.3rem .5rem;font-size:.72rem;cursor:pointer;backdrop-filter:blur(5px);line-height:1;list-style:none}
 .gx-ctrl button:hover,.gx-types summary:hover{color:var(--accent);border-color:var(--accent)}
@@ -276,8 +279,7 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 .gx-type-actions button{flex:1}
 .gx-read{position:absolute;top:.6rem;left:.6rem;z-index:3;font-size:.75rem;color:var(--dim);background:color-mix(in srgb,var(--panel) 60%,transparent);border:1px solid var(--line);border-radius:7px;padding:.32rem .6rem;backdrop-filter:blur(5px);max-width:62%;pointer-events:none;opacity:0;transition:opacity .15s}
 .gx-read.on{opacity:1}.gx-read b{color:var(--text)}
-.gx-stat{position:absolute;bottom:.5rem;left:.7rem;z-index:3;font-size:.68rem;color:var(--dim);opacity:.55;pointer-events:none}
-.gx-legend{position:absolute;right:.7rem;bottom:1.35rem;z-index:3;display:flex;gap:.45rem .7rem;align-items:center;justify-content:flex-end;flex-wrap:wrap;max-width:calc(100% - 1.4rem);color:var(--dim);font-size:.66rem;pointer-events:none;opacity:.8}
+.gx-legend{position:absolute;right:.7rem;bottom:.5rem;z-index:3;display:flex;gap:.45rem .7rem;align-items:center;justify-content:flex-end;flex-wrap:wrap;max-width:calc(100% - 1.4rem);color:var(--dim);font-size:.66rem;pointer-events:none;opacity:.8}
 .gx-legend span{display:inline-flex;gap:.28rem;align-items:center}.gx-shape{display:inline-block;width:.48rem;height:.48rem;background:var(--accent)}
 .gx-shape.semantic{border-radius:50%;background:var(--semantic)}.gx-shape.procedural{border-radius:1px;background:var(--procedural)}.gx-shape.episodic{width:0;height:0;background:none;border-left:.28rem solid transparent;border-right:.28rem solid transparent;border-bottom:.5rem solid var(--episodic)}
 .gx-shape.working{transform:rotate(45deg);background:transparent;border:1px solid var(--working)}
@@ -336,6 +338,8 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <input id="filter-date-to" type="date" title="to" onchange="toggleClear()">
   </span></label>
   <label><span>About <span class="picked" id="aboutcount"></span></span>
+    <input id="filter-about-q" type="search" placeholder="find a name..." oninput="filterAboutOptions()"
+           title="Show only the names that contain this. What you picked stays in the list.">
     <select id="filter-about" multiple size="8" title="Show only the memories about what you pick. Ctrl or cmd click picks several. Two tags match either tag, two people or things match either one, and a tag with a person or thing matches the memories that have both." onchange="toggleClear()"></select></label>
 </div>
 <input type="file" id="importfile" accept=".json,.jsonl,.txt,application/json" hidden onchange="importMemories(this.files[0]);this.value=''">
@@ -355,6 +359,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <button type="button" data-layout="lanes" title="One lane per group, the newest memories on the right.">Lanes</button>
     <button type="button" data-layout="galaxy" title="Rings by how many memories mention an entity.">Galaxy</button>
   </span>
+  <span class="gx-seg">
   <details class="gx-types" id="mapEntityFilter">
     <summary id="mapEntitiesBtn" title="Choose which types of entity the map shows. Tags are one of the types, off until you turn them on.">Entities</summary>
     <div class="gx-type-menu">
@@ -368,9 +373,20 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
       </div>
     </div>
   </details>
+  <details class="gx-types" id="mapGroupMenu">
+    <summary id="mapGroupsBtn" title="Choose how the map groups entities, and whether you are drawn as an entity.">Groups</summary>
+    <div class="gx-type-menu">
+      <div class="gx-type-head"><span>Groups</span>
+        <button type="button" class="x" onclick="document.getElementById('mapGroupMenu').open=false" title="close">x</button></div>
+      <label class="gx-type-option" title="On: each entity is one bubble holding all its memories. Off: every memory is a dot of its own, on the day it was said, and each entity a ring among its memories. Kept per layout; Lanes start with it off."><input type="checkbox" id="mapBundleByEntity" onchange="setMapBundling(this.checked)"><span>Show memories grouped by entity</span></label>
+      <label class="gx-type-option" title="Entities that share memories sit together: as an island, a sector of the heat core, a lane. Kept per layout."><input type="checkbox" id="mapGroupByLinks" onchange="setMapGrouping(this.checked)"><span>Show memories clustered</span></label>
+      <label class="gx-type-option" title="You are in most memories. Off: you are left off the map, and those memories show only under the other things they are about."><input type="checkbox" id="mapShowOwner" onchange="setMapShowOwner(this.checked)"><span>Group the user's memories</span></label>
+    </div>
+  </details>
+  </span>
   <button id="fsBtn" title="Open the map fullscreen." aria-label="Fullscreen">⤢</button>
 </div>
-<div class="gx-read" id="mapread"></div><div class="gx-stat" id="mapstat"></div>
+<div class="gx-read" id="mapread"></div>
 <div class="gx-legend" aria-label="Memory type shapes">
   <span data-memory-type="semantic"><i class="gx-shape semantic"></i>semantic</span><span data-memory-type="procedural"><i class="gx-shape procedural"></i>procedural</span>
   <span data-memory-type="episodic"><i class="gx-shape episodic"></i>episodic</span><span data-memory-type="working"><i class="gx-shape working"></i>working</span>
@@ -497,8 +513,8 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
 </section>
 </div></div>
 <div class="modal" id="timemodal"><div class="sheet" style="width:min(96vw,46rem)">
-<h2><button class="x" onclick="closeTimeline()" title="close">x</button>Timeline</h2>
-<p class="hint">Every memory that says when the thing itself happens, newest first. Today opens near the top, with what is still ahead above it.</p>
+<h2><button class="x" onclick="closeTimeline()" title="close">x</button><span id="timelinetitle">Timeline</span></h2>
+<p class="hint" id="timelinehint">Every memory that says when the thing itself happens, newest first. Today opens near the top, with what is still ahead above it.</p>
 <div class="timeline" id="timelinebody"></div>
 </div></div>
 </main><script>
@@ -739,6 +755,8 @@ const gSprites=new Map();let gBackdrop=null,gLastFrame=0;
 // Tags are the entity type "topic". The map reads them from the server only
 // while their type is on, so a map without tags costs what it always did.
 const TAG_TYPE='topic';
+// the types a named thing can have (``models.NAMED_ENTITY_TYPES``)
+const NAMED_TYPES=__NAMED_TYPES__;
 let mapData=null,mapEntityTypes=null,mapLoadSeq=0;
 function knownEntityTypes(){
   const types=new Set(mapData?mapData.entities.map(node=>node.entity_type||'untyped'):[]);
@@ -856,7 +874,8 @@ function galaxyRimPromotions(source,isCore,start,degree){
 }
 function buildGalaxy(data){
   initializeMapEntityTypes();
-  const source=data.entities.filter(node=>mapEntityTypes.has(node.entity_type||'untyped'));
+  const source=data.entities.filter(node=>mapEntityTypes.has(node.entity_type||'untyped')
+    &&(mapShowOwner||!node.owner));
   if(!source.length)return null;
   const rawEdges=data.entity_edges;
   // The rim needs to know how linked each node is before the zones are handed
@@ -952,9 +971,10 @@ function drawMap(){
   canvas.getContext('2d').setTransform(dpr,0,0,dpr,0,0);
   if(G){G.W=width;G.H=height;G.CX=width/2;G.CY=height/2;G.RX=width/2-46;G.RY=height/2-42;}
 }
-// hover/filter info as a corner overlay; a faint tag/memory count sits bottom-left
+// The corner box at the top left: the picked or hovered entity, else how many
+// entities, memories and groups the map holds.
 function galaxyRead(){
-  const readEl=document.getElementById('mapread'),statEl=document.getElementById('mapstat');
+  const readEl=document.getElementById('mapread');
   if(!G){readEl.classList.remove('on');return}
   const node=activeMapKey?G.byKey[activeMapKey]:(hoverMapKey?G.byKey[hoverMapKey]:null);
   if(node){
@@ -964,15 +984,14 @@ function galaxyRead(){
       +(types?' · '+types:'')+(node.part_count?' · '+node.part_count+' part'+(node.part_count===1?'':'s'):'')
       +(activeMapKey===node.key?' · filtering':'');
     readEl.classList.add('on');
-  }else readEl.classList.remove('on');
-  const selectedNode=activeMapKey?G.byKey[activeMapKey]:null;
-  const hoveredNode=!selectedNode&&hoverMapKey?G.byKey[hoverMapKey]:null;
-  const shownLinks=displayedGalaxyEdges(G,selectedNode,hoveredNode).length;
-  const grouped=mapLayout!=='galaxy'&&L;
+    return;
+  }
+  const grouped=mapLayout!=='galaxy'&&L&&mapGrouped();
   const linkNote=grouped?' · '+L.big.length+(L.big.length===1?' group':' groups')
-    :(G.edges.length?' · '+shownLinks+'/'+G.edges.length+' links shown':'');
-  statEl.textContent=G.nodes.length+(G.nodes.length===1?' entity':' entities')+' · '+G.total+' linked memories'+linkNote
-    +(G.fb&&!grouped?' · core = largest':'');
+    :(mapLayout==='galaxy'&&G.edges.length?' · '+displayedGalaxyEdges(G,null,null).length+'/'+G.edges.length+' links shown':'');
+  readEl.textContent=G.nodes.length+(G.nodes.length===1?' entity':' entities')+' · '+G.total+' linked memories'+linkNote
+    +(G.fb&&mapLayout==='galaxy'?' · core = largest':'');
+  readEl.classList.add('on');
 }
 // The static part of the scene (ground, nebulae, sun, dust band) is rendered
 // once per size and theme and blitted every frame.
@@ -1276,6 +1295,71 @@ function drawMemoryMarker(ctx,type,x,y,size){
 const MAP_LAYOUTS=['islands','heat','lanes','galaxy'];
 let mapLayout='islands';
 try{const saved=localStorage.getItem('memry_map_layout');if(MAP_LAYOUTS.includes(saved))mapLayout=saved}catch(error){}
+// Whether a layout groups entities that share memories, per layout: lanes
+// read best as one timeline, so they start without groups. And whether the
+// owner, mentioned in most memories, is drawn at all.
+// Two choices per layout: whether each entity is one disc of all its memories
+// (bundled) or every memory is a marker of its own, and whether entities that
+// share memories cluster (an island, a sector, a lane). Lanes start unbundled,
+// a timeline of memories. And whether the owner, in most memories, is drawn.
+let mapBundling={islands:true,heat:true,lanes:false};
+let mapGrouping={islands:true,heat:true,lanes:true},mapShowOwner=true;
+function savedLayoutChoice(key,into){
+  try{
+    const saved=JSON.parse(localStorage.getItem(key)||'null');
+    if(saved&&typeof saved==='object')for(const layout of ['islands','heat','lanes'])
+      if(typeof saved[layout]==='boolean')into[layout]=saved[layout];
+  }catch(error){}
+}
+savedLayoutChoice('memry_map_bundling',mapBundling);savedLayoutChoice('memry_map_clusters',mapGrouping);
+try{mapShowOwner=localStorage.getItem('memry_map_owner')!=='hidden'}catch(error){}
+const mapGrouped=()=>mapLayout!=='galaxy'&&mapGrouping[mapLayout]!==false;
+const mapBundled=()=>mapLayout==='galaxy'||mapBundling[mapLayout]!==false;
+const UNBUNDLED_R=6;
+function syncMapGroupControls(){
+  const galaxy=mapLayout==='galaxy',note='The galaxy draws each entity as a planet in rings by how many memories mention it; it has neither choice.';
+  const cluster=document.getElementById('mapGroupByLinks'),bundle=document.getElementById('mapBundleByEntity');
+  cluster.checked=mapGrouped();cluster.disabled=galaxy;
+  bundle.checked=mapBundled();bundle.disabled=galaxy;
+  if(galaxy){cluster.closest('label').title=note;bundle.closest('label').title=note}
+  document.getElementById('mapShowOwner').checked=mapShowOwner;
+}
+function setMapGrouping(on){
+  if(mapLayout==='galaxy')return;
+  mapGrouping[mapLayout]=on;
+  try{localStorage.setItem('memry_map_clusters',JSON.stringify(mapGrouping))}catch(error){}
+  if(L)L.targetsFor='';
+  restartLayout();
+}
+function setMapBundling(on){
+  if(mapLayout==='galaxy')return;
+  mapBundling[mapLayout]=on;
+  try{localStorage.setItem('memry_map_bundling',JSON.stringify(mapBundling))}catch(error){}
+  applyBundling();restartLayout();
+}
+// An entity's radius: its disc of every memory, or a small ring
+function applyBundling(){
+  if(!L)return;
+  const bundled=mapBundled();
+  for(const node of L.nodes)node.lr=bundled?node.br:UNBUNDLED_R;
+  L.targetsFor='';
+}
+function setMapShowOwner(on){
+  mapShowOwner=on;
+  try{localStorage.setItem('memry_map_owner',on?'shown':'hidden')}catch(error){}
+  if(!on&&activeMapKey&&G&&G.byKey[activeMapKey]&&G.byKey[activeMapKey].owner)activeMapKey=null;
+  drawMap();
+}
+function restartLayout(){
+  if(L){L.frames=220;L.sig=''}
+  if(G){
+    galaxyRead();
+    if(reducedMotion)galaxyFrame(performance.now());
+    else if(!gRAF)gRAF=requestAnimationFrame(galaxyFrame);
+  }
+}
+// The lanes end above the time axis, and the axis above the legend.
+const LANE_TOP=44,LANE_BOTTOM=56;
 const layoutPos=new Map(),layoutGroupOf=new Map();  // by node key, kept across rebuilds
 let L=null;
 const clampTo=(value,lo,hi)=>lo>hi?0:Math.max(lo,Math.min(hi,value));
@@ -1348,7 +1432,7 @@ function buildLayout(){
   let oldest=30;
   nodes.forEach((node,i)=>{
     node.group=grouped.label[i];layoutGroupOf.set(node.key,node.group);
-    node.lr=Math.max(2.5,step*Math.sqrt(node.count)+dot);
+    node.br=Math.max(2.5,step*Math.sqrt(node.count)+dot);node.lr=node.br;
     const said=Date.parse(node.last_said||'');
     node.age=isNaN(said)?null:Math.max(0,(now-said)/864e5);
     if(node.age!==null)oldest=Math.max(oldest,node.age);
@@ -1396,25 +1480,75 @@ function buildLayout(){
   if(other.area||!slots.length)slots.push(other);
   const share=slot=>Math.pow(slot.area||1,0.7),sum=slots.reduce((a,slot)=>a+share(slot),0);
   const Rm=H/2-30,ax=Math.min(1.8,(W/2-16)/Rm);
-  let angle=-Math.PI/2,y=44-H/2;
+  let angle=-Math.PI/2,y=LANE_TOP-H/2;
+  const laneSpan=H-LANE_TOP-LANE_BOTTOM;
   for(const slot of slots){
     const part=share(slot)/sum;
     slot.a0=angle+0.03;slot.a1=angle+Math.PI*2*part-0.03;angle+=Math.PI*2*part;
-    slot.y0=y;slot.y1=y+(H-72)*part;y=slot.y1;
+    slot.y0=y;slot.y1=y+laneSpan*part;y=slot.y1;
   }
+  // without groups: one sector, one lane, for every entity, and for islands
+  // a sunflower spiral, the largest in the middle, with room for each label
+  const flat={name:'',area:1,a0:-Math.PI/2,a1:Math.PI*1.5,y0:LANE_TOP-H/2,y1:H/2-LANE_BOTTOM};
+  let filled=0;
+  [...nodes].sort((a,b)=>(b===centre)-(a===centre)||b.count-a.count||(a.key<b.key?-1:1))
+    .forEach((node,k)=>{
+      const rad=k?Math.sqrt(filled)*1.05+node.lr:0,angle=k*2.39996;
+      node.spiral=[Math.cos(angle)*rad*Math.min(1.6,W/H),Math.sin(angle)*rad];
+      filled+=Math.pow(node.lr+14,2);
+    });
   if(centre)centre.slot=(groups.get(centre.group)||{}).slot||slots[0];
-  L={nodes,groups:[...groups.values()],big,slots,centre,step,dot,
+  // every memory on its own, for the layouts without bundles: the entities
+  // drawn that it mentions, its main one (the busiest that is not the owner)
+  const now2=Date.now(),points=[],perPrimary=new Map();
+  for(const raw of mapData.memory_points||[]){
+    const ents=raw.entities.map(key=>G.byKey[key]).filter(Boolean);
+    if(!ents.length)continue;
+    const primary=ents.filter(node=>node!==centre).sort((a,b)=>b.count-a.count)[0]||ents[0];
+    const said=Date.parse(raw.said||''),k=perPrimary.get(primary)||0;perPrimary.set(primary,k+1);
+    points.push({ents,primary,k,type:normalizedMemoryType({memory_type:raw.type}),
+      age:isNaN(said)?null:Math.max(0,(now2-said)/864e5),u:(hashCode(raw.id)%9973)/9973});
+  }
+  const counts=nodes.map(node=>node.count).sort((a,b)=>b-a),labelMin=counts[Math.min(counts.length-1,14)]||1;
+  L={nodes,groups:[...groups.values()],big,slots,flat,centre,step,dot,points,labelMin,targetsFor:'',
     dots:step>=1.15&&total<=20000,Rm,ax,r0:(centre?centre.lr:8)+12,
     xl:-W/2+22,xr:W/2-30,logMax:Math.log1p(oldest),oldest,frames:first?0:180,sig:''};
+  applyBundling();
   if(first){const settle=nodes.length<=600?220:70;for(let i=0;i<settle;i++)layoutTick()}
+}
+// Where a memory of its own sits in lanes and the heat core: at its own age,
+// in the lane or sector of its main entity's cluster.
+function pointTarget(point,grouped){
+  const node=point.primary,slot=grouped?(node.g?node.g.slot:node.slot):L.flat;
+  const f=point.age===null?1:Math.min(1,Math.log1p(point.age)/L.logMax);
+  if(mapLayout==='heat'){
+    const angle=slot.a0+point.u*(slot.a1-slot.a0),rad=L.r0+(L.Rm-L.r0)*f;
+    return[Math.cos(angle)*rad*L.ax,Math.sin(angle)*rad];
+  }
+  return[L.xr-(L.xr-L.xl)*f,slot.y0+(0.1+0.8*point.u)*(slot.y1-slot.y0)];
+}
+// Unbundled lanes and heat: each memory's place, and each entity in the middle
+// of its memories. Worked out once per layout and choice.
+function unbundledTargets(grouped){
+  const key=mapLayout+'|'+grouped;
+  if(L.targetsFor===key)return;
+  L.targetsFor=key;
+  const sum=new Map();
+  for(const point of L.points){
+    point.t=pointTarget(point,grouped);
+    for(const node of point.ents){
+      const s=sum.get(node)||[0,0,0];s[0]+=point.t[0];s[1]+=point.t[1];s[2]++;sum.set(node,s);
+    }
+  }
+  for(const node of L.nodes){const s=sum.get(node);node.ut=s?[s[0]/s[2],s[1]/s[2]]:null}
 }
 const layoutAgeF=node=>node.age===null?1:Math.min(1,Math.log1p(node.age)/L.logMax);
 // One step: every entity eases toward its place in the current layout, then
 // overlapping entities are pushed apart. Run for a few seconds after a change.
 function layoutTick(){
-  const W=G.W,H=G.H,islands=mapLayout!=='heat'&&mapLayout!=='lanes';
+  const W=G.W,H=G.H,islands=mapLayout!=='heat'&&mapLayout!=='lanes',grouped=mapGrouped();
   const pinned=mapLayout==='lanes'?null:L.centre,cr=pinned?pinned.lr:0;
-  if(islands){
+  if(islands&&grouped){
     const gs=L.groups,kx=0.006*Math.min(1,H/W*1.3),ky=0.006*Math.min(1,W/H);
     for(const group of gs){group.x-=group.x*kx;group.y-=group.y*ky}
     for(let i=0;i<gs.length;i++){
@@ -1430,9 +1564,11 @@ function layoutTick(){
   for(const node of L.nodes){
     if(node===pinned){node.lx=0;node.ly=0;continue}
     let tx,ty,ease=0.09;
-    if(islands){tx=node.g.x;ty=node.g.y;ease=0.015+0.06*Math.min(1,node.lr/22)}
+    if(islands&&grouped){tx=node.g.x;ty=node.g.y;ease=0.015+0.06*Math.min(1,node.lr/22)}
+    else if(islands){tx=node.spiral[0];ty=node.spiral[1];ease=0.06}
+    else if(!mapBundled()&&(unbundledTargets(grouped),node.ut)){tx=node.ut[0];ty=node.ut[1]}
     else{
-      const slot=node.g?node.g.slot:node.slot,f=layoutAgeF(node);
+      const slot=grouped?(node.g?node.g.slot:node.slot):L.flat,f=layoutAgeF(node);
       if(mapLayout==='heat'){
         const angle=slot.a0+node.u*(slot.a1-slot.a0),rad=L.r0+(L.Rm-L.r0)*f;
         tx=Math.cos(angle)*rad*L.ax;ty=Math.sin(angle)*rad;
@@ -1441,10 +1577,12 @@ function layoutTick(){
     node.lx+=(tx-node.lx)*ease;node.ly+=(ty-node.ly)*ease;
   }
   const ns=L.nodes,count=ns.length,passes=count>900?1:2;
+  // islands without groups: room between entities for their labels
+  const gap=islands&&!grouped?12:1.5;
   for(let pass=0;pass<passes;pass++)for(let i=0;i<count;i++){
     const a=ns[i];
     for(let j=i+1;j<count;j++){
-      const b=ns[j],dx=b.lx-a.lx,dy=b.ly-a.ly,min=a.lr+b.lr+1.5;
+      const b=ns[j],dx=b.lx-a.lx,dy=b.ly-a.ly,min=a.lr+b.lr+gap;
       if(dx>min||dx<-min||dy>min||dy<-min)continue;
       const q2=dx*dx+dy*dy;if(q2>=min*min)continue;
       const q=Math.sqrt(q2)||0.01,push=(min-q)/q;
@@ -1455,9 +1593,12 @@ function layoutTick(){
   }
   for(const node of ns){
     if(node===pinned)continue;
-    node.lx=clampTo(node.lx,-W/2+node.lr,W/2-node.lr);node.ly=clampTo(node.ly,-H/2+node.lr,H/2-node.lr);
+    node.lx=clampTo(node.lx,-W/2+node.lr,W/2-node.lr);
+    // in lanes an entity and its label stay between the top and the time axis
+    node.ly=mapLayout==='lanes'?clampTo(node.ly,LANE_TOP-H/2+node.lr,H/2-LANE_BOTTOM-node.lr-12)
+      :clampTo(node.ly,-H/2+node.lr,H/2-node.lr);
   }
-  for(const group of L.big){
+  if(grouped)for(const group of L.big){
     let reach=0;
     for(const node of group.members)reach=Math.max(reach,Math.hypot(node.lx-group.x,node.ly-group.y)+node.lr);
     group.hr+=(reach+5-group.hr)*0.2;
@@ -1493,7 +1634,8 @@ function layoutFrame(now){
   const moving=L.frames>0;
   if(moving){layoutTick();L.frames--}
   // Nothing moved and nothing changed: keep the picture that is there.
-  const sig=[mapLayout,W,H,dark,hoverFocusTag,hoverFocusMix.toFixed(2),activeMapKey].join('|');
+  const grouped=mapGrouped(),bundled=mapBundled();
+  const sig=[mapLayout,grouped,bundled,W,H,dark,hoverFocusTag,hoverFocusMix.toFixed(2),activeMapKey].join('|');
   if(!moving&&sig===L.sig&&!gPulses.length){next();return}
   L.sig=sig;
   ctx.setTransform(dpr,0,0,dpr,0,0);
@@ -1508,15 +1650,15 @@ function layoutFrame(now){
   };
   ctx.lineWidth=1;ctx.strokeStyle=hexA(DIM,0.3);
   if(mapLayout==='islands'){
-    ctx.setLineDash([3,4]);
+    if(grouped){ctx.setLineDash([3,4]);
     for(const group of L.big){ctx.beginPath();ctx.arc(group.x,group.y,group.hr,0,Math.PI*2);ctx.stroke()}
-    ctx.setLineDash([]);
+    ctx.setLineDash([]);}
   }else if(mapLayout==='heat'){
     for(const mark of marks){
       const rad=L.r0+(L.Rm-L.r0)*ageAt(mark[0]);
       ctx.beginPath();ctx.ellipse(0,0,rad*L.ax,rad,0,0,Math.PI*2);ctx.stroke();
     }
-    for(const slot of L.slots){
+    if(grouped)for(const slot of L.slots){
       const a=slot.a0-0.03;
       ctx.beginPath();ctx.moveTo(Math.cos(a)*L.r0*L.ax,Math.sin(a)*L.r0);
       ctx.lineTo(Math.cos(a)*L.Rm*L.ax,Math.sin(a)*L.Rm);ctx.stroke();
@@ -1524,9 +1666,9 @@ function layoutFrame(now){
   }else{
     for(const mark of marks){
       const x=L.xr-(L.xr-L.xl)*ageAt(mark[0]);
-      ctx.beginPath();ctx.moveTo(x,40-H/2);ctx.lineTo(x,H/2-26);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(x,LANE_TOP-4-H/2);ctx.lineTo(x,H/2-LANE_BOTTOM+4);ctx.stroke();
     }
-    for(const slot of L.slots){ctx.beginPath();ctx.moveTo(-W/2,slot.y0);ctx.lineTo(W/2,slot.y0);ctx.stroke()}
+    if(grouped)for(const slot of L.slots){ctx.beginPath();ctx.moveTo(-W/2,slot.y0);ctx.lineTo(W/2,slot.y0);ctx.stroke()}
   }
   const sel=activeMapKey?G.byKey[activeMapKey]:null;
   const hov=hoverFocusTag?G.byKey[hoverFocusTag]:null;
@@ -1545,6 +1687,31 @@ function layoutFrame(now){
     }
   }
   ctx.globalAlpha=1;
+  if(!bundled){
+    // every memory a marker of its own; with an entity picked or hovered,
+    // its memories stand out
+    if(mapLayout!=='islands')unbundledTargets(grouped);
+    const focus=sel||(hov&&hoverMix>0.04?hov:null),size=Math.max(1.5,L.dot);
+    const byType=new Map();
+    for(const point of L.points){
+      let x,y;
+      if(mapLayout==='islands'){
+        x=0;y=0;for(const node of point.ents){x+=node.lx;y+=node.ly}
+        x/=point.ents.length;y/=point.ents.length;
+        const rad=UNBUNDLED_R+3+L.step*Math.sqrt(point.k+0.5),angle=point.k*2.39996;
+        x+=Math.cos(angle)*rad;y+=Math.sin(angle)*rad;
+      }else{x=point.t[0];y=point.t[1]}
+      const lit=!focus||point.ents.includes(focus);
+      const list=byType.get(point.type+(lit?'':'~'))||[];list.push([x,y]);byType.set(point.type+(lit?'':'~'),list);
+    }
+    for(const [key,list] of byType){
+      const dim=key.endsWith('~'),type=dim?key.slice(0,-1):key;
+      ctx.globalAlpha=dim?0.12:0.9;ctx.fillStyle=TYPE[type]||DIM;ctx.beginPath();
+      for(const [x,y] of list)addMarkerPath(ctx,type,x,y,size);
+      ctx.fill();
+    }
+    ctx.globalAlpha=1;
+  }
   const order=hov?[...L.nodes.filter(node=>node!==hov),hov]:L.nodes;
   const labels=[];
   for(const n of order){
@@ -1553,7 +1720,11 @@ function layoutFrame(now){
     ctx.globalAlpha=A;
     ctx.fillStyle=hexA(TEXT,n===L.centre?0.1:0.05);
     ctx.beginPath();ctx.arc(x,y,n.lr,0,Math.PI*2);ctx.fill();
-    if(L.dots){
+    if(!bundled){
+      // a ring for the entity, its memories drawn on their own
+      ctx.strokeStyle=hexA(TEXT,0.75);ctx.lineWidth=1.3;
+      ctx.beginPath();ctx.arc(x,y,n.lr-0.5,0,Math.PI*2);ctx.stroke();
+    }else if(L.dots){
       // one marker per memory on a sunflower spiral, the types mixed by their share
       const types=n.dotTypes??=memoryMarkerTypes(n.typeCounts,n.count);
       for(const type of Object.keys(n.typeCounts)){
@@ -1577,7 +1748,8 @@ function layoutFrame(now){
       ctx.beginPath();ctx.arc(x,y,n.lr+2.5,0,Math.PI*2);ctx.stroke();
     }
     const lit=isSel||isHov||linked(n,sel)||(linked(n,hov)&&hoverMix>0.04);
-    if(n.lr>=13||n===L.centre||(n.g&&n.g.big&&n.g.hub===n)||lit)labels.push([n,A,lit,isSel||isHov?2:(lit?1:0)]);
+    const big=bundled?n.lr>=13:n.count>=L.labelMin;
+    if(big||n===L.centre||(grouped&&n.g&&n.g.big&&n.g.hub===n)||lit)labels.push([n,A,lit,isSel||isHov?2:(lit?1:0)]);
   }
   ctx.textAlign='center';ctx.textBaseline='top';
   ctx.font='500 9.5px ui-sans-serif,system-ui';
@@ -1599,16 +1771,17 @@ function layoutFrame(now){
   // what the rings, sectors and lanes stand for
   if(mapLayout==='heat'){
     for(const mark of marks)haloText(mark[1],0,-(L.r0+(L.Rm-L.r0)*ageAt(mark[0]))-5,DIM);
-    for(const slot of L.slots){
+    if(grouped)for(const slot of L.slots){
       const mid=(slot.a0+slot.a1)/2;
       haloText(slot.name.toUpperCase(),clampTo(Math.cos(mid)*L.Rm*L.ax*0.92,-W/2+70,W/2-70),
         clampTo(Math.sin(mid)*L.Rm*0.92,-H/2+44,H/2-40),ACCENT);
     }
   }else if(mapLayout==='lanes'){
-    for(const mark of marks)haloText(mark[1],L.xr-(L.xr-L.xl)*ageAt(mark[0]),H/2-24,DIM);
-    haloText('now',L.xr,H/2-24,DIM);
+    const axis=H/2-LANE_BOTTOM+8;
+    for(const mark of marks)haloText(mark[1],L.xr-(L.xr-L.xl)*ageAt(mark[0]),axis,DIM);
+    haloText('now',L.xr,axis,DIM);
     ctx.textAlign='left';
-    for(const slot of L.slots)haloText(slot.name.toUpperCase(),-W/2+12,slot.y0+5,ACCENT);
+    if(grouped)for(const slot of L.slots)haloText(slot.name.toUpperCase(),-W/2+12,slot.y0+5,ACCENT);
   }
   if('letterSpacing'in ctx)ctx.letterSpacing='0px';
   ctx.restore();
@@ -1624,12 +1797,13 @@ function layoutFrame(now){
 function syncMapLayoutButtons(){
   document.querySelectorAll('#mapLayouts button').forEach(button=>
     button.setAttribute('aria-pressed',String(button.dataset.layout===mapLayout)));
+  syncMapGroupControls();
 }
 function setMapLayout(layout){
   if(!MAP_LAYOUTS.includes(layout))return;
   mapLayout=layout;
   try{localStorage.setItem('memry_map_layout',layout)}catch(error){}
-  syncMapLayoutButtons();
+  syncMapLayoutButtons();applyBundling();
   if(L){L.frames=220;L.sig=''}
   if(G){
     galaxyRead();
@@ -1663,10 +1837,11 @@ function hitNode(event){
   return best;
 }
 let mapEntityDetailRequest=0;
+// The panel of the entity last picked, from the map or from a chip on a
+// memory, shown for as long as the About filter holds it, map open or not.
 function syncMapEntityDetailVisibility(){
-  const panel=document.getElementById('mapentitydetail');
-  panel.hidden=!(panels.map&&!knowledgeMapSuspended&&panel.dataset.entityId
-    &&activeMapKey==='entity:'+panel.dataset.entityId);
+  const panel=document.getElementById('mapentitydetail'),id=panel.dataset.entityId;
+  panel.hidden=!(id&&!knowledgeMapSuspended&&aboutPicks().some(option=>option.value===id));
 }
 function clearMapEntityDetail(){
   mapEntityDetailRequest++;
@@ -1680,34 +1855,108 @@ function mapEntityTargetOptions(entityId){
     .map(node=>`<option value="${esc(node.entity_id)}">${esc(node.label)} · ${esc(typeLabel(node.entity_type))}</option>`)
     .join('');
 }
-async function showMapEntityDetail(entityId){
-  const panel=document.getElementById('mapentitydetail'),request=++mapEntityDetailRequest;
-  panel.dataset.entityId=entityId;panel.hidden=false;
-  panel.innerHTML='<div class="hint">loading entity...</div>';
-  try{
-    const detail=await api('/api/v1/entities/'+encodeURIComponent(entityId));
-    if(request!==mapEntityDetailRequest||activeMapKey!=='entity:'+entityId)return;
-    const entity=detail.entity,aliases=detail.aliases||[],tag=entity.entity_type===TAG_TYPE;
-    if(tag)rememberTag(entity);
-    panel.innerHTML=`<h3><span id="mapentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(typeLabel(entity.entity_type))}</span>`:''}</h3>
-      <div id="mapentityidentity">${entityIdentityBlock(entity,aliases)}</div>
+// What the page already knows of an entity (its name, type and how many
+// memories mention it), from the map, the About list or the entities tab, so a
+// panel can show its name and buttons before the server answers. The answer
+// can take seconds: it writes the entity's description first when it is due.
+function knownEntity(entityId){
+  const node=(mapData?.entities||[]).find(candidate=>candidate.entity_id===entityId);
+  if(node)return{id:entityId,name:node.label,entity_type:node.entity_type,memories:node.count};
+  const row=aboutEntities.find(entity=>entity.id===entityId)||entityRows.find(entity=>entity.id===entityId);
+  return row?{id:entityId,name:row.name,entity_type:row.entity_type,memories:row.memories||0}:null;
+}
+// The type of a named thing, chosen from the named types. A tag stays a tag.
+function entityTypePicker(prefix,entityId,type){
+  return `<div class="entity-duplicate" id="${prefix}typepicker" hidden>
+    <select id="${prefix}typetarget" title="Choose what this entity is." onchange='changeEntityType(${JSON.stringify(entityId)},this.value)'>
+      ${NAMED_TYPES.map(option=>`<option value="${esc(option)}"${option===type?' selected':''}>${esc(option)}</option>`).join('')}
+    </select></div>`;
+}
+function entityTypeBadge(prefix,type){
+  return `<span class="syn" id="${prefix}entitytype"${type?'':' hidden'}>${esc(typeLabel(type))}</span>`;
+}
+const DESCRIPTION_LOADING='<div class="hint">loading description...</div>';
+function mapEntityPanelHtml(entityId,entity,aliases){
+  const id=JSON.stringify(entityId),tag=entity.entity_type===TAG_TYPE;
+  return `<h3><span id="mapentityname">${esc(entity.name)}</span> ${entityTypeBadge('map',entity.entity_type)}</h3>
+      <div id="mapentityidentity">${aliases?entityIdentityBlock(entity,aliases):DESCRIPTION_LOADING}</div>
       <div class="entity-actions">
-        <button class="act" onclick='renameEntity(${JSON.stringify(entityId)})' title="${renameTitle(tag)}">rename</button>
-        ${tag?'':`<button class="act" onclick='addMapAlias(${JSON.stringify(entityId)})' title="Add another name for this entity.">add alias</button>`}
+        <button class="act" onclick='openEntityTimeline("map",${id})' title="Every memory about this, in time order.">timeline</button>
+        <button class="act" onclick='renameEntity(${id})' title="${renameTitle(tag)}">rename</button>
+        ${tag?'':`<button class="act" onclick="togglePicker(this,'maptypepicker')" title="Change what this entity is: a person, an organization, a concept and so on.">change type...</button>
+        <button class="act" onclick='addMapAlias(${id})' title="Add another name for this entity.">add alias</button>`}
         <button class="act" onclick="toggleDuplicatePicker(this)" title="Say this is the same as another entity, and combine the two.">is duplicate of...</button>
-        ${tag?`<button class="act danger" onclick='deleteTagEntity(${JSON.stringify(entityId)})' title="${DELETE_TAG_TITLE}">delete tag</button>`
-          :`<button class="act danger" onclick='removeMapEntity(${JSON.stringify(entityId)})' title="Remove this name. If more than one memory mentions it, it is kept as a tag on them.">not an entity</button>`}
+        ${tag?`<button class="act danger" onclick='deleteTagEntity(${id})' title="${DELETE_TAG_TITLE}">delete tag</button>`
+          :`<button class="act danger" onclick='removeMapEntity(${id})' title="Remove this name. If more than one memory mentions it, it is kept as a tag on them.">not an entity</button>`}
       </div>
+      ${tag?'':entityTypePicker('map',entityId,entity.entity_type)}
       <div class="entity-duplicate" id="mapduplicatepicker" hidden>
         <select id="mapduplicatetarget" onchange="document.getElementById('mapduplicatebtn').disabled=!this.value" title="Choose the entity this is a duplicate of.">
           <option value="">pick the one it duplicates...</option>${mapEntityTargetOptions(entityId)}
         </select>
-        <button id="mapduplicatebtn" disabled onclick='mergeMapEntity(${JSON.stringify(entityId)})' title="Combine this entity into the selected entity; memories are preserved.">Combine</button>
+        <button id="mapduplicatebtn" disabled onclick='mergeMapEntity(${id})' title="Combine this entity into the selected entity; memories are preserved.">Combine</button>
       </div>`;
+}
+// Show an entity's panel. ``known`` is what the caller knows of it (a chip
+// knows its name and type); else ``knownEntity`` is asked.
+async function showMapEntityDetail(entityId,known){
+  const panel=document.getElementById('mapentitydetail'),request=++mapEntityDetailRequest;
+  panel.dataset.entityId=entityId;
+  const first=known||knownEntity(entityId);
+  panel.innerHTML=first?mapEntityPanelHtml(entityId,first,null):'<div class="hint">loading entity...</div>';
+  syncMapEntityDetailVisibility();
+  try{
+    const detail=await api('/api/v1/entities/'+encodeURIComponent(entityId));
+    if(request!==mapEntityDetailRequest||panel.dataset.entityId!==entityId)return;
+    const entity=detail.entity,aliases=detail.aliases||[],tag=entity.entity_type===TAG_TYPE;
+    if(tag)rememberTag(entity);
+    // the buttons drawn already stay, so a picker opened meanwhile stays open
+    if(!first||(first.entity_type===TAG_TYPE)!==tag){panel.innerHTML=mapEntityPanelHtml(entityId,entity,aliases)}
+    else{
+      document.getElementById('mapentityname').textContent=entity.name;
+      showEntityType('map',entity.entity_type);
+      document.getElementById('mapentityidentity').innerHTML=entityIdentityBlock(entity,aliases);
+    }
     syncMapEntityDetailVisibility();
   }catch(error){
-    if(request===mapEntityDetailRequest){panel.innerHTML='<div class="hint">Could not load this entity.</div>'}
+    if(request===mapEntityDetailRequest){
+      const identity=document.getElementById('mapentityidentity');
+      if(identity)identity.innerHTML='<div class="hint">Could not load this entity.</div>';
+      else panel.innerHTML='<div class="hint">Could not load this entity.</div>';
+    }
   }
+}
+function showEntityType(prefix,type){
+  const badge=document.getElementById(prefix+'entitytype');
+  if(badge){badge.textContent=typeLabel(type);badge.hidden=!type}
+  const select=document.getElementById(prefix+'typetarget');
+  if(select&&type)select.value=type;
+}
+function togglePicker(button,pickerId){
+  const picker=document.getElementById(pickerId);
+  picker.hidden=!picker.hidden;
+  button.setAttribute('aria-pressed',String(!picker.hidden));
+  if(!picker.hidden)picker.querySelector('select')?.focus();
+}
+// The owner chose this type: it stays, whatever later mentions say.
+async function changeEntityType(entityId,type){
+  if(!type)return;
+  const result=await api('/api/v1/entities/'+encodeURIComponent(entityId),
+    {method:'PATCH',body:JSON.stringify({entity_type:type})});
+  if(result.error){alert(result.error);return}
+  const entity=result.entity;
+  for(const [prefix,panelId] of [['map','mapentitydetail'],['knowledge','entitydetail']]){
+    if(document.getElementById(panelId).dataset.entityId!==entityId)continue;
+    showEntityType(prefix,entity.entity_type);
+    const picker=document.getElementById(prefix+'typepicker');if(picker)picker.hidden=true;
+    document.getElementById(panelId).querySelectorAll('button[aria-pressed="true"]').forEach(button=>{
+      if((button.getAttribute('onclick')||'').includes('typepicker'))button.setAttribute('aria-pressed','false');
+    });
+  }
+  const node=(mapData?.entities||[]).find(candidate=>candidate.entity_id===entityId);
+  if(node)node.entity_type=entity.entity_type;
+  await Promise.all([loadEntities(),loadSearchFilters()]);
+  drawMap();await search();
 }
 // A rename can answer with another entity than the one renamed (a tag renamed
 // to a name merged away lands in that name's survivor): the panels, the map
@@ -1865,8 +2114,15 @@ function filterByEntity(entity){
   // Reveal the panel, so a filter set from a chip is visible and clearable
   // rather than applied behind a collapsed row.
   if(option.selected&&!panels.filters)togglePanel('filters');
-  toggleClear();
-  activeMapKey=null;clearMapEntityDetail();
+  const key='entity:'+entity.id;
+  if(option.selected){
+    // what the chip is about shows above the memories, and on the map
+    activeMapKey=G&&G.byKey[key]?key:null;
+    showMapEntityDetail(entity.id,{id:entity.id,name:entity.name,entity_type:entity.entity_type});
+  }else if(document.getElementById('mapentitydetail').dataset.entityId===entity.id){
+    activeMapKey=null;clearMapEntityDetail();
+  }
+  toggleClear();if(G)galaxyRead();
   search();
 }
 // -- the About filter: one list of people, things and tags -----------------
@@ -1925,9 +2181,21 @@ async function loadSearchFilters(){
   // multi-select: keep every current choice across a reload, not just one
   const keep=new Set(aboutPicks().map(o=>o.value));
   const entities=await api('/api/v1/entities?limit=100000&kind=any');
-  entities.forEach(rememberTag);
+  entities.forEach(rememberTag);aboutEntities=entities;
   select.innerHTML=aboutOptions(entities,keep);
-  toggleClear();
+  filterAboutOptions();toggleClear();
+}
+// The About list holds every person, thing and tag: the field above it keeps
+// the names that contain what is typed, and the ones picked.
+function filterAboutOptions(){
+  const needle=(document.getElementById('filter-about-q').value||'').trim().toLowerCase();
+  const select=document.getElementById('filter-about');
+  for(const option of select.options){
+    option.hidden=!!needle&&!option.selected&&!option.textContent.toLowerCase().includes(needle);
+  }
+  for(const group of select.querySelectorAll('optgroup')){
+    group.hidden=![...group.children].some(option=>!option.hidden);
+  }
 }
 async function loadAll(more){
   if(!more){offset=0;current=[];searchActive=false}
@@ -1957,6 +2225,7 @@ function toggleClear(){
   document.getElementById('filterbtn').classList.toggle('active',on);
   const picks=f.topics.length+f.entities.length;
   document.getElementById('aboutcount').textContent=picks?`(${picks})`:'';
+  syncMapEntityDetailVisibility();
 }
 function clearSearch(){
   document.getElementById('q').value='';
@@ -1966,7 +2235,7 @@ function clearSearch(){
 }
 
 // -- unified knowledge area -------------------------------------------------
-let knowledgeNames={};
+let knowledgeNames={},aboutEntities=[];
 let knowledgeMapSuspended=false,knowledgeMapWasOpen=false;
 function suspendMapForKnowledge(){
   knowledgeMapWasOpen=panels.map;knowledgeMapSuspended=knowledgeMapWasOpen;
@@ -2597,34 +2866,57 @@ function entityIdentityBlock(entity,aliases){
   return `${entity.description?`<div class="description">${esc(entity.description)}</div>`:''}
     <div class="alias-list">${aliases.map(alias=>`<span>${esc(alias)}</span>`).join('')||'<span>No aliases yet.</span>'}</div>`;
 }
+function knowledgeEntityHeadHtml(id,entity,aliases,memories){
+  const arg=JSON.stringify(id),tag=entity.entity_type===TAG_TYPE;
+  return `<h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button><span id="knowledgeentityname">${esc(entity.name)}</span> ${entityTypeBadge('knowledge',entity.entity_type)}</h3>
+    <div id="knowledgeentityidentity">${aliases?entityIdentityBlock(entity,aliases):DESCRIPTION_LOADING}</div>
+    <div class="entity-actions">
+      <button class="act" onclick='openEntityTimeline("knowledge",${arg})' title="Every memory about this, in time order.">timeline</button>
+      <button class="act" onclick='renameEntity(${arg})' title="${renameTitle(tag)}">rename</button>
+      ${tag?'':`<button class="act" onclick="togglePicker(this,'knowledgetypepicker')" title="Change what this entity is: a person, an organization, a concept and so on.">change type...</button>
+      <button class="act" onclick='addAlias(${arg})' title="Add another name for this entity.">add alias</button>`}
+      <button class="act" onclick='toggleKnowledgeDuplicatePicker(this,${arg})' title="Say this is the same as another entity, and combine the two.">is duplicate of...</button>
+      ${tag?`<button class="act danger" onclick='deleteTagEntity(${arg})' title="${DELETE_TAG_TITLE}">delete tag</button>`
+        :`<button class="act danger" onclick='removeEntity(${arg},Number(document.getElementById("entitydetail").dataset.memories)||0)' title="Remove this name. If more than one memory mentions it, it is kept as a tag on them.">not an entity</button>`}
+    </div>
+    ${tag?'':entityTypePicker('knowledge',id,entity.entity_type)}
+    <div class="entity-duplicate" id="knowledgeduplicatepicker" data-memories="${memories}" hidden>
+      <select id="knowledgeduplicatetarget" onchange="document.getElementById('knowledgeduplicatebtn').disabled=!this.value" title="Choose the entity this is a duplicate of.">
+        <option value="">pick the one it duplicates...</option>
+      </select>
+      <button id="knowledgeduplicatebtn" disabled onclick='mergeKnowledgeEntity(${arg})' title="Combine this entity into the selected entity; memories are preserved.">Combine</button>
+    </div>`;
+}
 async function openEntity(id){
   setKnowledgeOpen(true);showKnowledge('entities');
-  const box=document.getElementById('entitydetail');box.dataset.entityId=id;box.innerHTML='<div class="hint">loading entity...</div>';
+  const box=document.getElementById('entitydetail');box.dataset.entityId=id;
+  // the name and the buttons first: the answer may wait on a new description
+  const known=knownEntity(id);
+  box.dataset.memories=known?known.memories:0;
+  box.innerHTML=known
+    ?`<div class="detail">${knowledgeEntityHeadHtml(id,known,null,known.memories)}<div id="knowledgeentitybody"><div class="hint">loading memories...</div></div></div>`
+    :'<div class="hint">loading entity...</div>';
   const detail=await api('/api/v1/entities/'+encodeURIComponent(id));
   // Clicking one entity and then another before the first had loaded let the
   // slower reply win, so the panel showed the one you had moved away from.
   if(box.dataset.entityId!==id)return;
-  const entity=detail.entity,aliases=detail.aliases||[],tag=entity.entity_type==='topic';
+  const entity=detail.entity,aliases=detail.aliases||[],tag=entity.entity_type===TAG_TYPE;
   if(tag)rememberTag(entity);
-  box.innerHTML=`<div class="detail"><h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button><span id="knowledgeentityname">${esc(entity.name)}</span> ${entity.entity_type?`<span class="syn">${esc(typeLabel(entity.entity_type))}</span>`:''}</h3>
-    <div id="knowledgeentityidentity">${entityIdentityBlock(entity,aliases)}</div>
-    <div class="entity-actions">
-      <button class="act" onclick='renameEntity(${JSON.stringify(id)})' title="${renameTitle(tag)}">rename</button>
-      ${tag?'':`<button class="act" onclick='addAlias(${JSON.stringify(id)})' title="Add another name for this entity.">add alias</button>`}
-      <button class="act" onclick='toggleKnowledgeDuplicatePicker(this,${JSON.stringify(id)})' title="Say this is the same as another entity, and combine the two.">is duplicate of...</button>
-      ${tag?`<button class="act danger" onclick='deleteTagEntity(${JSON.stringify(id)})' title="${DELETE_TAG_TITLE}">delete tag</button>`
-        :`<button class="act danger" onclick='removeEntity(${JSON.stringify(id)},${detail.memories.length})' title="Remove this name. If more than one memory mentions it, it is kept as a tag on them.">not an entity</button>`}
-    </div>
-    <div class="entity-duplicate" id="knowledgeduplicatepicker" data-memories="${detail.memories.length}" hidden>
-      <select id="knowledgeduplicatetarget" onchange="document.getElementById('knowledgeduplicatebtn').disabled=!this.value" title="Choose the entity this is a duplicate of.">
-        <option value="">pick the one it duplicates...</option>
-      </select>
-      <button id="knowledgeduplicatebtn" disabled onclick='mergeKnowledgeEntity(${JSON.stringify(id)})' title="Combine this entity into the selected entity; memories are preserved.">Combine</button>
-    </div>
-    ${placeBlock(detail)}
+  const memories=Math.max(known?known.memories:0,detail.memories.length);
+  box.dataset.memories=memories;
+  const body=`${placeBlock(detail)}
     ${relationsBlock(id,detail)}
     <div class="hint">${detail.memories.length} active supporting memor${detail.memories.length===1?'y':'ies'}</div>
-    ${detail.memories.map(memory=>`<div class="tagrow"><span class="name">${esc(memory.content)}</span><button class="act" onclick='showMemory(${JSON.stringify(memory.id)})'>open</button></div>`).join('')||'<div class="empty">No active supporting memories.</div>'}</div>`;
+    ${detail.memories.map(memory=>`<div class="tagrow"><span class="name">${esc(memory.content)}</span><button class="act" onclick='showMemory(${JSON.stringify(memory.id)})'>open</button></div>`).join('')||'<div class="empty">No active supporting memories.</div>'}`;
+  if(!known||(known.entity_type===TAG_TYPE)!==tag){
+    box.innerHTML=`<div class="detail">${knowledgeEntityHeadHtml(id,entity,aliases,memories)}<div id="knowledgeentitybody">${body}</div></div>`;
+    return;
+  }
+  document.getElementById('knowledgeentityname').textContent=entity.name;
+  showEntityType('knowledge',entity.entity_type);
+  document.getElementById('knowledgeentityidentity').innerHTML=entityIdentityBlock(entity,aliases);
+  document.getElementById('knowledgeduplicatepicker').dataset.memories=memories;
+  document.getElementById('knowledgeentitybody').innerHTML=body;
 }
 // Relations read as "this entity -> predicate -> that one", so they belong next
 // to the entity they describe. A flat list of every edge in the store had no
@@ -2855,6 +3147,10 @@ document.addEventListener('click',event=>{
 function mapEntityFilterOpen(){return document.getElementById('mapEntityFilter').open}
 function closeMapEntityFilter(){document.getElementById('mapEntityFilter').open=false}
 document.addEventListener('click',event=>{
+  const menu=document.getElementById('mapGroupMenu');
+  if(menu.open&&!(event.target.closest&&event.target.closest('#mapGroupMenu')))menu.open=false;
+});
+document.addEventListener('click',event=>{
   if(!mapEntityFilterOpen())return;
   if(event.target.closest&&event.target.closest('.gx-types'))return;
   closeMapEntityFilter();
@@ -2881,12 +3177,15 @@ function timelinePoint(m){
 // Pure on purpose: rows and a date in, the entries the timeline draws out. The
 // ordering and the place of the Today line are the part worth testing, and
 // neither needs a DOM.
-function timelineEntries(rows,todayISO){
+// With ``said``, a memory that does not say when it happened sits on the day
+// it was said, and says so: one entity's timeline is then its whole history.
+function timelineEntries(rows,todayISO,said=false){
   const today=String(todayISO||'').slice(0,10);
   const dated=[];
   for(const m of rows||[]){
     const at=timelinePoint(m);
     if(at)dated.push({at:String(at),memory:m});
+    else if(said&&m&&m.created_at)dated.push({at:String(m.created_at),memory:m,said:true});
   }
   dated.sort((a,b)=>a.at<b.at?1:(a.at>b.at?-1:0));
   const out=[];
@@ -2903,7 +3202,7 @@ function timelineEntries(rows,todayISO){
   for(const item of dated){
     if(item.at.slice(0,10)<today)placeToday();
     openMonth(item.at);
-    out.push({kind:'row',at:item.at,memory:item.memory});
+    out.push({kind:'row',at:item.at,memory:item.memory,said:!!item.said});
   }
   placeToday();
   return out;
@@ -2941,15 +3240,16 @@ function timelineRow(entry){
   const m=entry.memory;
   const repeat=timelineRepeat(m);
   return `<button class="tl-row" onclick='openTimelineMemory(${JSON.stringify(String(m.id))})'>
-    <span class="tl-when">${esc(timelineLabel(m,entry.at))}</span>
+    <span class="tl-when"${entry.said?' title="When it happened is not known: this is the day it was said."':''}>${esc(entry.said?'said '+String(entry.at).slice(0,10):timelineLabel(m,entry.at))}</span>
     <span class="tl-text">${esc(m.content)}</span>
     <span class="tl-side">${memoryTypeBadge(m)}${repeat?`<span class="tag when-chip">${esc(repeat)}</span>`:''}</span></button>`;
 }
-function renderTimeline(rows){
+function renderTimeline(rows,entity){
   const el=document.getElementById('timelinebody');
-  const entries=timelineEntries(rows,new Date().toISOString().slice(0,10));
+  const entries=timelineEntries(rows,new Date().toISOString().slice(0,10),!!entity);
   if(!entries.some(entry=>entry.kind==='row')){
-    el.innerHTML='<div class="empty">No memories carry a time yet.</div>';return;
+    el.innerHTML=entity?`<div class="empty">No memories about ${esc(entity.name)} yet.</div>`
+      :'<div class="empty">No memories carry a time yet.</div>';return;
   }
   el.innerHTML=entries.map(entry=>
     entry.kind==='month'?`<div class="tl-month">${esc(entry.label)}</div>`
@@ -2967,15 +3267,38 @@ function setTimelineOpen(open){
   document.body.classList.toggle('knowledge-open',open);
   if(!open&&wasOpen)resumeMapAfterKnowledge();
 }
-async function openTimeline(){
+const TIMELINE_HINT='Every memory that says when the thing itself happens, newest first. Today opens near the top, with what is still ahead above it.';
+// The memories the timeline asks for: those that carry a time, or every
+// memory about one entity (a tag by its name, a person or thing by its id).
+function timelinePath(entity){
+  if(!entity)return '/api/v1/memories?when_since=1900-01-01&limit=1000';
+  const tag=entity.entity_type===TAG_TYPE;
+  return '/api/v1/memories?limit=1000&'+(tag
+    ?'categories='+encodeURIComponent(tagNames[entity.id]||tagKey(entity))
+    :'entity_id='+encodeURIComponent(entity.id));
+}
+// ``entity`` ({id,name,entity_type}) narrows it to one person, thing or tag.
+async function openTimeline(entity){
   closeUserMenu();
+  document.getElementById('timelinetitle').textContent=entity?'Timeline: '+entity.name:'Timeline';
+  document.getElementById('timelinehint').textContent=entity
+    ?'Every memory about '+entity.name+', newest first: on the day it happened where a memory says so, else on the day it was said. Today opens near the top.'
+    :TIMELINE_HINT;
   setTimelineOpen(true);
   const el=document.getElementById('timelinebody');
   el.innerHTML='<div class="empty">loading…</div>';
   let rows;
-  try{rows=await api('/api/v1/memories?when_since=1900-01-01&limit=1000')}
+  try{rows=await api(timelinePath(entity))}
   catch(error){el.innerHTML='<div class="empty">The timeline could not be loaded.</div>';return}
-  renderTimeline(Array.isArray(rows)?rows:[]);
+  renderTimeline(Array.isArray(rows)?rows:[],entity);
+}
+// The timeline of the entity a panel shows, by its name and type there.
+function openEntityTimeline(prefix,entityId){
+  const name=document.getElementById(prefix+'entityname')?.textContent||'';
+  const known=knownEntity(entityId);
+  const type=known?known.entity_type:(entityId in tagNames?TAG_TYPE:null);
+  if(prefix==='knowledge')setKnowledgeOpen(false);
+  openTimeline({id:entityId,name,entity_type:type});
 }
 function closeTimeline(){setTimelineOpen(false)}
 function openTimelineMemory(id){closeTimeline();showMemory(id)}
@@ -3348,7 +3671,8 @@ def create_app(
         if principal is None:
             return RedirectResponse("/login", status_code=302)
         who = principal.name or "admin"
-        return HTMLResponse(_DASHBOARD.replace("__WHOAMI__", html.escape(who)))
+        return HTMLResponse(_DASHBOARD.replace("__WHOAMI__", html.escape(who)).replace(
+            "__NAMED_TYPES__", json.dumps(list(NAMED_ENTITY_TYPES))))
 
     async def health(request: Request) -> Response:
         from . import __version__
@@ -4327,12 +4651,30 @@ def create_app(
         )
 
     async def rename_entity_route(request: Request) -> Response:
+        """Rename an entity (``name``), or give a named one another type
+        (``entity_type``), or both."""
         body = await request.json()
         name = str(body.get("name", "")).strip()
-        if not name:
-            return JSONResponse({"error": "name required"}, status_code=400)
+        entity_type = str(body.get("entity_type", "")).strip()
+        if not name and not entity_type:
+            return JSONResponse({"error": "name or entity_type required"}, status_code=400)
+        entity_id = request.path_params["entity_id"]
+        if entity_type:
+            try:
+                typed = store.set_entity_type(
+                    entity_id, entity_type, owner_prefix=_p(request).prefix)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            if typed is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            if not name:
+                return JSONResponse({
+                    "entity_id": typed.id,
+                    "entity": typed.model_dump(),
+                    "aliases": store.backend.entity_aliases(typed.id),
+                })
         entity = store.rename_entity(
-            request.path_params["entity_id"],
+            entity_id,
             name,
             owner_prefix=_p(request).prefix,
         )

@@ -36,6 +36,7 @@ from ..models import (
     ENTITY_TYPES,
     HISTORY_KINDS,
     TOPIC_TYPE,
+    TYPE_SET_BY_OWNER,
     Scope,
     Topic,
     later_ts,
@@ -532,6 +533,15 @@ def _band_bounds(
         return (total + left * words[-1][0]) * (1 + _ROUNDING)
 
     return least, most
+
+
+def _owner_typed(row: sqlite3.Row) -> bool:
+    """Whether an entity row's type is one the owner chose
+    (``TYPE_SET_BY_OWNER``), which no recount of its mentions changes."""
+    try:
+        return bool(json.loads(row["metadata"] or "{}").get(TYPE_SET_BY_OWNER))
+    except (TypeError, ValueError):
+        return False
 
 
 def _scope_clause(scope: Scope, prefix: str = "") -> tuple[str, list[Any]]:
@@ -1678,6 +1688,19 @@ class LocalBackend(MemoryBackend):
                 "ORDER BY weight DESC, a, b LIMIT 50000",
                 (*entity1_params, *entity2_params, *memory_params),
             ).fetchall()
+            # one row per memory and entity it mentions, for a map that draws
+            # every memory on its own: the day it was said and its type, no text
+            point_rows = self._db.execute(
+                "SELECT m.id, m.created_at, m.memory_type, em.entity_id "
+                "FROM entity_mentions em "
+                "JOIN entities e1 ON e1.id = em.entity_id "
+                "JOIN memories m ON m.id = em.memory_id "
+                "WHERE e1.merged_into IS NULL AND m.invalid_at IS NULL "
+                f"AND {entity1_clause} AND {memory_clause} "
+                f"AND {_kind_clause(kind, 'e1.')} "
+                "ORDER BY m.created_at, m.id LIMIT 200000",
+                (*entity1_params, *memory_params),
+            ).fetchall()
 
         entities: dict[str, dict[str, Any]] = {}
         for row in entity_rows:
@@ -1700,9 +1723,16 @@ class LocalBackend(MemoryBackend):
             # the day the newest memory about it was said: the map's time layouts
             node["last_said"] = max(node["last_said"], str(row["last_said"] or ""))
 
+        points: dict[str, dict[str, Any]] = {}
+        for row in point_rows:
+            point = points.setdefault(row["id"], {
+                "id": row["id"], "said": str(row["created_at"] or ""),
+                "type": row["memory_type"], "entities": []})
+            point["entities"].append(f"entity:{row['entity_id']}")
         return {
             "memories": total,
             "entity_memories": entity_memories,
+            "memory_points": list(points.values()),
             "entities": list(entities.values()),
             "entity_edges": [
                 {
@@ -3514,10 +3544,11 @@ class LocalBackend(MemoryBackend):
         the thing's type, not of another thing. Nothing is committed here."""
         for entity_id in sorted(set(entity_ids)):
             row = self._db.execute(
-                "SELECT entity_type FROM entities WHERE id = ? AND merged_into IS NULL",
+                "SELECT entity_type, metadata FROM entities "
+                "WHERE id = ? AND merged_into IS NULL",
                 (entity_id,),
             ).fetchone()
-            if row is None or row["entity_type"] == TOPIC_TYPE:
+            if row is None or row["entity_type"] == TOPIC_TYPE or _owner_typed(row):
                 continue
             own = row["entity_type"]
             kind = self._most_given(self._type_votes_locked(entity_id, own), [own])
@@ -4216,12 +4247,16 @@ class LocalBackend(MemoryBackend):
         does not hand the thing that sentence's type. Two tags merge as a
         tag."""
         rows = {row["id"]: row for row in self._db.execute(
-            "SELECT id, entity_type, created_at FROM entities WHERE id IN (?, ?)",
+            "SELECT id, entity_type, created_at, metadata FROM entities WHERE id IN (?, ?)",
             (keep_id, merge_id),
         ).fetchall()}
         keep, merged = rows[keep_id], rows[merge_id]
         if keep["entity_type"] == TOPIC_TYPE:
             return keep["entity_type"]
+        # a type the owner chose outlasts the count, the kept one's first
+        for row in (keep, merged):
+            if row["entity_type"] != TOPIC_TYPE and _owner_typed(row):
+                return row["entity_type"]
 
         def own(row: sqlite3.Row) -> str | None:
             return None if row["entity_type"] == TOPIC_TYPE else row["entity_type"]

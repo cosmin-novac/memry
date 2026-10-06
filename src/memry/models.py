@@ -48,6 +48,12 @@ NAMED_ENTITY_TYPES: tuple[str, ...] = (
 #: ``TOPIC_TYPE``, which extraction never offers.
 ENTITY_TYPES: tuple[str, ...] = (*NAMED_ENTITY_TYPES, TOPIC_TYPE)
 
+#: The entity metadata key that marks a type the owner chose (the dashboard's
+#: "type" button, ``MemoryStore.set_entity_type``). Without it the type is
+#: whatever most of the entity's mentions say, recounted on every save and
+#: merge, so a type the owner corrected would come back on the next save.
+TYPE_SET_BY_OWNER = "type_set_by_owner"
+
 
 #: A tag is a short retrieval subject. Anything longer is a sentence or a list
 #: that was glued together, and is dropped rather than stored.

@@ -107,7 +107,7 @@ const stored={};
 const localStorage={getItem:key=>stored[key]??null,setItem:(key,value)=>{stored[key]=value}};
 const matchMedia=()=>({matches:true});
 let activeMapKey=null,hoverMapKey=null,hoverFocusTag=null,redraws=0;
-let knowledgeMapSuspended=false;
+let knowledgeMapSuspended=false,mapShowOwner=true;
 const updateHover=()=>{},clearMapEntityDetail=()=>{};
 const drawMap=()=>{redraws++};
 const esc=value=>value;
@@ -145,6 +145,10 @@ check(big.byKey['entity:hub'].typeCounts.procedural===1,'type counts');
 check(big.idleEdges.length===400,'idle edge cap');
 check(big.lod===true,'431 planets is above the detail threshold');
 check(big.byKey['entity:hub'].satTypes.length===2,'orbit marker types are precomputed');
+// the owner, marked by the server, can be left off the map
+data.entities[0].owner=true;mapShowOwner=false;
+check(!buildGalaxy(data).byKey['entity:hub'],'the owner is left off on request');
+mapShowOwner=true;delete data.entities[0].owner;
 const hoverEdges=displayedGalaxyEdges(big,null,big.byKey['entity:hub']);
 check(hoverEdges.length===430,'hover shows every node edge');
 check(big.idleEdges.every(edge=>hoverEdges.includes(edge)),'hover preserves every idle edge');
@@ -240,7 +244,7 @@ check(linked.byKey['entity:c10'].zone==='rim','an unlinked two goes out to the r
 def test_knowledge_modal_releases_and_restores_the_map():
     source = "\n".join(_scripts(_dashboard_html()))
     modal_source = source[
-        source.index("let knowledgeNames={};") : source.index("function openAbout(){")
+        source.index("let knowledgeNames={},aboutEntities=[];") : source.index("function openAbout(){")
     ]
     contract = r"""
 const classList=()=>({
@@ -298,8 +302,9 @@ def test_selected_map_entity_shows_identity_and_cleanup_actions():
 
     assert 'id="mapentitydetail"' in html
     assert "function entityIdentityBlock(entity,aliases)" in source
-    assert source.count("${entityIdentityBlock(entity,aliases)}") == 2
-    assert "function showMapEntityDetail(entityId)" in source
+    # both panels draw the name and the buttons before the description comes
+    assert source.count("${aliases?entityIdentityBlock(entity,aliases):DESCRIPTION_LOADING}") == 2
+    assert "async function showMapEntityDetail(entityId,known)" in source
     assert "is duplicate of..." in source
     # the picker stays folded until asked for, so the four actions read as a row
     assert 'id="mapduplicatepicker" hidden' in source
@@ -478,15 +483,15 @@ def test_the_entities_page_can_declare_a_selected_entity_a_duplicate():
     could not, so a duplicate found while browsing the list had to be hunted
     down again on the map."""
     source = "\n".join(_scripts(_dashboard_html()))
-    panel = source[source.index("async function openEntity(id)") : source.index("function relationsBlock(")]
+    panel = source[source.index("function knowledgeEntityHeadHtml(") : source.index("function relationsBlock(")]
 
     assert "toggleKnowledgeDuplicatePicker(this," in panel
     assert ">is duplicate of...</button>" in panel
     # folded until asked for, and nothing to combine until a target is picked
-    assert 'id="knowledgeduplicatepicker" data-memories="${detail.memories.length}" hidden' in panel
+    assert 'id="knowledgeduplicatepicker" data-memories="${memories}" hidden' in panel
     assert 'id="knowledgeduplicatebtn" disabled' in panel
     # the name reaches the merge from the page, not through a quoted attribute
-    assert "mergeKnowledgeEntity(${JSON.stringify(id)})'" in panel
+    assert "mergeKnowledgeEntity(${arg})'" in panel
 
 
 def test_duplicate_picker_on_the_entities_page_merges_this_into_the_chosen_one():
@@ -599,10 +604,13 @@ def test_the_entity_panel_shows_the_entity_clicked_last_not_the_one_answered_las
     panel = source[source.index("function placeBlock(") : source.index("function closeEntity(")]
     contract = helpers + "\n" + r"""
 function check(condition,message){if(!condition)throw new Error(message)}
-const box={dataset:{},innerHTML:''};
-const document={getElementById:id=>id==='entitydetail'?box:null};
+const box={dataset:{},innerHTML:''},others={};
+const document={getElementById:id=>id==='entitydetail'?box:(others[id]??={dataset:{},innerHTML:''})};
 const setKnowledgeOpen=()=>{},showKnowledge=()=>{};
-const renameTitle=()=>'',DELETE_TAG_TITLE='',rememberTag=()=>{};
+const renameTitle=()=>'',DELETE_TAG_TITLE='',rememberTag=()=>{},TAG_TYPE='topic';
+const entityTypeBadge=(prefix,type)=>type||'',entityTypePicker=()=>'<picker>',showEntityType=()=>{};
+const DESCRIPTION_LOADING='<loading description>';
+const known={};const knownEntity=id=>known[id]||null;
 const pending={};
 const api=path=>new Promise(resolve=>{pending[path.split('/').pop()]=resolve});
 const reply=name=>({entity:{name,description:name+' facts'},aliases:[],memories:[],relations:[],relation_names:{},hub:true});
@@ -613,6 +621,17 @@ const reply=name=>({entity:{name,description:name+' facts'},aliases:[],memories:
   pending.slow(reply('Slow'));await first;
   check(box.dataset.entityId==='fast','the last click is the open entity');
   check(box.innerHTML.includes('Fast')&&!box.innerHTML.includes('Slow'),'and it is what the panel shows');
+  // a name the page knows shows with its buttons before the server answers,
+  // which may first write a description
+  known.samurai={id:'samurai',name:'armored samurai',entity_type:'person',memories:3};
+  const third=openEntity('samurai');
+  check(box.innerHTML.includes('armored samurai')&&box.innerHTML.includes('>not an entity</button>')
+    &&box.innerHTML.includes('>change type...</button>')&&box.innerHTML.includes('<loading description>'),
+    'name and buttons at once: '+box.innerHTML.slice(0,200));
+  check(box.dataset.memories==3,'the count for "not an entity" is known at once');
+  pending.samurai(reply('armored samurai'));await third;
+  check(others.knowledgeentityidentity.innerHTML.includes('armored samurai facts'),'the description fills in');
+  check(others.knowledgeentitybody.innerHTML.includes('No active supporting memories.'),'and the memories');
 })().catch(e=>{console.error(e.message);process.exit(1)});
 """
     result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
@@ -999,6 +1018,7 @@ const panels={filters:true};
 let activeMapKey=null,haveMore=false,searchActive=false,current=[],offset=0;
 const PAGE=100,sent=[];
 const api=async(path,opts={})=>{sent.push(opts.body?JSON.parse(opts.body):path);return []};
+let G=null;nodes.mapentitydetail={dataset:{}};
 const render=()=>{},togglePanel=()=>{},toggleClear=()=>{},clearMapEntityDetail=()=>{},
   showMapEntityDetail=()=>{},galaxyRead=()=>{};
 """ + _region(source, "function filterByEntity(entity){", "function toggleClear(){") \
@@ -1079,7 +1099,10 @@ const document={getElementById:id=>nodes[id]};
 const panels={filters:false};
 let activeMapKey=null,editingId=null,opened=0;
 const sent=[];
-const togglePanel=()=>{opened++},toggleClear=()=>{},clearMapEntityDetail=()=>{};
+let G=null,shown=[],cleared=0;nodes.mapentitydetail={dataset:{}};
+const togglePanel=()=>{opened++},toggleClear=()=>{},galaxyRead=()=>{};
+const showMapEntityDetail=(id,known)=>{shown.push(known.name);nodes.mapentitydetail.dataset.entityId=id};
+const clearMapEntityDetail=()=>{cleared++;delete nodes.mapentitydetail.dataset.entityId};
 const search=async()=>{sent.push(searchFilters())};
 """ + _region(source, "function normalizedMemoryType", "function editCard(") \
         + _region(source, "function filterByEntity(entity){", "async function loadSearchFilters(") + r"""
@@ -1095,11 +1118,16 @@ const clicked=chips.map(m=>JSON.parse(decode(m[1])));
 (async()=>{
   filterByEntity(clicked[1]);
   check(opened===1,'the filters open to show the pick');
+  check(shown.join()==='travel','a chip shows what it is about, not only filters by it');
   filterByEntity(clicked[0]);
   check(JSON.stringify(sent.at(-1))==='{"since":"","until":"","topics":["travel"],"entities":["'+clicked[0].id+'"]}',
         'a tag chip filters by its tag, a person chip by its id: '+JSON.stringify(sent.at(-1)));
+  check(shown.join()==='travel,Ada','the panel follows the chip clicked last');
   filterByEntity(clicked[1]);
   check(JSON.stringify(sent.at(-1).topics)==='[]','a second click takes the tag off');
+  check(cleared===0,'the panel of another pick stays');
+  filterByEntity(clicked[0]);
+  check(cleared===1,'taking off the shown one closes its panel');
 })().catch(e=>{console.error(e.message);process.exit(1)});
 """
     _run_node(contract, json.dumps(memory))
@@ -1114,6 +1142,7 @@ def test_a_tag_panel_renames_and_deletes_but_offers_no_alias():
 const nodes={};
 const document={getElementById:id=>(nodes[id]??={innerHTML:'',dataset:{},hidden:true})};
 const panels={map:true};let knowledgeMapSuspended=false,activeMapKey=null,mapData={entities:[]};
+let aboutEntities=[],entityRows=[];const aboutPicks=()=>[],NAMED_TYPES=['person','concept'];
 const setKnowledgeOpen=()=>{},showKnowledge=()=>{},rememberTag=()=>{};
 const renameTitle=tag=>tag?'tag rename':'rename',DELETE_TAG_TITLE='delete this tag';
 const replies={
@@ -1128,10 +1157,13 @@ function check(condition,message){if(!condition)throw new Error(message)}
   let html=nodes.entitydetail.innerHTML;
   check(html.includes('>rename</button>')&&html.includes('>delete tag</button>'),'a tag renames and deletes');
   check(!html.includes('add alias')&&!html.includes('not an entity'),'and nothing else');
-  check(html.includes('<span class="syn">tag</span>'),'it reads "tag"');
+  check(html.includes('<span class="syn" id="knowledgeentitytype">tag</span>'),'it reads "tag"');
+  check(!html.includes('change type'),'a tag stays a tag');
   await openEntity('p1');
   html=nodes.entitydetail.innerHTML;
   check(html.includes('>add alias</button>')&&html.includes('>not an entity</button>'),'a person keeps both');
+  check(html.includes('>change type...</button>')&&html.includes('<option value="concept">concept</option>'),
+    'and can be given another type');
   activeMapKey='entity:t1';await showMapEntityDetail('t1');
   html=nodes.mapentitydetail.innerHTML;
   check(html.includes('>delete tag</button>')&&!html.includes('add alias'),'the map panel of a tag too');
@@ -1456,3 +1488,19 @@ check(at('entity:a')>at('entity:a29'),'newer is further right');
     result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
+
+
+def test_an_entity_timeline_asks_for_every_memory_about_it():
+    """The timeline button on an entity panel opens the timeline of that
+    entity alone: a person or thing by its id, a tag by its name."""
+    source = "\n".join(_scripts(_dashboard_html()))
+    assert source.count("openEntityTimeline(") >= 3, "a button on both panels"
+    contract = _lines(source, "const TAG_TYPE=", "function tagKey(") + r"""
+const tagNames={'t1':'lisbon trip'};
+""" + _region(source, "function timelinePath(entity){", "// ``entity`` ({id,name,entity_type})") + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+check(timelinePath()==='/api/v1/memories?when_since=1900-01-01&limit=1000','the whole store: what carries a time');
+check(timelinePath({id:'p1',name:'Ada',entity_type:'person'})==='/api/v1/memories?limit=1000&entity_id=p1','a person by id');
+check(timelinePath({id:'t1',name:'Lisbon trip',entity_type:'topic'})==='/api/v1/memories?limit=1000&categories=lisbon%20trip','a tag by its name');
+"""
+    _run_node(contract)
