@@ -374,7 +374,8 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <div class="gx-type-menu">
       <div class="gx-type-head"><span>Groups</span>
         <button type="button" class="x" onclick="document.getElementById('mapGroupMenu').open=false" title="close">x</button></div>
-      <label class="gx-type-option" title="Entities that share memories form a group: an island, a sector of the heat core, a lane. Kept per layout; Lanes start without groups."><input type="checkbox" id="mapGroupByLinks" onchange="setMapGrouping(this.checked)"><span>group by shared memories</span></label>
+      <label class="gx-type-option" title="Each entity is one disc holding all its memories. Off, every memory is a marker of its own, on the day it was said, and an entity is a ring among its memories. Kept per layout; Lanes start with it off."><input type="checkbox" id="mapBundleByEntity" onchange="setMapBundling(this.checked)"><span>bundle memories by entity</span></label>
+      <label class="gx-type-option" title="Entities that share memories form a cluster: an island, a sector of the heat core, a lane. Kept per layout."><input type="checkbox" id="mapGroupByLinks" onchange="setMapGrouping(this.checked)"><span>cluster entities that share memories</span></label>
       <label class="gx-type-option" title="You are mentioned in most memories. Without you on the map, those memories show only under the other things they are about."><input type="checkbox" id="mapShowOwner" onchange="setMapShowOwner(this.checked)"><span>show yourself</span></label>
     </div>
   </details>
@@ -1292,27 +1293,51 @@ try{const saved=localStorage.getItem('memry_map_layout');if(MAP_LAYOUTS.includes
 // Whether a layout groups entities that share memories, per layout: lanes
 // read best as one timeline, so they start without groups. And whether the
 // owner, mentioned in most memories, is drawn at all.
-let mapGrouping={islands:true,heat:true,lanes:false},mapShowOwner=true;
-try{
-  const saved=JSON.parse(localStorage.getItem('memry_map_grouping')||'null');
-  if(saved&&typeof saved==='object')for(const layout of ['islands','heat','lanes'])
-    if(typeof saved[layout]==='boolean')mapGrouping[layout]=saved[layout];
-  mapShowOwner=localStorage.getItem('memry_map_owner')!=='hidden';
-}catch(error){}
+// Two choices per layout: whether each entity is one disc of all its memories
+// (bundled) or every memory is a marker of its own, and whether entities that
+// share memories cluster (an island, a sector, a lane). Lanes start unbundled,
+// a timeline of memories. And whether the owner, in most memories, is drawn.
+let mapBundling={islands:true,heat:true,lanes:false};
+let mapGrouping={islands:true,heat:true,lanes:true},mapShowOwner=true;
+function savedLayoutChoice(key,into){
+  try{
+    const saved=JSON.parse(localStorage.getItem(key)||'null');
+    if(saved&&typeof saved==='object')for(const layout of ['islands','heat','lanes'])
+      if(typeof saved[layout]==='boolean')into[layout]=saved[layout];
+  }catch(error){}
+}
+savedLayoutChoice('memry_map_bundling',mapBundling);savedLayoutChoice('memry_map_clusters',mapGrouping);
+try{mapShowOwner=localStorage.getItem('memry_map_owner')!=='hidden'}catch(error){}
 const mapGrouped=()=>mapLayout!=='galaxy'&&mapGrouping[mapLayout]!==false;
+const mapBundled=()=>mapLayout==='galaxy'||mapBundling[mapLayout]!==false;
+const UNBUNDLED_R=6;
 function syncMapGroupControls(){
-  const box=document.getElementById('mapGroupByLinks');
-  box.checked=mapGrouped();box.disabled=mapLayout==='galaxy';
-  box.closest('label').title=mapLayout==='galaxy'
-    ?'The galaxy places entities in rings by how many memories mention them; it has no groups.'
-    :'Entities that share memories form a group: an island, a sector of the heat core, a lane. Kept per layout; Lanes start without groups.';
+  const galaxy=mapLayout==='galaxy',note='The galaxy draws each entity as a planet in rings by how many memories mention it; it has neither choice.';
+  const cluster=document.getElementById('mapGroupByLinks'),bundle=document.getElementById('mapBundleByEntity');
+  cluster.checked=mapGrouped();cluster.disabled=galaxy;
+  bundle.checked=mapBundled();bundle.disabled=galaxy;
+  if(galaxy){cluster.closest('label').title=note;bundle.closest('label').title=note}
   document.getElementById('mapShowOwner').checked=mapShowOwner;
 }
 function setMapGrouping(on){
   if(mapLayout==='galaxy')return;
   mapGrouping[mapLayout]=on;
-  try{localStorage.setItem('memry_map_grouping',JSON.stringify(mapGrouping))}catch(error){}
+  try{localStorage.setItem('memry_map_clusters',JSON.stringify(mapGrouping))}catch(error){}
+  if(L)L.targetsFor='';
   restartLayout();
+}
+function setMapBundling(on){
+  if(mapLayout==='galaxy')return;
+  mapBundling[mapLayout]=on;
+  try{localStorage.setItem('memry_map_bundling',JSON.stringify(mapBundling))}catch(error){}
+  applyBundling();restartLayout();
+}
+// An entity's radius: its disc of every memory, or a small ring
+function applyBundling(){
+  if(!L)return;
+  const bundled=mapBundled();
+  for(const node of L.nodes)node.lr=bundled?node.br:UNBUNDLED_R;
+  L.targetsFor='';
 }
 function setMapShowOwner(on){
   mapShowOwner=on;
@@ -1402,7 +1427,7 @@ function buildLayout(){
   let oldest=30;
   nodes.forEach((node,i)=>{
     node.group=grouped.label[i];layoutGroupOf.set(node.key,node.group);
-    node.lr=Math.max(2.5,step*Math.sqrt(node.count)+dot);
+    node.br=Math.max(2.5,step*Math.sqrt(node.count)+dot);node.lr=node.br;
     const said=Date.parse(node.last_said||'');
     node.age=isNaN(said)?null:Math.max(0,(now-said)/864e5);
     if(node.age!==null)oldest=Math.max(oldest,node.age);
@@ -1468,10 +1493,49 @@ function buildLayout(){
       filled+=Math.pow(node.lr+14,2);
     });
   if(centre)centre.slot=(groups.get(centre.group)||{}).slot||slots[0];
-  L={nodes,groups:[...groups.values()],big,slots,flat,centre,step,dot,
+  // every memory on its own, for the layouts without bundles: the entities
+  // drawn that it mentions, its main one (the busiest that is not the owner)
+  const now2=Date.now(),points=[],perPrimary=new Map();
+  for(const raw of mapData.memory_points||[]){
+    const ents=raw.entities.map(key=>G.byKey[key]).filter(Boolean);
+    if(!ents.length)continue;
+    const primary=ents.filter(node=>node!==centre).sort((a,b)=>b.count-a.count)[0]||ents[0];
+    const said=Date.parse(raw.said||''),k=perPrimary.get(primary)||0;perPrimary.set(primary,k+1);
+    points.push({ents,primary,k,type:normalizedMemoryType({memory_type:raw.type}),
+      age:isNaN(said)?null:Math.max(0,(now2-said)/864e5),u:(hashCode(raw.id)%9973)/9973});
+  }
+  const counts=nodes.map(node=>node.count).sort((a,b)=>b-a),labelMin=counts[Math.min(counts.length-1,14)]||1;
+  L={nodes,groups:[...groups.values()],big,slots,flat,centre,step,dot,points,labelMin,targetsFor:'',
     dots:step>=1.15&&total<=20000,Rm,ax,r0:(centre?centre.lr:8)+12,
     xl:-W/2+22,xr:W/2-30,logMax:Math.log1p(oldest),oldest,frames:first?0:180,sig:''};
+  applyBundling();
   if(first){const settle=nodes.length<=600?220:70;for(let i=0;i<settle;i++)layoutTick()}
+}
+// Where a memory of its own sits in lanes and the heat core: at its own age,
+// in the lane or sector of its main entity's cluster.
+function pointTarget(point,grouped){
+  const node=point.primary,slot=grouped?(node.g?node.g.slot:node.slot):L.flat;
+  const f=point.age===null?1:Math.min(1,Math.log1p(point.age)/L.logMax);
+  if(mapLayout==='heat'){
+    const angle=slot.a0+point.u*(slot.a1-slot.a0),rad=L.r0+(L.Rm-L.r0)*f;
+    return[Math.cos(angle)*rad*L.ax,Math.sin(angle)*rad];
+  }
+  return[L.xr-(L.xr-L.xl)*f,slot.y0+(0.1+0.8*point.u)*(slot.y1-slot.y0)];
+}
+// Unbundled lanes and heat: each memory's place, and each entity in the middle
+// of its memories. Worked out once per layout and choice.
+function unbundledTargets(grouped){
+  const key=mapLayout+'|'+grouped;
+  if(L.targetsFor===key)return;
+  L.targetsFor=key;
+  const sum=new Map();
+  for(const point of L.points){
+    point.t=pointTarget(point,grouped);
+    for(const node of point.ents){
+      const s=sum.get(node)||[0,0,0];s[0]+=point.t[0];s[1]+=point.t[1];s[2]++;sum.set(node,s);
+    }
+  }
+  for(const node of L.nodes){const s=sum.get(node);node.ut=s?[s[0]/s[2],s[1]/s[2]]:null}
 }
 const layoutAgeF=node=>node.age===null?1:Math.min(1,Math.log1p(node.age)/L.logMax);
 // One step: every entity eases toward its place in the current layout, then
@@ -1497,6 +1561,7 @@ function layoutTick(){
     let tx,ty,ease=0.09;
     if(islands&&grouped){tx=node.g.x;ty=node.g.y;ease=0.015+0.06*Math.min(1,node.lr/22)}
     else if(islands){tx=node.spiral[0];ty=node.spiral[1];ease=0.06}
+    else if(!mapBundled()&&(unbundledTargets(grouped),node.ut)){tx=node.ut[0];ty=node.ut[1]}
     else{
       const slot=grouped?(node.g?node.g.slot:node.slot):L.flat,f=layoutAgeF(node);
       if(mapLayout==='heat'){
@@ -1564,8 +1629,8 @@ function layoutFrame(now){
   const moving=L.frames>0;
   if(moving){layoutTick();L.frames--}
   // Nothing moved and nothing changed: keep the picture that is there.
-  const grouped=mapGrouped();
-  const sig=[mapLayout,grouped,W,H,dark,hoverFocusTag,hoverFocusMix.toFixed(2),activeMapKey].join('|');
+  const grouped=mapGrouped(),bundled=mapBundled();
+  const sig=[mapLayout,grouped,bundled,W,H,dark,hoverFocusTag,hoverFocusMix.toFixed(2),activeMapKey].join('|');
   if(!moving&&sig===L.sig&&!gPulses.length){next();return}
   L.sig=sig;
   ctx.setTransform(dpr,0,0,dpr,0,0);
@@ -1617,6 +1682,31 @@ function layoutFrame(now){
     }
   }
   ctx.globalAlpha=1;
+  if(!bundled){
+    // every memory a marker of its own; with an entity picked or hovered,
+    // its memories stand out
+    if(mapLayout!=='islands')unbundledTargets(grouped);
+    const focus=sel||(hov&&hoverMix>0.04?hov:null),size=Math.max(1.5,L.dot);
+    const byType=new Map();
+    for(const point of L.points){
+      let x,y;
+      if(mapLayout==='islands'){
+        x=0;y=0;for(const node of point.ents){x+=node.lx;y+=node.ly}
+        x/=point.ents.length;y/=point.ents.length;
+        const rad=UNBUNDLED_R+3+L.step*Math.sqrt(point.k+0.5),angle=point.k*2.39996;
+        x+=Math.cos(angle)*rad;y+=Math.sin(angle)*rad;
+      }else{x=point.t[0];y=point.t[1]}
+      const lit=!focus||point.ents.includes(focus);
+      const list=byType.get(point.type+(lit?'':'~'))||[];list.push([x,y]);byType.set(point.type+(lit?'':'~'),list);
+    }
+    for(const [key,list] of byType){
+      const dim=key.endsWith('~'),type=dim?key.slice(0,-1):key;
+      ctx.globalAlpha=dim?0.12:0.9;ctx.fillStyle=TYPE[type]||DIM;ctx.beginPath();
+      for(const [x,y] of list)addMarkerPath(ctx,type,x,y,size);
+      ctx.fill();
+    }
+    ctx.globalAlpha=1;
+  }
   const order=hov?[...L.nodes.filter(node=>node!==hov),hov]:L.nodes;
   const labels=[];
   for(const n of order){
@@ -1625,7 +1715,11 @@ function layoutFrame(now){
     ctx.globalAlpha=A;
     ctx.fillStyle=hexA(TEXT,n===L.centre?0.1:0.05);
     ctx.beginPath();ctx.arc(x,y,n.lr,0,Math.PI*2);ctx.fill();
-    if(L.dots){
+    if(!bundled){
+      // a ring for the entity, its memories drawn on their own
+      ctx.strokeStyle=hexA(TEXT,0.75);ctx.lineWidth=1.3;
+      ctx.beginPath();ctx.arc(x,y,n.lr-0.5,0,Math.PI*2);ctx.stroke();
+    }else if(L.dots){
       // one marker per memory on a sunflower spiral, the types mixed by their share
       const types=n.dotTypes??=memoryMarkerTypes(n.typeCounts,n.count);
       for(const type of Object.keys(n.typeCounts)){
@@ -1649,7 +1743,8 @@ function layoutFrame(now){
       ctx.beginPath();ctx.arc(x,y,n.lr+2.5,0,Math.PI*2);ctx.stroke();
     }
     const lit=isSel||isHov||linked(n,sel)||(linked(n,hov)&&hoverMix>0.04);
-    if(n.lr>=13||n===L.centre||(grouped&&n.g&&n.g.big&&n.g.hub===n)||lit)labels.push([n,A,lit,isSel||isHov?2:(lit?1:0)]);
+    const big=bundled?n.lr>=13:n.count>=L.labelMin;
+    if(big||n===L.centre||(grouped&&n.g&&n.g.big&&n.g.hub===n)||lit)labels.push([n,A,lit,isSel||isHov?2:(lit?1:0)]);
   }
   ctx.textAlign='center';ctx.textBaseline='top';
   ctx.font='500 9.5px ui-sans-serif,system-ui';
@@ -1703,7 +1798,7 @@ function setMapLayout(layout){
   if(!MAP_LAYOUTS.includes(layout))return;
   mapLayout=layout;
   try{localStorage.setItem('memry_map_layout',layout)}catch(error){}
-  syncMapLayoutButtons();
+  syncMapLayoutButtons();applyBundling();
   if(L){L.frames=220;L.sig=''}
   if(G){
     galaxyRead();

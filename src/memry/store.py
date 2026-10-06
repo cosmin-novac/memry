@@ -3131,6 +3131,7 @@ class MemoryStore:
         by_id = {node.get("entity_id"): node for node in nodes}
         planets: list[dict[str, Any]] = []
         parts: dict[str, list[dict[str, Any]]] = {}
+        folded: dict[str, str] = {}  # a part's key -> the key of its home
         def is_planet(entity_id: str, entity_type: str | None) -> bool:
             info = structure.get(entity_id)
             return bool(info and info["hub"] and (
@@ -3153,6 +3154,7 @@ class MemoryStore:
                     "entity_id": node["entity_id"], "label": node["label"],
                     "count": node["count"],
                 })
+                folded[node["key"]] = f"entity:{home['id']}"
                 continue
             if is_planet(node["entity_id"], node.get("entity_type")):
                 planets.append(node)
@@ -3183,6 +3185,15 @@ class MemoryStore:
             edge for edge in data.get("entity_edges") or []
             if edge["a"] in shown and edge["b"] in shown
         ]
+        # each memory names the planets it is about: a part by its home
+        points = []
+        for point in data.get("memory_points") or []:
+            keys = list(dict.fromkeys(
+                key for key in (folded.get(key, key) for key in point["entities"])
+                if key in shown))
+            if keys:
+                points.append({**point, "entities": keys})
+        data["memory_points"] = points
         return data
 
     def categories(
