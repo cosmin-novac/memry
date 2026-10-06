@@ -125,7 +125,7 @@ def test_the_timeline_orders_groups_and_marks_today():
     source = "\n".join(_scripts(html))
 
     assert 'id="timemodal"' in html
-    assert ">Timeline</h2>" in html
+    assert '<span id="timelinetitle">Timeline</span></h2>' in html
     assert "No memories carry a time yet." in source
     assert "when_since=1900-01-01" in source
     assert "openTimelineMemory(" in source
@@ -166,6 +166,14 @@ check(allAhead[allAhead.length-1].kind==='today',
   'a future-only timeline ends at today');
 check(timelineEntries([],'2026-09-20').every(entry=>entry.kind!=='row'),
   'nothing dated, nothing placed');
+// one entity's timeline: a memory without a time sits on the day it was said
+const about=[{id:'trip',content:'f',when:{start:'2026-08-05'},created_at:'2026-07-01T10:00:00'},
+  {id:'note',content:'g',created_at:'2026-09-10T08:00:00'}];
+const history=timelineEntries(about,'2026-09-20',true).filter(entry=>entry.kind==='row');
+check(history.map(entry=>entry.memory.id+':'+entry.said).join()==='note:true,trip:false',
+  'every memory about it, the undated one on the day it was said: '+JSON.stringify(history));
+check(timelineEntries(about,'2026-09-20').filter(entry=>entry.kind==='row').length===1,
+  'the whole-store timeline keeps only what carries a time');
 """
     result = subprocess.run(
         ["node", "-"], input=contract, capture_output=True, text=True

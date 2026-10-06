@@ -507,8 +507,8 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
 </section>
 </div></div>
 <div class="modal" id="timemodal"><div class="sheet" style="width:min(96vw,46rem)">
-<h2><button class="x" onclick="closeTimeline()" title="close">x</button>Timeline</h2>
-<p class="hint">Every memory that says when the thing itself happens, newest first. Today opens near the top, with what is still ahead above it.</p>
+<h2><button class="x" onclick="closeTimeline()" title="close">x</button><span id="timelinetitle">Timeline</span></h2>
+<p class="hint" id="timelinehint">Every memory that says when the thing itself happens, newest first. Today opens near the top, with what is still ahead above it.</p>
 <div class="timeline" id="timelinebody"></div>
 </div></div>
 </main><script>
@@ -1781,6 +1781,7 @@ function mapEntityPanelHtml(entityId,entity,aliases){
   return `<h3><span id="mapentityname">${esc(entity.name)}</span> ${entityTypeBadge('map',entity.entity_type)}</h3>
       <div id="mapentityidentity">${aliases?entityIdentityBlock(entity,aliases):DESCRIPTION_LOADING}</div>
       <div class="entity-actions">
+        <button class="act" onclick='openEntityTimeline("map",${id})' title="Every memory about this, in time order.">timeline</button>
         <button class="act" onclick='renameEntity(${id})' title="${renameTitle(tag)}">rename</button>
         ${tag?'':`<button class="act" onclick="togglePicker(this,'maptypepicker')" title="Change what this entity is: a person, an organization, a concept and so on.">change type...</button>
         <button class="act" onclick='addMapAlias(${id})' title="Add another name for this entity.">add alias</button>`}
@@ -2770,6 +2771,7 @@ function knowledgeEntityHeadHtml(id,entity,aliases,memories){
   return `<h3><button class="x" style="float:right;border:none;background:none;color:var(--dim);cursor:pointer" title="close" onclick="closeEntity()">x</button><span id="knowledgeentityname">${esc(entity.name)}</span> ${entityTypeBadge('knowledge',entity.entity_type)}</h3>
     <div id="knowledgeentityidentity">${aliases?entityIdentityBlock(entity,aliases):DESCRIPTION_LOADING}</div>
     <div class="entity-actions">
+      <button class="act" onclick='openEntityTimeline("knowledge",${arg})' title="Every memory about this, in time order.">timeline</button>
       <button class="act" onclick='renameEntity(${arg})' title="${renameTitle(tag)}">rename</button>
       ${tag?'':`<button class="act" onclick="togglePicker(this,'knowledgetypepicker')" title="Change what this entity is: a person, an organization, a concept and so on.">change type...</button>
       <button class="act" onclick='addAlias(${arg})' title="Add another name for this entity.">add alias</button>`}
@@ -3075,12 +3077,15 @@ function timelinePoint(m){
 // Pure on purpose: rows and a date in, the entries the timeline draws out. The
 // ordering and the place of the Today line are the part worth testing, and
 // neither needs a DOM.
-function timelineEntries(rows,todayISO){
+// With ``said``, a memory that does not say when it happened sits on the day
+// it was said, and says so: one entity's timeline is then its whole history.
+function timelineEntries(rows,todayISO,said=false){
   const today=String(todayISO||'').slice(0,10);
   const dated=[];
   for(const m of rows||[]){
     const at=timelinePoint(m);
     if(at)dated.push({at:String(at),memory:m});
+    else if(said&&m&&m.created_at)dated.push({at:String(m.created_at),memory:m,said:true});
   }
   dated.sort((a,b)=>a.at<b.at?1:(a.at>b.at?-1:0));
   const out=[];
@@ -3097,7 +3102,7 @@ function timelineEntries(rows,todayISO){
   for(const item of dated){
     if(item.at.slice(0,10)<today)placeToday();
     openMonth(item.at);
-    out.push({kind:'row',at:item.at,memory:item.memory});
+    out.push({kind:'row',at:item.at,memory:item.memory,said:!!item.said});
   }
   placeToday();
   return out;
@@ -3135,15 +3140,16 @@ function timelineRow(entry){
   const m=entry.memory;
   const repeat=timelineRepeat(m);
   return `<button class="tl-row" onclick='openTimelineMemory(${JSON.stringify(String(m.id))})'>
-    <span class="tl-when">${esc(timelineLabel(m,entry.at))}</span>
+    <span class="tl-when"${entry.said?' title="When it happened is not known: this is the day it was said."':''}>${esc(entry.said?'said '+String(entry.at).slice(0,10):timelineLabel(m,entry.at))}</span>
     <span class="tl-text">${esc(m.content)}</span>
     <span class="tl-side">${memoryTypeBadge(m)}${repeat?`<span class="tag when-chip">${esc(repeat)}</span>`:''}</span></button>`;
 }
-function renderTimeline(rows){
+function renderTimeline(rows,entity){
   const el=document.getElementById('timelinebody');
-  const entries=timelineEntries(rows,new Date().toISOString().slice(0,10));
+  const entries=timelineEntries(rows,new Date().toISOString().slice(0,10),!!entity);
   if(!entries.some(entry=>entry.kind==='row')){
-    el.innerHTML='<div class="empty">No memories carry a time yet.</div>';return;
+    el.innerHTML=entity?`<div class="empty">No memories about ${esc(entity.name)} yet.</div>`
+      :'<div class="empty">No memories carry a time yet.</div>';return;
   }
   el.innerHTML=entries.map(entry=>
     entry.kind==='month'?`<div class="tl-month">${esc(entry.label)}</div>`
@@ -3161,15 +3167,38 @@ function setTimelineOpen(open){
   document.body.classList.toggle('knowledge-open',open);
   if(!open&&wasOpen)resumeMapAfterKnowledge();
 }
-async function openTimeline(){
+const TIMELINE_HINT='Every memory that says when the thing itself happens, newest first. Today opens near the top, with what is still ahead above it.';
+// The memories the timeline asks for: those that carry a time, or every
+// memory about one entity (a tag by its name, a person or thing by its id).
+function timelinePath(entity){
+  if(!entity)return '/api/v1/memories?when_since=1900-01-01&limit=1000';
+  const tag=entity.entity_type===TAG_TYPE;
+  return '/api/v1/memories?limit=1000&'+(tag
+    ?'categories='+encodeURIComponent(tagNames[entity.id]||tagKey(entity))
+    :'entity_id='+encodeURIComponent(entity.id));
+}
+// ``entity`` ({id,name,entity_type}) narrows it to one person, thing or tag.
+async function openTimeline(entity){
   closeUserMenu();
+  document.getElementById('timelinetitle').textContent=entity?'Timeline: '+entity.name:'Timeline';
+  document.getElementById('timelinehint').textContent=entity
+    ?'Every memory about '+entity.name+', newest first: on the day it happened where a memory says so, else on the day it was said. Today opens near the top.'
+    :TIMELINE_HINT;
   setTimelineOpen(true);
   const el=document.getElementById('timelinebody');
   el.innerHTML='<div class="empty">loading…</div>';
   let rows;
-  try{rows=await api('/api/v1/memories?when_since=1900-01-01&limit=1000')}
+  try{rows=await api(timelinePath(entity))}
   catch(error){el.innerHTML='<div class="empty">The timeline could not be loaded.</div>';return}
-  renderTimeline(Array.isArray(rows)?rows:[]);
+  renderTimeline(Array.isArray(rows)?rows:[],entity);
+}
+// The timeline of the entity a panel shows, by its name and type there.
+function openEntityTimeline(prefix,entityId){
+  const name=document.getElementById(prefix+'entityname')?.textContent||'';
+  const known=knownEntity(entityId);
+  const type=known?known.entity_type:(entityId in tagNames?TAG_TYPE:null);
+  if(prefix==='knowledge')setKnowledgeOpen(false);
+  openTimeline({id:entityId,name,entity_type:type});
 }
 function closeTimeline(){setTimelineOpen(false)}
 function openTimelineMemory(id){closeTimeline();showMemory(id)}

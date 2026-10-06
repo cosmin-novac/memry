@@ -1488,3 +1488,19 @@ check(at('entity:a')>at('entity:a29'),'newer is further right');
     result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
+
+
+def test_an_entity_timeline_asks_for_every_memory_about_it():
+    """The timeline button on an entity panel opens the timeline of that
+    entity alone: a person or thing by its id, a tag by its name."""
+    source = "\n".join(_scripts(_dashboard_html()))
+    assert source.count("openEntityTimeline(") >= 3, "a button on both panels"
+    contract = _lines(source, "const TAG_TYPE=", "function tagKey(") + r"""
+const tagNames={'t1':'lisbon trip'};
+""" + _region(source, "function timelinePath(entity){", "// ``entity`` ({id,name,entity_type})") + r"""
+function check(condition,message){if(!condition)throw new Error(message)}
+check(timelinePath()==='/api/v1/memories?when_since=1900-01-01&limit=1000','the whole store: what carries a time');
+check(timelinePath({id:'p1',name:'Ada',entity_type:'person'})==='/api/v1/memories?limit=1000&entity_id=p1','a person by id');
+check(timelinePath({id:'t1',name:'Lisbon trip',entity_type:'topic'})==='/api/v1/memories?limit=1000&categories=lisbon%20trip','a tag by its name');
+"""
+    _run_node(contract)
