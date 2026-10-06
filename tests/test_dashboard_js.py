@@ -1480,10 +1480,32 @@ check(moved<60,'one new entity does not reshuffle the map: '+moved.toFixed(1));
 mapLayout='heat';for(let i=0;i<260;i++)layoutTick();
 const reach=key=>{const node=G.nodes.find(n=>n.key===key);return Math.hypot(node.lx/L.ax,node.ly)};
 check(reach('entity:a')<reach('entity:a29'),'an entity touched yesterday is nearer than one touched long ago');
-// lanes: the newest on the right
-mapLayout='lanes';for(let i=0;i<260;i++)layoutTick();
+// lanes with one bubble per entity: the newest on the right
+mapLayout='lanes';mapBundling.lanes=true;applyBundling();for(let i=0;i<260;i++)layoutTick();
 const at=key=>G.nodes.find(n=>n.key===key).lx;
 check(at('entity:a')>at('entity:a29'),'newer is further right');
+// lanes without bundles: one row of equal height per entity, the rows of a
+// cluster together under its name, more rows than fit scrolling
+mapBundling.lanes=false;applyBundling();
+const rows=laneRows(true),only=rows.entries.filter(entry=>entry.kind==='row');
+check(only.length===G.nodes.length,'a row for every entity: '+only.length);
+check(new Set(only.map(entry=>entry.h)).size===1&&only[0].h>=14&&only[0].h<=28,'all rows one height');
+check(rows.entries[0].kind==='head','a cluster opens with its name');
+let block=null,seen=new Set();
+for(const entry of rows.entries){
+  if(entry.kind==='head'){check(!seen.has(entry.name),'a cluster is one block: '+entry.name);seen.add(entry.name);block=entry.name;continue}
+  const slot=entry.node.g?entry.node.g.slot:entry.node.slot;
+  check((slot.name||'other')===block,entry.node.key+' sits in the block of its cluster');
+}
+check(rows.max>0&&rows.total-rows.max===rows.span,'more rows than fit scroll');
+const first=only[0];
+check(laneRowAt(G.H/2+rows.top+first.y+first.h/2)===first.node,'a point on a row finds its entity');
+check(laneRowAt(G.H/2+rows.top-5)===null,'above the rows, none');
+L.rowScroll=rows.max;
+const last=only[only.length-1];
+check(laneRowAt(G.H/2+rows.top+last.y-rows.max+last.h/2)===last.node,'scrolled to the end, the last row');
+const flat=laneRows(false).entries;
+check(flat.every(entry=>entry.kind==='row')&&flat[0].node.key==='entity:me','without clusters the busiest is on top');
 """
     result = subprocess.run(["node", "-"], input=contract, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

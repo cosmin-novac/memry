@@ -378,7 +378,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <div class="gx-type-menu">
       <div class="gx-type-head"><span>Groups</span>
         <button type="button" class="x" onclick="document.getElementById('mapGroupMenu').open=false" title="close">x</button></div>
-      <label class="gx-type-option" title="On: each entity is one bubble holding all its memories. Off: every memory is a dot of its own, on the day it was said, and each entity a ring among its memories. Kept per layout; Lanes start with it off."><input type="checkbox" id="mapBundleByEntity" onchange="setMapBundling(this.checked)"><span>Show memories grouped by entity</span></label>
+      <label class="gx-type-option" title="On: each entity is one bubble holding all its memories. Off: every memory is a dot of its own, on the day it was said; in Lanes each entity is a row of its own, in the other layouts a faint ring among its memories. Kept per layout; Lanes start with it off."><input type="checkbox" id="mapBundleByEntity" onchange="setMapBundling(this.checked)"><span>Show memories grouped by entity</span></label>
       <label class="gx-type-option" title="Entities that share memories sit together: as an island, a sector of the heat core, a lane. Kept per layout."><input type="checkbox" id="mapGroupByLinks" onchange="setMapGrouping(this.checked)"><span>Show memories clustered</span></label>
       <label class="gx-type-option" title="You are in most memories. Off: you are left off the map, and those memories show only under the other things they are about."><input type="checkbox" id="mapShowOwner" onchange="setMapShowOwner(this.checked)"><span>Group the user's memories</span></label>
     </div>
@@ -1506,8 +1506,10 @@ function buildLayout(){
     if(!ents.length)continue;
     const primary=ents.filter(node=>node!==centre).sort((a,b)=>b.count-a.count)[0]||ents[0];
     const said=Date.parse(raw.said||''),k=perPrimary.get(primary)||0;perPrimary.set(primary,k+1);
-    points.push({ents,primary,k,type:normalizedMemoryType({memory_type:raw.type}),
-      age:isNaN(said)?null:Math.max(0,(now2-said)/864e5),u:(hashCode(raw.id)%9973)/9973});
+    const point={ents,primary,k,type:normalizedMemoryType({memory_type:raw.type}),
+      age:isNaN(said)?null:Math.max(0,(now2-said)/864e5),u:(hashCode(raw.id)%9973)/9973};
+    points.push(point);
+    for(const node of ents)(node.points??=[]).push(point);
   }
   const counts=nodes.map(node=>node.count).sort((a,b)=>b-a),labelMin=counts[Math.min(counts.length-1,14)]||1;
   L={nodes,groups:[...groups.values()],big,slots,flat,centre,step,dot,points,labelMin,targetsFor:'',
@@ -1526,6 +1528,107 @@ function pointTarget(point,grouped){
     return[Math.cos(angle)*rad*L.ax,Math.sin(angle)*rad];
   }
   return[L.xr-(L.xr-L.xl)*f,slot.y0+(0.1+0.8*point.u)*(slot.y1-slot.y0)];
+}
+// Lanes without bundles: one row of equal height per entity, its memories as
+// markers along it on the day they were said. With clusters, the rows of a
+// cluster sit together under its name, the biggest cluster first; without,
+// the busiest entity is on top. More rows than fit scroll inside the map.
+const ROW_GUTTER=150,ROW_HEAD=16;
+function laneRows(grouped){
+  const W=G.W,H=G.H,key=[grouped,W,H,L.nodes.length].join('|');
+  if(L.rows&&L.rows.key===key)return L.rows;
+  const byCount=(a,b)=>b.count-a.count||(a.label<b.label?-1:1);
+  const total=nodes=>nodes.reduce((sum,node)=>sum+node.count,0);
+  const blocks=[];
+  if(grouped){
+    const bySlot=new Map();
+    for(const node of L.nodes){
+      const slot=node.g?node.g.slot:(node.slot||L.flat);
+      if(!bySlot.has(slot))bySlot.set(slot,[]);
+      bySlot.get(slot).push(node);
+    }
+    [...bySlot.entries()]
+      .sort((a,b)=>(a[0].name==='other')-(b[0].name==='other')||total(b[1])-total(a[1]))
+      .forEach(([slot,nodes])=>blocks.push({name:slot.name||'other',nodes:nodes.sort(byCount)}));
+  }else blocks.push({name:'',nodes:[...L.nodes].sort(byCount)});
+  const top=LANE_TOP-H/2,span=H-LANE_TOP-LANE_BOTTOM;
+  const heads=blocks.filter(block=>block.name).length;
+  const h=clampTo((span-heads*ROW_HEAD)/Math.max(1,L.nodes.length),14,28);
+  const entries=[];let y=0;
+  for(const block of blocks){
+    if(block.name){entries.push({kind:'head',name:block.name,y,h:ROW_HEAD});y+=ROW_HEAD}
+    block.nodes.forEach((node,i)=>{entries.push({kind:'row',node,y,h,odd:i%2===1});y+=h});
+  }
+  L.rows={key,entries,top,span,total:y,max:Math.max(0,y-span),xl:-W/2+ROW_GUTTER,xr:L.xr};
+  L.rowScroll=clampTo(L.rowScroll||0,0,L.rows.max);
+  return L.rows;
+}
+// The row under a point of the canvas (CSS pixels from its top left), if any.
+function laneRowAt(y){
+  const R=L&&L.rows;if(!R)return null;
+  const local=y-G.H/2;
+  if(local<R.top||local>R.top+R.span)return null;
+  const at=local-R.top+(L.rowScroll||0);
+  const entry=R.entries.find(item=>item.kind==='row'&&at>=item.y&&at<item.y+item.h);
+  return entry?entry.node:null;
+}
+function drawLaneRows(ctx,o){
+  const {W,H,TEXT,DIM,ACCENT,TYPE,haloText,marks,ageAt,grouped,sel,hov,hoverMix}=o;
+  const R=laneRows(grouped),scroll=L.rowScroll||0,top=R.top,bottom=top+R.span;
+  const timeX=age=>R.xr-(R.xr-R.xl)*(age===null?1:Math.min(1,ageAt(age)));
+  ctx.lineWidth=1;ctx.strokeStyle=hexA(DIM,0.3);
+  for(const mark of marks){
+    const x=timeX(mark[0]);ctx.beginPath();ctx.moveTo(x,top-4);ctx.lineTo(x,bottom+4);ctx.stroke();
+  }
+  const focus=sel||(hov&&hoverMix>0.04?hov:null),size=Math.max(1.6,Math.min(3,L.dot));
+  const byType=new Map();
+  ctx.save();ctx.beginPath();ctx.rect(-W/2,top,W,R.span);ctx.clip();
+  ctx.textBaseline='middle';ctx.font='500 10px ui-sans-serif,system-ui';
+  if('letterSpacing'in ctx)ctx.letterSpacing='0.5px';
+  for(const entry of R.entries){
+    const y0=top+entry.y-scroll;
+    if(y0+entry.h<top||y0>bottom)continue;
+    const mid=y0+entry.h/2;
+    ctx.globalAlpha=1;ctx.textAlign='left';
+    if(entry.kind==='head'){
+      ctx.strokeStyle=hexA(ACCENT,0.35);ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(-W/2,y0+0.5);ctx.lineTo(W/2,y0+0.5);ctx.stroke();
+      haloText(entry.name.toUpperCase(),-W/2+10,mid,ACCENT);continue;
+    }
+    const n=entry.node,isSel=activeMapKey===n.key,isHov=n===hov&&hoverMix>0.04;
+    if(entry.odd||isSel||isHov){
+      ctx.fillStyle=isSel?hexA(ACCENT,0.12):(isHov?hexA(TEXT,0.08):hexA(TEXT,0.025));
+      ctx.fillRect(-W/2,y0,W,entry.h);
+    }
+    const label=n.label.length>19?n.label.slice(0,18)+'...':n.label;
+    ctx.fillStyle=isSel?ACCENT:(!focus||n===focus||isHov?TEXT:DIM);
+    ctx.fillText(label,-W/2+10,mid);
+    ctx.fillStyle=DIM;ctx.textAlign='right';ctx.fillText(String(n.count),R.xl-10,mid);
+    for(const point of n.points||[]){
+      const lit=!focus||point.ents.includes(focus),kind=point.type+(lit?'':'~');
+      if(!byType.has(kind))byType.set(kind,[]);
+      byType.get(kind).push([timeX(point.age),mid+(point.u-0.5)*entry.h*0.5]);
+    }
+    n.px=ROW_GUTTER/2;n.py=H/2+mid;
+  }
+  for(const [kind,list] of byType){
+    const dim=kind.endsWith('~'),type=dim?kind.slice(0,-1):kind;
+    ctx.globalAlpha=dim?0.14:0.9;ctx.fillStyle=TYPE[type]||DIM;ctx.beginPath();
+    for(const [x,y] of list)addMarkerPath(ctx,type,x,y,size);
+    ctx.fill();
+  }
+  ctx.restore();ctx.globalAlpha=1;
+  ctx.strokeStyle=hexA(DIM,0.25);ctx.beginPath();ctx.moveTo(R.xl-4,top);ctx.lineTo(R.xl-4,bottom);ctx.stroke();
+  if(R.max>0){
+    const thumb=Math.max(24,R.span*R.span/R.total),ty=top+(R.span-thumb)*(scroll/R.max);
+    ctx.fillStyle=hexA(DIM,0.4);ctx.fillRect(W/2-6,ty,3,thumb);
+  }
+  ctx.textAlign='center';ctx.textBaseline='top';ctx.font='500 9.5px ui-sans-serif,system-ui';
+  if('letterSpacing'in ctx)ctx.letterSpacing='1.5px';
+  const axis=H/2-LANE_BOTTOM+8;
+  for(const mark of marks)haloText(mark[1],timeX(mark[0]),axis,DIM);
+  haloText('now',R.xr,axis,DIM);
+  if('letterSpacing'in ctx)ctx.letterSpacing='0px';
 }
 // Unbundled lanes and heat: each memory's place, and each entity in the middle
 // of its memories. Worked out once per layout and choice.
@@ -1546,6 +1649,7 @@ const layoutAgeF=node=>node.age===null?1:Math.min(1,Math.log1p(node.age)/L.logMa
 // One step: every entity eases toward its place in the current layout, then
 // overlapping entities are pushed apart. Run for a few seconds after a change.
 function layoutTick(){
+  if(mapLayout==='lanes'&&!mapBundled())return;  // rows are placed, not moved
   const W=G.W,H=G.H,islands=mapLayout!=='heat'&&mapLayout!=='lanes',grouped=mapGrouped();
   const pinned=mapLayout==='lanes'?null:L.centre,cr=pinned?pinned.lr:0;
   if(islands&&grouped){
@@ -1635,7 +1739,7 @@ function layoutFrame(now){
   if(moving){layoutTick();L.frames--}
   // Nothing moved and nothing changed: keep the picture that is there.
   const grouped=mapGrouped(),bundled=mapBundled();
-  const sig=[mapLayout,grouped,bundled,W,H,dark,hoverFocusTag,hoverFocusMix.toFixed(2),activeMapKey].join('|');
+  const sig=[mapLayout,grouped,bundled,W,H,dark,hoverFocusTag,hoverFocusMix.toFixed(2),activeMapKey,L.rowScroll||0].join('|');
   if(!moving&&sig===L.sig&&!gPulses.length){next();return}
   L.sig=sig;
   ctx.setTransform(dpr,0,0,dpr,0,0);
@@ -1648,6 +1752,19 @@ function layoutFrame(now){
   const haloText=(text,x,y,color)=>{
     ctx.lineWidth=4;ctx.strokeStyle=haloColor;ctx.strokeText(text,x,y);ctx.fillStyle=color;ctx.fillText(text,x,y);
   };
+  if(mapLayout==='lanes'&&!bundled){
+    const sel=activeMapKey?G.byKey[activeMapKey]:null,hov=hoverFocusTag?G.byKey[hoverFocusTag]:null;
+    drawLaneRows(ctx,{W,H,TEXT,DIM,ACCENT,TYPE,haloText,marks,ageAt,grouped,sel,hov,
+      hoverMix:hov?hoverFocusMix:0});
+    ctx.restore();
+    for(let i=gPulses.length-1;i>=0;i--){
+      const pulse=gPulses[i],age=(now-pulse.start)/700;
+      if(age>1){gPulses.splice(i,1);continue}
+      ctx.globalAlpha=(1-age)*0.6;ctx.strokeStyle=ACCENT;ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.arc(pulse.x,pulse.y,8+age*30,0,Math.PI*2);ctx.stroke();
+    }
+    ctx.globalAlpha=1;next();return;
+  }
   ctx.lineWidth=1;ctx.strokeStyle=hexA(DIM,0.3);
   if(mapLayout==='islands'){
     if(grouped){ctx.setLineDash([3,4]);
@@ -1718,11 +1835,14 @@ function layoutFrame(now){
     const x=n.lx,y=n.ly,A=emph(n);
     n.px=W/2+x;n.py=H/2+y;
     ctx.globalAlpha=A;
-    ctx.fillStyle=hexA(TEXT,n===L.centre?0.1:0.05);
-    ctx.beginPath();ctx.arc(x,y,n.lr,0,Math.PI*2);ctx.fill();
+    if(bundled){
+      ctx.fillStyle=hexA(TEXT,n===L.centre?0.1:0.05);
+      ctx.beginPath();ctx.arc(x,y,n.lr,0,Math.PI*2);ctx.fill();
+    }
     if(!bundled){
-      // a ring for the entity, its memories drawn on their own
-      ctx.strokeStyle=hexA(TEXT,0.75);ctx.lineWidth=1.3;
+      // a faint ring for the entity, its memories drawn on their own
+      const ringLit=activeMapKey===n.key||(n===hov&&hoverMix>0.04);
+      ctx.strokeStyle=hexA(TEXT,ringLit?0.6:0.14);ctx.lineWidth=1.1;
       ctx.beginPath();ctx.arc(x,y,n.lr-0.5,0,Math.PI*2);ctx.stroke();
     }else if(L.dots){
       // one marker per memory on a sunflower spiral, the types mixed by their share
@@ -1820,6 +1940,7 @@ function hitNode(event){
   if(!G)return null;
   const rect=document.getElementById('map').getBoundingClientRect();
   const x=event.clientX-rect.left,y=event.clientY-rect.top;
+  if(mapLayout==='lanes'&&L&&!mapBundled())return laneRowAt(y);
   if(mapLayout!=='galaxy'&&L){
     let found=null;
     for(const node of G.nodes){
@@ -2090,6 +2211,14 @@ document.getElementById('map').addEventListener('mousemove',event=>{
   updateHover(node?node.key:null);
 });
 document.getElementById('map').addEventListener('mouseleave',()=>updateHover(null));
+// The rows of the lanes scroll inside the map; at either end the page scrolls.
+document.getElementById('map').addEventListener('wheel',event=>{
+  if(mapLayout!=='lanes'||!L||mapBundled()||!L.rows||!L.rows.max)return;
+  const next=clampTo((L.rowScroll||0)+event.deltaY,0,L.rows.max);
+  if(next===(L.rowScroll||0))return;
+  event.preventDefault();L.rowScroll=next;L.sig='';
+  if(reducedMotion)galaxyFrame(performance.now());
+},{passive:false});
 // Fullscreen: real API where allowed, CSS-maximize fallback otherwise.
 function setMaxed(v){gMaxed=v;document.getElementById('mapwrap').classList.toggle('maxed',v);
   document.documentElement.style.overflow=v?'hidden':'';drawMap()}
