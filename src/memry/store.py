@@ -163,6 +163,8 @@ from .models import (
     Scope,
     SearchResult,
     TOPIC_TYPE,
+    TYPE_SET_BY_OWNER,
+    NAMED_ENTITY_TYPES,
     clean_tags,
     later_ts,
     parse_ts,
@@ -3159,6 +3161,20 @@ class MemoryStore:
                           key=lambda part: (-part["count"], part["label"].lower()))
             node["parts"] = mine[:24]
             node["part_count"] = len(mine)
+        # the owner is marked, so the map can leave them out on request: the
+        # account's owner entity, or, read across accounts, each person whose
+        # entity says it is an owner (``owner_entity`` marks it)
+        owner = self.owner_entity(user_id) if user_id is not None else None
+        for node in planets:
+            if owner is not None:
+                mine = node.get("entity_id") == owner.id
+            elif node.get("entity_type") == "person":
+                entity = self.backend.get_entity(node.get("entity_id"))
+                mine = bool(entity and (entity.metadata or {}).get("owner"))
+            else:
+                mine = False
+            if mine:
+                node["owner"] = True
         shown = {node["key"] for node in planets}
         data["entity_names"] = sum(1 for node in nodes
                                    if node.get("entity_type") != TOPIC_TYPE)
@@ -4617,6 +4633,25 @@ class MemoryStore:
             return self.backend.topic_entity(
                 tag.lower(), Scope(user_id=entity.user_id), create=False, follow_merged=True)
         return self.backend.rename_entity(entity_id, name)
+
+    def set_entity_type(
+        self, entity_id: str, entity_type: str, *, owner_prefix: str | None = None
+    ) -> Entity | None:
+        """Give a named entity the type the owner chose ("armored samurai" is
+        a concept, not a person). The type is marked as the owner's
+        (``TYPE_SET_BY_OWNER``), so the recount of its mentions on a save or
+        a merge leaves it alone. A tag is a tag and no named thing becomes
+        one here; turning a name into a tag is "not an entity"."""
+        entity = self.backend.get_entity(entity_id)
+        if (not _owned(entity, owner_prefix) or entity.merged_into is not None
+                or entity.entity_type == TOPIC_TYPE):
+            return None
+        if entity_type not in NAMED_ENTITY_TYPES:
+            raise ValueError(f"unknown entity type: {entity_type!r}")
+        self.backend.set_entity_type(entity_id, entity_type)
+        self.backend.set_entity_metadata(
+            entity_id, {**(entity.metadata or {}), TYPE_SET_BY_OWNER: True})
+        return self.backend.get_entity(entity_id)
 
     def merge_proposals(
         self,

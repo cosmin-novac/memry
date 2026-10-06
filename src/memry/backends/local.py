@@ -36,6 +36,7 @@ from ..models import (
     ENTITY_TYPES,
     HISTORY_KINDS,
     TOPIC_TYPE,
+    TYPE_SET_BY_OWNER,
     Scope,
     Topic,
     later_ts,
@@ -532,6 +533,15 @@ def _band_bounds(
         return (total + left * words[-1][0]) * (1 + _ROUNDING)
 
     return least, most
+
+
+def _owner_typed(row: sqlite3.Row) -> bool:
+    """Whether an entity row's type is one the owner chose
+    (``TYPE_SET_BY_OWNER``), which no recount of its mentions changes."""
+    try:
+        return bool(json.loads(row["metadata"] or "{}").get(TYPE_SET_BY_OWNER))
+    except (TypeError, ValueError):
+        return False
 
 
 def _scope_clause(scope: Scope, prefix: str = "") -> tuple[str, list[Any]]:
@@ -3514,10 +3524,11 @@ class LocalBackend(MemoryBackend):
         the thing's type, not of another thing. Nothing is committed here."""
         for entity_id in sorted(set(entity_ids)):
             row = self._db.execute(
-                "SELECT entity_type FROM entities WHERE id = ? AND merged_into IS NULL",
+                "SELECT entity_type, metadata FROM entities "
+                "WHERE id = ? AND merged_into IS NULL",
                 (entity_id,),
             ).fetchone()
-            if row is None or row["entity_type"] == TOPIC_TYPE:
+            if row is None or row["entity_type"] == TOPIC_TYPE or _owner_typed(row):
                 continue
             own = row["entity_type"]
             kind = self._most_given(self._type_votes_locked(entity_id, own), [own])
@@ -4216,12 +4227,16 @@ class LocalBackend(MemoryBackend):
         does not hand the thing that sentence's type. Two tags merge as a
         tag."""
         rows = {row["id"]: row for row in self._db.execute(
-            "SELECT id, entity_type, created_at FROM entities WHERE id IN (?, ?)",
+            "SELECT id, entity_type, created_at, metadata FROM entities WHERE id IN (?, ?)",
             (keep_id, merge_id),
         ).fetchall()}
         keep, merged = rows[keep_id], rows[merge_id]
         if keep["entity_type"] == TOPIC_TYPE:
             return keep["entity_type"]
+        # a type the owner chose outlasts the count, the kept one's first
+        for row in (keep, merged):
+            if row["entity_type"] != TOPIC_TYPE and _owner_typed(row):
+                return row["entity_type"]
 
         def own(row: sqlite3.Row) -> str | None:
             return None if row["entity_type"] == TOPIC_TYPE else row["entity_type"]
