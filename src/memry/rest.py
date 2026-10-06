@@ -260,8 +260,11 @@ textarea{width:100%;min-height:70px;margin-bottom:.4rem}
 #mapwrap:fullscreen #map,#mapwrap.maxed #map{border-radius:0}
 #mapwrap.maxed{position:fixed;inset:0;z-index:99999}
 .gx-ctrl{position:absolute;top:.6rem;right:.6rem;display:flex;gap:.4rem;align-items:flex-start;z-index:3;flex-wrap:wrap;justify-content:flex-end;max-width:calc(100% - 1.2rem)}
-.gx-layouts{display:flex}.gx-layouts button{border-radius:0;margin-left:-1px}
-.gx-layouts button:first-child{border-radius:7px 0 0 7px;margin-left:0}.gx-layouts button:last-child{border-radius:0 7px 7px 0}
+.gx-layouts,.gx-seg{display:flex}
+.gx-ctrl .gx-layouts button,.gx-ctrl .gx-seg summary{border-radius:0;margin-left:-1px}
+.gx-ctrl .gx-layouts button:first-child,.gx-ctrl .gx-seg .gx-types:first-child summary{border-radius:7px 0 0 7px;margin-left:0}
+.gx-ctrl .gx-layouts button:last-child,.gx-ctrl .gx-seg .gx-types:last-child summary{border-radius:0 7px 7px 0}
+.gx-ctrl .gx-layouts button:hover,.gx-ctrl .gx-seg summary:hover,.gx-ctrl .gx-seg .gx-types[open] summary{position:relative;z-index:1}
 .gx-layouts button[aria-pressed="true"]{position:relative;color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 11%,var(--panel))}
 .gx-ctrl button,.gx-types summary{background:color-mix(in srgb,var(--panel) 68%,transparent);border:1px solid var(--line);color:var(--dim);border-radius:7px;padding:.3rem .5rem;font-size:.72rem;cursor:pointer;backdrop-filter:blur(5px);line-height:1;list-style:none}
 .gx-ctrl button:hover,.gx-types summary:hover{color:var(--accent);border-color:var(--accent)}
@@ -356,6 +359,7 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <button type="button" data-layout="lanes" title="One lane per group, the newest memories on the right.">Lanes</button>
     <button type="button" data-layout="galaxy" title="Rings by how many memories mention an entity.">Galaxy</button>
   </span>
+  <span class="gx-seg">
   <details class="gx-types" id="mapEntityFilter">
     <summary id="mapEntitiesBtn" title="Choose which types of entity the map shows. Tags are one of the types, off until you turn them on.">Entities</summary>
     <div class="gx-type-menu">
@@ -374,11 +378,12 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <div class="gx-type-menu">
       <div class="gx-type-head"><span>Groups</span>
         <button type="button" class="x" onclick="document.getElementById('mapGroupMenu').open=false" title="close">x</button></div>
-      <label class="gx-type-option" title="Each entity is one disc holding all its memories. Off, every memory is a marker of its own, on the day it was said, and an entity is a ring among its memories. Kept per layout; Lanes start with it off."><input type="checkbox" id="mapBundleByEntity" onchange="setMapBundling(this.checked)"><span>bundle memories by entity</span></label>
-      <label class="gx-type-option" title="Entities that share memories form a cluster: an island, a sector of the heat core, a lane. Kept per layout."><input type="checkbox" id="mapGroupByLinks" onchange="setMapGrouping(this.checked)"><span>cluster entities that share memories</span></label>
-      <label class="gx-type-option" title="You are mentioned in most memories. Without you on the map, those memories show only under the other things they are about."><input type="checkbox" id="mapShowOwner" onchange="setMapShowOwner(this.checked)"><span>show yourself</span></label>
+      <label class="gx-type-option" title="On: each entity is one bubble holding all its memories. Off: every memory is a dot of its own, on the day it was said, and each entity a ring among its memories. Kept per layout; Lanes start with it off."><input type="checkbox" id="mapBundleByEntity" onchange="setMapBundling(this.checked)"><span>One bubble per entity</span></label>
+      <label class="gx-type-option" title="Entities that share memories sit together: as an island, a sector of the heat core, a lane. Kept per layout."><input type="checkbox" id="mapGroupByLinks" onchange="setMapGrouping(this.checked)"><span>Cluster related entities</span></label>
+      <label class="gx-type-option" title="You are in most memories. Off: you are left off the map, and those memories show only under the other things they are about."><input type="checkbox" id="mapShowOwner" onchange="setMapShowOwner(this.checked)"><span>Include me</span></label>
     </div>
   </details>
+  </span>
   <button id="fsBtn" title="Open the map fullscreen." aria-label="Fullscreen">⤢</button>
 </div>
 <div class="gx-read" id="mapread"></div>
