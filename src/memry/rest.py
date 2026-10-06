@@ -1523,7 +1523,10 @@ function layoutTick(){
   }
   for(const node of ns){
     if(node===pinned)continue;
-    node.lx=clampTo(node.lx,-W/2+node.lr,W/2-node.lr);node.ly=clampTo(node.ly,-H/2+node.lr,H/2-node.lr);
+    node.lx=clampTo(node.lx,-W/2+node.lr,W/2-node.lr);
+    // in lanes an entity and its label stay between the top and the time axis
+    node.ly=mapLayout==='lanes'?clampTo(node.ly,LANE_TOP-H/2+node.lr,H/2-LANE_BOTTOM-node.lr-12)
+      :clampTo(node.ly,-H/2+node.lr,H/2-node.lr);
   }
   if(grouped)for(const group of L.big){
     let reach=0;
