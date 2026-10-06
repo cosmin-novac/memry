@@ -378,9 +378,9 @@ h1 .datalinks .menu .account-links[hidden]{display:none}
     <div class="gx-type-menu">
       <div class="gx-type-head"><span>Groups</span>
         <button type="button" class="x" onclick="document.getElementById('mapGroupMenu').open=false" title="close">x</button></div>
-      <label class="gx-type-option" title="On: each entity is one bubble holding all its memories. Off: every memory is a dot of its own, on the day it was said, and each entity a ring among its memories. Kept per layout; Lanes start with it off."><input type="checkbox" id="mapBundleByEntity" onchange="setMapBundling(this.checked)"><span>One bubble per entity</span></label>
-      <label class="gx-type-option" title="Entities that share memories sit together: as an island, a sector of the heat core, a lane. Kept per layout."><input type="checkbox" id="mapGroupByLinks" onchange="setMapGrouping(this.checked)"><span>Cluster related entities</span></label>
-      <label class="gx-type-option" title="You are in most memories. Off: you are left off the map, and those memories show only under the other things they are about."><input type="checkbox" id="mapShowOwner" onchange="setMapShowOwner(this.checked)"><span>Include me</span></label>
+      <label class="gx-type-option" title="On: each entity is one bubble holding all its memories. Off: every memory is a dot of its own, on the day it was said, and each entity a ring among its memories. Kept per layout; Lanes start with it off."><input type="checkbox" id="mapBundleByEntity" onchange="setMapBundling(this.checked)"><span>Show memories grouped by entity</span></label>
+      <label class="gx-type-option" title="Entities that share memories sit together: as an island, a sector of the heat core, a lane. Kept per layout."><input type="checkbox" id="mapGroupByLinks" onchange="setMapGrouping(this.checked)"><span>Show memories clustered</span></label>
+      <label class="gx-type-option" title="You are in most memories. Off: you are left off the map, and those memories show only under the other things they are about."><input type="checkbox" id="mapShowOwner" onchange="setMapShowOwner(this.checked)"><span>Group the user's memories</span></label>
     </div>
   </details>
   </span>
