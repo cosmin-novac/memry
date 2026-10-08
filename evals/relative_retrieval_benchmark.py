@@ -49,9 +49,20 @@ stores none, so it reads the ordinary vectors, names as written: why property
 vectors exist. ``--property-dimensions N`` keeps the first N numbers of every
 vector it compares: at what size.
 
+Question keys (``retrieval.question_keys``, ``intelligence.questions``): with
+``--questions FILE`` every memory of the world is stored with the questions it
+answers, as a backfill stores them, and every mode is scored twice, with the
+search reading the questions and without (the row labelled "(no
+questions)"). ``--write-questions FILE`` asks the configured text model to
+write them (2 or 3 a memory, 25 memories a call) and keeps them in FILE for
+the next run. The questions belong to the world, not to a store: one file
+serves every store built from the same world, keyed by size.
+
 Run:
     OPENAI_API_KEY=... python evals/relative_retrieval_benchmark.py      # real embeddings
     python evals/relative_retrieval_benchmark.py --sizes 1500             # hash, offline
+    python evals/relative_retrieval_benchmark.py --world dense --sizes 2000 \
+        --write-questions questions_dense.json     # questions by the text model, then scored
 """
 
 from __future__ import annotations
@@ -75,7 +86,8 @@ sys.path.insert(0, str(HERE))
 from memry.config import Config, EmbeddingConfig  # noqa: E402
 from memry.models import Entity, EntityMention, Memory, MergeProposal, Relation  # noqa: E402
 from memry.providers.embeddings import Embedder, HashEmbedder, OpenAIEmbedder  # noqa: E402
-from memry.providers.llm import NoneLLM  # noqa: E402
+from memry.intelligence.questions import QUESTIONS_PER_MEMORY, clean_questions  # noqa: E402
+from memry.providers.llm import LLM, NoneLLM, build_llm  # noqa: E402
 from memry.store import MemoryStore, _cut, _text_hash  # noqa: E402
 
 USER = "bench"
@@ -1218,7 +1230,8 @@ def tag_world(world: dict, seed: int = 21) -> None:
 
 def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed: int = 3,
                 decider=None, property_dimensions: int | None = None,
-                says: dict[str, str] | None = None, vectors: str = "property"):
+                says: dict[str, str] | None = None, vectors: str = "property",
+                questions: dict[str, list[str]] | None = None):
     """The world in a fresh store, with compared pairs as ``links`` says.
     ``decider`` is the decision provider searches ask when given (Jev in
     production).
@@ -1229,7 +1242,10 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
     with each memory's ordinary vector, names as written (as it does for a
     memory saved before property vectors existed). ``property_dimensions``
     is ``retrieval.property_dimensions``: the leading numbers the comparison
-    keeps of every vector it reads."""
+    keeps of every vector it reads. ``questions`` (memory index as a string:
+    the questions that memory answers) are stored as each memory's question
+    keys, as a backfill stores them, and turn ``retrieval.question_keys``
+    on."""
     if vectors not in ("property", "ordinary"):
         raise ValueError(f"vectors must be 'property' or 'ordinary', not {vectors!r}")
     if vectors == "ordinary" and says is not None:
@@ -1281,6 +1297,8 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
             id=f"p{n:05d}", entity_a=ids[child], entity_b=ids[parent], user_id=USER,
             confidence=same, different=different, belongs=belongs, compared_step=1,
             created_at=stamp))
+    if questions is not None:
+        store_questions(store, memory_ids, questions)
     if says is not None:
         store_says(store, memory_ids, [m["text"] for m in world["memories"]], says)
     elif vectors == "property":
@@ -1310,6 +1328,118 @@ def store_says(store: MemoryStore, memory_ids: list[str], texts: list[str],
             rows, model, {mid: _text_hash(text) for mid, text in batch if mid in rows})
         embedded += len(rows)
     return embedded
+
+
+def store_questions(store: MemoryStore, memory_ids: list[str],
+                    questions: dict[str, list[str]]) -> int:
+    """Each memory's ``questions`` as its question keys, written as
+    ``MemoryStore`` writes a backfill's (``_write_questions``, source
+    "backfill"), cleaned as every source of questions is; turns
+    ``retrieval.question_keys`` on. Returns how many memories got questions."""
+    written = 0
+    for k, items in sorted(questions.items(), key=lambda kv: int(kv[0])):
+        items = clean_questions(items)
+        if items:
+            store._write_questions(memory_ids[int(k)], items, "backfill")
+            written += 1
+    store.config.retrieval.question_keys = True
+    return written
+
+
+#: What the text model is asked for a batch of memories (``--write-questions``):
+#: the rule the extractor follows (``intelligence.questions.QUESTIONS_RULE``),
+#: for memories already written.
+QUESTIONS_SYSTEM = """You write the questions that stored memories answer.
+For each numbered memory, write 2 or 3 questions a person would ask later, in \
+another conversation, that this memory answers. Each question names the thing \
+or person it asks about (never "it", "he" or "they" alone) and asks for one thing \
+the memory says. At least one question uses other words than the memory does.
+Answer with JSON only, one item for each memory:
+{"items": [{"n": <the memory's number>, "questions": ["...", "..."]}]}"""
+QUESTIONS_SCHEMA: dict = {
+    "type": "object",
+    "properties": {"items": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"n": {"type": "integer"},
+                       "questions": {"type": "array", "items": {"type": "string"}}},
+        "required": ["n", "questions"], "additionalProperties": False}}},
+    "required": ["items"], "additionalProperties": False,
+}
+#: Memories a call.
+QUESTIONS_BATCH = 25
+
+
+def ask_questions(llm: LLM, texts: list[str]) -> list[list[str]]:
+    """The questions the text model writes for each of ``texts`` in one call,
+    in their order, each list cleaned (``clean_questions``) and at most
+    ``QUESTIONS_PER_MEMORY`` long. A memory the answer skips, or an answer that
+    cannot be read, gives an empty list."""
+    user = "\n".join(f"{n}. {text}" for n, text in enumerate(texts, start=1))
+    raw = llm.complete(QUESTIONS_SYSTEM, user, json_schema=QUESTIONS_SCHEMA)
+    out: list[list[str]] = [[] for _ in texts]
+    try:
+        items = json.loads(raw[raw.index("{"):raw.rindex("}") + 1]).get("items")
+    except (ValueError, AttributeError):
+        return out
+    for item in items if isinstance(items, list) else []:
+        n = item.get("n") if isinstance(item, dict) else None
+        if isinstance(n, int) and 1 <= n <= len(texts):
+            out[n - 1] = clean_questions(item.get("questions"), limit=QUESTIONS_PER_MEMORY)
+    return out
+
+
+def write_world_questions(llm: LLM, texts: list[str], known: dict[str, list[str]], save,
+                          batch: int = QUESTIONS_BATCH, workers: int = 4
+                          ) -> dict[str, list[str]]:
+    """``known`` (memory index as a string: its questions) completed with the
+    questions of every memory of ``texts`` it lacks, ``batch`` memories a call
+    and ``workers`` calls at a time. ``save`` is called with the questions so
+    far after every call, so an interrupted run keeps what it paid for. A
+    memory the answer skipped is asked once more in a later batch; skipped
+    again, it keeps an empty list. A call that fails writes nothing: the next
+    run asks for those memories again."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    questions = dict(known)
+    due = [k for k in range(len(texts)) if str(k) not in questions]
+    for last in (False, True):
+        again: list[int] = []
+        chunks = [due[i:i + batch] for i in range(0, len(due), batch)]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            asked = {pool.submit(ask_questions, llm, [texts[k] for k in chunk]): chunk
+                     for chunk in chunks}
+            for future in as_completed(asked):
+                chunk = asked[future]
+                try:
+                    got = future.result()
+                except Exception as exc:  # noqa: BLE001  one failed call stops nothing
+                    print(f"  no questions for {len(chunk)} memories: {exc}", flush=True)
+                    continue
+                for k, items in zip(chunk, got):
+                    if items or last:
+                        questions[str(k)] = items
+                    else:
+                        again.append(k)
+                save(questions)
+                print(f"  questions for {len(questions)}/{len(texts)} memories", flush=True)
+        due = sorted(again)
+        if not due:
+            break
+    return questions
+
+
+def keyed_by_size(data: dict) -> bool:
+    """Whether a questions file holds its questions under world sizes
+    ({"2000": {"0": [...]}}), every value an object, rather than the
+    questions of one world by memory index."""
+    return bool(data) and all(isinstance(v, dict) for v in data.values())
+
+
+def questions_for_size(data: dict, size: int) -> dict[str, list[str]] | None:
+    """The questions of a questions file for the world of ``size``: under the
+    key ``str(size)`` in a file keyed by size, else the whole file (a file for
+    one world). None when a file keyed by size has no entry for it."""
+    return data.get(str(size)) if keyed_by_size(data) else data
 
 
 MODES = [
@@ -1356,7 +1486,8 @@ def _asks_decider(store: MemoryStore) -> bool:
     return bool(getattr(store.decider, "available", False)) and store.relevance_mode() == "jev"
 
 
-def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dict:
+def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode,
+          question_keys: bool | None = None) -> dict:
     """Per family, over the top 10 of the limit-10 search: ``mrr``, ``recall``
     and ``wrong_first``. Over the full ranking (below):
 
@@ -1374,7 +1505,11 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
     (``MemoryStore._final_order``) on a second search at limit 100 (its text
     ranking 500 deep). A search that asks the decision provider is not run a
     second time (it would be judged again): its ranking is the limit-10
-    search's own."""
+    search's own.
+
+    ``question_keys`` True or False runs every search with
+    ``retrieval.question_keys`` so, and sets it back as it was after; None
+    leaves it as the store has it."""
     _, relational, depth = mode[:3]
     cfg = store.config.retrieval
     cfg.relational_depth = depth
@@ -1390,6 +1525,9 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
         return seen["ranked"]
 
     store._final_order = capture
+    keys_before = cfg.question_keys
+    if question_keys is not None:
+        cfg.question_keys = question_keys
     out: dict[str, dict[str, float]] = {}
     try:
         for family, items in queries.items():
@@ -1437,6 +1575,7 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
                     "precision": statistics.mean(precision) if precision else None})
     finally:
         del store._final_order  # the method again
+        cfg.question_keys = keys_before
     return out
 
 
@@ -1484,6 +1623,18 @@ def main() -> None:
     parser.add_argument("--says", default=None,
                         help="JSON object memory index -> says (the statement with its "
                              "subject taken out): property vectors from it, not the masked text")
+    asked = parser.add_mutually_exclusive_group()
+    asked.add_argument("--questions", default=None, metavar="PATH",
+                       help="JSON file of question keys: memory index (a string) to the "
+                            "questions that memory answers, keyed by world size at the top "
+                            "({\"2000\": {\"0\": [...]}}; a file for one size may leave the "
+                            "size out). One file serves every store of the same world "
+                            "(--world, --owner) and size. Every mode is scored twice, with "
+                            "retrieval.question_keys on and off (\"(no questions)\")")
+    asked.add_argument("--write-questions", default=None, metavar="PATH",
+                       help="ask the configured text model (memry config) for the questions "
+                            "of every memory of each size's world that PATH lacks, save them "
+                            "to PATH keyed by size as --questions reads it, and run with them")
     parser.add_argument("--tags", action="store_true",
                         help="tag every memory as an agent does when it saves (tag_world); "
                              "the store keeps the tags as the memories' categories")
@@ -1540,6 +1691,18 @@ def main() -> None:
     embedder = CachedEmbedder(base, cache)
     answers = json.loads((HERE / "datasets" / "belongs_answers.json").read_text())["answers"]
     says = json.loads(pathlib.Path(args.says).read_text()) if args.says else None
+    questions_path = args.questions or args.write_questions
+    questions_file: dict = {}
+    if args.questions:
+        questions_file = json.loads(pathlib.Path(args.questions).read_text())
+    elif args.write_questions and pathlib.Path(args.write_questions).exists():
+        questions_file = json.loads(pathlib.Path(args.write_questions).read_text())
+        if questions_file and not keyed_by_size(questions_file):
+            parser.error("--write-questions keeps the questions keyed by size "
+                         f"({{\"2000\": {{...}}}}); {args.write_questions} is not")
+    if args.questions and len(sizes) > 1 and not keyed_by_size(questions_file):
+        parser.error("--questions without sizes as keys holds one world: run one size")
+    question_llm: LLM | None = None
     results = {}
     for size in sizes:
         world = (build_world_dense(size, owner=args.owner) if args.world == "dense"
@@ -1547,6 +1710,37 @@ def main() -> None:
         if args.tags:
             tag_world(world)
         texts = [m["text"] for m in world["memories"]]
+        questions: dict[str, list[str]] | None = None
+        if args.write_questions:
+            known = questions_file.get(str(size), {})
+            if any(str(k) not in known for k in range(len(texts))):
+                if question_llm is None:
+                    question_llm = build_llm(Config.load().llm)
+                    if not question_llm.available:
+                        parser.error("--write-questions needs a text model (memry config: "
+                                     "MEMRY_LLM_PROVIDER, ANTHROPIC_API_KEY or OPENAI_API_KEY)")
+
+                def save(so_far: dict, size: int = size) -> None:
+                    questions_file[str(size)] = so_far
+                    path = pathlib.Path(args.write_questions)
+                    part = path.with_name(path.name + ".part")
+                    part.write_text(json.dumps(questions_file))
+                    part.replace(path)
+
+                print(f"  writing questions for {len(texts)} memories", flush=True)
+                known = write_world_questions(question_llm, texts, known, save)
+            questions = known
+        elif args.questions:
+            questions = questions_for_size(questions_file, size)
+            if questions is None:
+                parser.error(f"{args.questions} has no questions for size {size}; it has "
+                             f"{', '.join(questions_file) or 'none'}")
+        if questions is not None:
+            beyond = [k for k in questions if not 0 <= int(k) < len(texts)]
+            if beyond:
+                parser.error(f"{questions_path} has questions for memory {beyond[0]}, past "
+                             f"the {len(texts)} memories of this world: it is another world's")
+            texts += [q for items in questions.values() for q in clean_questions(items)]
         if says is not None:
             missing = sum(str(k) not in says for k in range(len(texts)))
             if missing:
@@ -1564,23 +1758,33 @@ def main() -> None:
                              f"the families are {', '.join(world['queries'])}")
             world["queries"] = {f: q for f, q in world["queries"].items() if f in args.families}
         print(f"\n===== {len(world['memories'])} memories, embedder {embedder.model_id}, "
-              f"{args.vectors} vectors, dimensions {args.property_dimensions or 'all'} =====",
-              flush=True)
+              f"{args.vectors} vectors, dimensions {args.property_dimensions or 'all'}"
+              + ("" if questions is None else
+                 f", questions for {sum(bool(v) for v in questions.values())} memories")
+              + " =====", flush=True)
         for links in args.links:
             if args.jev:
                 decider = jev_judge()
             store, memory_ids = build_store(world, embedder, links, answers, decider=decider,
                                             says=says, vectors=args.vectors,
-                                            property_dimensions=args.property_dimensions)
-            for mode in modes:
+                                            property_dimensions=args.property_dimensions,
+                                            questions=questions)
+            # with question keys, each mode twice: the search reading them and not
+            arms = [None] if questions is None else [True, False]
+            for mode, keys in [(mode, keys) for mode in modes for keys in arms]:
                 if (links == "none") != (mode[0] == "hybrid"):
                     continue  # hybrid reads no links; the linked modes need compared pairs
+                label = f"{mode[0]} (no questions)" if keys is False else mode[0]
                 calls_before = getattr(decider, "calls", 0)
-                res = score(store, memory_ids, world["queries"], mode)
+                # without question keys, called as before (tests stand in for score)
+                res = (score(store, memory_ids, world["queries"], mode) if keys is None
+                       else score(store, memory_ids, world["queries"], mode, question_keys=keys))
                 asked = sum(v["n"] for v in res.values())
                 res["_jev_calls_per_search"] = (getattr(decider, "calls", 0) - calls_before) / asked
-                results[f"{size}|{links}|{mode[0]}"] = res
-                print(f"{links:9} {mode[0]:24} " + "  ".join(
+                if keys is not None:
+                    res["_question_keys"] = keys
+                results[f"{size}|{links}|{label}"] = res
+                print(f"{links:9} {label:24} " + "  ".join(
                     f"{f[:12]} {v[RECALL.get(f, 'mrr')]:.2f}"
                     + (f"/{v['wrong_first']:.2f}" if v["wrong_first"] is not None else "")
                     for f, v in res.items() if not f.startswith("_"))
