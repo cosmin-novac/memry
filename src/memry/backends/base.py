@@ -739,6 +739,12 @@ class MemoryBackend(ABC):
         """Valid memories with no question key at all, oldest first."""
         return []
 
+    def question_vectors_of(
+        self, memory_ids: list[str], embedding_model: str,
+    ) -> dict[str, "np.ndarray"]:
+        """Each memory's question key vectors, a matrix per memory."""
+        return {}
+
     def question_keyword_search(
         self, query: str, scope: Scope, limit: int = 20, include_invalid: bool = False,
         categories: list[str] | None = None, entity_id: str | None = None,

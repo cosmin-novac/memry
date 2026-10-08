@@ -1336,9 +1336,15 @@ def store_questions(store: MemoryStore, memory_ids: list[str],
     ``MemoryStore`` writes a backfill's (``_write_questions``, source
     "backfill"), cleaned as every source of questions is; turns
     ``retrieval.question_keys`` on. Returns how many memories got questions."""
+    cleaned = {k: clean_questions(items) for k, items in questions.items()}
+    if hasattr(store.embedder, "warm"):
+        # the vectors are of the questions with names masked, which the
+        # cache has not seen: all in one batch, since the cache writes its
+        # file on every new text
+        store.embedder.warm([text for k, items in cleaned.items() if items
+                             for text in store._masked_question_texts(memory_ids[int(k)], items)])
     written = 0
-    for k, items in sorted(questions.items(), key=lambda kv: int(kv[0])):
-        items = clean_questions(items)
+    for k, items in sorted(cleaned.items(), key=lambda kv: int(kv[0])):
         if items:
             store._write_questions(memory_ids[int(k)], items, "backfill")
             written += 1

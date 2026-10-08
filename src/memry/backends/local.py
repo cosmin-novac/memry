@@ -3299,6 +3299,24 @@ class LocalBackend(MemoryBackend):
             found = self._memories_by_id(order)
         return [(found[mid], best[mid]) for mid in order if mid in found]
 
+    def question_vectors_of(
+        self, memory_ids: list[str], embedding_model: str,
+    ) -> dict[str, np.ndarray]:
+        """Each memory's question key vectors from ``embedding_model``, one
+        matrix (a row per question) per memory that has any."""
+        out: dict[str, list[np.ndarray]] = {}
+        with self._lock:
+            for start in range(0, len(memory_ids), 500):
+                chunk = memory_ids[start:start + 500]
+                rows = self._db.execute(
+                    "SELECT memory_id, embedding FROM memory_questions WHERE memory_id IN "
+                    f"({','.join('?' * len(chunk))}) AND embedding IS NOT NULL "
+                    "AND embedding_model = ? ORDER BY memory_id, n",
+                    (*chunk, embedding_model)).fetchall()
+                for row in rows:
+                    out.setdefault(row["memory_id"], []).append(_unpack_half(row["embedding"]))
+        return {mid: np.stack(vectors) for mid, vectors in out.items()}
+
     def _memories_by_id(self, memory_ids: list[str]) -> dict[str, Memory]:
         """The memories of these ids that exist. Caller holds the lock."""
         found: dict[str, Memory] = {}

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 import difflib
 import hashlib
+import itertools
 import json
 import logging
 import re
@@ -1238,14 +1239,31 @@ class MemoryStore:
     def _write_questions(self, memory_id: str, questions: list[str], source: str) -> None:
         """Keep ``questions`` as the memory's question keys, each embedded
         (cut to ``retrieval.property_dimensions``, as a property vector is)
-        in one call; without an embedder, by their words alone."""
+        in one call; without an embedder, by their words alone. The vector
+        is of the question with the memory's entity names read as "it"
+        (``_masked_question_texts``), as a property vector is of the text:
+        compared with a question about one thing, a sibling's key ("How much
+        does Bildy v3 cost?") would otherwise match as well as the thing's
+        own, and the inherited answer lose its place. The words stay as
+        written for the keyword index."""
         vectors: list[list[float] | None] | None = None
         if questions and self.embedder.dimensions:
             keep = self.config.retrieval.property_dimensions
-            vectors = [_cut(v, keep) if v else None for v in self.embedder.embed(questions)]
+            masked = self._masked_question_texts(memory_id, questions)
+            vectors = [_cut(v, keep) if v else None for v in self.embedder.embed(masked)]
         self.backend.set_questions(
             memory_id, [(q, source) for q in questions], vectors,
             self.embedder.model_id if vectors else None)
+
+    def _masked_question_texts(self, memory_id: str, questions: list[str]) -> list[str]:
+        """``questions`` with the names of the memory's named entities, and of
+        what those belong to, read as "it" (``_masked_texts``)."""
+        named = [e.id for e in self.backend.entities_of_memory(memory_id, kind="named")]
+        if not named:
+            return list(questions)
+        keys = [f"{memory_id}#{n}" for n in range(len(questions))]
+        masked = self._masked_texts(dict(zip(keys, questions)), {k: named for k in keys})
+        return [masked.get(k, q) for k, q in zip(keys, questions)]
 
     def refresh_question_vectors(
         self, *, user_id: str | None = None, exact_user: bool = False,
@@ -1262,7 +1280,11 @@ class MemoryStore:
         embedded = 0
         for start in range(0, len(due), 64):
             batch = due[start:start + 64]
-            vectors = self.embedder.embed([text for _, _, text in batch])
+            texts: list[str] = []
+            for mid, group in itertools.groupby(batch, key=lambda row: row[0]):
+                rows_of = list(group)
+                texts += self._masked_question_texts(mid, [text for _, _, text in rows_of])
+            vectors = self.embedder.embed(texts)
             rows = {(mid, n): _cut(v, keep) for (mid, n, _), v in zip(batch, vectors) if v}
             if rows:
                 self.backend.set_question_vectors(rows, self.embedder.model_id)
@@ -2450,9 +2472,11 @@ class MemoryStore:
             members = plan.reads.entity_memories(self.backend, entity_id, FAMILY_SCAN)
             vectors = (self.backend.vectors_of([m.id for m in members], self.embedder.model_id)
                        if several else self._property_vectors([m.id for m in members]))
+            by_question = self._question_similarity(asked, [m.id for m in members])
             # a tie keeps the order read: the newest first, then by memory id
             for memory in sorted(members,
-                                 key=lambda m: -_similarity(asked, vectors.get(m.id)))[:FAMILY_TOP]:
+                                 key=lambda m: -max(_similarity(asked, vectors.get(m.id)),
+                                                    by_question.get(m.id, 0.0)))[:FAMILY_TOP]:
                 pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
         scores = self._linked_scores(asked, list(pool), act, plan.entities, names_kept=several)
         scored = []
@@ -2521,9 +2545,32 @@ class MemoryStore:
         vectors = self._property_vectors(reached)
         vectors.update(self.backend.vectors_of([mid for mid in memory_ids if mid not in vectors],
                                                self.embedder.model_id))
-        return {mid: (_similarity(asked, vectors.get(mid)),
+        by_question = self._question_similarity(asked, memory_ids)
+        return {mid: (max(_similarity(asked, vectors.get(mid)), by_question.get(mid, 0.0)),
                       aboutness([act.get(e.id) for e in entities[mid]]))
                 for mid in memory_ids}
+
+    def _question_similarity(self, asked: np.ndarray, memory_ids: list[str]) -> dict[str, float]:
+        """How well each memory's best question key matches the question
+        (``retrieval.question_keys``; nothing when off): the cosine of
+        ``asked`` and the nearest of the memory's question vectors, each cut
+        to the question's length, 0 for an opposite one. The linked order
+        reads a memory's relevance as the better of this and its property
+        similarity: a question worded unlike the fact ("what city is Ada
+        based in?") matches a stored question ("Where does Ada live?")
+        where the masked text does not."""
+        if not self.config.retrieval.question_keys or not memory_ids:
+            return {}
+        out: dict[str, float] = {}
+        for mid, matrix in self.backend.question_vectors_of(
+                memory_ids, self.embedder.model_id).items():
+            if matrix.shape[1] < asked.shape[0]:
+                continue
+            cut = matrix[:, :asked.shape[0]]
+            norms = np.linalg.norm(cut, axis=1)
+            norms[norms == 0] = 1e-9
+            out[mid] = max(float(((cut @ asked) / norms).max()), 0.0)
+        return out
 
     def _judge_ranking(
         self, question: str, ranked: list[SearchResult], scope: Scope, include_invalid: bool,
