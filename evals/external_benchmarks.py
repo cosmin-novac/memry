@@ -1512,10 +1512,14 @@ def store_stats(store: MemoryStore, conversation: Conversation) -> dict[str, Any
     speakers = {speaker: sorted((store.backend.count_entity_memories(e.id) for e in entities
                                  if name_of(e) == speaker.strip().lower()), reverse=True)
                 for speaker in conversation.speakers}
+    memories = store.get_all(user_id=BENCH_USER, limit=1_000_000)
+    with_questions = sum(1 for mid, rows in store.backend.questions_of(
+        [m.id for m in memories]).items() if rows)
     return {"entities": len(entities), "same_name_entities": sum(shared.values()),
             "same_name_groups": len(shared),
             "open_proposals": len(store.backend.list_proposals(scope, limit=1_000_000)),
-            "speaker_entities": speakers}
+            "speaker_entities": speakers,
+            "memories_with_questions": with_questions}
 
 
 def _qualname(function: Any) -> str | None:
@@ -1599,7 +1603,8 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                   evidence_tokens: int | None = None,
                   compare_evidence_tokens: int | None = None,
                   compare_answer_llm: LLM | None = None,
-                  descriptions: bool = True) -> dict[str, Any]:
+                  descriptions: bool = True,
+                  question_keys: str = "config") -> dict[str, Any]:
     """Ingest each conversation into a fresh store and ask its questions once
     per pass of ``search_deciders`` (name -> the decision provider the store
     asks with, given it once the conversation is loaded; default: the store's
@@ -1618,7 +1623,11 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
     with the turns chosen within that many tokens, and ``compare_answer_llm``
     with that model (``ask``); ``descriptions``
     false leaves out the descriptions of the entities a question names, for
-    an ablation. Returns {config, stores, passes, tables (the first
+    an ablation. ``question_keys`` "on" or "both" has the store write
+    question keys at ingest (``retrieval.question_keys``; "config" keeps the
+    store's setting); "both" then asks every pass twice, once with the keys
+    read and once without ("<pass>:text-only"), from the one store, so the
+    keys' gain is measured on the same memories. Returns {config, stores, passes, tables (the first
     pass's), rows, warnings, notes, complete}. A call refused at a cap
     (``api_usage.CapReached``) ends the run where it is: what was done is
     kept, "complete" is false and "stopped" says where."""
@@ -1627,6 +1636,16 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
     passes = search_deciders or {"store": search_decider("store")}
     if full_context:
         passes = {"full-context": search_decider("store")}
+    if question_keys not in ("config", "on", "both"):
+        raise ValueError(f"question_keys {question_keys!r}: config, on or both")
+    # which passes read the question keys; "both" adds a text-only twin of each
+    reads_keys: dict[str, bool | None] = {name: None for name in passes}
+    if question_keys == "both" and not full_context:
+        reads_keys = {}
+        for name, factory in list(passes.items()):
+            reads_keys[name] = True
+            passes[f"{name}:text-only"] = factory
+            reads_keys[f"{name}:text-only"] = False
     ks = sorted(set(ks or [k]) | {k})
     corrections = corrections or {}
     pool = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
@@ -1672,6 +1691,9 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
             store = make_store(mode, embedder, decider=decider, db_path=db_path)
         if evidence_tokens is not None:
             store.config.retrieval.evidence_tokens = evidence_tokens
+        if question_keys in ("on", "both"):
+            store.config.retrieval.question_keys = True
+        entry["question_keys"] = store.config.retrieval.question_keys
         entry["decider"] = store.decider.name
         entry["evidence_tokens"] = store.config.retrieval.evidence_tokens
         try:
@@ -1690,6 +1712,9 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                     decider, kept = factory(), store.decider
                     if decider is not None:
                         store.decider = decider
+                    kept_keys = store.config.retrieval.question_keys
+                    if reads_keys.get(name) is not None:
+                        store.config.retrieval.question_keys = bool(reads_keys[name])
                     started = time.perf_counter()
                     try:
                         for question in asked:
@@ -1703,6 +1728,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                                 descriptions=descriptions)})
                     finally:
                         entry[f"seconds_{name}"] = round(time.perf_counter() - started, 2)
+                        store.config.retrieval.question_keys = kept_keys
                         if decider is not None:
                             store.decider = kept
                             entry[f"decider_failures_{name}"] = getattr(decider, "failures", 0)
@@ -1748,6 +1774,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                    "compare_answer_model": (getattr(compare_answer_llm, "model", None)
                                             if compare_answer_llm else None),
                    "descriptions": descriptions,
+                   "question_keys": question_keys,
                    "locomo_categories": LOCOMO_CATEGORIES if dataset == "locomo" else None},
         "stores": stores,
         "passes": tables,
@@ -1902,6 +1929,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="what decides at question time: the store's provider (store, "
                              "the default), none, or Jev (TYPESAFE_API_KEY); given several "
                              "times, every question is asked once per value")
+    parser.add_argument("--question-keys", choices=["config", "on", "both"], default="config",
+                        help="question keys (retrieval.question_keys): on writes them at "
+                             "ingest and reads them; both also asks every pass a second "
+                             "time without reading them (<pass>:text-only), from the same "
+                             "store; config keeps the store's setting (the default)")
     parser.add_argument("--when", choices=WHEN_POLICIES, default="never",
                         help="write metadata['when'] = session date on every new memory "
                              "without one of its own (always), or not (never, the default)")
@@ -2185,7 +2217,8 @@ def main(argv: list[str] | None = None) -> int:
                         evidence_tokens=args.evidence_tokens,
                         compare_evidence_tokens=args.compare_evidence_tokens,
                         compare_answer_llm=compare_answer_llm,
-                        descriptions=not args.no_descriptions)
+                        descriptions=not args.no_descriptions,
+                        question_keys=args.question_keys)
 
         def finish(part: dict[str, Any]) -> dict[str, Any]:
             part["file"] = str(path)

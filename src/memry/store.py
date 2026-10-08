@@ -122,7 +122,7 @@ from .intelligence.extraction import (
     verbatim_candidates,
     verify_coverage,
 )
-from .intelligence.questions import merge_questions
+from .intelligence.questions import QUESTIONS_CHECKED_KEY, merge_questions, write_questions
 from .intelligence.reconcile import (
     CONFLICT_KEY,
     UPDATE_SUPERSEDE_REASON,
@@ -1268,6 +1268,68 @@ class MemoryStore:
                 self.backend.set_question_vectors(rows, self.embedder.model_id)
                 embedded += len(rows)
         return embedded
+
+    def backfill_questions(
+        self,
+        *,
+        user_id: str | None = None,
+        exact_user: bool = False,
+        batch: int = 20,
+        limit: int | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Write the question keys of memories saved before there were any.
+
+        Only valid memories with no question key at all are asked about, so a
+        second run over the same store asks only for what the first left
+        without questions. A batch whose call fails is logged and skipped,
+        never fatal: its memories stay due for the next run. It runs whether
+        ``retrieval.question_keys`` is on or not, since an operator fills the
+        keys before turning the search on. ``dry_run`` asks the model but
+        writes nothing and hands back what it would have written.
+        """
+        if not self.llm.available:
+            return {"skipped": "no LLM configured"}
+        pending = self.backend.memories_without_questions(
+            Scope(user_id=user_id, exact_user=exact_user))
+        if limit is not None:
+            pending = pending[: max(int(limit), 0)]
+        size = max(int(batch), 1)
+        summary: dict[str, Any] = {"checked": 0, "written": 0}
+        proposals: list[dict[str, Any]] = []
+        failed = 0
+        for index in range(0, len(pending), size):
+            group = pending[index : index + size]
+            try:
+                found = write_questions(self.llm, [m.content for m in group])
+            except Exception as exc:
+                failed += 1
+                log.warning("question backfill: a batch of %d not asked: %s", len(group), exc)
+                continue
+            for memory, questions in zip(group, found):
+                summary["checked"] += 1
+                if not questions:
+                    if not dry_run:
+                        # marked, so a later run does not ask about it again
+                        self.backend.update_memory(
+                            memory.id, metadata={**(memory.metadata or {}),
+                                                 QUESTIONS_CHECKED_KEY: True}, touch=False)
+                    continue
+                if dry_run:
+                    proposals.append(
+                        {"id": memory.id, "content": memory.content, "questions": questions})
+                    continue
+                try:
+                    self._write_questions(memory.id, questions, "backfill")
+                except Exception as exc:
+                    log.warning("question backfill: %s not written: %s", memory.id, exc)
+                    continue
+                summary["written"] += 1
+        if failed:
+            summary["failed_batches"] = failed
+        if dry_run:
+            summary["proposals"] = proposals
+        return summary
 
     def _property_vectors_after_save(self, memory_ids: list[str]) -> None:
         """Property vectors of memories just saved or edited, once their

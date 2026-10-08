@@ -10,6 +10,7 @@
     memry stats                   store statistics
     memry reindex                 re-embed all memories
     memry backfill-property-vectors  property vectors for the linked search
+    memry backfill-questions      question keys for memories saved without them (--dry-run first)
     memry export / import         lossless backup/restore; legacy JSON imports
     memry snapshot [--to DIR]     verified copy of the database files (--check to verify it)
     memry tags-to-things          give existing tags their topic entities (first open does it)
@@ -341,6 +342,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
 
+    p = sub.add_parser(
+        "backfill-questions",
+        help="write the question keys of memories saved without them (asks the text "
+             "model; only memories with none)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="ask the model and show the questions, write nothing")
+    p.add_argument("--limit", type=int, default=None,
+                   help="at most this many memories per namespace")
+
     p = sub.add_parser("export", help="export a lossless JSON backup to stdout")
     _scope_args(p)
 
@@ -612,6 +624,12 @@ def main(argv: list[str] | None = None) -> int:
             namespaces = _namespaces(store, args.user)
             _print([{"user": uid,
                      "embedded": store.refresh_property_vectors(user_id=uid, exact_user=True)}
+                    for uid in namespaces])
+        elif args.command == "backfill-questions":
+            namespaces = _namespaces(store, args.user)
+            _print([{"user": uid,
+                     **store.backfill_questions(user_id=uid, exact_user=True,
+                                                limit=args.limit, dry_run=args.dry_run)}
                     for uid in namespaces])
         elif args.command == "tags-to-things":
             scopes = store.tags_to_topics(

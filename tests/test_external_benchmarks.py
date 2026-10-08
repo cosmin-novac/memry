@@ -501,6 +501,50 @@ def test_extract_mode_traces_memories_to_their_session_and_dates_extraction():
     assert any("session-level" in note for note in result["notes"])
 
 
+class QuestionRuleLLM(RuleLLM):
+    """``RuleLLM`` that also answers the question keys rule when asked: each
+    fact gets one question made of its own line number, which no turn's
+    words hold."""
+
+    def complete(self, system: str, user: str, *, json_schema=None) -> str:
+        raw = super().complete(system, user, json_schema=json_schema)
+        if system.startswith("You are the long-term memory extraction system") \
+                and "- questions:" in system:
+            data = json.loads(raw)
+            for item in data["facts"]:
+                item["questions"] = [f"Which turn is number {item['sources'][0]}?"]
+            return json.dumps(data)
+        return raw
+
+
+def test_question_keys_both_asks_each_pass_twice_from_one_store():
+    """--question-keys both: the store writes question keys at ingest (the
+    extractor is asked for them) and every pass is asked once reading them
+    and once without, from the same memories."""
+    conv = xb.load_locomo(LOCOMO)[0]
+    llms: list[QuestionRuleLLM] = []
+
+    def factory():
+        llms.append(QuestionRuleLLM())
+        return MemoryStore(Config(db_path=":memory:"), llm=llms[-1], embedder=HashEmbedder(128))
+
+    result = xb.run_benchmark([conv], dataset="locomo", mode="extract", questions=2,
+                              store_factory=factory, log=lambda _: None, question_keys="both")
+    assert [p["search_decider"] for p in result["passes"]] == ["store", "store:text-only"]
+    assert result["config"]["question_keys"] == "both"
+    (entry,) = result["stores"]
+    assert entry["question_keys"] is True and entry["memories_with_questions"] == 8
+    by_pass = {}
+    for row in result["rows"]:
+        by_pass.setdefault(row["search_decider"], []).append(row)
+    assert set(by_pass) == {"store", "store:text-only"} and len(by_pass["store"]) == 2
+    # the text-only pass read no question key
+    assert all("question_keyword" not in r.get("signals", {}) for r in by_pass["store:text-only"])
+    with pytest.raises(ValueError, match="config, on or both"):
+        xb.run_benchmark([conv], dataset="locomo", store_factory=verbatim_store,
+                         log=lambda _: None, question_keys="maybe")
+
+
 def test_extract_mode_refuses_to_run_without_an_llm():
     conv = xb.load_locomo(LOCOMO)[0]
     with pytest.raises(SystemExit, match="needs a configured LLM"):

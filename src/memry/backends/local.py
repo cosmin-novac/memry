@@ -3188,14 +3188,17 @@ class LocalBackend(MemoryBackend):
         return [(row["memory_id"], row["n"], row["text"]) for row in rows]
 
     def memories_without_questions(self, scope: Scope, limit: int = 100_000) -> list[Memory]:
-        """Valid memories in ``scope`` with no question key at all, oldest
-        first (a backfill's work)."""
+        """Valid memories in ``scope`` with no question key at all and not
+        marked as asked about (``questions_checked``), oldest first (a
+        backfill's work)."""
         clause, params = _scope_clause(scope, prefix="m.")
         with self._lock:
             rows = self._db.execute(
                 f"SELECT {_prefixed(_MEMORY_COLS, 'm')} FROM memories m WHERE {clause} "
                 "AND m.invalid_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_questions q "
-                "WHERE q.memory_id = m.id) ORDER BY m.created_at, m.id LIMIT ?",
+                "WHERE q.memory_id = m.id) "
+                "AND json_extract(m.metadata, '$.questions_checked') IS NULL "
+                "ORDER BY m.created_at, m.id LIMIT ?",
                 (*params, limit)).fetchall()
         return [_row_to_memory(row) for row in rows]
 
