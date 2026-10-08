@@ -310,6 +310,9 @@ class CandidateFact(BaseModel):
     #: the memory to the episodes of those lines; with none, or a number no
     #: line has, to every episode of the save.
     sources: list[int] = Field(default_factory=list)
+    #: The questions the fact answers, as the extractor wrote them when asked
+    #: (``retrieval.question_keys``); kept as search keys beside the memory.
+    questions: list[str] = Field(default_factory=list)
 
 
 class AddAction(BaseModel):

@@ -172,6 +172,16 @@ class RetrievalConfig(BaseModel):
     #: comparison keeps (None: all). The v3 OpenAI models are trained so a
     #: vector cut short still works; property vectors are stored this short.
     property_dimensions: int | None = None
+    #: Question keys: with every fact the extractor writes 2 or 3 questions
+    #: it answers, kept beside the memory as search keys (``memory_questions``),
+    #: and every search matches the words and the meaning of the question
+    #: against them too, as two more candidate lists fused with the memory
+    #: text's (``retrieval.hybrid_search``). On LoCoMo turns three generated
+    #: questions per record raised top-8 success by 11 to 15 points for every
+    #: writing model (PhD notes, dreaming-questions). Off until measured on
+    #: Memry's facts; ``memry backfill-questions`` writes them for a store
+    #: saved before.
+    question_keys: bool = False
     #: A question that needs several memories (a list, a total, a comparison)
     #: has at most this many more judged in one further call, after the first
     #: ``decision.rerank_pool``: the memories filed under the topics the first

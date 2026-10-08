@@ -706,6 +706,55 @@ class MemoryBackend(ABC):
         """Drop these memories' property vectors."""
         return None
 
+    # Question keys (``intelligence.questions``): the questions a memory
+    # answers, kept as search keys. A backend without them keeps none and
+    # finds none, and the search runs on the memory text alone.
+
+    def set_questions(
+        self, memory_id: str, questions: list[tuple[str, str]],
+        vectors: list[list[float] | None] | None = None, embedding_model: str | None = None,
+    ) -> None:
+        """Replace a memory's question keys ((text, source) each) and their
+        vectors where given."""
+        return None
+
+    def set_question_vectors(
+        self, vectors: dict[tuple[str, int], list[float]], embedding_model: str,
+    ) -> None:
+        """The vectors of these question rows ((memory_id, n) each)."""
+        return None
+
+    def questions_of(self, memory_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Each memory's question keys in order (``n``, ``text``, ``source``,
+        ``embedding_model``)."""
+        return {}
+
+    def questions_without_vectors(
+        self, scope: Scope, embedding_model: str, limit: int = 100_000,
+    ) -> list[tuple[str, int, str]]:
+        """Question keys of valid memories without a vector from this model."""
+        return []
+
+    def memories_without_questions(self, scope: Scope, limit: int = 100_000) -> list[Memory]:
+        """Valid memories with no question key at all, oldest first."""
+        return []
+
+    def question_keyword_search(
+        self, query: str, scope: Scope, limit: int = 20, include_invalid: bool = False,
+        categories: list[str] | None = None, entity_id: str | None = None,
+        history: bool = False, among: Any = None,
+    ) -> list[tuple[Memory, float]]:
+        """BM25 over the question keys; a memory scores as its best question."""
+        return []
+
+    def question_vector_search(
+        self, embedding: list[float], embedding_model: str, scope: Scope, limit: int = 20,
+        include_invalid: bool = False, categories: list[str] | None = None,
+        entity_id: str | None = None, history: bool = False, among: Any = None,
+    ) -> list[tuple[Memory, float]]:
+        """Cosine over the question keys' vectors; a memory scores as its best."""
+        return []
+
     def session_memories(
         self, memory: Memory, *, hours: float = 3.0, limit: int = 50
     ) -> list[Memory]:

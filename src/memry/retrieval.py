@@ -81,6 +81,7 @@ def hybrid_search(
             entity_id=entity_id, history=history, **kept,
         )
         vector: list[tuple[Memory, float]] = []
+        qvec: list[float] | None = None
         if embedder.dimensions:
             try:
                 qvec = embedder.embed([query])[0] if query_vector is None else query_vector
@@ -108,6 +109,30 @@ def hybrid_search(
                 cfg.rrf_k + rank + 1
             )
             signals_by_id.setdefault(memory.id, {})["keyword"] = score
+        if cfg.question_keys:
+            # The question keys (``intelligence.questions``): the memories
+            # whose stored questions match the query's words, and whose
+            # question vectors are nearest it, each a list of its own fused
+            # as the two above are. A memory found only through a question it
+            # answers enters the candidates here.
+            lists = [("question_keyword", cfg.keyword_weight, backend.question_keyword_search(
+                query, scope, n, include_invalid=include_invalid, categories=categories,
+                entity_id=entity_id, history=history, **kept))]
+            if qvec:
+                try:
+                    lists.append(("question_vector", cfg.vector_weight,
+                                  backend.question_vector_search(
+                                      qvec, embedder.model_id, scope, n,
+                                      include_invalid=include_invalid, categories=categories,
+                                      entity_id=entity_id, history=history, **kept)))
+                except Exception:
+                    pass  # as the memory vectors above: the words alone then
+            for signal, weight, found in lists:
+                for rank, (memory, score) in enumerate(found):
+                    memories.setdefault(memory.id, memory)
+                    fused[memory.id] = fused.get(memory.id, 0.0) + weight / (
+                        cfg.rrf_k + rank + 1)
+                    signals_by_id.setdefault(memory.id, {})[signal] = score
 
     if not memories:
         return []

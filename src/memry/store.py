@@ -122,6 +122,7 @@ from .intelligence.extraction import (
     verbatim_candidates,
     verify_coverage,
 )
+from .intelligence.questions import merge_questions
 from .intelligence.reconcile import (
     CONFLICT_KEY,
     UPDATE_SUPERSEDE_REASON,
@@ -922,6 +923,7 @@ class MemoryStore:
             entity_names=self._entity_vocabulary(scope, said),
             identity=stated if stated is not None and self._owner_unnamed(scope.user_id)
             else None,
+            questions=self.config.retrieval.question_keys,
         )
         self._confirm_candidate_whens(candidates, now=now)
         return candidates
@@ -1205,7 +1207,67 @@ class MemoryStore:
                 )
         self._property_vectors_after_save(
             [a.memory_id for a in actions if a.event != "NONE" and a.memory_id])
+        self._questions_after_save(candidates, actions)
         return actions
+
+    def _questions_after_save(
+        self, candidates: list[CandidateFact], actions: list[AddAction],
+    ) -> None:
+        """The question keys of the memories just saved (``retrieval.
+        question_keys``): a new memory's are its candidate's; a merged text's
+        (an UPDATE) are its candidate's and those of the memory it replaced,
+        since it answers what both answered. A restatement (NONE) adds none.
+        A failure never fails the save: the backfill writes what is missing."""
+        if not self.config.retrieval.question_keys:
+            return
+        for candidate, action in zip(candidates, actions):
+            if action.event == "NONE" or not action.memory_id:
+                continue
+            questions = candidate.questions
+            if action.event == "UPDATE":
+                replaced = [q["text"] for old in self.backend.replaced_by(action.memory_id)
+                            for q in self.backend.questions_of([old.id]).get(old.id, [])]
+                questions = merge_questions(candidate.questions, replaced)
+            if not questions:
+                continue
+            try:
+                self._write_questions(action.memory_id, questions, "save")
+            except Exception as exc:
+                log.warning("question keys not written on save: %s", exc)
+
+    def _write_questions(self, memory_id: str, questions: list[str], source: str) -> None:
+        """Keep ``questions`` as the memory's question keys, each embedded
+        (cut to ``retrieval.property_dimensions``, as a property vector is)
+        in one call; without an embedder, by their words alone."""
+        vectors: list[list[float] | None] | None = None
+        if questions and self.embedder.dimensions:
+            keep = self.config.retrieval.property_dimensions
+            vectors = [_cut(v, keep) if v else None for v in self.embedder.embed(questions)]
+        self.backend.set_questions(
+            memory_id, [(q, source) for q in questions], vectors,
+            self.embedder.model_id if vectors else None)
+
+    def refresh_question_vectors(
+        self, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> int:
+        """Embed the question keys of valid memories that have no vector from
+        the configured embedder (restored from a backup, which carries the
+        texts only; written without an embedder; or embedded by another
+        model), in batches of 64. Returns how many it embedded."""
+        if not self.embedder.dimensions:
+            return 0
+        scope = Scope(user_id=user_id, exact_user=exact_user)
+        due = self.backend.questions_without_vectors(scope, self.embedder.model_id)
+        keep = self.config.retrieval.property_dimensions
+        embedded = 0
+        for start in range(0, len(due), 64):
+            batch = due[start:start + 64]
+            vectors = self.embedder.embed([text for _, _, text in batch])
+            rows = {(mid, n): _cut(v, keep) for (mid, n, _), v in zip(batch, vectors) if v}
+            if rows:
+                self.backend.set_question_vectors(rows, self.embedder.model_id)
+                embedded += len(rows)
+        return embedded
 
     def _property_vectors_after_save(self, memory_ids: list[str]) -> None:
         """Property vectors of memories just saved or edited, once their
@@ -1579,7 +1641,14 @@ class MemoryStore:
                         and not row.get("user_id") else row
                         for row in rows]
             backup = {**backup, "tables": tables}
-        return self.backend.import_backup(backup, owner_prefix=owner_prefix)
+        result = self.backend.import_backup(backup, owner_prefix=owner_prefix)
+        if self.config.retrieval.question_keys:
+            # a backup carries the question keys' texts, not their vectors
+            try:
+                self.refresh_question_vectors()
+            except Exception as exc:
+                log.warning("question vectors not computed after a restore: %s", exc)
+        return result
 
     def _namespace(self, user_id: str | None) -> str:
         """The namespace a write goes to: ``user_id``, else the default one
@@ -6335,6 +6404,15 @@ class MemoryStore:
                 embedded = 0
             if embedded:
                 ran["property_vectors"] = {"embedded": embedded}
+            if self.config.retrieval.question_keys:
+                try:
+                    embedded = self.refresh_question_vectors(user_id=user_id,
+                                                             exact_user=exact_user)
+                except Exception as exc:
+                    log.warning("question vector refresh failed: %s", exc)
+                    embedded = 0
+                if embedded:
+                    ran["question_vectors"] = {"embedded": embedded}
         return ran
 
     def run_consolidation_pass(
