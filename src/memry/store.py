@@ -2472,11 +2472,9 @@ class MemoryStore:
             members = plan.reads.entity_memories(self.backend, entity_id, FAMILY_SCAN)
             vectors = (self.backend.vectors_of([m.id for m in members], self.embedder.model_id)
                        if several else self._property_vectors([m.id for m in members]))
-            by_question = self._question_similarity(asked, [m.id for m in members])
             # a tie keeps the order read: the newest first, then by memory id
             for memory in sorted(members,
-                                 key=lambda m: -max(_similarity(asked, vectors.get(m.id)),
-                                                    by_question.get(m.id, 0.0)))[:FAMILY_TOP]:
+                                 key=lambda m: -_similarity(asked, vectors.get(m.id)))[:FAMILY_TOP]:
                 pool.setdefault(memory.id, SearchResult(memory=memory, score=0.0))
         scores = self._linked_scores(asked, list(pool), act, plan.entities, names_kept=several)
         scored = []
@@ -2545,32 +2543,9 @@ class MemoryStore:
         vectors = self._property_vectors(reached)
         vectors.update(self.backend.vectors_of([mid for mid in memory_ids if mid not in vectors],
                                                self.embedder.model_id))
-        by_question = self._question_similarity(asked, memory_ids)
-        return {mid: (max(_similarity(asked, vectors.get(mid)), by_question.get(mid, 0.0)),
+        return {mid: (_similarity(asked, vectors.get(mid)),
                       aboutness([act.get(e.id) for e in entities[mid]]))
                 for mid in memory_ids}
-
-    def _question_similarity(self, asked: np.ndarray, memory_ids: list[str]) -> dict[str, float]:
-        """How well each memory's best question key matches the question
-        (``retrieval.question_keys``; nothing when off): the cosine of
-        ``asked`` and the nearest of the memory's question vectors, each cut
-        to the question's length, 0 for an opposite one. The linked order
-        reads a memory's relevance as the better of this and its property
-        similarity: a question worded unlike the fact ("what city is Ada
-        based in?") matches a stored question ("Where does Ada live?")
-        where the masked text does not."""
-        if not self.config.retrieval.question_keys or not memory_ids:
-            return {}
-        out: dict[str, float] = {}
-        for mid, matrix in self.backend.question_vectors_of(
-                memory_ids, self.embedder.model_id).items():
-            if matrix.shape[1] < asked.shape[0]:
-                continue
-            cut = matrix[:, :asked.shape[0]]
-            norms = np.linalg.norm(cut, axis=1)
-            norms[norms == 0] = 1e-9
-            out[mid] = max(float(((cut @ asked) / norms).max()), 0.0)
-        return out
 
     def _judge_ranking(
         self, question: str, ranked: list[SearchResult], scope: Scope, include_invalid: bool,
