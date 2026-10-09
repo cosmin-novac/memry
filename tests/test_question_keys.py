@@ -1,8 +1,8 @@
 """Question keys: with ``retrieval.question_keys`` on, the extractor writes
 2 or 3 questions each fact answers, the store keeps them beside the memory
 (``memory_questions``) with their vectors, and the search reads them as two
-more candidate lists (``question_keyword``, ``question_vector``). Off, the
-prompt, the schema and the search are those without them."""
+more candidate lists (``question_keyword``, ``question_vector``). On by
+default. Off, the prompt, the schema and the search are those without them."""
 
 from __future__ import annotations
 
@@ -174,6 +174,26 @@ def test_a_save_writes_the_questions_of_each_new_memory(store, llm):
     assert store.backend.questions_without_vectors(Scope(user_id="ada"),
                                                    store.embedder.model_id) == []
     assert llm.responses == []
+
+
+def test_the_defaults_turn_question_keys_entity_questions_and_the_log_on(llm):
+    """Question keys, entity questions and the search log are on by default,
+    keys from traffic off; a store with the defaults asks the extractor for
+    questions with the prompt and schema built for them."""
+    cfg = Config(db_path=":memory:")
+    retrieval = cfg.retrieval
+    assert (retrieval.question_keys, retrieval.entity_questions, retrieval.search_log,
+            retrieval.traffic_keys) == (True, True, True, False)
+    store = MemoryStore(cfg, llm=llm, embedder=HashEmbedder(64))
+    try:
+        llm.queue(facts_response(_asked("Ada works as a nurse", ["What is Ada's job?"])),
+                  NO_GAPS)
+        actions = store.add("I work as a nurse", user_id="ada").actions
+        system = llm.calls[0][0]
+        assert QUESTIONS_RULE in system and '"questions": [str],' in system
+        assert _texts(store, actions[0].memory_id) == ["What is Ada's job?"]
+    finally:
+        store.close()
 
 
 def test_with_the_flag_off_nothing_is_asked_or_written(plain_store, llm):

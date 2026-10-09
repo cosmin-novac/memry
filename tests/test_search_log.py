@@ -77,11 +77,21 @@ def _keys(store, memory_id):
 
 # ------------------------------------------------------------------ the log
 
-def test_off_by_default_and_nothing_is_kept():
+def test_the_log_is_on_by_default_and_the_keys_from_traffic_are_off():
     s = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
     try:
-        assert s.config.retrieval.search_log is False
+        assert s.config.retrieval.search_log is True
         assert s.config.retrieval.traffic_keys is False
+        _remember(s, "Ada lives in Lisbon")
+        s.search("where does ada live", user_id="ada")
+        assert [row["query"] for row in _rows(s)] == ["where does ada live"]
+    finally:
+        s.close()
+
+
+def test_with_the_log_off_nothing_is_kept():
+    s = _store(search_log=False)
+    try:
         _remember(s, "Ada lives in Lisbon")
         s.search("where does ada live", user_id="ada")
         assert _rows(s) == []
@@ -165,13 +175,21 @@ def test_a_failing_log_never_fails_the_search(store, monkeypatch):
     assert store.search("lisbon", user_id="ada")
 
 
-def test_the_environment_turns_the_log_and_the_keys_on(monkeypatch, tmp_path):
+def test_the_environment_turns_the_keys_from_traffic_on(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMRY_CONFIG", str(tmp_path / "missing.json"))
-    monkeypatch.setenv("MEMRY_SEARCH_LOG", "1")
     monkeypatch.setenv("MEMRY_TRAFFIC_KEYS", "true")
-    monkeypatch.setenv("MEMRY_QUESTION_KEYS", "on")
     cfg = Config.load()
     assert cfg.retrieval.search_log and cfg.retrieval.traffic_keys and cfg.retrieval.question_keys
+
+
+@pytest.mark.parametrize("off", ["0", "false", "off", "no"])
+def test_the_environment_turns_the_features_on_by_default_off(monkeypatch, tmp_path, off):
+    monkeypatch.setenv("MEMRY_CONFIG", str(tmp_path / "missing.json"))
+    for name in ("MEMRY_SEARCH_LOG", "MEMRY_QUESTION_KEYS", "MEMRY_ENTITY_QUESTIONS"):
+        monkeypatch.setenv(name, off)
+    cfg = Config.load()
+    assert not (cfg.retrieval.search_log or cfg.retrieval.question_keys
+                or cfg.retrieval.entity_questions)
 
 
 # ------------------------------------------------------- retention, deletion

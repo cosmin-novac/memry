@@ -26,7 +26,10 @@ def llm() -> FakeLLM:
 
 @pytest.fixture
 def store(llm):
-    s = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64))
+    """A store saved without question keys: the backfill is for such stores."""
+    cfg = Config(db_path=":memory:")
+    cfg.retrieval.question_keys = False
+    s = MemoryStore(cfg, llm=llm, embedder=HashEmbedder(64))
     yield s
     s.close()
 

@@ -976,7 +976,7 @@ superseded otherwise (a contradiction, a consolidation, a distillation) or delet
 excluded unless a caller explicitly requests every memory (`include_invalid`). Reconcile's
 candidates are memories in use only.
 
-Entity questions (`retrieval.entity_questions`, off by default) are for a question by role.
+Entity questions (`retrieval.entity_questions`, on by default) are for a question by role.
 Someone asks "Where does my sister work?" without her name. With the flag off, Memry starts
 that search from the owner. Each person related to the owner can have two or three stored
 questions (table `entity_questions`), written by a text model from the person's description
@@ -991,17 +991,18 @@ word, Memry starts from the owner. The questions of a merged entity stay with it
 and are not read until the merge is undone. A backup and the trash contain their texts.
 Memry embeds them again after a restore (`MemoryStore.refresh_entity_question_vectors`).
 
-The search log (`retrieval.search_log`, off by default) is the table `search_log`, with one
+The search log (`retrieval.search_log`, on by default) is the table `search_log`, with one
 row per search: the time, the namespace, agent and run, the query, the seeds, the mode, the
 result count and the latency. Memry deletes rows older than 90 days during upkeep. A
 namespace's rows are deleted with it. An export contains the log only with
 `--with-search-log`, and a snapshot copy only with `snapshot.include_search_log`. With
 `memry search-stats`, an operator gets the searches with and without seeds per namespace.
-With `retrieval.traffic_keys` on, Memry stores the query of a recent search as a question key
-(source "traffic") of a memory saved after it, when that memory is in the first 20 of the
-search ordered again. Traffic keys need `retrieval.question_keys`. With question keys off,
-Memry logs one warning when the store opens and leaves traffic keys off. With traffic keys
-alone, two question families scored lower (PhD notes, traffic-keys).
+Traffic keys (`retrieval.traffic_keys`) are off by default. With them on, Memry stores the
+query of a recent search as a question key (source "traffic") of a memory saved after it,
+when that memory is in the first 20 of the search ordered again. Traffic keys need
+`retrieval.question_keys`. With question keys off, Memry logs one warning when the store
+opens and leaves traffic keys off. With traffic keys alone, two question families scored
+lower (PhD notes, traffic-keys).
 
 ## 6. Product surfaces and security
 

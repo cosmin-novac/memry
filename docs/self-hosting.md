@@ -746,15 +746,26 @@ When a fact changes or someone corrects it, save the new statement and leave the
 old memory as it is. Memry keeps the old value as dated history, or retires it
 when it was wrong.
 
-## Entity questions (optional, off by default)
+## Question keys (on by default)
+
+With each fact it extracts, Memry writes two or three questions the fact answers. Memry
+keeps them beside the memory, and every search matches the question against them as well
+as against the memory's text. They cost no extra call: the extraction call writes them,
+with about 40 more output tokens a fact. Memry embeds them with the memory.
+`MEMRY_QUESTION_KEYS=0` (or `retrieval.question_keys` set to false in
+`~/.memry/config.json`) turns them off. For memories saved before, `memry
+backfill-questions` writes them.
+
+## Entity questions (on by default)
 
 Someone may ask "Where does my sister work?" without the sister's name. With
-`retrieval.entity_questions` set to true in `~/.memry/config.json`, Memry starts that
+`retrieval.entity_questions` on, Memry starts that
 search from the sister. Each person related to the owner has two or three stored questions,
 written by a text model from the person's description and relations. Memry picks the person
 whose stored questions alone contain the word after "my". The best match must reach
 `retrieval.entity_question_bar` (0.5). Otherwise Memry starts from the owner, as with the
-flag off. An operator can also turn the flag on with `MEMRY_ENTITY_QUESTIONS=1`.
+flag off. `MEMRY_ENTITY_QUESTIONS=0` (or `retrieval.entity_questions` set to false in
+`~/.memry/config.json`) turns the flag off.
 
 With the flag on, Memry writes the questions during upkeep. In each upkeep tick, Memry asks
 the text model about the described people and things related to the owner that have no
@@ -765,9 +776,10 @@ next tick. To write them for a whole store at once, run `memry write-entity-ques
 estimated tokens. Backups and exports contain the question texts, and Memry embeds them
 again after a restore.
 
-## The search log (optional, off by default)
+## The search log (on by default)
 
-With `MEMRY_SEARCH_LOG=1` (`retrieval.search_log`), Memry keeps one row per search. A row
+With `retrieval.search_log` on, Memry keeps one row per search. `MEMRY_SEARCH_LOG=0`
+turns the log off, and Memry then keeps no new search. A row
 contains the time, the namespace, agent and run, the query, the seeds (the entities Memry
 recognised in the question), the result count and the time taken. Memry deletes rows older
 than 90 days during upkeep. A namespace's rows are deleted with its memories.
@@ -783,9 +795,9 @@ seeds.
 With `MEMRY_TRAFFIC_KEYS=1` (`retrieval.traffic_keys`), Memry stores a search's query as a
 question key of a memory saved after it. The save must come within the same run in the hour
 after the search, or within ten minutes in the same namespace. Ordered again after the save,
-the search must have that memory in its first 20. Traffic keys need the log and
-`MEMRY_QUESTION_KEYS=1`. With question keys off, Memry logs one warning at startup and leaves
-traffic keys off.
+the search must have that memory in its first 20. Traffic keys are off by default
+and need the log and question keys. With question keys off, Memry logs one warning at
+startup and leaves traffic keys off.
 
 ## Search filters
 

@@ -178,32 +178,35 @@ class RetrievalConfig(BaseModel):
     #: against them too, as two more candidate lists fused with the memory
     #: text's (``retrieval.hybrid_search``). On LoCoMo turns three generated
     #: questions per record raised top-8 success by 11 to 15 points for every
-    #: writing model (PhD notes, dreaming-questions). Off until measured on
-    #: Memry's facts; ``memry backfill-questions`` writes them for a store
-    #: saved before.
-    question_keys: bool = False
+    #: writing model (PhD notes, dreaming-questions). On by default since
+    #: 2026-10-09 (``MEMRY_QUESTION_KEYS=0`` turns it off); ``memry
+    #: backfill-questions`` writes them for a store saved before.
+    question_keys: bool = True
     #: Entity questions (``intelligence.entity_questions``): the questions the
     #: owner would ask about an entity related to them, by its role ("Where
     #: does my sister work?"). A question that contains no hub's name is then
     #: about the entity whose questions alone contain its role word after "my",
     #: when its best cosine similarity with that entity's questions is at
     #: least ``entity_question_bar``; otherwise it is about the owner, as
-    #: before. Off until measured (PhD notes, entity-questions).
-    entity_questions: bool = False
+    #: before. On by default since 2026-10-09 (``MEMRY_ENTITY_QUESTIONS=0``
+    #: turns it off; PhD notes, entity-questions).
+    entity_questions: bool = True
     entity_question_bar: float = 0.5
     #: The search log (``search_log``): one row per search, with its time,
     #: namespace, run, the query's text, whether it was about a known entity
     #: (how many seeds), how it was ordered, how many results and how long it
     #: took. Kept ``SEARCH_LOG_DAYS`` days, deleted by upkeep, never in an
     #: export or a snapshot unless asked. ``memry search-stats`` counts it.
-    #: Off by default: it keeps what people ask.
-    search_log: bool = False
+    #: On by default since 2026-10-09 (``MEMRY_SEARCH_LOG=0`` turns it off).
+    #: It keeps what people ask, so copies leave it out unless asked.
+    search_log: bool = True
     #: Keys from traffic: a search followed by a save, whose order after the
     #: save puts one of the saved memories in its first 20, gives that memory
     #: the query as a question key (source "traffic"). Needs ``search_log``
     #: and ``question_keys``: with ``question_keys`` off the store warns once
     #: when it opens and keeps this off (alone, the keys from traffic made two
-    #: question families worse; PhD notes, traffic-keys).
+    #: question families worse; PhD notes, traffic-keys). Off by default: it
+    #: was measured only in simulation.
     traffic_keys: bool = False
     #: A question that needs several memories (a list, a total, a comparison)
     #: has at most this many more judged in one further call, after the first
