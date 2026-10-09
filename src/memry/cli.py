@@ -12,6 +12,7 @@
     memry backfill-property-vectors  property vectors for the linked search
     memry backfill-questions      question keys for memories saved without them (--dry-run first)
     memry export / import         lossless backup/restore; legacy JSON imports
+    memry search-stats [--days N] count the search log: searches with and without seeds
     memry snapshot [--to DIR]     verified copy of the database files (--check to verify it)
     memry tags-to-things          give existing tags their topic entities (first open does it)
     memry split-memories          split memories that hold several facts (--dry-run first)
@@ -355,6 +356,16 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("export", help="export a lossless JSON backup to stdout")
     _scope_args(p)
+    p.add_argument("--with-search-log", action="store_true",
+                   help="include the search log (the queries people asked); left out by default")
+
+    p = sub.add_parser(
+        "search-stats",
+        help="count the search log: searches with and without seeds, per namespace",
+    )
+    p.add_argument("--days", type=int, default=30, help="the last N days (default 30)")
+    p.add_argument("-u", "--user", default=None, help="one namespace (default: every one)")
+    p.add_argument("--json", dest="as_json", action="store_true", help="print JSON")
 
     p = sub.add_parser("import", help="restore a Memry backup or import legacy JSON/JSONL")
     p.add_argument("path")
@@ -643,9 +654,16 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "reindex":
             count = store.reindex()
             _print({"reindexed": count, "embedder": store.embedder.model_id})
+        elif args.command == "search-stats":
+            stats = store.search_stats(days=args.days, user_id=args.user)
+            if args.as_json:
+                _print(stats)
+            else:
+                print(format_search_stats(stats, store.config.retrieval.search_log))
         elif args.command == "export":
             backup = store.export_backup(
                 user_id=args.user, agent_id=args.agent, run_id=args.run,
+                search_log=args.with_search_log,
             )
             print(json.dumps(backup, ensure_ascii=False))
         elif args.command == "import":
@@ -665,6 +683,38 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         store.close()
     return 0
+
+
+def format_search_stats(stats: dict[str, Any], logging_on: bool = True) -> str:
+    """``search-stats`` for a person to read: the counts in all, then per
+    namespace, then the most common queries without seeds."""
+
+    def share(value: float | None) -> str:
+        return "-" if value is None else f"{100 * value:.1f}%"
+
+    lines = [f"Search log, last {stats['days']} days (since {stats['since']})"]
+    if not logging_on:
+        lines.append("The search log is off (retrieval.search_log, MEMRY_SEARCH_LOG=1): "
+                     "no new search is kept.")
+    head = ["namespace", "searches", "with seeds", "without", "share without",
+            "filtered", "no results", "judged", "judged none", "browses"]
+    table = [head]
+    for name, c in [("(all)", stats["total"]), *stats["namespaces"].items()]:
+        table.append([name or "(none)", str(c["searches"]), str(c["with_seeds"]),
+                      str(c["without_seeds"]), share(c["share_without_seeds"]),
+                      str(c["filtered"]), str(c["no_results"]), str(c["judged"]),
+                      str(c["judged_none_answering"]), str(c["browses"])])
+    widths = [max(len(row[i]) for row in table) for i in range(len(head))]
+    for row in table:
+        lines.append("  ".join(cell.ljust(w) if i == 0 else cell.rjust(w)
+                               for i, (cell, w) in enumerate(zip(row, widths))))
+    top = stats["top_without_seeds"]
+    lines.append("")
+    lines.append(f"Most common searches without seeds ({len(top)}):" if top
+                 else "No search without seeds.")
+    for item in top:
+        lines.append(f"  {item['count']:>5}  {item['query']}")
+    return "\n".join(lines)
 
 
 def format_split_report(reports: list[dict[str, Any]]) -> str:

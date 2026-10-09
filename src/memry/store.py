@@ -123,7 +123,13 @@ from .intelligence.extraction import (
     verbatim_candidates,
     verify_coverage,
 )
-from .intelligence.questions import QUESTIONS_CHECKED_KEY, merge_questions, write_questions
+from .intelligence.questions import (
+    QUESTIONS_CHECKED_KEY,
+    QUESTIONS_LIMIT,
+    clean_questions,
+    merge_questions,
+    write_questions,
+)
 from .intelligence.reconcile import (
     CONFLICT_KEY,
     UPDATE_SUPERSEDE_REASON,
@@ -380,6 +386,21 @@ def _dedup_run_key(user_id: str | None) -> str:
 
 def _consolidation_run_key(user_id: str | None) -> str:
     return f"consolidation:last_run:{user_id or ''}"
+
+
+#: The search log (``retrieval.search_log``) keeps a search this many days;
+#: upkeep deletes older ones (``run_upkeep_cycle``).
+SEARCH_LOG_DAYS = 90
+#: Keys from traffic (``MemoryStore._traffic_keys``): a save may answer the
+#: searches of its run this long before it, and those of its namespace this
+#: long before it; at most this many searches are read a save, each ordered
+#: again to its first ``TRAFFIC_TOP``, and a search's query keys at most
+#: ``TRAFFIC_KEYS_PER_QUERY`` memories of the save.
+TRAFFIC_RUN_WINDOW = timedelta(hours=1)
+TRAFFIC_WINDOW = timedelta(minutes=10)
+TRAFFIC_QUERIES = 20
+TRAFFIC_TOP = 20
+TRAFFIC_KEYS_PER_QUERY = 1
 
 
 def _upkeep_key(name: str, user_id: str | None) -> str:
@@ -677,6 +698,8 @@ class _SearchPlan:
     #: stages 5 and 6: each memory judged (member of the set, score), in the
     #: order judged
     judged: dict[str, tuple[bool, float]] = field(default_factory=dict)
+    #: the judge's highest relevance in the first call (None: not judged)
+    best_judged: float | None = None
 
 
 def _cut(vector: list[float], keep: int | None) -> list[float]:
@@ -1206,9 +1229,10 @@ class MemoryStore:
                 self._recheck_proposals(
                     scope, open_before, {entity.id for entity in resolved.values()}
                 )
-        self._property_vectors_after_save(
-            [a.memory_id for a in actions if a.event != "NONE" and a.memory_id])
+        written = [a.memory_id for a in actions if a.event != "NONE" and a.memory_id]
+        self._property_vectors_after_save(written)
         self._questions_after_save(candidates, actions)
+        self._traffic_keys(scope, written)
         return actions
 
     def _questions_after_save(
@@ -1235,6 +1259,108 @@ class MemoryStore:
                 self._write_questions(action.memory_id, questions, "save")
             except Exception as exc:
                 log.warning("question keys not written on save: %s", exc)
+
+    def _traffic_keys(
+        self, scope: Scope, memory_ids: list[str], *, at: datetime | None = None,
+    ) -> dict[str, int]:
+        """Keys from traffic (``retrieval.traffic_keys``): the searches kept
+        in the search log that a save may answer take their query as a
+        question key (source "traffic") of the memory it saved that ranks
+        first among them.
+
+        The searches are the namespace's, of the save's run in the
+        ``TRAFFIC_RUN_WINDOW`` before ``at`` (the clock), or of any run in
+        the ``TRAFFIC_WINDOW`` before it, newest first, each query once, at
+        most ``TRAFFIC_QUERIES``, none whose query is a key already. Each is
+        ordered again over its own scope as a search would order it, without
+        the judge (``_unjudged_order``). When one of ``memory_ids`` is in its
+        first ``TRAFFIC_TOP``, the first ``TRAFFIC_KEYS_PER_QUERY`` of them
+        take the query as a key, embedded as every key is (names read "it",
+        ``_masked_question_texts``), all in one call; a failed call keeps the
+        words without vectors, and upkeep embeds them
+        (``refresh_question_vectors``). A memory with ``QUESTIONS_LIMIT``
+        keys, or with this one, takes none. A failure never fails the save.
+        Returns how many searches were read and how many keys were added."""
+        cfg = self.config.retrieval
+        if not (cfg.traffic_keys and cfg.search_log and memory_ids):
+            return {"searches": 0, "keys": 0}
+        try:
+            return self._add_traffic_keys(scope, memory_ids, at or datetime.now(timezone.utc))
+        except Exception as exc:
+            log.warning("keys from traffic not written on save: %s", exc)
+            return {"searches": 0, "keys": 0}
+
+    def _traffic_searches(self, scope: Scope, at: datetime) -> list[dict[str, Any]]:
+        """The kept searches a save at ``at`` in ``scope`` may answer
+        (``_traffic_keys``), newest first."""
+        stamp = lambda moment: moment.isoformat(timespec="seconds")  # noqa: E731
+        recent = stamp(at - TRAFFIC_WINDOW)
+        due: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in self.backend.search_log_rows(
+                user_id=scope.user_id, since=stamp(at - TRAFFIC_RUN_WINDOW),
+                until=stamp(at), newest_first=True, limit=1000):
+            if row["mode"] == "browse" or row["keyed"] or not row["query"]:
+                continue
+            in_run = scope.run_id is not None and row["run_id"] == scope.run_id
+            if not (in_run or row["at"] >= recent):
+                continue
+            asked = row["query"].casefold()
+            if asked in seen:
+                continue
+            seen.add(asked)
+            due.append(row)
+            if len(due) >= TRAFFIC_QUERIES:
+                break
+        return due
+
+    def _add_traffic_keys(
+        self, scope: Scope, memory_ids: list[str], at: datetime,
+    ) -> dict[str, int]:
+        searches = self._traffic_searches(scope, at)
+        saved = set(memory_ids)
+        planned: list[tuple[int, str, str]] = []  # (log id, memory id, query)
+        for row in searches:
+            text = clean_questions([row["query"]], limit=1)
+            if not text:
+                continue
+            order = self._unjudged_order(
+                row["query"], Scope(user_id=row["user_id"], agent_id=row["agent_id"],
+                                    run_id=row["run_id"]), TRAFFIC_TOP)
+            for memory_id in [mid for mid in order if mid in saved][:TRAFFIC_KEYS_PER_QUERY]:
+                planned.append((row["id"], memory_id, text[0]))
+        if not planned:
+            return {"searches": len(searches), "keys": 0}
+        vectors: list[list[float] | None] = [None] * len(planned)
+        if self.embedder.dimensions:
+            masked = [self._masked_question_texts(mid, [text])[0] for _, mid, text in planned]
+            keep = self.config.retrieval.property_dimensions
+            try:
+                vectors = [_cut(v, keep) if v else None for v in self.embedder.embed(masked)]
+            except Exception as exc:
+                log.warning("keys from traffic kept without vectors: %s", exc)
+        keyed: dict[int, int] = {}
+        added = 0
+        for (log_id, memory_id, text), vector in zip(planned, vectors):
+            if self.backend.add_question(
+                    memory_id, text, "traffic", vector,
+                    self.embedder.model_id if vector else None, limit=QUESTIONS_LIMIT):
+                keyed[log_id] = keyed.get(log_id, 0) + 1
+                added += 1
+        if keyed:
+            self.backend.mark_search_keyed(keyed)
+        return {"searches": len(searches), "keys": added}
+
+    def _unjudged_order(self, query: str, scope: Scope, top: int) -> list[str]:
+        """The first ``top`` memory ids of ``query``'s order in ``scope`` as a
+        search orders it (seeds, text ranking, linked order, the final order),
+        without the judge and without the search log."""
+        reads = _Reads(scope)
+        plan = self._plan(query, reads, True)
+        plan.judges = False
+        results = self._text_ranking(query, reads, top)
+        ranked = self._search_linked(query, scope, results, False, plan=plan)
+        return [r.memory.id for r in self._final_order(ranked, plan)[:top]]
 
     def _write_questions(self, memory_id: str, questions: list[str], source: str) -> None:
         """Keep ``questions`` as the memory's question keys, each embedded
@@ -1698,11 +1824,14 @@ class MemoryStore:
         user_id: str | None = None,
         agent_id: str | None = None,
         run_id: str | None = None,
+        search_log: bool = False,
     ) -> dict[str, Any]:
-        """Export exact knowledge records for this scope as one versioned bundle."""
-        return self.backend.export_backup(
-            Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        )
+        """Export exact knowledge records for this scope as one versioned
+        bundle. The search log goes with them only when ``search_log``."""
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        if search_log:
+            return self.backend.export_backup(scope, search_log=True)
+        return self.backend.export_backup(scope)
 
     def import_backup(
         self, backup: dict[str, Any], *, owner_prefix: str | None = None
@@ -1725,7 +1854,18 @@ class MemoryStore:
                         and not row.get("user_id") else row
                         for row in rows]
             backup = {**backup, "tables": tables}
+        searches = backup.get("search_log") if isinstance(backup, dict) else None
+        if searches is not None:
+            # an export that asked for the search log carries it (``export_backup``)
+            searches = [{**row, "user_id": self._namespace(row.get("user_id"))}
+                        if isinstance(row, dict) and not row.get("user_id") else row
+                        for row in searches] if isinstance(searches, list) else searches
+            self.backend.restore_search_log(searches, owner_prefix=owner_prefix,
+                                            check_only=True)
         result = self.backend.import_backup(backup, owner_prefix=owner_prefix)
+        if searches:
+            result["search_log"] = self.backend.restore_search_log(
+                searches, owner_prefix=owner_prefix)
         if self.config.retrieval.question_keys:
             # a backup carries the question keys' texts, not their vectors
             try:
@@ -2110,6 +2250,120 @@ class MemoryStore:
         evidence: bool = True,
         filters: Filters | None = None,
     ) -> list[SearchResult]:
+        """The memories that best answer ``query``, best first (``_search``
+        has the stages). With ``retrieval.search_log`` on, each search is
+        kept as one row of the search log (``_log_search``)."""
+        note: dict[str, Any] = {}
+        started = time.perf_counter()
+        found = self._search(
+            query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit,
+            include_invalid=include_invalid, categories=categories, entity_id=entity_id,
+            since=since, until=until, when_since=when_since, when_until=when_until,
+            relational=relational, evidence=evidence, filters=filters, note=note)
+        if self.config.retrieval.search_log:
+            filtered = bool(categories or entity_id or since or until or when_since
+                            or when_until or (filters is not None and filters.active))
+            self._log_search(query, user_id=user_id, agent_id=agent_id, run_id=run_id,
+                             note=note, filtered=filtered, results=len(found),
+                             latency_ms=(time.perf_counter() - started) * 1000)
+        return found
+
+    def search_stats(
+        self, *, days: int = 30, user_id: str | None = None, now: datetime | None = None,
+        top: int = 10,
+    ) -> dict[str, Any]:
+        """Counts of the search log over the last ``days`` days, of one
+        namespace (``user_id``) or all: per namespace and in all, the
+        searches with query text, those with seeds (a question about a known
+        entity, the owner of one in the first person included), those
+        without, the share without, those with filters, those with no
+        result and those the judge judged (and of them, those where nothing
+        judged reached 0.5); the browses (no query text) apart; and the
+        ``top`` most common queries without seeds, compared ignoring case
+        and spacing."""
+        now = now or datetime.now(timezone.utc)
+        since = (now - timedelta(days=days)).isoformat(timespec="seconds")
+        rows = self.backend.search_log_rows(user_id=user_id, since=since)
+
+        def counts(group: list[dict[str, Any]]) -> dict[str, Any]:
+            ranked = [r for r in group if r["mode"] != "browse"]
+            seeded = sum(1 for r in ranked if r["seeds"] > 0)
+            judged = [r for r in ranked if r["judged"] and r["best_judged"] is not None]
+            return {
+                "searches": len(ranked),
+                "with_seeds": seeded,
+                "without_seeds": len(ranked) - seeded,
+                "share_without_seeds": round((len(ranked) - seeded) / len(ranked), 4)
+                if ranked else None,
+                "filtered": sum(1 for r in ranked if r["filtered"]),
+                "no_results": sum(1 for r in ranked if not r["results"]),
+                "judged": len(judged),
+                "judged_none_answering": sum(1 for r in judged if r["best_judged"] < 0.5),
+                "browses": len(group) - len(ranked),
+                "median_latency_ms": round(float(np.median([r["latency_ms"] for r in ranked])), 1)
+                if ranked else None,
+            }
+
+        by_namespace: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            by_namespace[row["user_id"] or ""].append(row)
+        asked: Counter[str] = Counter()
+        first: dict[str, str] = {}
+        for row in rows:
+            if row["mode"] == "browse" or row["seeds"] > 0:
+                continue
+            key = " ".join(row["query"].casefold().split())
+            asked[key] += 1
+            first.setdefault(key, row["query"])
+        return {
+            "days": days, "since": since,
+            "total": counts(rows),
+            "namespaces": {ns: counts(group) for ns, group in sorted(by_namespace.items())},
+            "top_without_seeds": [{"query": first[key], "count": n}
+                                  for key, n in asked.most_common(top)],
+        }
+
+    def _log_search(
+        self, query: str, *, user_id: str | None, agent_id: str | None,
+        run_id: str | None, note: dict[str, Any], filtered: bool, results: int,
+        latency_ms: float,
+    ) -> None:
+        """Keep one search in the search log. A failure is logged and never
+        fails the search."""
+        try:
+            self.backend.log_search({
+                "at": utcnow(), "user_id": self._namespace(user_id),
+                "agent_id": agent_id, "run_id": run_id,
+                "query": " ".join((query or "").split()),
+                "mode": note.get("mode", "text"), "seeds": note.get("seeds", 0),
+                "first_person": int(bool(note.get("first_person"))),
+                "filtered": int(filtered), "judged": int(bool(note.get("judged"))),
+                "best_judged": note.get("best_judged"), "results": results,
+                "latency_ms": round(latency_ms, 1),
+            })
+        except Exception as exc:
+            log.warning("search not kept in the search log: %s", exc)
+
+    def _search(
+        self,
+        query: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 10,
+        include_invalid: bool = False,
+        categories: list[str] | None = None,
+        entity_id: str | list[str] | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        when_since: str | None = None,
+        when_until: str | None = None,
+        relational: bool = True,
+        evidence: bool = True,
+        filters: Filters | None = None,
+        note: dict[str, Any] | None = None,
+    ) -> list[SearchResult]:
         """The memories that best answer ``query``, best first.
 
         Every search runs one pipeline, its stages in this order, each rule
@@ -2145,7 +2399,13 @@ class MemoryStore:
         others: those read in SQL join ``categories`` and ``entity_id``, and
         the rest are read once over the scope (``_admitted``) into the set
         of memories every stage keeps to (``_Reads.among``), so a memory
-        they drop is never a candidate, however well it matches."""
+        they drop is never a candidate, however well it matches.
+
+        ``note`` receives what the search log keeps of it: "mode" ("linked"
+        with seeds, "text" without, "browse" for no query text), "seeds",
+        "first_person", "judged" and "best_judged" (the judge's highest
+        relevance in the judged pool)."""
+        note = {} if note is None else note
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         if filters is not None:
             filters = self.resolve_filters(filters, user_id=user_id, agent_id=agent_id)
@@ -2159,6 +2419,7 @@ class MemoryStore:
                 return []
         # No query text = browse by tag/date rather than rank by relevance.
         if not (query or "").strip():
+            note["mode"] = "browse"
             memories = self.get_all(
                 user_id=user_id, agent_id=agent_id, run_id=run_id,
                 include_invalid=include_invalid, limit=limit,
@@ -2180,6 +2441,8 @@ class MemoryStore:
                        when_since, when_until, among)
         # 1. the seeds, the question as it is read, and whether it is judged
         plan = self._plan(query, reads, relational)
+        note.update(mode="linked" if plan.seeds else "text", seeds=len(plan.seeds),
+                    first_person=plan.first_person, judged=plan.judges)
         # 2. the candidates: the text ranking, as deep for every search
         query_vector = self._query_vector(query)  # the ranking and the evidence read it
         results = self._text_ranking(query, reads, limit, query_vector)
@@ -2188,6 +2451,7 @@ class MemoryStore:
         # 5 and 6. the judge and the set call
         if plan.judges:
             ranked = self._judge_ranking(plan.question, ranked, scope, include_invalid, plan)
+            note["best_judged"] = plan.best_judged
         # 7. the final order and the limit, then the evidence
         ranked = self._final_order(ranked, plan)
         members = sum(1 for r in ranked if r.signals.get("member"))
@@ -2625,6 +2889,7 @@ class MemoryStore:
         judged, specific, several = judge(ranked[:size], True)
         if not judged:
             return ranked
+        plan.best_judged = round(max(judged.values()), 4)
         found: dict[str, SearchResult] = {r.memory.id: r for r in ranked}
         extra: list[SearchResult] = []
         calls, pooled = 1, 0
@@ -3997,6 +4262,9 @@ class MemoryStore:
         memories = self.backend.list_memories(scope, limit=1_000_000)
         for memory in memories:
             self.delete(memory.id, hard=hard)
+        if user_id is not None and agent_id is None and run_id is None:
+            # what the namespace asked goes with what it keeps
+            self.backend.delete_search_log(user_id=user_id)
         return len(memories)
 
     # ------------------------------------------------------------------
@@ -6442,6 +6710,16 @@ class MemoryStore:
         """
         now = now or datetime.now(timezone.utc)
         ran: dict[str, Any] = {}
+        # The search log's retention holds whatever else is paused or off,
+        # for every namespace (one without memories has no tick of its own).
+        try:
+            pruned = self.backend.prune_search_log(
+                (now - timedelta(days=SEARCH_LOG_DAYS)).isoformat(timespec="seconds"))
+        except Exception as exc:
+            log.warning("search log not pruned: %s", exc)
+            pruned = 0
+        if pruned:
+            ran["search_log"] = {"deleted": pruned}
         if self.upkeep_paused():
             return ran
         if (self._upkeep_get("owner_learned", user_id, None) is None

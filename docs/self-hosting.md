@@ -746,6 +746,26 @@ When a fact changes or someone corrects it, save the new statement and leave the
 old memory as it is. Memry keeps the old value as dated history, or retires it
 when it was wrong.
 
+## The search log (optional, off by default)
+
+`MEMRY_SEARCH_LOG=1` (`retrieval.search_log`) keeps one row per search: the time,
+the namespace, agent and run, the query, whether the question was about an entity
+Memry knows (its seeds), the result count and the time it took. Upkeep deletes rows
+older than 90 days. Deleting a namespace's memories deletes its rows.
+
+The log contains what people asked, so it stays out of copies. `memry export` leaves
+it out unless given `--with-search-log`. The nightly snapshot empties the log in its
+copy unless `snapshot.include_search_log` is true.
+
+`memry search-stats --days 30` prints the counts per namespace: searches, those with
+seeds, those without and their share, and the ten most common searches without seeds.
+
+`MEMRY_TRAFFIC_KEYS=1` (`retrieval.traffic_keys`, needs the log) turns a search into
+a question key of the memory saved after it. The save must come within the same run
+in the hour after the search, or within ten minutes in the same namespace. The
+search, ordered again after the save, must place that memory in its first 20.
+Searches read question keys only with `MEMRY_QUESTION_KEYS=1`.
+
 ## Search filters
 
 Memry does not guess dates or names from the words of a question. The caller states them,

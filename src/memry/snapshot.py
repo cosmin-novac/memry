@@ -177,12 +177,16 @@ def read_failure(directory: str | os.PathLike[str]) -> dict[str, Any] | None:
     return _read_json(Path(directory) / FAILURE)
 
 
-def copy_database(source: Path, dest: Path) -> None:
+def copy_database(source: Path, dest: Path, *, drop_search_log: bool = False) -> None:
     """Copy a live SQLite file with the online backup API.
 
     The copy reads from a connection of its own, so it never waits on
     Memry's backend lock, and steps a few pages at a time with a short pause,
-    so the server's writes get through between steps."""
+    so the server's writes get through between steps.
+
+    ``drop_search_log``: the copy's search log (the queries people asked,
+    ``retrieval.search_log``) is emptied, its pages overwritten with zeros
+    (``secure_delete``), so the copy does not contain it."""
     if not source.exists():
         raise SnapshotError(f"{source} does not exist")
     src = sqlite3.connect(str(source), timeout=30)
@@ -204,6 +208,11 @@ def copy_database(source: Path, dest: Path) -> None:
             # A rollback-journal file: the copy then is one file, with no
             # -wal or -shm beside it, and opens read-only without writing.
             dst.execute("PRAGMA journal_mode=DELETE")
+            if drop_search_log and dst.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'search_log'").fetchone():
+                dst.execute("PRAGMA secure_delete=ON")
+                dst.execute("DELETE FROM search_log")
             dst.commit()
         finally:
             dst.close()
@@ -314,7 +323,8 @@ def take_snapshot(
             for name, source in sources.items():
                 tmp = target_dir / f".{name}.{os.getpid()}.tmp"
                 temps.append((name, tmp))
-                copy_database(source, tmp)
+                copy_database(source, tmp, drop_search_log=(
+                    name == "memry.db" and not config.snapshot.include_search_log))
                 _fsync_file(tmp)
                 verdict = integrity(tmp)
                 if verdict != "ok":
