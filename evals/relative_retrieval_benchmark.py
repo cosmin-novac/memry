@@ -1653,7 +1653,8 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode,
     ``retrieval.question_keys`` so, and sets it back as it was after; None
     leaves it as the store has it. ``entity_questions`` does the same for
     ``retrieval.entity_questions``. ``seeds`` lists the names of the entities
-    each search starts from, in the family's order."""
+    each search starts from, in the family's order, and ``rr`` the reciprocal
+    rank of each question's first answer."""
     _, relational, depth = mode[:3]
     cfg = store.config.retrieval
     cfg.relational_depth = depth
@@ -1716,7 +1717,7 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode,
                            "ms": statistics.median(ms), "n": len(items),
                            "r20": statistics.mean(r20),
                            "linked": statistics.mean(map(float, linked)),
-                           "seeds": seeds}
+                           "seeds": seeds, "rr": mrr}
             if sets:
                 out[family].update({
                     "set_n": len(sets),
