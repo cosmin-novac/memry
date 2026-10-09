@@ -407,22 +407,50 @@ FAMILY = [{
     "answer_session_ids": ["s-job"]}]
 
 
+#: FAMILY with a brother, Tomas, in two more sessions and Mira in a third, so
+#: the user has two related people and Mira has the more memories.
+FAMILY_TWO = [{**FAMILY[0], "question_id": "fam-2",
+               "haystack_session_ids": FAMILY[0]["haystack_session_ids"]
+               + ["s-move", "s-call", "s-photos"],
+               "haystack_dates": FAMILY[0]["haystack_dates"]
+               + ["2023/05/10 (Wed) 09:00", "2023/05/12 (Fri) 09:00",
+                  "2023/05/14 (Sun) 09:00"],
+               "haystack_sessions": FAMILY[0]["haystack_sessions"] + [
+                   [{"role": "user", "content": "My brother Tomas moved to Lisbon."},
+                    {"role": "assistant", "content": "A big change."}],
+                   [{"role": "user", "content": "Tomas called me about his flat."},
+                    {"role": "assistant", "content": "Good to hear."}],
+                   [{"role": "user", "content": "Mira sent me photos of the lake."},
+                    {"role": "assistant", "content": "How nice."}]]}]
+
+#: The relation a line's family word gives, and the person it is about.
+KIN = {"sister": ("has_sister", "Mira"), "brother": ("has_brother", "Tomas")}
+
+
 class FamilyLLM(RuleLLM):
     """``RuleLLM`` whose facts name the user as "the user" (the owner's name
-    in a chat between the user and an assistant), Mira where a line names
-    her, and the user's sister relation where a line says "sister". Each fact
-    has one question key. The entity question writer gets two questions by
-    role for each entity, and its calls are kept with their stage. With
-    ``cap`` the writer's call is refused as at a --max-calls cap."""
+    in a chat between the user and an assistant), Mira or Tomas where a line
+    names them, and the user's sister or brother relation where a line says
+    "sister" or "brother". Each fact has one question key. The description
+    writer writes one sentence for each entity it is asked about. The entity
+    question writer gets two questions by role for each entity. Both writers'
+    calls are kept with their stage. With ``cap`` the entity question
+    writer's call is refused as at a --max-calls cap."""
 
     def __init__(self, cap: bool = False) -> None:
         super().__init__()
         self.cap = cap
         self.entity_question_calls: list[str] = []
+        self.description_calls: list[tuple[str, str]] = []
 
     def complete(self, system: str, user: str, *, json_schema=None) -> str:
+        from memry.intelligence.entities import DESCRIPTION_SCHEMA
         from memry.intelligence.entity_questions import ENTITY_QUESTIONS_SCHEMA
 
+        if json_schema is DESCRIPTION_SCHEMA:
+            name = user.split("\n", 1)[0].removeprefix("Entity: ")
+            self.description_calls.append((api_usage.current_stage(), name))
+            return json.dumps({"description": f"{name} is family of the user."})
         if json_schema is ENTITY_QUESTIONS_SCHEMA:
             self.entity_question_calls.append(api_usage.current_stage())
             if self.cap:
@@ -437,22 +465,26 @@ class FamilyLLM(RuleLLM):
         facts = json.loads(out)["facts"]
         for fact in facts:
             fact["entities"] = [{"name": "the user", "type": "person"}]
-            if "Mira" in fact["content"]:
-                fact["entities"].append({"name": "Mira", "type": "person"})
-            if "sister" in fact["content"]:
-                fact["relations"] = [{"subject": "the user", "predicate": "has_sister",
-                                      "object": "Mira"}]
+            for person in ("Mira", "Tomas"):
+                if person in fact["content"]:
+                    fact["entities"].append({"name": person, "type": "person"})
+            for word, (predicate, person) in KIN.items():
+                if word in fact["content"]:
+                    fact["relations"] = [{"subject": "the user", "predicate": predicate,
+                                          "object": person}]
             fact["questions"] = [f"What did I say about {fact['content'][:20]}?"]
         return json.dumps({"facts": facts})
 
 
-def _family_run(monkeypatch, tmp_path, *, flag: bool, look: bool = True, cap: bool = False):
-    """The invented one-question dataset run with ``FamilyLLM``, entity
-    questions on or off. With ``look`` someone opens Mira's page once the
-    haystack is loaded, so she has a description, as the entity question
-    writer needs; a store loaded just now has none."""
+def _family_run(monkeypatch, tmp_path, *, flag: bool, look: bool = True, cap: bool = False,
+                data: list | None = None, logs: list | None = None):
+    """The invented one-question dataset (``data``, FAMILY by default) run
+    with ``FamilyLLM``, entity questions on or off. With ``look`` someone
+    opens Mira's page once the haystack is loaded, so she has a description
+    before the runner's description step; a store loaded just now has none.
+    ``logs`` keeps the run's log lines."""
     path = tmp_path / "family.json"
-    path.write_text(json.dumps(FAMILY))
+    path.write_text(json.dumps(data or FAMILY))
     llms: list[FamilyLLM] = []
 
     def store_factory() -> MemoryStore:
@@ -476,7 +508,7 @@ def _family_run(monkeypatch, tmp_path, *, flag: bool, look: bool = True, cap: bo
     monkeypatch.setattr(xb, "ingest", ingest_and_look)
     result = xb.run_benchmark(xb.load_longmemeval(path), dataset="longmemeval",
                               mode="extract", k=20, store_factory=store_factory,
-                              log=lambda _: None)
+                              log=(logs.append if logs is not None else lambda _: None))
     return result, llms[0]
 
 
@@ -491,6 +523,9 @@ def test_the_owner_is_the_user_and_entity_questions_are_written_before_the_quest
     assert (writer["entities"], writer["calls"], writer["written"]) == (1, 1, 1)
     # one call, counted under its own stage
     assert llm.entity_question_calls == [xb.ENTITY_QUESTIONS_STAGE]
+    # Mira was described when her page was opened, so the runner describes no one
+    assert llm.description_calls == [("ingest", "Mira")]
+    assert store["entity_descriptions"]["due"] == 0 and store["entities_described"] == 0
     (row,) = result["rows"]
     assert row["owner"] == "the user"
     assert row["entities_with_questions"] == 1
@@ -503,23 +538,51 @@ def test_the_owner_is_the_user_and_entity_questions_are_written_before_the_quest
 
 def test_with_entity_questions_off_the_step_makes_no_call_and_the_owner_is_the_start(
         monkeypatch, tmp_path):
-    result, llm = _family_run(monkeypatch, tmp_path, flag=False)
+    result, llm = _family_run(monkeypatch, tmp_path, flag=False, look=False)
     store = result["stores"][0]
     assert store["entity_question_writer"] == {"skipped": "retrieval.entity_questions is off"}
+    assert store["entity_descriptions"] == {"skipped": "retrieval.entity_questions is off"}
     assert llm.entity_question_calls == []
+    assert [stage for stage, _ in llm.description_calls
+            if stage == xb.ENTITY_DESCRIPTIONS_STAGE] == []
     (row,) = result["rows"]
     assert row["entities_with_questions"] == 0
+    assert row["entities_described"] == 0
     assert row["start"] == ["the user"] and row["start_first_person"]
     assert not (row["start_by_role"] or row["start_other_than_owner"])
 
 
-def test_a_store_loaded_just_now_has_no_description_so_the_writer_asks_nothing(
+def test_a_related_person_without_a_description_is_described_and_then_asked_about(
         monkeypatch, tmp_path):
     result, llm = _family_run(monkeypatch, tmp_path, flag=True, look=False)
-    writer = result["stores"][0]["entity_question_writer"]
-    assert (writer["entities"], writer["calls"]) == (0, 0)
-    assert llm.entity_question_calls == []
-    assert result["rows"][0]["start"] == ["the user"]
+    store = result["stores"][0]
+    assert store["entity_descriptions"] == {"due": 1, "calls": 1, "described": 1,
+                                            "skipped_by_cap": 0}
+    writer = store["entity_question_writer"]
+    assert (writer["entities"], writer["calls"], writer["written"]) == (1, 1, 1)
+    # one call in each stage, the description first
+    assert llm.description_calls == [(xb.ENTITY_DESCRIPTIONS_STAGE, "Mira")]
+    assert llm.entity_question_calls == [xb.ENTITY_QUESTIONS_STAGE]
+    (row,) = result["rows"]
+    assert row["entities_described"] == 1
+    assert row["entities_with_questions"] == 1
+    assert row["start"] == ["Mira"]
+
+
+def test_the_description_step_stops_at_its_cap_and_logs_the_rest(monkeypatch, tmp_path):
+    monkeypatch.setattr(xb, "DESCRIBE_CAP", 1)
+    logs: list[str] = []
+    result, llm = _family_run(monkeypatch, tmp_path, flag=True, look=False,
+                              data=FAMILY_TWO, logs=logs)
+    store = result["stores"][0]
+    # Mira has the more memories, so she goes first; Tomas waits
+    assert store["entity_descriptions"] == {"due": 2, "calls": 1, "described": 1,
+                                            "skipped_by_cap": 1}
+    assert llm.description_calls == [(xb.ENTITY_DESCRIPTIONS_STAGE, "Mira")]
+    assert any("1 of 2 hubs skipped by the cap of 1" in line for line in logs)
+    writer = store["entity_question_writer"]
+    assert (writer["entities"], writer["calls"]) == (1, 1)
+    assert result["rows"][0]["entities_described"] == 1
 
 
 def test_the_entity_question_call_stops_at_a_cap(monkeypatch, tmp_path):

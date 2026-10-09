@@ -138,10 +138,12 @@ evaluate_qa.py. The tables have a row for the abstention questions and the
 task-averaged judge score, as in print_qa_metrics.py. The store's owner is
 "the user": Memry's own rule for a conversation between the user and an
 assistant (``MemoryStore.owner_name``), so no name is set. With
-``retrieval.entity_questions`` on, the store writes its entity questions once
-the haystack is loaded and before the question is asked
-(``write_entity_questions_step``, counted under the stage "entity_questions"
-and capped with the chat calls). Each row has the store's memories with
+``retrieval.entity_questions`` on, the store first describes each hub related
+to the owner that has no description yet, at most 20 a question
+(``describe_related_hubs_step``, counted under the stage "entity_descriptions"),
+and then writes its entity questions once the haystack is loaded and before
+the question is asked (``write_entity_questions_step``, counted under the stage
+"entity_questions"). Both are capped with the chat calls. Each row has the store's memories with
 question keys, its entities with entity questions, and where the search
 started (``search_start``):
 
@@ -199,6 +201,7 @@ sys.path.insert(0, str(HERE.parent))
 from evals import api_usage  # noqa: E402
 from memry.config import Config, DecisionConfig, EmbeddingConfig  # noqa: E402
 from memry.intelligence.context import context_lines  # noqa: E402
+from memry.intelligence.entities import DESCRIPTION_MIN_MEMORIES  # noqa: E402
 from memry.intelligence.graph_retrieval import detect_query_entities  # noqa: E402
 from memry.models import Memory, Scope  # noqa: E402
 from memry.providers.decisions import (  # noqa: E402
@@ -1675,8 +1678,59 @@ def store_stats(store: MemoryStore, conversation: Conversation) -> dict[str, Any
 #: The stage the entity question writer's calls are counted under.
 ENTITY_QUESTIONS_STAGE = "entity_questions"
 
+#: The stage the description writer's calls for the entity questions are counted under.
+ENTITY_DESCRIPTIONS_STAGE = "entity_descriptions"
+
+#: Hubs related to the owner described at most for one question's store.
+DESCRIBE_CAP = 20
+
 #: Store counts copied into each of its questions' rows.
-ROW_STORE_FIELDS = ("owner", "memories_with_questions", "entities_with_questions")
+ROW_STORE_FIELDS = ("owner", "memories_with_questions", "entities_with_questions",
+                    "entities_described")
+
+
+def describe_related_hubs_step(store: MemoryStore, *, cap: int | None = None,
+                               log: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """With ``retrieval.entity_questions`` on, a description for each hub
+    related to the owner that has none yet, so the entity question writer
+    has something to ask from. Memry's own description writer writes it
+    (``MemoryStore._refresh_entity_description``, the one an opened entity
+    and a question about it use). A hub with fewer than
+    ``DESCRIPTION_MIN_MEMORIES`` memories gets no description, so it is not
+    taken. The most remembered hubs go first, at most ``cap``; the rest are
+    counted in "skipped_by_cap" and logged. One call a hub, counted under
+    ``ENTITY_DESCRIPTIONS_STAGE``; a call refused at a cap ends the run.
+    Off, no call and {"skipped": ...}. ``cap`` defaults to ``DESCRIBE_CAP``."""
+    if not store.config.retrieval.entity_questions:
+        return {"skipped": "retrieval.entity_questions is off"}
+    cap = DESCRIBE_CAP if cap is None else cap
+    owner = store.owner_entity(BENCH_USER)
+    if owner is None:
+        return {"skipped": "no owner"}
+    related = {relation.object if relation.subject == owner.id else relation.subject
+               for relation in store.backend.relations_of([owner.id])} - {owner.id}
+    due: list[tuple[int, str]] = []
+    for entity_id in sorted(related):
+        entity = store.backend.get_entity(entity_id)
+        if (entity is None or entity.merged_into or entity.description
+                or not store._is_hub(entity_id)):
+            continue
+        memories = store.backend.count_entity_memories(entity_id)
+        if memories >= DESCRIPTION_MIN_MEMORIES:
+            due.append((memories, entity_id))
+    due.sort(key=lambda item: (-item[0], item[1]))
+    taken = due[: max(int(cap), 0)]
+    skipped = len(due) - len(taken)
+    if skipped and log:
+        log(f"  entity descriptions: {skipped} of {len(due)} hubs skipped by the cap of {cap}")
+    described = 0
+    with api_usage.stage(ENTITY_DESCRIPTIONS_STAGE):
+        for _, entity_id in taken:
+            entity = store._refresh_entity_description(entity_id)
+            if entity is not None and entity.description:
+                described += 1
+    return {"due": len(due), "calls": len(taken) if store.llm.available else 0,
+            "described": described, "skipped_by_cap": skipped}
 
 
 def write_entity_questions_step(store: MemoryStore) -> dict[str, Any]:
@@ -1686,7 +1740,7 @@ def write_entity_questions_step(store: MemoryStore) -> dict[str, Any]:
     cap (``api_usage.CapReached``) ends the run as any other. Off, no call
     and {"skipped": ...}. The writer asks only about described entities
     related to the owner; a store loaded just now has no description yet,
-    so it then makes no call."""
+    so the runner describes them first (``describe_related_hubs_step``)."""
     if not store.config.retrieval.entity_questions:
         return {"skipped": "retrieval.entity_questions is off"}
     with api_usage.stage(ENTITY_QUESTIONS_STAGE):
@@ -1876,7 +1930,10 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                     ingested = ingest(store, conv, mode=mode, unit=unit, when=when,
                                       dataset=dataset)
                 entry["entity_questions"] = store.config.retrieval.entity_questions
+                entry["entities_described"] = 0
                 if dataset == "longmemeval":
+                    entry["entity_descriptions"] = describe_related_hubs_step(store, log=log)
+                    entry["entities_described"] = entry["entity_descriptions"].get("described", 0)
                     entry["entity_question_writer"] = write_entity_questions_step(store)
                 entry.update(memories=len(store.get_all(user_id=BENCH_USER, limit=1_000_000)),
                              ingest_seconds=round(ingested.seconds, 2),
