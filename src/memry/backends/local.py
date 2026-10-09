@@ -125,6 +125,19 @@ CREATE TABLE IF NOT EXISTS memory_questions (
     embedding_model TEXT DEFAULT NULL,
     PRIMARY KEY (memory_id, n)
 );
+-- The questions the owner would ask about an entity by its role ("Where does
+-- my sister work?", ``intelligence.entity_questions``), one row per question,
+-- with its vector in float16 cut to ``retrieval.property_dimensions``.
+-- source: "model" (the writer) or "agent".
+CREATE TABLE IF NOT EXISTS entity_questions (
+    entity_id TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'model',
+    embedding BLOB DEFAULT NULL,
+    embedding_model TEXT DEFAULT NULL,
+    PRIMARY KEY (entity_id, n)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_questions_fts USING fts5(
     text, content='memory_questions', content_rowid='rowid'
 );
@@ -3201,6 +3214,60 @@ class LocalBackend(MemoryBackend):
                 "ORDER BY m.created_at, m.id LIMIT ?",
                 (*params, limit)).fetchall()
         return [_row_to_memory(row) for row in rows]
+
+    # --- entity questions (``intelligence.entity_questions``) -----------------
+
+    def set_entity_questions(
+        self, entity_id: str, questions: list[tuple[str, str]],
+        vectors: list[list[float] | None] | None = None, embedding_model: str | None = None,
+    ) -> None:
+        """Replace an entity's questions with ``questions`` ((text, source)
+        each, in order) and their vectors where given, stored in float16."""
+        with self._lock:
+            self._db.execute("DELETE FROM entity_questions WHERE entity_id = ?", (entity_id,))
+            for n, (text, source) in enumerate(questions):
+                vector = vectors[n] if vectors and n < len(vectors) else None
+                self._db.execute(
+                    "INSERT INTO entity_questions (entity_id, n, text, source, embedding, "
+                    "embedding_model) VALUES (?, ?, ?, ?, ?, ?)",
+                    (entity_id, n, text, source, _pack_half(vector) if vector else None,
+                     embedding_model if vector else None))
+            self._commit()
+
+    def entity_questions_of(self, entity_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Each entity's questions, in order: ``n``, ``text``, ``source`` and
+        ``embedding_model`` (None for a question without a vector)."""
+        out: dict[str, list[dict[str, Any]]] = {}
+        with self._lock:
+            for start in range(0, len(entity_ids), 500):
+                chunk = entity_ids[start:start + 500]
+                rows = self._db.execute(
+                    "SELECT entity_id, n, text, source, embedding_model FROM entity_questions "
+                    f"WHERE entity_id IN ({','.join('?' * len(chunk))}) ORDER BY entity_id, n",
+                    chunk).fetchall()
+                for row in rows:
+                    out.setdefault(row["entity_id"], []).append(
+                        {"n": row["n"], "text": row["text"], "source": row["source"],
+                         "embedding_model": row["embedding_model"]})
+        return out
+
+    def entity_question_rows(
+        self, scope: Scope, embedding_model: str,
+    ) -> list[tuple[str, str, np.ndarray | None]]:
+        """(entity id, text, vector) of every question of the entities in
+        ``scope`` that are not merged into another; the vector is None where
+        it is missing or of another model."""
+        clause, params = _scope_clause(scope, prefix="e.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT q.entity_id, q.text, q.embedding, q.embedding_model "
+                "FROM entity_questions q JOIN entities e ON e.id = q.entity_id "
+                f"WHERE e.merged_into IS NULL AND {clause} ORDER BY q.entity_id, q.n",
+                params).fetchall()
+        return [(row["entity_id"], row["text"],
+                 _unpack_half(row["embedding"])
+                 if row["embedding"] is not None and row["embedding_model"] == embedding_model
+                 else None) for row in rows]
 
     def question_keyword_search(
         self,

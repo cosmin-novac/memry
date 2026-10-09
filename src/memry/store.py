@@ -70,6 +70,12 @@ from .intelligence.entities import (
     resolve_open_proposals,
     synthesize_entity_description,
 )
+from .intelligence.entity_questions import (
+    distinct_holders,
+    mask_role,
+    role_words,
+    write_entity_questions,
+)
 from .intelligence.graph_retrieval import (
     FAMILY_SCAN,
     FAMILY_TOP,
@@ -2237,6 +2243,110 @@ class MemoryStore:
             return [owner.id], True
         return [], False
 
+    def _role_seed(self, query: str, scope: Scope) -> tuple[str, str, float] | None:
+        """The entity a question by role is about (``retrieval.entity_questions``),
+        the question as the order reads it, and the best similarity: "Where
+        does my sister work?" is about the sister and is read "Where does it
+        work?". The question contains a role word after "my" that only that
+        entity's questions contain, and its best cosine similarity with them
+        is at least ``retrieval.entity_question_bar``. None when no entity
+        has questions, when the role words belong to no entity or to
+        several, below the bar, or without an embedder. With
+        ``retrieval.entity_question_role_word`` False (a measurement only),
+        the entity with the most similar question at or above the bar."""
+        cfg = self.config.retrieval
+        if not self.embedder.dimensions:
+            return None
+        rows = self.backend.entity_question_rows(scope, self.embedder.model_id)
+        if not rows:
+            return None
+        word = None
+        if cfg.entity_question_role_word:
+            holders = distinct_holders([(entity_id, text) for entity_id, text, _ in rows])
+            hits = {w: holders[w] for w in role_words(query) if w in holders}
+            if len(set(hits.values())) != 1:
+                return None
+            word, entity_id = next(iter(hits.items()))
+            rows = [row for row in rows if row[0] == entity_id]
+        rows = [row for row in rows if row[2] is not None]
+        if not rows:
+            return None
+        asked = self._asked_vector(query)
+        best = max(rows, key=lambda row: _similarity(asked, row[2]))
+        similarity = _similarity(asked, best[2])
+        if similarity < cfg.entity_question_bar:
+            return None
+        return best[0], mask_role(query, word) if word else query, similarity
+
+    def _write_entity_questions(self, entity_id: str, questions: list[str], source: str) -> None:
+        """Keep ``questions`` as the entity's questions, each embedded as
+        written (cut to ``retrieval.property_dimensions``) in one call."""
+        vectors: list[list[float] | None] | None = None
+        if questions and self.embedder.dimensions:
+            keep = self.config.retrieval.property_dimensions
+            vectors = [_cut(v, keep) if v else None for v in self.embedder.embed(questions)]
+        self.backend.set_entity_questions(
+            entity_id, [(q, source) for q in questions], vectors,
+            self.embedder.model_id if vectors else None)
+
+    def write_entity_questions(
+        self, *, user_id: str | None = None, batch: int = 10, limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Write the entity questions of every hub related to the owner that
+        has a description and no questions yet: 2 or 3 questions the owner
+        would ask about it by its role, from its description and its
+        relations to the owner, ``batch`` entities a call. A batch whose call
+        fails is logged and stays due. Runs whether
+        ``retrieval.entity_questions`` is on or not, so the questions exist
+        before the search reads them."""
+        if not self.llm.available:
+            return {"skipped": "no LLM configured"}
+        owner = self.owner_entity(user_id)
+        if owner is None:
+            return {"skipped": "no owner"}
+        names: dict[str, str] = {}
+
+        def name(entity_id: str) -> str:
+            if entity_id not in names:
+                entity = self.backend.get_entity(entity_id)
+                names[entity_id] = entity.name if entity is not None else entity_id
+            return names[entity_id]
+
+        related: dict[str, list[str]] = {}
+        for relation in self.backend.relations_of([owner.id]):
+            other = relation.object if relation.subject == owner.id else relation.subject
+            if other != owner.id:
+                related.setdefault(other, []).append(
+                    f"{name(relation.subject)} {relation.predicate} {name(relation.object)}")
+        held = self.backend.entity_questions_of(sorted(related))
+        due = []
+        for entity_id in sorted(related):
+            entity = self.backend.get_entity(entity_id)
+            if (entity is None or entity.merged_into or not entity.description
+                    or entity_id in held or not self._is_hub(entity_id)):
+                continue
+            due.append(entity)
+        if limit is not None:
+            due = due[: max(int(limit), 0)]
+        summary: dict[str, Any] = {"checked": 0, "written": 0}
+        size = max(int(batch), 1)
+        for start in range(0, len(due), size):
+            group = due[start:start + size]
+            try:
+                found = write_entity_questions(self.llm, owner.name, [
+                    {"name": e.name, "description": e.description, "relations": related[e.id]}
+                    for e in group])
+            except Exception as exc:
+                log.warning("entity questions: a batch of %d not asked: %s", len(group), exc)
+                summary["failed_batches"] = summary.get("failed_batches", 0) + 1
+                continue
+            for entity, questions in zip(group, found):
+                summary["checked"] += 1
+                if questions:
+                    self._write_entity_questions(entity.id, questions, "model")
+                    summary["written"] += 1
+        return summary
+
     def _plan(self, query: str, reads: _Reads, relational: bool) -> _SearchPlan:
         """A search's seeds (stage 1, none with ``relational=False``), the
         question as the linked order and the judge read it, and whether the
@@ -2252,7 +2362,15 @@ class MemoryStore:
         ``decision.rerank``); with "vector" no search is judged."""
         seeds, first_person = self._seeds(query, reads.scope) if relational else ([], False)
         question = query
-        if len(seeds) == 1:
+        role = None
+        if (relational and self.config.retrieval.entity_questions
+                and (not seeds or first_person)):
+            # no hub in the question: an entity whose questions match it by
+            # its role is what it is about, before the owner
+            role = self._role_seed(query, reads.scope)
+        if role is not None:
+            seeds, first_person, question = [role[0]], False, role[1]
+        elif len(seeds) == 1:
             question = mask_names(query, self.backend.entity_aliases(seeds[0]))
             if first_person:
                 question = mask_first_person(question)
