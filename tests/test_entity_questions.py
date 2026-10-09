@@ -275,13 +275,161 @@ def test_write_entity_questions_asks_about_described_relations_of_the_owner_once
     store.backend.set_entity_description(ids["sister"], "Ilva's sister.", "2026-10-09T00:00:00Z")
     store.llm = FakeLLM([json.dumps({"items": [
         {"n": 1, "questions": ["Who is my sister?", "Which company employs my sister?"]}]})])
-    assert store.write_entity_questions(user_id=USER) == {"checked": 1, "written": 1}
+    summary = store.write_entity_questions(user_id=USER)
+    assert (summary["entities"], summary["calls"]) == (1, 1)
+    assert (summary["checked"], summary["written"]) == (1, 1)
     assert "Mira Lund" in store.llm.calls[0][1] and "Kai Berg" not in store.llm.calls[0][1]
     rows = store.backend.entity_questions_of([ids["sister"]])[ids["sister"]]
     assert [r["text"] for r in rows] == ["Who is my sister?", "Which company employs my sister?"]
     assert all(r["embedding_model"] == store.embedder.model_id for r in rows)
-    assert store.write_entity_questions(user_id=USER) == {"checked": 0, "written": 0}
+    summary = store.write_entity_questions(user_id=USER)
+    assert (summary["calls"], summary["checked"], summary["written"]) == (0, 0, 0)
     store.close()
+
+
+# ------------------------------------------------------------ upkeep and the CLI
+
+
+class _RoleWriter(FakeLLM):
+    """A text model for the entity question writer: two questions by role
+    for each entity, the role read from its description ("Ilva's sister.").
+    It records each entity question call and asks nothing of other prompts."""
+
+    def complete(self, system, user, *, json_schema=None):
+        from memry.intelligence.entity_questions import ENTITY_QUESTIONS_SCHEMA
+
+        if json_schema is not ENTITY_QUESTIONS_SCHEMA:
+            raise AssertionError("not an entity question prompt")
+        self.calls.append((system, user))
+        items = []
+        for n, line in enumerate(l for l in user.splitlines() if l.startswith("Description:")):
+            role = line.rstrip(".").split()[-1]
+            items.append({"n": n + 1, "questions": [f"Who is my {role}?",
+                                                    f"Where does my {role} work?"]})
+        return json.dumps({"items": items})
+
+
+def _described(flag: bool = True):
+    """The world of ``_store`` before any entity question, the sister
+    described, with the writer as its text model."""
+    store, ids, mids = _store(flag)
+    for role in ("sister", "brother"):
+        store.backend.set_entity_questions(ids[role], [])
+    store.backend.set_entity_description(ids["sister"], "Ilva's sister.", "2026-10-09T00:00:00Z")
+    store.llm = _RoleWriter()
+    return store, ids
+
+
+def test_upkeep_writes_the_questions_of_a_new_described_relation_of_the_owner():
+    store, ids = _described()
+    ran = store.run_upkeep_cycle(user_id=USER)
+    assert ran["entity_questions"]["calls"] == 1
+    assert len(store.llm.calls) == 1 and "Kai Berg" not in store.llm.calls[0][1]
+    assert _texts(store, ids["sister"]) == ["Who is my sister?", "Where does my sister work?"]
+    assert _texts(store, ids["brother"]) == []
+    plan = store._plan("Where does my sister work?", _reads(store), True)
+    assert plan.seeds == [ids["sister"]]
+    store.close()
+
+
+def test_with_the_flag_off_upkeep_writes_no_entity_question():
+    store, ids = _described(flag=False)
+    ran = store.run_upkeep_cycle(user_id=USER)
+    assert "entity_questions" not in ran and store.llm.calls == []
+    assert _texts(store, ids["sister"]) == []
+    store.close()
+
+
+def test_upkeep_does_not_ask_again_about_an_unchanged_entity():
+    store, ids = _described()
+    store.run_upkeep_cycle(user_id=USER)
+    ran = store.run_upkeep_cycle(user_id=USER)
+    assert "entity_questions" not in ran and len(store.llm.calls) == 1
+    store.close()
+
+
+def test_upkeep_does_not_ask_again_after_an_answer_without_questions():
+    store, ids = _described()
+    store.llm = FakeLLM([json.dumps({"items": [{"n": 1, "questions": []}]})])
+    assert store.run_upkeep_cycle(user_id=USER)["entity_questions"]["checked"] == 1
+    assert "entity_questions" not in store.run_upkeep_cycle(user_id=USER)
+    assert len(store.llm.calls) == 1
+    store.close()
+
+
+def test_upkeep_asks_again_after_the_description_changes():
+    store, ids = _described()
+    store.run_upkeep_cycle(user_id=USER)
+    store.backend.set_entity_description(ids["sister"], "Ilva's twin.", "2026-10-10T00:00:00Z")
+    ran = store.run_upkeep_cycle(user_id=USER)
+    assert ran["entity_questions"]["calls"] == 1 and len(store.llm.calls) == 2
+    assert _texts(store, ids["sister"]) == ["Who is my twin?", "Where does my twin work?"]
+    store.close()
+
+
+def test_upkeep_asks_again_after_a_relation_to_the_owner_changes():
+    store, ids = _described()
+    store.run_upkeep_cycle(user_id=USER)
+    store.backend.add_relation(Relation(subject=ids["sister"], predicate="lives_with",
+                                        object=ids["owner"], user_id=USER))
+    assert store.run_upkeep_cycle(user_id=USER)["entity_questions"]["calls"] == 1
+    assert "lives_with" in store.llm.calls[1][1]
+    store.close()
+
+
+def test_one_upkeep_tick_makes_at_most_its_cap_of_calls():
+    store, ids = _described()
+    store.backend.set_entity_description(ids["brother"], "Ilva's brother.",
+                                         "2026-10-09T00:00:00Z")
+    store.ENTITY_QUESTION_BATCH = 1
+    store.UPKEEP_ENTITY_QUESTION_CALLS = 1
+    first = store.run_upkeep_cycle(user_id=USER)["entity_questions"]
+    assert (first["entities"], first["calls"], len(store.llm.calls)) == (1, 1, 1)
+    second = store.run_upkeep_cycle(user_id=USER)["entity_questions"]
+    assert (second["calls"], len(store.llm.calls)) == (1, 2)
+    assert "entity_questions" not in store.run_upkeep_cycle(user_id=USER)
+    assert _texts(store, ids["brother"]) == ["Who is my brother?", "Where does my brother work?"]
+    store.close()
+
+
+def test_the_cli_dry_run_counts_entities_calls_and_tokens_and_asks_nothing(
+        monkeypatch, tmp_path, capsys):
+    from memry.cli import main
+
+    monkeypatch.setenv("MEMRY_DB_PATH", str(tmp_path / "cli.db"))
+    monkeypatch.setenv("MEMRY_CONFIG", str(tmp_path / "missing.json"))
+    store, ids = _described()
+    backup = store.export_backup(user_id=USER)
+    owner = store._upkeep_get("owner_entity", USER, None)
+    store.close()
+    refusing = FakeLLM()  # any call fails: it has no scripted answer
+
+    def make():
+        made = MemoryStore(Config.load(), llm=refusing, embedder=HashEmbedder(64))
+        if made.backend.get_entity(ids["sister"]) is None:
+            made.import_backup(backup)
+            made._upkeep_set("owner_entity", USER, owner)
+        return made
+
+    make().close()
+    monkeypatch.setattr("memry.cli._store", make)
+    assert main(["write-entity-questions", "--dry-run", "-u", USER]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["total"]["entities"] == 1 and out["total"]["calls"] == 1
+    assert out["total"]["estimated_tokens"]["input"] > 0
+    assert out["namespaces"][0]["names"] == ["Mira Lund"]
+    assert refusing.calls == []
+    check = make()
+    assert check.backend.entity_questions_of([ids["sister"]]) == {}
+    check.close()
+
+
+def test_an_operator_turns_entity_questions_on_from_the_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("MEMRY_CONFIG", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("MEMRY_ENTITY_QUESTIONS", "1")
+    assert Config.load().retrieval.entity_questions
+    monkeypatch.setenv("MEMRY_ENTITY_QUESTIONS", "0")
+    assert not Config.load().retrieval.entity_questions
 
 
 # ------------------------------------------------------------ the benchmark family

@@ -19,6 +19,8 @@ Writing: ``MemoryStore.write_entity_questions``. Storage: the table
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any
 
@@ -81,6 +83,46 @@ ENTITY_QUESTIONS_SCHEMA: dict[str, Any] = {
 }
 
 
+#: Entity metadata key: a hash of what the writer was given for the entity
+#: (``entity_questions_input``) the last time it was asked about it, with or
+#: without questions as the answer. A different hash means its description or
+#: relations changed since, so upkeep asks about it again.
+ENTITY_QUESTIONS_CHECKED_KEY = "questions_checked"
+
+#: Output tokens a call is estimated at per entity: up to 3 short questions in
+#: JSON.
+ANSWER_TOKENS_PER_ENTITY = 60
+
+
+def entity_questions_input(owner: str, entity: dict[str, Any]) -> str:
+    """A hash of what the writer is given for one entity: the owner's name,
+    its name, description and relations. Equal hashes mean an equal prompt."""
+    payload = json.dumps([owner, entity["name"],
+                          " ".join(str(entity.get("description") or "").split()),
+                          sorted(entity.get("relations") or [])], ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def entity_questions_prompt(owner: str, entities: list[dict[str, Any]]) -> tuple[str, str]:
+    """The system and user text of one call about ``entities``."""
+    listing = "\n\n".join(
+        f"{n}. {e['name']}\nDescription: {' '.join(str(e.get('description') or '').split())}\n"
+        f"Relations: {'; '.join(e.get('relations') or []) or 'none'}"
+        for n, e in enumerate(entities, 1))
+    return (ENTITY_QUESTIONS_SYSTEM.format(owner=owner),
+            f"Entities:\n{listing}\n\nAnswer for every number as JSON.")
+
+
+def estimate_call_tokens(owner: str, entities: list[dict[str, Any]]) -> dict[str, int]:
+    """Estimated tokens of one call about ``entities``: the prompt at four
+    characters a token, the answer at ``ANSWER_TOKENS_PER_ENTITY`` each."""
+    from .context import estimate_tokens
+
+    system, user = entity_questions_prompt(owner, entities)
+    return {"input": estimate_tokens(system) + estimate_tokens(user),
+            "output": ANSWER_TOKENS_PER_ENTITY * len(entities)}
+
+
 def write_entity_questions(llm: Any, owner: str, entities: list[dict[str, Any]]) -> list[list[str]]:
     """The questions ``owner`` would ask about each of ``entities`` (each a
     dict with "name", "description" and "relations", a list of lines such as
@@ -92,13 +134,8 @@ def write_entity_questions(llm: Any, owner: str, entities: list[dict[str, Any]])
         return out
     from .extraction import parse_lenient_json  # extraction imports questions
 
-    listing = "\n\n".join(
-        f"{n}. {e['name']}\nDescription: {' '.join(str(e.get('description') or '').split())}\n"
-        f"Relations: {'; '.join(e.get('relations') or []) or 'none'}"
-        for n, e in enumerate(entities, 1))
-    raw = llm.complete(ENTITY_QUESTIONS_SYSTEM.format(owner=owner),
-                       f"Entities:\n{listing}\n\nAnswer for every number as JSON.",
-                       json_schema=ENTITY_QUESTIONS_SCHEMA)
+    system, user = entity_questions_prompt(owner, entities)
+    raw = llm.complete(system, user, json_schema=ENTITY_QUESTIONS_SCHEMA)
     parsed = parse_lenient_json(raw)
     items = parsed.get("items") if isinstance(parsed, dict) else parsed
     for item in items if isinstance(items, list) else []:
