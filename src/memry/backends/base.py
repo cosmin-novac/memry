@@ -762,6 +762,18 @@ class MemoryBackend(ABC):
         ``embedding_model``)."""
         return {}
 
+    def entity_questions_without_vectors(
+        self, scope: Scope, embedding_model: str, limit: int = 100_000,
+    ) -> list[tuple[str, int, str]]:
+        """Questions of unmerged entities without a vector from this model."""
+        return []
+
+    def set_entity_question_vectors(
+        self, vectors: dict[tuple[str, int], list[float]], embedding_model: str,
+    ) -> None:
+        """The vectors of these entity question rows ((entity_id, n) each)."""
+        return None
+
     def entity_question_rows(self, scope: Scope, embedding_model: str) -> list[tuple[str, str, Any]]:
         """(entity id, text, vector or None) of the questions of the entities in scope."""
         return []

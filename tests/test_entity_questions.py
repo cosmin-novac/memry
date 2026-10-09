@@ -155,6 +155,97 @@ def test_a_merged_entitys_questions_are_not_read():
     store.close()
 
 
+# ------------------------------------------- backups, removal and merges
+
+
+def _texts(store, entity_id):
+    return [q["text"] for q in store.backend.entity_questions_of([entity_id]).get(entity_id, [])]
+
+
+def test_a_backup_carries_the_entity_question_texts_and_a_restore_embeds_them():
+    store, ids, _ = _store()
+    backup = store.export_backup(user_id=USER)
+    rows = backup["tables"]["entity_questions"]
+    assert {r["entity_id"] for r in rows} == {ids["sister"], ids["brother"]}
+    assert all("embedding" not in r and "embedding_model" not in r for r in rows)
+    json.dumps(backup)  # a backup is plain JSON
+    store.close()
+
+    fresh = MemoryStore(Config(db_path=":memory:"), llm=FakeLLM(), embedder=HashEmbedder(64))
+    fresh.backend.import_backup(backup)
+    assert _texts(fresh, ids["sister"]) == ["Who is my sister?", "Where does my sister work?"]
+    assert len(fresh.backend.entity_questions_without_vectors(
+        SCOPE, fresh.embedder.model_id)) == 4
+    fresh.close()
+
+    cfg = Config(db_path=":memory:")
+    cfg.retrieval.entity_questions = True
+    keyed = MemoryStore(cfg, llm=FakeLLM(), embedder=HashEmbedder(64))
+    keyed.import_backup(backup)
+    assert keyed.backend.entity_questions_without_vectors(SCOPE, keyed.embedder.model_id) == []
+    keyed.close()
+
+
+def test_an_older_backup_without_the_entity_questions_table_restores():
+    store, ids, _ = _store()
+    backup = store.export_backup(user_id=USER)
+    store.close()
+    older = {**backup, "tables": {k: v for k, v in backup["tables"].items()
+                                  if k != "entity_questions"}}
+    fresh = MemoryStore(Config(db_path=":memory:"), llm=FakeLLM(), embedder=HashEmbedder(64))
+    fresh.import_backup(older)
+    assert fresh.backend.get_entity(ids["sister"]) is not None
+    assert fresh.backend.entity_questions_of([ids["sister"]]) == {}
+    fresh.close()
+
+
+def test_a_backup_entity_question_of_an_entity_outside_it_is_refused():
+    store, _, _ = _store()
+    backup = store.export_backup(user_id=USER)
+    store.close()
+    backup["tables"]["entity_questions"] = [
+        {"entity_id": "nowhere", "n": 0, "text": "Who is my aunt?", "source": "model"}]
+    fresh = MemoryStore(Config(db_path=":memory:"), llm=FakeLLM(), embedder=HashEmbedder(64))
+    with pytest.raises(ValueError, match="entity question"):
+        fresh.import_backup(backup)
+    fresh.close()
+
+
+def test_a_removed_entitys_questions_go_and_a_restore_brings_them_back():
+    store, ids, _ = _store()
+    assert store.backend.retire_entity(ids["sister"])
+    assert store.backend.entity_questions_of([ids["sister"]]) == {}
+    assert store.restore_entities([ids["sister"]]) == 1
+    assert _texts(store, ids["sister"]) == ["Who is my sister?", "Where does my sister work?"]
+    # the trash keeps the texts; the store embeds them again
+    assert store.backend.entity_questions_without_vectors(SCOPE, store.embedder.model_id) == []
+    plan = store._plan("Where does my sister work?", _reads(store), True)
+    assert plan.seeds == [ids["sister"]]
+    store.close()
+
+
+def test_a_deleted_entitys_questions_go_with_it():
+    store, ids, _ = _store()
+    assert store.backend.delete_entity(ids["brother"])
+    assert store.backend.entity_questions_of([ids["brother"]]) == {}
+    store.close()
+
+
+def test_a_merged_entitys_questions_stay_with_its_tombstone_until_the_merge_is_undone():
+    store, ids, _ = _store()
+    assert store.merge_entities(ids["brother"], ids["sister"])
+    assert {row[0] for row in store.backend.entity_question_rows(SCOPE, "x")} == {ids["brother"]}
+    assert len(_texts(store, ids["sister"])) == 2
+    store.undo_merge(ids["sister"])
+    assert {row[0] for row in store.backend.entity_question_rows(SCOPE, "x")} == {
+        ids["sister"], ids["brother"]}
+    # removing the kept entity takes the questions of what was merged into it
+    assert store.merge_entities(ids["brother"], ids["sister"])
+    assert store.backend.delete_entity(ids["brother"])
+    assert store.backend.entity_questions_of([ids["sister"], ids["brother"]]) == {}
+    store.close()
+
+
 def _reads(store):
     from memry.store import _Reads
 

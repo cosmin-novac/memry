@@ -127,7 +127,11 @@ CREATE TABLE IF NOT EXISTS memory_questions (
 );
 -- The questions the owner would ask about an entity by its role ("Where does
 -- my sister work?", ``intelligence.entity_questions``), one row per question,
--- with its vector in float16 cut to ``retrieval.property_dimensions``.
+-- with its vector in float16 cut to ``retrieval.property_dimensions``. The
+-- texts are in a backup and in a retired entity's snapshot; the vectors are
+-- filled in again after a restore
+-- (``MemoryStore.refresh_entity_question_vectors``). A merged entity keeps
+-- its questions with its tombstone, unread until the merge is undone.
 -- source: "model" (the writer) or "agent".
 CREATE TABLE IF NOT EXISTS entity_questions (
     entity_id TEXT NOT NULL,
@@ -484,6 +488,7 @@ _BACKUP_TABLE_KEYS: dict[str, tuple[str, ...]] = {
     "topics": ("id",),
     "memory_topics": ("memory_id", "topic_id"),
     "entities": ("id",),
+    "entity_questions": ("entity_id", "n"),
     "entity_mentions": ("id",),
     "entity_proposals": ("id",),
     "relations": ("id",),
@@ -3306,6 +3311,34 @@ class LocalBackend(MemoryBackend):
                          "embedding_model": row["embedding_model"]})
         return out
 
+    def entity_questions_without_vectors(
+        self, scope: Scope, embedding_model: str, limit: int = 100_000,
+    ) -> list[tuple[str, int, str]]:
+        """The questions of the entities in ``scope`` that are not merged into
+        another and have no vector from ``embedding_model`` ((entity_id, n,
+        text) each)."""
+        clause, params = _scope_clause(scope, prefix="e.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT q.entity_id, q.n, q.text FROM entity_questions q "
+                f"JOIN entities e ON e.id = q.entity_id WHERE e.merged_into IS NULL AND {clause} "
+                "AND (q.embedding IS NULL OR q.embedding_model IS NOT ?) "
+                "ORDER BY q.entity_id, q.n LIMIT ?",
+                (*params, embedding_model, limit)).fetchall()
+        return [(row["entity_id"], row["n"], row["text"]) for row in rows]
+
+    def set_entity_question_vectors(
+        self, vectors: dict[tuple[str, int], list[float]], embedding_model: str,
+    ) -> None:
+        """The vectors of these entity question rows ((entity_id, n) each)."""
+        with self._lock:
+            for (entity_id, n), vector in vectors.items():
+                self._db.execute(
+                    "UPDATE entity_questions SET embedding = ?, embedding_model = ? "
+                    "WHERE entity_id = ? AND n = ?",
+                    (_pack_half(vector), embedding_model, entity_id, n))
+            self._commit()
+
     def entity_question_rows(
         self, scope: Scope, embedding_model: str,
     ) -> list[tuple[str, str, np.ndarray | None]]:
@@ -4249,6 +4282,10 @@ class LocalBackend(MemoryBackend):
             ],
             "mentions": rows(
                 f"SELECT * FROM entity_mentions WHERE entity_id IN ({marks})", 1),
+            # the texts; the vectors are computed again after a restore
+            "questions": rows(
+                "SELECT entity_id, n, text, source FROM entity_questions "
+                f"WHERE entity_id IN ({marks})", 1),
             "relations": rows(
                 f"SELECT * FROM relations WHERE subject IN ({marks}) OR object IN ({marks})", 2),
             "proposals": rows(
@@ -4267,6 +4304,7 @@ class LocalBackend(MemoryBackend):
         marks = ",".join("?" * len(chain))
         for sql, times in (
             (f"DELETE FROM entity_mentions WHERE entity_id IN ({marks})", 1),
+            (f"DELETE FROM entity_questions WHERE entity_id IN ({marks})", 1),
             (f"DELETE FROM relations WHERE subject IN ({marks}) OR object IN ({marks})", 2),
             ("DELETE FROM entity_proposals "
              f"WHERE entity_a IN ({marks}) OR entity_b IN ({marks})", 2),
@@ -4501,6 +4539,10 @@ class LocalBackend(MemoryBackend):
                 return all(self._db.execute(
                     "SELECT 1 FROM entities WHERE id = ?", (other,)
                 ).fetchone() is not None for other in entity_ids)
+
+            for question in snapshot.get("questions", []):
+                if present(question["entity_id"]):
+                    self._insert_row_locked("entity_questions", question)
 
             for relation in snapshot.get("relations", []):
                 if not present(relation["subject"], relation["object"]):
@@ -5214,6 +5256,12 @@ class LocalBackend(MemoryBackend):
                 for row in (self._select_backup_rows("memory_questions") if scope.is_empty()
                             else self._backup_rows_for_ids(
                                 "memory_questions", "memory_id", memory_ids))]
+            tables["entity_questions"] = [
+                {key: value for key, value in row.items()
+                 if key not in ("embedding", "embedding_model")}
+                for row in (self._select_backup_rows("entity_questions") if scope.is_empty()
+                            else self._backup_rows_for_ids(
+                                "entity_questions", "entity_id", entity_ids))]
 
             if scope.is_empty():
                 for table in (
@@ -5278,8 +5326,11 @@ class LocalBackend(MemoryBackend):
         raw_tables = backup.get("tables")
         # Every table this schema needs must be present; anything extra is from
         # an older Memry and is ignored rather than refused.
-        if isinstance(raw_tables, dict) and "memory_questions" not in raw_tables:
-            raw_tables = {**raw_tables, "memory_questions": []}  # a backup from before
+        if isinstance(raw_tables, dict):
+            # a backup from before the question keys or the entity questions
+            for added in ("memory_questions", "entity_questions"):
+                if added not in raw_tables:
+                    raw_tables = {**raw_tables, added: []}
         if not isinstance(raw_tables, dict) or not set(_BACKUP_ORDER) <= set(raw_tables):
             raise ValueError("backup table set is incomplete or unknown")
         tables: dict[str, list[dict[str, Any]]] = {}
@@ -5319,6 +5370,9 @@ class LocalBackend(MemoryBackend):
         for row in tables["memory_questions"]:
             if row["memory_id"] not in memory_ids:
                 raise ValueError("question key references a memory outside the backup")
+        for row in tables["entity_questions"]:
+            if row["entity_id"] not in entity_ids:
+                raise ValueError("entity question references an entity outside the backup")
         for row in tables["memory_topics"]:
             if row["memory_id"] not in memory_ids or row["topic_id"] not in topic_ids:
                 raise ValueError("topic assignment references data outside the backup")

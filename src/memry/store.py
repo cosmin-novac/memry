@@ -1423,6 +1423,28 @@ class MemoryStore:
                 embedded += len(rows)
         return embedded
 
+    def refresh_entity_question_vectors(
+        self, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> int:
+        """Embed the entity questions that have no vector from the configured
+        embedder (restored from a backup or from the trash, which carry the
+        texts only; or embedded by another model), as written, in batches of
+        64. Returns how many it embedded."""
+        if not self.embedder.dimensions:
+            return 0
+        scope = Scope(user_id=user_id, exact_user=exact_user)
+        due = self.backend.entity_questions_without_vectors(scope, self.embedder.model_id)
+        keep = self.config.retrieval.property_dimensions
+        embedded = 0
+        for start in range(0, len(due), 64):
+            batch = due[start:start + 64]
+            vectors = self.embedder.embed([text for _, _, text in batch])
+            rows = {(eid, n): _cut(v, keep) for (eid, n, _), v in zip(batch, vectors) if v}
+            if rows:
+                self.backend.set_entity_question_vectors(rows, self.embedder.model_id)
+                embedded += len(rows)
+        return embedded
+
     def backfill_questions(
         self,
         *,
@@ -1878,6 +1900,11 @@ class MemoryStore:
                 self.refresh_question_vectors()
             except Exception as exc:
                 log.warning("question vectors not computed after a restore: %s", exc)
+        if self.config.retrieval.entity_questions:
+            try:
+                self.refresh_entity_question_vectors()
+            except Exception as exc:
+                log.warning("entity question vectors not computed after a restore: %s", exc)
         return result
 
     def _namespace(self, user_id: str | None) -> str:
@@ -5348,6 +5375,12 @@ class MemoryStore:
             if self.backend.restore_entity(entity_id):
                 restored += 1
                 self._meet_namesakes(entity_id)
+        if restored and self.config.retrieval.entity_questions:
+            # the trash keeps the entity questions' texts, not their vectors
+            try:
+                self.refresh_entity_question_vectors()
+            except Exception as exc:
+                log.warning("entity question vectors not computed after a restore: %s", exc)
         return restored
 
     def _meet_namesakes(self, entity_id: str) -> None:
@@ -6889,6 +6922,15 @@ class MemoryStore:
                     embedded = 0
                 if embedded:
                     ran["question_vectors"] = {"embedded": embedded}
+            if self.config.retrieval.entity_questions:
+                try:
+                    embedded = self.refresh_entity_question_vectors(
+                        user_id=user_id, exact_user=exact_user)
+                except Exception as exc:
+                    log.warning("entity question vector refresh failed: %s", exc)
+                    embedded = 0
+                if embedded:
+                    ran["entity_question_vectors"] = {"embedded": embedded}
         return ran
 
     def run_consolidation_pass(
