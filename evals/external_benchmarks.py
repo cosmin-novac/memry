@@ -135,7 +135,15 @@ and one for the abstention questions). --sample N: N questions drawn in
 proportion to the question types (``stratified_sample``, seeded with --seed).
 --export-longmemeval PATH: the answers in the jsonl form of the official
 evaluate_qa.py. The tables have a row for the abstention questions and the
-task-averaged judge score, as in print_qa_metrics.py:
+task-averaged judge score, as in print_qa_metrics.py. The store's owner is
+"the user": Memry's own rule for a conversation between the user and an
+assistant (``MemoryStore.owner_name``), so no name is set. With
+``retrieval.entity_questions`` on, the store writes its entity questions once
+the haystack is loaded and before the question is asked
+(``write_entity_questions_step``, counted under the stage "entity_questions"
+and capped with the chat calls). Each row has the store's memories with
+question keys, its entities with entity questions, and where the search
+started (``search_start``):
 
     ... --dataset longmemeval --file longmemeval_s_cleaned.json --sample 100 --seed 1 \
         --ingest extract --embedder openai --decider jev --k 20 \
@@ -1123,7 +1131,31 @@ def search_signals(store: MemoryStore, question: str, results: list[Any]) -> dic
     return {"named": sorted(names), "named_entities": len(ids),
             "linked": any("about" in s for s in signals),
             "judge_calls": max((int(s.get("calls") or 0) for s in signals), default=0),
-            "set_members": sum(1 for s in signals if s.get("member"))}
+            "set_members": sum(1 for s in signals if s.get("member")),
+            **search_start(store, question)}
+
+
+def search_start(store: MemoryStore, question: str) -> dict[str, Any]:
+    """The entities the search of ``question`` starts from (stage 1 of
+    ``MemoryStore.search``, its seeds): their names (``start``), whether the
+    start is the owner for a question in the first person
+    (``start_first_person``), whether it is an entity whose entity questions
+    match the question by its role (``start_by_role``), and whether it
+    contains an entity other than the owner (``start_other_than_owner``).
+    The plan is made again as the search made it; the question's vector
+    comes from the embedder's cache in a benchmark run."""
+    from memry.store import _Reads
+
+    scope = Scope(user_id=BENCH_USER)
+    plan = store._plan(question, _Reads(scope), True)
+    named, _ = store._seeds(question, scope)
+    owner = store.owner_entity(BENCH_USER)
+    names = [entity.name for entity in map(store.backend.get_entity, plan.seeds)
+             if entity is not None]
+    return {"start": names, "start_first_person": plan.first_person,
+            "start_by_role": bool(plan.seeds) and plan.seeds != named,
+            "start_other_than_owner": any(owner is None or seed != owner.id
+                                          for seed in plan.seeds)}
 
 
 _ENCODING: list[Any] = []
@@ -1628,11 +1660,37 @@ def store_stats(store: MemoryStore, conversation: Conversation) -> dict[str, Any
     memories = store.get_all(user_id=BENCH_USER, limit=1_000_000)
     with_questions = sum(1 for mid, rows in store.backend.questions_of(
         [m.id for m in memories]).items() if rows)
+    entities_asked = sum(1 for rows in store.backend.entity_questions_of(
+        [e.id for e in entities]).values() if rows)
+    owner = store.owner_entity(BENCH_USER)
     return {"entities": len(entities), "same_name_entities": sum(shared.values()),
             "same_name_groups": len(shared),
             "open_proposals": len(store.backend.list_proposals(scope, limit=1_000_000)),
             "speaker_entities": speakers,
-            "memories_with_questions": with_questions}
+            "owner": owner.name if owner is not None else None,
+            "memories_with_questions": with_questions,
+            "entities_with_questions": entities_asked}
+
+
+#: The stage the entity question writer's calls are counted under.
+ENTITY_QUESTIONS_STAGE = "entity_questions"
+
+#: Store counts copied into each of its questions' rows.
+ROW_STORE_FIELDS = ("owner", "memories_with_questions", "entities_with_questions")
+
+
+def write_entity_questions_step(store: MemoryStore) -> dict[str, Any]:
+    """With ``retrieval.entity_questions`` on, the store's entity questions,
+    written once for the loaded haystack (``MemoryStore.write_entity_questions``),
+    its calls counted under ``ENTITY_QUESTIONS_STAGE``. A call refused at a
+    cap (``api_usage.CapReached``) ends the run as any other. Off, no call
+    and {"skipped": ...}. The writer asks only about described entities
+    related to the owner; a store loaded just now has no description yet,
+    so it then makes no call."""
+    if not store.config.retrieval.entity_questions:
+        return {"skipped": "retrieval.entity_questions is off"}
+    with api_usage.stage(ENTITY_QUESTIONS_STAGE):
+        return store.write_entity_questions(user_id=BENCH_USER)
 
 
 def _qualname(function: Any) -> str | None:
@@ -1817,9 +1875,13 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                 with api_usage.stage("ingest"):
                     ingested = ingest(store, conv, mode=mode, unit=unit, when=when,
                                       dataset=dataset)
+                entry["entity_questions"] = store.config.retrieval.entity_questions
+                if dataset == "longmemeval":
+                    entry["entity_question_writer"] = write_entity_questions_step(store)
                 entry.update(memories=len(store.get_all(user_id=BENCH_USER, limit=1_000_000)),
                              ingest_seconds=round(ingested.seconds, 2),
                              actions=dict(ingested.actions), **store_stats(store, conv))
+                counts = {key: entry[key] for key in ROW_STORE_FIELDS}
                 warnings.extend(ingested.warnings)
                 for name, factory in passes.items():
                     decider, kept = factory(), store.decider
@@ -1831,7 +1893,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                     started = time.perf_counter()
                     try:
                         for question in asked:
-                            rows.append({"search_decider": name, **ask(
+                            rows.append({"search_decider": name, **counts, **ask(
                                 ingested, question, k=k, answer_llm=answer_llm, judge=judge,
                                 use_context=use_context, answer_prompt=answer_prompt,
                                 search_stage=f"search:{name}", ks=ks, judge_runs=judge_runs,

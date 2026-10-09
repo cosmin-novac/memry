@@ -386,3 +386,144 @@ def test_the_selected_questions_are_written_as_the_file_has_them(monkeypatch, tm
         xb.load_longmemeval(TINY), 4, seed=3)]
     assert xb.main(["--dataset", "locomo", "--file", "locomo_mini.json",
                     "--write-selected", str(tmp_path / "x.json")]) == 2
+
+
+# --------------------------------------------------------------------------
+# the owner and the entity questions
+
+
+FAMILY = [{
+    "question_id": "fam-1", "question_type": "single-session-user",
+    "question": "Where does my sister work?", "answer": "Kestrel Labs",
+    "question_date": "2023/06/01 (Thu) 10:00",
+    "haystack_session_ids": ["s-job", "s-hike"],
+    "haystack_dates": ["2023/05/01 (Mon) 09:00", "2023/05/07 (Sun) 18:00"],
+    "haystack_sessions": [
+        [{"role": "user", "content": "My sister Mira started at Kestrel Labs.",
+          "has_answer": True},
+         {"role": "assistant", "content": "Congratulations to her."}],
+        [{"role": "user", "content": "Mira and I went hiking today."},
+         {"role": "assistant", "content": "That sounds lovely."}]],
+    "answer_session_ids": ["s-job"]}]
+
+
+class FamilyLLM(RuleLLM):
+    """``RuleLLM`` whose facts name the user as "the user" (the owner's name
+    in a chat between the user and an assistant), Mira where a line names
+    her, and the user's sister relation where a line says "sister". Each fact
+    has one question key. The entity question writer gets two questions by
+    role for each entity, and its calls are kept with their stage. With
+    ``cap`` the writer's call is refused as at a --max-calls cap."""
+
+    def __init__(self, cap: bool = False) -> None:
+        super().__init__()
+        self.cap = cap
+        self.entity_question_calls: list[str] = []
+
+    def complete(self, system: str, user: str, *, json_schema=None) -> str:
+        from memry.intelligence.entity_questions import ENTITY_QUESTIONS_SCHEMA
+
+        if json_schema is ENTITY_QUESTIONS_SCHEMA:
+            self.entity_question_calls.append(api_usage.current_stage())
+            if self.cap:
+                raise api_usage.CapReached("chat: 2 calls, cap 2")
+            entities = [line for line in user.splitlines() if line.startswith("Description:")]
+            return json.dumps({"items": [
+                {"n": n + 1, "questions": ["Who is my sister?", "Where does my sister work?"]}
+                for n in range(len(entities))]})
+        out = super().complete(system, user, json_schema=json_schema)
+        if not system.startswith("You are the long-term memory extraction system"):
+            return out
+        facts = json.loads(out)["facts"]
+        for fact in facts:
+            fact["entities"] = [{"name": "the user", "type": "person"}]
+            if "Mira" in fact["content"]:
+                fact["entities"].append({"name": "Mira", "type": "person"})
+            if "sister" in fact["content"]:
+                fact["relations"] = [{"subject": "the user", "predicate": "has_sister",
+                                      "object": "Mira"}]
+            fact["questions"] = [f"What did I say about {fact['content'][:20]}?"]
+        return json.dumps({"facts": facts})
+
+
+def _family_run(monkeypatch, tmp_path, *, flag: bool, look: bool = True, cap: bool = False):
+    """The invented one-question dataset run with ``FamilyLLM``, entity
+    questions on or off. With ``look`` someone opens Mira's page once the
+    haystack is loaded, so she has a description, as the entity question
+    writer needs; a store loaded just now has none."""
+    path = tmp_path / "family.json"
+    path.write_text(json.dumps(FAMILY))
+    llms: list[FamilyLLM] = []
+
+    def store_factory() -> MemoryStore:
+        cfg = Config(db_path=":memory:")
+        cfg.retrieval.entity_questions = flag
+        llms.append(FamilyLLM(cap=cap))
+        return MemoryStore(cfg, llm=llms[-1], embedder=HashEmbedder(128))
+
+    loaded = xb.ingest
+
+    def ingest_and_look(store, conversation, **kwargs):
+        ingested = loaded(store, conversation, **kwargs)
+        if look:
+            from memry.models import Scope
+
+            for entity in store.backend.list_entities(Scope(user_id=xb.BENCH_USER), limit=50):
+                if entity.name == "Mira":
+                    store.entity(entity.id)  # writes her description
+        return ingested
+
+    monkeypatch.setattr(xb, "ingest", ingest_and_look)
+    result = xb.run_benchmark(xb.load_longmemeval(path), dataset="longmemeval",
+                              mode="extract", k=20, store_factory=store_factory,
+                              log=lambda _: None)
+    return result, llms[0]
+
+
+def test_the_owner_is_the_user_and_entity_questions_are_written_before_the_question(
+        monkeypatch, tmp_path):
+    result, llm = _family_run(monkeypatch, tmp_path, flag=True)
+    assert result["complete"]
+    store = result["stores"][0]
+    assert store["owner"] == "the user"
+    assert store["entity_questions"] is True
+    writer = store["entity_question_writer"]
+    assert (writer["entities"], writer["calls"], writer["written"]) == (1, 1, 1)
+    # one call, counted under its own stage
+    assert llm.entity_question_calls == [xb.ENTITY_QUESTIONS_STAGE]
+    (row,) = result["rows"]
+    assert row["owner"] == "the user"
+    assert row["entities_with_questions"] == 1
+    assert row["memories_with_questions"] == store["memories_with_questions"] > 0
+    # the question by role starts from Mira, not from the owner
+    assert row["start"] == ["Mira"]
+    assert row["start_by_role"] and row["start_other_than_owner"]
+    assert not row["start_first_person"]
+
+
+def test_with_entity_questions_off_the_step_makes_no_call_and_the_owner_is_the_start(
+        monkeypatch, tmp_path):
+    result, llm = _family_run(monkeypatch, tmp_path, flag=False)
+    store = result["stores"][0]
+    assert store["entity_question_writer"] == {"skipped": "retrieval.entity_questions is off"}
+    assert llm.entity_question_calls == []
+    (row,) = result["rows"]
+    assert row["entities_with_questions"] == 0
+    assert row["start"] == ["the user"] and row["start_first_person"]
+    assert not (row["start_by_role"] or row["start_other_than_owner"])
+
+
+def test_a_store_loaded_just_now_has_no_description_so_the_writer_asks_nothing(
+        monkeypatch, tmp_path):
+    result, llm = _family_run(monkeypatch, tmp_path, flag=True, look=False)
+    writer = result["stores"][0]["entity_question_writer"]
+    assert (writer["entities"], writer["calls"]) == (0, 0)
+    assert llm.entity_question_calls == []
+    assert result["rows"][0]["start"] == ["the user"]
+
+
+def test_the_entity_question_call_stops_at_a_cap(monkeypatch, tmp_path):
+    result, llm = _family_run(monkeypatch, tmp_path, flag=True, cap=True)
+    assert llm.entity_question_calls == [xb.ENTITY_QUESTIONS_STAGE]
+    assert not result["complete"] and result["stopped"].startswith("fam-1: chat")
+    assert result["rows"] == []
