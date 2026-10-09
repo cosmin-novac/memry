@@ -71,7 +71,10 @@ from .intelligence.entities import (
     synthesize_entity_description,
 )
 from .intelligence.entity_questions import (
+    ENTITY_QUESTIONS_CHECKED_KEY,
     distinct_holders,
+    entity_questions_input,
+    estimate_call_tokens,
     mask_role,
     role_words,
     write_entity_questions,
@@ -2584,17 +2587,34 @@ class MemoryStore:
             entity_id, [(q, source) for q in questions], vectors,
             self.embedder.model_id if vectors else None)
 
+    #: Entities a call of the entity question writer is about.
+    ENTITY_QUESTION_BATCH = 10
+    #: Calls of the entity question writer one upkeep tick makes at most;
+    #: what is left waits for the next tick.
+    UPKEEP_ENTITY_QUESTION_CALLS = 3
+
     def write_entity_questions(
-        self, *, user_id: str | None = None, batch: int = 10, limit: int | None = None,
+        self, *, user_id: str | None = None, batch: int = ENTITY_QUESTION_BATCH,
+        limit: int | None = None, dry_run: bool = False,
     ) -> dict[str, Any]:
         """Write the entity questions of every hub related to the owner that
-        has a description and no questions yet: 2 or 3 questions the owner
-        would ask about it by its role, from its description and its
-        relations to the owner, ``batch`` entities a call. A batch whose call
-        fails is logged and stays due. Runs whether
-        ``retrieval.entity_questions`` is on or not, so the questions exist
-        before the search reads them."""
-        if not self.llm.available:
+        has a description: 2 or 3 questions the owner would ask about it by
+        its role, from its description and its relations to the owner,
+        ``batch`` entities a call.
+
+        An entity is due when it has no questions yet, or when its
+        description or relations changed since it was last asked about.
+        Each asked entity keeps a hash of what the model was given
+        (``ENTITY_QUESTIONS_CHECKED_KEY``), also when the answer has no
+        questions, so an unchanged entity is never asked about twice. An
+        entity with questions and no hash (written by hand, or before the
+        hash existed) is left as it is. A batch whose call fails is logged
+        and stays due. ``limit`` caps the due entities taken, so a run makes
+        at most ``ceil(limit / batch)`` calls. ``dry_run`` asks nothing and
+        writes nothing: it counts the due entities, the calls and the
+        estimated tokens. Runs whether ``retrieval.entity_questions`` is on
+        or not, so the questions exist before the search reads them."""
+        if not dry_run and not self.llm.available:
             return {"skipped": "no LLM configured"}
         owner = self.owner_entity(user_id)
         if owner is None:
@@ -2614,31 +2634,54 @@ class MemoryStore:
                 related.setdefault(other, []).append(
                     f"{name(relation.subject)} {relation.predicate} {name(relation.object)}")
         held = self.backend.entity_questions_of(sorted(related))
-        due = []
+        due: list[tuple[Entity, dict[str, Any], str]] = []
         for entity_id in sorted(related):
             entity = self.backend.get_entity(entity_id)
             if (entity is None or entity.merged_into or not entity.description
-                    or entity_id in held or not self._is_hub(entity_id)):
+                    or not self._is_hub(entity_id)):
                 continue
-            due.append(entity)
+            given = {"name": entity.name, "description": entity.description,
+                     "relations": sorted(related[entity_id])}
+            digest = entity_questions_input(owner.name, given)
+            checked = (entity.metadata or {}).get(ENTITY_QUESTIONS_CHECKED_KEY)
+            if checked == digest or (entity_id in held and checked is None):
+                continue
+            due.append((entity, given, digest))
         if limit is not None:
             due = due[: max(int(limit), 0)]
-        summary: dict[str, Any] = {"checked": 0, "written": 0}
         size = max(int(batch), 1)
-        for start in range(0, len(due), size):
-            group = due[start:start + size]
+        groups = [due[start:start + size] for start in range(0, len(due), size)]
+        tokens = {"input": 0, "output": 0}
+        for group in groups:
+            for key, n in estimate_call_tokens(owner.name, [g for _, g, _ in group]).items():
+                tokens[key] += n
+        summary: dict[str, Any] = {"entities": len(due), "calls": len(groups),
+                                   "estimated_tokens": tokens}
+        if dry_run:
+            summary["dry_run"] = True
+            summary["names"] = [entity.name for entity, _, _ in due]
+            return summary
+        summary.update({"checked": 0, "written": 0})
+        for group in groups:
             try:
-                found = write_entity_questions(self.llm, owner.name, [
-                    {"name": e.name, "description": e.description, "relations": related[e.id]}
-                    for e in group])
+                found = write_entity_questions(self.llm, owner.name, [g for _, g, _ in group])
             except Exception as exc:
                 log.warning("entity questions: a batch of %d not asked: %s", len(group), exc)
                 summary["failed_batches"] = summary.get("failed_batches", 0) + 1
                 continue
-            for entity, questions in zip(group, found):
+            for (entity, _, digest), questions in zip(group, found):
                 summary["checked"] += 1
-                if questions:
+                try:
+                    # an answer without questions replaces stale ones too
                     self._write_entity_questions(entity.id, questions, "model")
+                    current = self.backend.get_entity(entity.id)
+                    metadata = dict((current or entity).metadata or {})
+                    metadata[ENTITY_QUESTIONS_CHECKED_KEY] = digest
+                    self.backend.set_entity_metadata(entity.id, metadata)
+                except Exception as exc:
+                    log.warning("entity questions: %s not written: %s", entity.id, exc)
+                    continue
+                if questions:
                     summary["written"] += 1
         return summary
 
@@ -6910,6 +6953,18 @@ class MemoryStore:
                 self._upkeep_set("last:durability", user_id,
                                  {"at": now.isoformat(timespec="seconds"), "result": result})
                 ran["durability"] = result
+        if self.config.retrieval.entity_questions and self.llm.available:
+            # Cheap when no described hub related to the owner is new or
+            # changed, so it runs every tick, a few calls at most.
+            try:
+                result = self.write_entity_questions(
+                    user_id=user_id, batch=self.ENTITY_QUESTION_BATCH,
+                    limit=self.ENTITY_QUESTION_BATCH * self.UPKEEP_ENTITY_QUESTION_CALLS)
+            except Exception as exc:
+                log.warning("entity questions not written: %s", exc)
+                result = {}
+            if result.get("calls"):
+                ran["entity_questions"] = result
         if dedup_due:
             # After this week's merges and new homes: re-embed the memories
             # whose masked names changed. Nothing to embed is no run.

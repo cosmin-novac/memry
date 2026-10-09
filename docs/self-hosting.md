@@ -754,9 +754,16 @@ search from the sister. Each person related to the owner has two or three stored
 written by a text model from the person's description and relations. Memry picks the person
 whose stored questions alone contain the word after "my". The best match must reach
 `retrieval.entity_question_bar` (0.5). Otherwise Memry starts from the owner, as with the
-flag off. No server command writes the questions yet. An operator writes them from Python
-with `MemoryStore.write_entity_questions()`. Backups and exports contain their texts, and
-Memry embeds them again after a restore.
+flag off. An operator can also turn the flag on with `MEMRY_ENTITY_QUESTIONS=1`.
+
+With the flag on, Memry writes the questions during upkeep. In each upkeep tick, Memry asks
+the text model about the described people and things related to the owner that have no
+questions yet. Memry asks again about one whose description or relations changed since.
+Memry makes at most three calls of ten entities each in one tick and leaves the rest for the
+next tick. To write them for a whole store at once, run `memry write-entity-questions`. With
+`--dry-run`, Memry asks the model nothing and prints the number of entities, calls and
+estimated tokens. Backups and exports contain the question texts, and Memry embeds them
+again after a restore.
 
 ## The search log (optional, off by default)
 

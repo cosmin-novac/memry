@@ -525,6 +525,7 @@ def _from_env() -> dict[str, Any]:
     put("retrieval", "question_keys", _bool(e("MEMRY_QUESTION_KEYS")))
     put("retrieval", "search_log", _bool(e("MEMRY_SEARCH_LOG")))
     put("retrieval", "traffic_keys", _bool(e("MEMRY_TRAFFIC_KEYS")))
+    put("retrieval", "entity_questions", _bool(e("MEMRY_ENTITY_QUESTIONS")))
 
     put("embedding", "provider", e("MEMRY_EMBEDDING_PROVIDER"))
     put("embedding", "model", e("MEMRY_EMBEDDING_MODEL"))

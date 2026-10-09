@@ -11,6 +11,7 @@
     memry reindex                 re-embed all memories
     memry backfill-property-vectors  property vectors for the linked search
     memry backfill-questions      question keys for memories saved without them (--dry-run first)
+    memry write-entity-questions  entity questions for people related to the owner (--dry-run first)
     memry export / import         lossless backup/restore; legacy JSON imports
     memry search-stats [--days N] count the search log: searches with and without seeds
     memry snapshot [--to DIR]     verified copy of the database files (--check to verify it)
@@ -354,6 +355,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=None,
                    help="at most this many memories per namespace")
 
+    p = sub.add_parser(
+        "write-entity-questions",
+        help="write the entity questions of the described people and things related to "
+             "the owner (asks the text model; only new or changed ones)",
+    )
+    p.add_argument("-u", "--user", default=None, help="namespace (default: every namespace)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="count the entities, calls and estimated tokens; ask nothing")
+
     p = sub.add_parser("export", help="export a lossless JSON backup to stdout")
     _scope_args(p)
     p.add_argument("--with-search-log", action="store_true",
@@ -642,6 +652,19 @@ def main(argv: list[str] | None = None) -> int:
                      **store.backfill_questions(user_id=uid, exact_user=True,
                                                 limit=args.limit, dry_run=args.dry_run)}
                     for uid in namespaces])
+        elif args.command == "write-entity-questions":
+            if not args.dry_run and not store.llm.available:
+                print("no LLM configured; writing entity questions needs one", file=sys.stderr)
+                return 1
+            reports = [{"user": uid, **store.write_entity_questions(user_id=uid,
+                                                                    dry_run=args.dry_run)}
+                       for uid in _namespaces(store, args.user)]
+            totals = {"entities": sum(r.get("entities", 0) for r in reports),
+                      "calls": sum(r.get("calls", 0) for r in reports),
+                      "estimated_tokens": {
+                          key: sum(r.get("estimated_tokens", {}).get(key, 0) for r in reports)
+                          for key in ("input", "output")}}
+            _print({"dry_run": args.dry_run, "namespaces": reports, "total": totals})
         elif args.command == "tags-to-things":
             scopes = store.tags_to_topics(
                 user_id=args.user, all_users=args.user is None, dry_run=args.dry_run)
