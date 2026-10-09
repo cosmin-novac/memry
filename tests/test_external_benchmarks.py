@@ -161,7 +161,8 @@ def test_longmemeval_loader_rejects_and_reports(tmp_path):
     path.write_text(json.dumps([dict(item, answer_session_ids=["s-dog", "s-gone"],
                                      question_id="x_abs")]))
     (conv,) = xb.load_longmemeval(path)
-    assert conv.questions[0].evidence == ["s-dog"] and conv.questions[0].abstain
+    assert conv.questions[0].evidence == [] and conv.questions[0].abstain
+    assert conv.questions[0].extra["answer_session_ids"] == ["s-dog"]
     assert "s-gone" in conv.warnings[0]
 
 

@@ -127,6 +127,22 @@ call that would pass N calls of that group (chat, embeddings, jev). The
 harness tries a failed call again (a timeout, a rate limit, a server
 error), up to four calls in all; every try is counted.
 
+LongMemEval: each question is a conversation of its own, so each question has
+its own store, its haystack saved session by session in time order, each
+session dated with its time (``load_longmemeval``). ``evals/longmemeval_judge.py``
+contains the official reading prompt and judge (one prompt per question type
+and one for the abstention questions). --sample N: N questions drawn in
+proportion to the question types (``stratified_sample``, seeded with --seed).
+--export-longmemeval PATH: the answers in the jsonl form of the official
+evaluate_qa.py. The tables have a row for the abstention questions and the
+task-averaged judge score, as in print_qa_metrics.py:
+
+    ... --dataset longmemeval --file longmemeval_s_cleaned.json --sample 100 --seed 1 \
+        --ingest extract --embedder openai --decider jev --k 20 \
+        --answer-model gpt-4o-mini --compare-answer-model gpt-6-luna \
+        --answer-prompt evals.longmemeval_judge:answer_messages \
+        --judge evals.longmemeval_judge:judge
+
 Run (the data directory holds locomo10.json and longmemeval_s.json):
 
     MEMRY_BENCH_DATA=/data .venv/bin/python -m evals.external_benchmarks --dataset locomo
@@ -468,8 +484,18 @@ def _locomo_sample(sample: Any, index: int) -> Conversation:
 
 def load_longmemeval(path: str | os.PathLike[str]) -> list[Conversation]:
     """LongMemEval questions, each with its haystack as a conversation of its
-    own; the evidence is the answer sessions. Raises FormatError on a shape it
-    cannot read; smaller faults go to each conversation's warnings."""
+    own; the evidence is the answer sessions. The sessions are in time order
+    (the file's order where two have the same time): the authors write in the
+    README that the files are sorted, but the haystacks of the
+    temporal-reasoning and knowledge-update questions are not. A session id
+    that comes again (the same filler session at another date) is kept as
+    "<id>~2", "<id>~3", ... An abstention question (its id ends in "_abs")
+    has no evidence, because the authors leave those questions out of the
+    retrieval scores; its answer sessions are kept under
+    ``extra["answer_session_ids"]``. ``extra["question_date"]``
+    is the question's date as the file writes it. Raises FormatError on a
+    shape it cannot read; smaller faults go to each conversation's
+    warnings."""
     return [_longmemeval_item(item, i)
             for i, item in enumerate(_items(_read_json(path), "haystack_sessions"))]
 
@@ -492,10 +518,14 @@ def _longmemeval_item(item: Any, index: int) -> Conversation:
     warnings: list[str] = []
     sessions: list[Session] = []
     seen: set[str] = set()
+    again: Counter = Counter()
     for sid, date_text, raw_turns in zip(ids, dates, raw_sessions):
         sid = str(sid)
         if sid in seen:
-            raise FormatError(f"{qid}: session id {sid} appears twice")
+            again[sid] += 1
+            kept = f"{sid}~{again[sid] + 1}"
+            warnings.append(f"{qid}: session id {sid} comes again, kept as {kept}")
+            sid = kept
         seen.add(sid)
         date = parse_bench_date(date_text)
         if date is None:
@@ -515,6 +545,12 @@ def _longmemeval_item(item: Any, index: int) -> Conversation:
                               text=content if role == "user" else f"{role}: {content}",
                               has_answer=bool(raw.get("has_answer"))))
         sessions.append(Session(sid, date, str(date_text or ""), turns))
+    in_time = sorted(sessions, key=lambda s: s.date or datetime.max.replace(tzinfo=timezone.utc))
+    moved = sum(a is not b for a, b in zip(sessions, in_time))
+    if moved:
+        warnings.append(f"{qid}: sessions saved in time order, {moved} of {n} "
+                        "not where the file has them")
+    sessions = in_time
     evidence, unknown = [], []
     for sid in item.get("answer_session_ids") or []:
         (evidence if str(sid) in seen else unknown).append(str(sid))
@@ -522,11 +558,15 @@ def _longmemeval_item(item: Any, index: int) -> Conversation:
         warnings.append(f"{qid}: answer sessions {unknown} are not in the haystack, left out")
     qtype = str(item.get("question_type") or "unknown")
     asked_on = parse_bench_date(item.get("question_date"))
+    abstain = qid.endswith("_abs")
+    extra: dict[str, Any] = {"question_date": str(item.get("question_date") or "")}
+    if abstain:
+        extra["answer_session_ids"] = list(dict.fromkeys(evidence))
+        evidence = []
     question = Question(
         qid=qid, question=_text(item["question"]), answer=_text(item["answer"]),
         category=qtype, category_name=qtype, evidence=list(dict.fromkeys(evidence)),
-        level="session", question_date=asked_on,
-        abstain=qid.endswith("_abs"),
+        level="session", question_date=asked_on, abstain=abstain, extra=extra,
         reference_date=asked_on.isoformat() if asked_on else None)
     if not question.question:
         raise FormatError(f"{qid}: empty question")
@@ -565,6 +605,46 @@ def find_dataset(dataset: str, data_dir: str | os.PathLike[str] | None, *, varia
         return None
     return next((root / name for name in dataset_files(dataset, variant)
                  if (root / name).is_file()), None)
+
+
+def stratum(conversation: Conversation) -> str:
+    """The stratum ``stratified_sample`` draws a one-question conversation
+    from: its question's category, with "/abstention" for a question whose
+    right answer is that the conversation does not say."""
+    if len(conversation.questions) != 1:
+        raise ValueError(f"{conversation.conv_id}: {len(conversation.questions)} questions; "
+                         "a stratified sample draws conversations of one question "
+                         "(LongMemEval)")
+    question = conversation.questions[0]
+    return question.category_name + ("/abstention" if question.abstain else "")
+
+
+def stratified_sample(conversations: list[Conversation], n: int, seed: int = 0
+                      ) -> list[Conversation]:
+    """``n`` of the one-question ``conversations``, each stratum (``stratum``)
+    given its share of ``n`` (largest remainder; ties to the larger stratum,
+    then by name), drawn with ``random.Random(seed)`` from each stratum's
+    conversations sorted by id, the strata in order of name. The sample is
+    the same whatever order the conversations come in; it keeps theirs."""
+    if n < 1:
+        raise ValueError("a sample of at least 1")
+    groups: dict[str, list[Conversation]] = {}
+    for conv in conversations:
+        groups.setdefault(stratum(conv), []).append(conv)
+    total = len(conversations)
+    if n >= total:
+        return list(conversations)
+    shares = {name: n * len(group) / total for name, group in groups.items()}
+    quota = {name: int(share) for name, share in shares.items()}
+    for name in sorted(groups, key=lambda g: (-(shares[g] - quota[g]), -len(groups[g]), g)
+                       )[:n - sum(quota.values())]:
+        quota[name] += 1
+    rng = random.Random(seed)
+    chosen: set[str] = set()
+    for name in sorted(groups):
+        ids = sorted(c.conv_id for c in groups[name])
+        chosen.update(rng.sample(ids, quota[name]))
+    return [c for c in conversations if c.conv_id in chosen]
 
 
 # --------------------------------------------------------------------------
@@ -929,13 +1009,24 @@ def judged_gold(question: Question, judge: Judge) -> str:
     return question.answer
 
 
-def verdicts(judge: Judge, question: str, gold: str, prediction: str, runs: int = 1,
+def call_judge(judge: Judge, question: Question, gold: str, prediction: str) -> bool:
+    """One verdict of ``judge`` on ``prediction``: ``judge(question text,
+    gold, prediction)``, and ``asked=question`` as well for a judge with a
+    true ``reads_question`` attribute (LongMemEval's judge prompt depends on
+    the question's type and on whether it is an abstention question)."""
+    if getattr(judge, "reads_question", False):
+        return bool(judge(question.question, gold, prediction, asked=question))
+    return bool(judge(question.question, gold, prediction))
+
+
+def verdicts(judge: Judge, question: Question, gold: str, prediction: str, runs: int = 1,
              pool: Any = None) -> tuple[list[bool | None], str | None]:
-    """``runs`` verdicts of ``judge`` on one answer (in ``pool``, a thread
-    pool, when given) and the first error: a failed run is None."""
+    """``runs`` verdicts of ``judge`` on one answer to ``question`` (in
+    ``pool``, a thread pool, when given) and the first error: a failed run
+    is None."""
     def once() -> tuple[bool | None, str | None]:
         try:
-            return bool(judge(question, gold, prediction)), None
+            return call_judge(judge, question, gold, prediction), None
         except Exception as exc:  # one failed judgement must not end a long run
             return None, str(exc)[:300]
 
@@ -969,7 +1060,7 @@ def score_answer(prediction: str, question: Question, judge: Judge = containment
     judge reads ``judged_gold``. A judge that fails leaves its verdict None
     ("judge_error" says why), which the means leave out."""
     scores = lexical_scores(prediction, question)
-    scores.update(judge_fields(*verdicts(judge, question.question, judged_gold(question, judge),
+    scores.update(judge_fields(*verdicts(judge, question, judged_gold(question, judge),
                                          prediction, runs, pool)))
     return scores
 
@@ -1003,7 +1094,9 @@ def answer_question(llm: LLM, question: Question, context: str) -> str:
 #: --answer-prompt: (question, the memory list) -> the answering call's
 #: messages ([{"role", "content"}, ...]). The memory list is Memry's lines as
 #: its context builder renders them (``answer_with``); answering from the whole
-#: conversation, the turns (``full_context_memories``).
+#: conversation, the turns (``full_context_memories``). A function with a true
+#: ``reads_question`` attribute is also given ``asked=`` the ``Question`` (its
+#: date: LongMemEval's prompt contains the day the question is asked).
 AnswerPrompt = Callable[[str, list[Any]], list[dict[str, str]]]
 
 
@@ -1090,8 +1183,10 @@ def answer_from(answer_llm: LLM, question: Question, items: list[Any],
     started = time.perf_counter()
     try:
         if answer_prompt is not None:
-            prediction = str(chat(answer_llm, answer_prompt(question.question, items))
-                             or "").strip()
+            messages = answer_prompt(question.question, items, asked=question) \
+                if getattr(answer_prompt, "reads_question", False) \
+                else answer_prompt(question.question, items)
+            prediction = str(chat(answer_llm, messages) or "").strip()
         else:
             prediction = answer_question(answer_llm, question, memories_text(items))
     except Exception as exc:  # one failed call must not end a long run
@@ -1130,8 +1225,8 @@ def judge_answers(answers: dict[Any, dict[str, Any]], question: Question, judge:
         try:
             if stage:
                 with api_usage.stage(stage):
-                    return bool(judge(question.question, truth, prediction)), None
-            return bool(judge(question.question, truth, prediction)), None
+                    return call_judge(judge, question, truth, prediction), None
+            return call_judge(judge, question, truth, prediction), None
         except Exception as exc:  # one failed judgement must not end a long run
             return None, str(exc)[:300]
 
@@ -1341,14 +1436,30 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     category 5, ``ABSTAIN_CATEGORIES``), as the published LoCoMo results do.
     With several judge runs a row's ``judge`` is its mean verdict, and
     ``judge_runs`` holds each run's share right with ``judge_std`` their
-    sample standard deviation."""
+    sample standard deviation.
+
+    For LongMemEval's rows (level "session") the tables also have the two
+    other numbers of the official print_qa_metrics.py: a last row
+    "abstention" for the questions whose right answer is that the haystack
+    does not contain it (these questions are also in their types' rows and
+    in the overall), and the overall's ``judge_task_averaged``, the mean of
+    the types' judge scores."""
     groups: dict[tuple[Any, str], list[dict[str, Any]]] = {}
     for row in rows:
         groups.setdefault((row["category"], row["category_name"]), []).append(row)
     order = sorted(groups, key=lambda key: (not isinstance(key[0], int), str(key[0]).zfill(6)))
     scored = [r for r in rows if r.get("category_name") not in ABSTAIN_CATEGORIES]
-    return {"by_category": [_summary(c, n, groups[(c, n)]) for c, n in order],
-            "overall": _summary("all", "overall", scored)}
+    tables = {"by_category": [_summary(c, n, groups[(c, n)]) for c, n in order],
+              "overall": _summary("all", "overall", scored)}
+    if any(r.get("level") == "session" for r in rows):
+        types = [entry["judge"] for entry in tables["by_category"]
+                 if entry.get("judge") is not None]
+        if types:
+            tables["overall"]["judge_task_averaged"] = round(statistics.mean(types), 4)
+        abstained = [r for r in rows if r.get("abstain")]
+        if abstained:
+            tables["by_category"].append(_summary("abstention", "abstention", abstained))
+    return tables
 
 
 def markdown_table(tables: dict[str, Any]) -> str:
@@ -1362,6 +1473,8 @@ def markdown_table(tables: dict[str, Any]) -> str:
                   else f"{row[m]:.3f}" for m in metrics]
         cells.append("-" if row.get("search_ms") is None else f"{row['search_ms']:.1f}")
         lines.append("| " + " | ".join(cells) + " |")
+    if tables["overall"].get("judge_task_averaged") is not None:
+        lines.append(f"\njudge, task-averaged: {tables['overall']['judge_task_averaged']:.3f}")
     return "\n".join(lines)
 
 
@@ -1886,6 +1999,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--export-mem0", default=None, metavar="PATH",
                         help="also write the headline answers as Mem0's per-question "
                              "results file (evals/mem0_judge.export_results)")
+    parser.add_argument("--write-selected", default=None, metavar="PATH",
+                        help="write the file's items of the questions selected (--sample, "
+                             "--seed, --limit, --conversation) to PATH as they are, and stop "
+                             "(LongMemEval): a small file for a run in several processes")
+    parser.add_argument("--export-longmemeval", default=None, metavar="PATH",
+                        help="also write the headline answers as the jsonl LongMemEval's "
+                             "evaluate_qa.py reads (and the compared answers to "
+                             "PATH.compared.jsonl, if any)")
     parser.add_argument("--limit", type=int, default=None,
                         help="first N conversations (LoCoMo samples, LongMemEval questions)")
     parser.add_argument("--conversation", action="append", default=None, metavar="ID",
@@ -1894,7 +2015,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--questions", type=int, default=None,
                         help="first N questions of each conversation")
     parser.add_argument("--seed", type=int, default=None,
-                        help="shuffle the conversations with this seed before --limit")
+                        help="shuffle the conversations with this seed before --limit; "
+                             "with --sample, also the seed of the draw (default 0)")
+    parser.add_argument("--sample", type=int, default=None, metavar="N",
+                        help="N conversations of one question (LongMemEval) drawn in "
+                             "proportion to the question types, abstention questions apart "
+                             "(stratified_sample), before --seed's shuffle and --limit")
     parser.add_argument("--answer", action="store_true",
                         help="answer with the configured LLM and score F1, EM, contains, judge")
     parser.add_argument("--answer-model", default=None, metavar="MODEL",
@@ -2081,8 +2207,8 @@ def _write_json(path: pathlib.Path, data: Any) -> None:
 #: Options that do not change a conversation's results: a per-conversation
 #: file written under other values of these is still reused.
 _RUN_ONLY = ("jobs", "results_dir", "out", "worker", "usage_db", "max_calls", "caps",
-             "conversation", "limit", "seed", "workers", "store_dir", "export_mem0",
-             "k_list", "category_set")
+             "conversation", "limit", "seed", "sample", "workers", "store_dir", "export_mem0",
+             "export_longmemeval", "k_list", "category_set")
 
 
 def run_options(args: argparse.Namespace) -> dict[str, Any]:
@@ -2126,6 +2252,27 @@ def run_workers(argv: list[str], conversation_ids: list[str], results_dir: pathl
                 queue.clear()
 
 
+def write_selected(dataset: str, path: pathlib.Path, conversations: list[Conversation],
+                   target: str | os.PathLike[str]) -> int:
+    """Write the items of ``path`` whose question is one of ``conversations``,
+    unchanged and in the file's order, to ``target`` (LongMemEval). Each
+    process of a run loads its whole data file, and the 500 questions of
+    longmemeval_s take about 2.4 GB in memory; a file of the questions to run
+    keeps ten processes in a few GB."""
+    if dataset != "longmemeval":
+        print("--write-selected: LongMemEval only", file=sys.stderr)
+        return 2
+    keep = {c.conv_id for c in conversations}
+    items = [item for i, item in enumerate(_items(_read_json(path), "haystack_sessions"))
+             if str(item.get("question_id") or f"question-{i}") in keep]
+    out = pathlib.Path(target)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    digest = hashlib.sha256(out.read_bytes()).hexdigest()
+    print(f"{len(items)} questions of {path} written to {out} (sha256 {digest})")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
@@ -2140,6 +2287,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.worker:
         conversations = [c for c in conversations if c.conv_id == args.worker]
     else:
+        if args.sample:
+            try:
+                conversations = stratified_sample(conversations, args.sample, args.seed or 0)
+            except ValueError as exc:
+                print(f"--sample: {exc}", file=sys.stderr)
+                return 2
         if args.seed is not None:
             random.Random(args.seed).shuffle(conversations)
         if args.limit:
@@ -2151,6 +2304,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"--conversation: no {', '.join(unknown)} in {path}", file=sys.stderr)
                 return 2
             conversations = [c for c in conversations if c.conv_id in set(args.conversation)]
+        if args.write_selected:
+            return write_selected(args.dataset, path, conversations, args.write_selected)
     judge = load_judge(args.judge)
     answer_prompt = load_function(args.answer_prompt, "--answer-prompt") \
         if args.answer_prompt else None
@@ -2271,6 +2426,17 @@ def main(argv: list[str] | None = None) -> int:
 
         _write_json(pathlib.Path(args.export_mem0), export_results(result, path))
         print(f"Mem0's results file: {args.export_mem0}")
+    if args.export_longmemeval:
+        from evals.longmemeval_judge import export_hypotheses
+
+        target = pathlib.Path(args.export_longmemeval)
+        for compared, where in ((False, target), (True, target.with_suffix(".compared.jsonl"))):
+            lines = export_hypotheses(result, compared=compared)
+            if lines or not compared:
+                where.parent.mkdir(parents=True, exist_ok=True)
+                where.write_text("".join(json.dumps(line) + "\n" for line in lines),
+                                 encoding="utf-8")
+                print(f"LongMemEval's hypothesis file: {where}")
     print(f"\n## {args.dataset}: {len(result['rows'])} rows, "
           f"{sum(s.get('memories', 0) for s in result['stores'])} memories")
     for part in result["passes"]:

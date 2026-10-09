@@ -161,9 +161,21 @@ def _render(template: str, values: dict[str, str]) -> str:
     return text[:-1] if template.endswith("\n") else text
 
 
+#: Name prefixes of the reasoning models, which take no temperature.
+NO_TEMPERATURE = ("gpt-5", "gpt-6", "o1", "o3", "o4")
+
+
+def takes_temperature(model: str) -> bool:
+    """Whether the API takes a temperature for ``model``: not for the
+    reasoning models (``NO_TEMPERATURE``), which run at their own."""
+    return not str(model).startswith(NO_TEMPERATURE)
+
+
 class OpenAIChat(LLM):
     """An OpenAI chat model called as Mem0's evaluation calls one: the
-    messages as given, at temperature 0 (``OPENAI_API_KEY``). A timeout, a
+    messages as given, at temperature 0 (``OPENAI_API_KEY``), or with no
+    temperature for a model that takes none (``takes_temperature``).
+    ``max_tokens``, when given, caps the reply. A timeout, a
     dropped connection, a rate limit or a server error is tried again, up to
     ``attempts`` calls in all. ``last_usage()`` is the ``usage`` of the reply
     to this thread's last call."""
@@ -171,12 +183,14 @@ class OpenAIChat(LLM):
     name = "openai"
 
     def __init__(self, model: str, *, api_key: str | None = None, base_url: str | None = None,
-                 temperature: float = 0.0, timeout: float = 120.0, attempts: int = 4) -> None:
+                 temperature: float | None = 0.0, timeout: float = 120.0, attempts: int = 4,
+                 max_tokens: int | None = None) -> None:
         self.model = model
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.available = bool(self.api_key)
         self.base_url = (base_url or OPENAI_URL).rstrip("/")
-        self.temperature = temperature
+        self.temperature = temperature if takes_temperature(model) else None
+        self.max_tokens = max_tokens
         self.attempts = max(attempts, 1)
         self._client = httpx.Client(timeout=timeout)
         self._local = threading.local()
@@ -188,8 +202,11 @@ class OpenAIChat(LLM):
         return getattr(self._local, "usage", None)
 
     def chat(self, messages: list[dict[str, str]], *, json_object: bool = False) -> str:
-        body: dict[str, Any] = {"model": self.model, "messages": messages,
-                                "temperature": self.temperature}
+        body: dict[str, Any] = {"model": self.model, "messages": messages}
+        if self.temperature is not None:
+            body["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            body["max_tokens"] = self.max_tokens
         if json_object:
             body["response_format"] = {"type": "json_object"}
         self._local.usage = None
