@@ -146,15 +146,6 @@ def test_a_role_word_shared_by_two_entities_seeds_neither():
     store.close()
 
 
-def test_without_the_role_word_rule_the_most_similar_question_decides():
-    store, ids, _ = _store()
-    cfg = store.config.retrieval
-    cfg.entity_question_role_word, cfg.entity_question_bar = False, 0.0
-    plan = store._plan("Where do I work?", _reads(store), True)
-    assert plan.seeds in ([ids["sister"]], [ids["brother"]])  # the risk the rule removes
-    store.close()
-
-
 def test_a_merged_entitys_questions_are_not_read():
     store, ids, _ = _store()
     with store.backend._lock:

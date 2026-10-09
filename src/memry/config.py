@@ -191,9 +191,6 @@ class RetrievalConfig(BaseModel):
     #: before. Off until measured (PhD notes, entity-questions).
     entity_questions: bool = False
     entity_question_bar: float = 0.5
-    #: For the measurement only: False drops the role word rule, and the
-    #: entity with the most similar question at or above the bar is the seed.
-    entity_question_role_word: bool = True
     #: The search log (``search_log``): one row per search, with its time,
     #: namespace, run, the query's text, whether it was about a known entity
     #: (how many seeds), how it was ordered, how many results and how long it

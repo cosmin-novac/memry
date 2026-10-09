@@ -1796,8 +1796,6 @@ def main() -> None:
                              "(\"(no entity questions)\")")
     parser.add_argument("--entity-question-bar", type=float, default=None,
                         help="retrieval.entity_question_bar (Memry's default without it)")
-    parser.add_argument("--no-role-word", action="store_true",
-                        help="retrieval.entity_question_role_word off: the bar alone decides")
     parser.add_argument("--tags", action="store_true",
                         help="tag every memory as an agent does when it saves (tag_world); "
                              "the store keeps the tags as the memories' categories")
@@ -1949,7 +1947,6 @@ def main() -> None:
                 entity_questions=world["entity_questions"] if args.entity_questions else None)
             if args.entity_question_bar is not None:
                 store.config.retrieval.entity_question_bar = args.entity_question_bar
-            store.config.retrieval.entity_question_role_word = not args.no_role_word
             # with question keys or entity questions, each mode with them and without
             arms = [None] if questions is None else [True, False]
             entity_arms = [None] if not args.entity_questions else [True, False]

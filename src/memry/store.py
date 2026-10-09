@@ -2515,23 +2515,19 @@ class MemoryStore:
         entity's questions contain, and its best cosine similarity with them
         is at least ``retrieval.entity_question_bar``. None when no entity
         has questions, when the role words belong to no entity or to
-        several, below the bar, or without an embedder. With
-        ``retrieval.entity_question_role_word`` False (a measurement only),
-        the entity with the most similar question at or above the bar."""
+        several, below the bar, or without an embedder."""
         cfg = self.config.retrieval
         if not self.embedder.dimensions:
             return None
         rows = self.backend.entity_question_rows(scope, self.embedder.model_id)
         if not rows:
             return None
-        word = None
-        if cfg.entity_question_role_word:
-            holders = distinct_holders([(entity_id, text) for entity_id, text, _ in rows])
-            hits = {w: holders[w] for w in role_words(query) if w in holders}
-            if len(set(hits.values())) != 1:
-                return None
-            word, entity_id = next(iter(hits.items()))
-            rows = [row for row in rows if row[0] == entity_id]
+        holders = distinct_holders([(entity_id, text) for entity_id, text, _ in rows])
+        hits = {w: holders[w] for w in role_words(query) if w in holders}
+        if len(set(hits.values())) != 1:
+            return None
+        word, entity_id = next(iter(hits.items()))
+        rows = [row for row in rows if row[0] == entity_id]
         rows = [row for row in rows if row[2] is not None]
         if not rows:
             return None
@@ -2540,7 +2536,7 @@ class MemoryStore:
         similarity = _similarity(asked, best[2])
         if similarity < cfg.entity_question_bar:
             return None
-        return best[0], mask_role(query, word) if word else query, similarity
+        return best[0], mask_role(query, word), similarity
 
     def _write_entity_questions(self, entity_id: str, questions: list[str], source: str) -> None:
         """Keep ``questions`` as the entity's questions, each embedded as
