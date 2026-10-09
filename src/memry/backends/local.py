@@ -4793,13 +4793,23 @@ class LocalBackend(MemoryBackend):
     #: decided stays (``_one_row_per_pair_locked``).
     _DECIDED = {"proposed": 0, "rejected": 1, "confirmed": 2}
 
+    @staticmethod
+    def _answered(row: sqlite3.Row) -> bool:
+        """Whether a pair's row carries an answer: it was compared, or has
+        P(different) or a belongs answer."""
+        return bool(row["compared_step"]) or row["different"] is not None or (
+            row["belongs"] is not None)
+
     def _one_row_per_pair_locked(self, keep_id: str, merge_id: str) -> list[dict[str, Any]]:
         """Before a merge points the merged entity's pairs at the kept one:
         where the kept one has a row for the same pair (both were compared
         with a third entity), one row stays. That is the more decided one (a
-        decision over an open pair), of two alike the later answer, the kept
-        entity's own on a tie; it carries its answer or decision, and the
-        other row goes. A confirmed row keeps the ends it was decided on and
+        decision over an open pair), then one with an answer over one never
+        compared, of two alike the later answer, the kept entity's own on a
+        tie; it carries its answer or decision, and the other row goes. A pair
+        raised after the other was answered is the later row but has no
+        answer: before, it won, and the answer went with the row it dropped
+        (a version's belongs answer, so its memories lost the merged names). A confirmed row keeps the ends it was decided on and
         is never dropped. Returns the rows dropped, as they were, for the
         merge record: an undo puts them back."""
         dropped: list[dict[str, Any]] = []
@@ -4824,8 +4834,8 @@ class LocalBackend(MemoryBackend):
             else:
                 rows = [row, *held]
                 best = max(rows, key=lambda r: (
-                    self._DECIDED.get(r["status"], 0), r["decided_at"] or r["created_at"],
-                    r["id"] != row["id"]))
+                    self._DECIDED.get(r["status"], 0), self._answered(r),
+                    r["decided_at"] or r["created_at"], r["id"] != row["id"]))
                 losers = [r for r in rows if r["id"] != best["id"]]
             for loser in losers:
                 dropped.append(dict(loser))
@@ -4841,8 +4851,9 @@ class LocalBackend(MemoryBackend):
         both created in that pass. Of each pair's rows the one a merge keeps
         stays (``_one_row_per_pair_locked``): confirmed rows all stay as they
         are, and beside one the rest go (the two are one, the pair is moot);
-        otherwise the more decided, of two alike the later answer. The rows
-        that go are kept under the marker, so each can be put back."""
+        otherwise the more decided, then one with an answer, of two alike the
+        later answer. The rows that go are kept under the marker, so each can
+        be put back."""
         if self._db.execute(
             "SELECT 1 FROM meta WHERE key = 'schema:one-row-per-pair:v1'"
         ).fetchone():
@@ -4862,8 +4873,8 @@ class LocalBackend(MemoryBackend):
                 losers = [r for r in rows if r["status"] != "confirmed"]
             else:
                 best = max(rows, key=lambda r: (
-                    self._DECIDED.get(r["status"], 0), r["decided_at"] or r["created_at"],
-                    r["id"]))
+                    self._DECIDED.get(r["status"], 0), self._answered(r),
+                    r["decided_at"] or r["created_at"], r["id"]))
                 losers = [r for r in rows if r["id"] != best["id"]]
             for loser in losers:
                 dropped.append(dict(loser))
