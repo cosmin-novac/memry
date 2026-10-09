@@ -739,6 +739,26 @@ class MemoryBackend(ABC):
         """Valid memories with no question key at all, oldest first."""
         return []
 
+    # Entity questions (``intelligence.entity_questions``): the questions the
+    # owner would ask about an entity by its role. A backend without them
+    # keeps none, and a question by role is about the owner.
+
+    def set_entity_questions(
+        self, entity_id: str, questions: list[tuple[str, str]],
+        vectors: list[list[float] | None] | None = None, embedding_model: str | None = None,
+    ) -> None:
+        """Replace an entity's questions ((text, source) each) and their vectors."""
+        return None
+
+    def entity_questions_of(self, entity_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Each entity's questions in order (``n``, ``text``, ``source``,
+        ``embedding_model``)."""
+        return {}
+
+    def entity_question_rows(self, scope: Scope, embedding_model: str) -> list[tuple[str, str, Any]]:
+        """(entity id, text, vector or None) of the questions of the entities in scope."""
+        return []
+
     def question_keyword_search(
         self, query: str, scope: Scope, limit: int = 20, include_invalid: bool = False,
         categories: list[str] | None = None, entity_id: str | None = None,

@@ -182,6 +182,18 @@ class RetrievalConfig(BaseModel):
     #: Memry's facts; ``memry backfill-questions`` writes them for a store
     #: saved before.
     question_keys: bool = False
+    #: Entity questions (``intelligence.entity_questions``): the questions the
+    #: owner would ask about an entity related to them, by its role ("Where
+    #: does my sister work?"). A question that contains no hub's name is then
+    #: about the entity whose questions alone contain its role word after "my",
+    #: when its best cosine similarity with that entity's questions is at
+    #: least ``entity_question_bar``; otherwise it is about the owner, as
+    #: before. Off until measured (PhD notes, entity-questions).
+    entity_questions: bool = False
+    entity_question_bar: float = 0.5
+    #: For the measurement only: False drops the role word rule, and the
+    #: entity with the most similar question at or above the bar is the seed.
+    entity_question_role_word: bool = True
     #: A question that needs several memories (a list, a total, a comparison)
     #: has at most this many more judged in one further call, after the first
     #: ``decision.rerank_pool``: the memories filed under the topics the first
