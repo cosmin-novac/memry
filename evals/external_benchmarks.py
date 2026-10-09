@@ -1999,6 +1999,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--export-mem0", default=None, metavar="PATH",
                         help="also write the headline answers as Mem0's per-question "
                              "results file (evals/mem0_judge.export_results)")
+    parser.add_argument("--write-selected", default=None, metavar="PATH",
+                        help="write the file's items of the questions selected (--sample, "
+                             "--seed, --limit, --conversation) to PATH as they are, and stop "
+                             "(LongMemEval): a small file for a run in several processes")
     parser.add_argument("--export-longmemeval", default=None, metavar="PATH",
                         help="also write the headline answers as the jsonl LongMemEval's "
                              "evaluate_qa.py reads (and the compared answers to "
@@ -2248,6 +2252,27 @@ def run_workers(argv: list[str], conversation_ids: list[str], results_dir: pathl
                 queue.clear()
 
 
+def write_selected(dataset: str, path: pathlib.Path, conversations: list[Conversation],
+                   target: str | os.PathLike[str]) -> int:
+    """Write the items of ``path`` whose question is one of ``conversations``,
+    unchanged and in the file's order, to ``target`` (LongMemEval). Each
+    process of a run loads its whole data file, and the 500 questions of
+    longmemeval_s take about 2.4 GB in memory; a file of the questions to run
+    keeps ten processes in a few GB."""
+    if dataset != "longmemeval":
+        print("--write-selected: LongMemEval only", file=sys.stderr)
+        return 2
+    keep = {c.conv_id for c in conversations}
+    items = [item for i, item in enumerate(_items(_read_json(path), "haystack_sessions"))
+             if str(item.get("question_id") or f"question-{i}") in keep]
+    out = pathlib.Path(target)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    digest = hashlib.sha256(out.read_bytes()).hexdigest()
+    print(f"{len(items)} questions of {path} written to {out} (sha256 {digest})")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
@@ -2279,6 +2304,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"--conversation: no {', '.join(unknown)} in {path}", file=sys.stderr)
                 return 2
             conversations = [c for c in conversations if c.conv_id in set(args.conversation)]
+        if args.write_selected:
+            return write_selected(args.dataset, path, conversations, args.write_selected)
     judge = load_judge(args.judge)
     answer_prompt = load_function(args.answer_prompt, "--answer-prompt") \
         if args.answer_prompt else None

@@ -368,3 +368,21 @@ def test_cli_runs_a_sample_and_then_the_rest_reusing_it(monkeypatch, tmp_path, n
                for c in sampled)
     assert sum(r["abstain"] for r in whole["rows"]) == 2
     assert xb.main(["--dataset", "locomo", "--file", "locomo_mini.json", "--sample", "1"]) == 2
+
+
+def test_the_selected_questions_are_written_as_the_file_has_them(monkeypatch, tmp_path,
+                                                                   no_models):
+    monkeypatch.setenv(xb.DATA_ENV, str(FIXTURES))
+    target = tmp_path / "data" / "tiny_sample4_seed3.json"
+    assert xb.main(["--dataset", "longmemeval", "--file", "longmemeval_tiny.json",
+                    "--sample", "4", "--seed", "3", "--write-selected", str(target)]) == 0
+    written = json.loads(target.read_text())
+    source = json.loads(TINY.read_text())
+    chosen = {c.conv_id for c in xb.stratified_sample(xb.load_longmemeval(TINY), 4, seed=3)}
+    assert written == [item for item in source if item["question_id"] in chosen]
+    # a run from the small file asks the same questions in the same order
+    small = xb.load_longmemeval(target)
+    assert [c.conv_id for c in small] == [c.conv_id for c in xb.stratified_sample(
+        xb.load_longmemeval(TINY), 4, seed=3)]
+    assert xb.main(["--dataset", "locomo", "--file", "locomo_mini.json",
+                    "--write-selected", str(tmp_path / "x.json")]) == 2
