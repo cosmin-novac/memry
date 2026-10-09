@@ -746,25 +746,39 @@ When a fact changes or someone corrects it, save the new statement and leave the
 old memory as it is. Memry keeps the old value as dated history, or retires it
 when it was wrong.
 
+## Entity questions (optional, off by default)
+
+Someone may ask "Where does my sister work?" without the sister's name. With
+`retrieval.entity_questions` set to true in `~/.memry/config.json`, Memry starts that
+search from the sister. Each person related to the owner has two or three stored questions,
+written by a text model from the person's description and relations. Memry picks the person
+whose stored questions alone contain the word after "my". The best match must reach
+`retrieval.entity_question_bar` (0.5). Otherwise Memry starts from the owner, as with the
+flag off. No server command writes the questions yet. An operator writes them from Python
+with `MemoryStore.write_entity_questions()`. Backups and exports contain their texts, and
+Memry embeds them again after a restore.
+
 ## The search log (optional, off by default)
 
-`MEMRY_SEARCH_LOG=1` (`retrieval.search_log`) keeps one row per search: the time,
-the namespace, agent and run, the query, whether the question was about an entity
-Memry knows (its seeds), the result count and the time it took. Upkeep deletes rows
-older than 90 days. Deleting a namespace's memories deletes its rows.
+With `MEMRY_SEARCH_LOG=1` (`retrieval.search_log`), Memry keeps one row per search. A row
+contains the time, the namespace, agent and run, the query, the seeds (the entities Memry
+recognised in the question), the result count and the time taken. Memry deletes rows older
+than 90 days during upkeep. A namespace's rows are deleted with its memories.
 
-The log contains what people asked, so it stays out of copies. `memry export` leaves
-it out unless given `--with-search-log`. The nightly snapshot empties the log in its
-copy unless `snapshot.include_search_log` is true.
+The log contains what people asked, so it is left out of copies by default. `memry export`
+includes it only with `--with-search-log`. The nightly snapshot copy is emptied of it unless
+`snapshot.include_search_log` is true.
 
-`memry search-stats --days 30` prints the counts per namespace: searches, those with
-seeds, those without and their share, and the ten most common searches without seeds.
+With `memry search-stats --days 30`, an operator gets the counts per namespace: searches,
+those with seeds, those without and their share, and the ten most common searches without
+seeds.
 
-`MEMRY_TRAFFIC_KEYS=1` (`retrieval.traffic_keys`, needs the log) turns a search into
-a question key of the memory saved after it. The save must come within the same run
-in the hour after the search, or within ten minutes in the same namespace. The
-search, ordered again after the save, must place that memory in its first 20.
-Searches read question keys only with `MEMRY_QUESTION_KEYS=1`.
+With `MEMRY_TRAFFIC_KEYS=1` (`retrieval.traffic_keys`), Memry stores a search's query as a
+question key of a memory saved after it. The save must come within the same run in the hour
+after the search, or within ten minutes in the same namespace. Ordered again after the save,
+the search must have that memory in its first 20. Traffic keys need the log and
+`MEMRY_QUESTION_KEYS=1`. With question keys off, Memry logs one warning at startup and leaves
+traffic keys off.
 
 ## Search filters
 
