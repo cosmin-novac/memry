@@ -980,7 +980,9 @@ Entity questions (`retrieval.entity_questions`, off by default) are for a questi
 Someone asks "Where does my sister work?" without her name. With the flag off, Memry starts
 that search from the owner. Each person related to the owner can have two or three stored
 questions (table `entity_questions`), written by a text model from the person's description
-and relations (`MemoryStore.write_entity_questions`). With the flag on, a question that
+and relations (`MemoryStore.write_entity_questions`). With the flag on, the upkeep pass
+writes them for a new or changed person, at most 3 calls a tick, and
+`memry write-entity-questions` writes them for a whole store at once. A question that
 contains no hub's name and contains a role word after "my" is about the one entity whose
 stored questions alone contain that word. Its best cosine similarity with them must be at
 least `retrieval.entity_question_bar` (0.5). Memry then starts the search from that entity
