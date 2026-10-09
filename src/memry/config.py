@@ -200,8 +200,10 @@ class RetrievalConfig(BaseModel):
     search_log: bool = False
     #: Keys from traffic: a search followed by a save, whose order after the
     #: save puts one of the saved memories in its first 20, gives that memory
-    #: the query as a question key (source "traffic"). Needs ``search_log``;
-    #: a search reads the keys only with ``question_keys`` on.
+    #: the query as a question key (source "traffic"). Needs ``search_log``
+    #: and ``question_keys``: with ``question_keys`` off the store warns once
+    #: when it opens and keeps this off (alone, the keys from traffic made two
+    #: question families worse; PhD notes, traffic-keys).
     traffic_keys: bool = False
     #: A question that needs several memories (a list, a total, a comparison)
     #: has at most this many more judged in one further call, after the first

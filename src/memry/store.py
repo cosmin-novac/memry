@@ -793,6 +793,12 @@ class MemoryStore:
         self._pass_locks: dict[tuple[str, str | None], threading.RLock] = {}
         self._pass_locks_guard = threading.Lock()
         self.backend.names_changed = self._names_changed
+        retrieval = self.config.retrieval
+        if retrieval.traffic_keys and not retrieval.question_keys:
+            # keys from traffic alone made two question families worse
+            # (PhD notes, traffic-keys); they are read as question keys
+            log.warning("retrieval.traffic_keys is on without retrieval.question_keys: "
+                        "keys from traffic stay off")
         try:
             self._settle_owner_pairs()
         except Exception as exc:  # an upgrade step must never stop a store opening
@@ -1286,9 +1292,11 @@ class MemoryStore:
         words without vectors, and upkeep embeds them
         (``refresh_question_vectors``). A memory with ``QUESTIONS_LIMIT``
         keys, or with this one, takes none. A failure never fails the save.
-        Returns how many searches were read and how many keys were added."""
+        Off without ``retrieval.question_keys`` (the store warns once when it
+        opens). Returns how many searches were read and how many keys were
+        added."""
         cfg = self.config.retrieval
-        if not (cfg.traffic_keys and cfg.search_log and memory_ids):
+        if not (cfg.traffic_keys and cfg.question_keys and cfg.search_log and memory_ids):
             return {"searches": 0, "keys": 0}
         try:
             return self._add_traffic_keys(scope, memory_ids, at or datetime.now(timezone.utc))

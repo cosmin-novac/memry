@@ -341,6 +341,27 @@ def test_no_key_without_the_flag_or_without_the_log():
             s.close()
 
 
+def test_traffic_keys_without_question_keys_warn_once_and_stay_off(caplog):
+    with caplog.at_level("WARNING", logger=store_module.log.name):
+        s = _store(traffic_keys=True, question_keys=False)
+    try:
+        warned = [r for r in caplog.records if "traffic_keys" in r.getMessage()]
+        assert len(warned) == 1
+        s.search("when was the boiler serviced", user_id="ada")
+        saved = s.add("The boiler was serviced on 3 May", user_id="ada", infer=False)
+        assert _keys(s, saved.actions[0].memory_id) == []
+        assert len([r for r in caplog.records if "traffic_keys" in r.getMessage()]) == 1
+    finally:
+        s.close()
+
+
+def test_traffic_keys_with_question_keys_open_without_a_warning(caplog):
+    with caplog.at_level("WARNING", logger=store_module.log.name):
+        s = _store(traffic_keys=True, question_keys=True)
+    s.close()
+    assert not [r for r in caplog.records if "traffic_keys" in r.getMessage()]
+
+
 def test_the_windows_the_run_for_an_hour_the_namespace_for_ten_minutes(keyed):
     _keep(keyed, "who serviced the boiler", _ago(minutes=40), run_id="r1")
     _keep(keyed, "what does the boiler cost", _ago(minutes=40), run_id="r2")
