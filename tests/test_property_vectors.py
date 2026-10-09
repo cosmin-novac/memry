@@ -222,12 +222,15 @@ def _masked(store, memory):
 def _tarnby(store):
     """ "Tarnby Labs" with a memory that also writes the short name, "Tarnby"
     with one of its own, and a version of Tarnby Labs whose memory writes the
-    short name too, all refreshed."""
+    short name too, all refreshed. The version's pair was answered a day
+    before, as on a real store: a pair raised later in the same second hid
+    that its row lost to a newer one never compared."""
     labs, short = _entity(store, "Tarnby Labs"), _entity(store, "Tarnby")
     v2 = _entity(store, "Tarnby Labs v2")
     store.backend.add_proposal(MergeProposal(
         entity_a=v2.id, entity_b=labs.id, user_id="ada", confidence=0.7,
-        different=0.3, belongs=NEITHER_BUT, compared_step=1))
+        different=0.3, belongs=NEITHER_BUT, compared_step=1,
+        created_at="2026-01-01T00:00:00+00:00"))
     staff = _memory(store, "Tarnby Labs, called Tarnby by its staff, hired two engineers", [labs])
     office = _memory(store, "Tarnby moved to a bigger office", [short])
     release = _memory(store, "The second release of Tarnby added sync", [v2])
