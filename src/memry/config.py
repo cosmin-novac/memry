@@ -194,6 +194,18 @@ class RetrievalConfig(BaseModel):
     #: For the measurement only: False drops the role word rule, and the
     #: entity with the most similar question at or above the bar is the seed.
     entity_question_role_word: bool = True
+    #: The search log (``search_log``): one row per search, with its time,
+    #: namespace, run, the query's text, whether it was about a known entity
+    #: (how many seeds), how it was ordered, how many results and how long it
+    #: took. Kept ``SEARCH_LOG_DAYS`` days, deleted by upkeep, never in an
+    #: export or a snapshot unless asked. ``memry search-stats`` counts it.
+    #: Off by default: it keeps what people ask.
+    search_log: bool = False
+    #: Keys from traffic: a search followed by a save, whose order after the
+    #: save puts one of the saved memories in its first 20, gives that memory
+    #: the query as a question key (source "traffic"). Needs ``search_log``;
+    #: a search reads the keys only with ``question_keys`` on.
+    traffic_keys: bool = False
     #: A question that needs several memories (a list, a total, a comparison)
     #: has at most this many more judged in one further call, after the first
     #: ``decision.rerank_pool``: the memories filed under the topics the first
@@ -310,6 +322,10 @@ class SnapshotConfig(BaseModel):
     offsite_secret: str | None = None
     offsite_region: str = "auto"
     offsite_prefix: str = "memry/"
+    #: Whether the copy keeps the search log (``retrieval.search_log``): the
+    #: queries people asked. Off: the copy's log is emptied before it is
+    #: checked, so neither the copy nor the offsite copy contains it.
+    include_search_log: bool = False
 
 
 class TenantConfig(BaseModel):
@@ -506,6 +522,10 @@ def _from_env() -> dict[str, Any]:
     put("supersede", "protect_sources", _int(e("MEMRY_SUPERSEDE_PROTECT_SOURCES")))
     put("supersede", "state_confidence", _float(e("MEMRY_SUPERSEDE_STATE_CONFIDENCE")))
     put("supersede", "confidence", _float(e("MEMRY_SUPERSEDE_CONFIDENCE")))
+
+    put("retrieval", "question_keys", _bool(e("MEMRY_QUESTION_KEYS")))
+    put("retrieval", "search_log", _bool(e("MEMRY_SEARCH_LOG")))
+    put("retrieval", "traffic_keys", _bool(e("MEMRY_TRAFFIC_KEYS")))
 
     put("embedding", "provider", e("MEMRY_EMBEDDING_PROVIDER"))
     put("embedding", "model", e("MEMRY_EMBEDDING_MODEL"))

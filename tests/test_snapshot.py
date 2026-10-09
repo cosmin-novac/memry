@@ -167,8 +167,8 @@ def test_the_old_copy_stays_valid_while_the_new_one_is_written(live, monkeypatch
     seen = []
     real_copy = snapshot.copy_database
 
-    def copy_and_look(source, dest):
-        real_copy(source, dest)
+    def copy_and_look(source, dest, **kw):
+        real_copy(source, dest, **kw)
         # mid-run: the new copy exists beside the old, which still checks out
         seen.append(check_snapshot(target)["ok"])
         assert snapshot.sha256_file(target / "memry.db") == old["files"]["memry.db"]["sha256"]

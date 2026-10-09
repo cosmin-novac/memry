@@ -153,6 +153,32 @@ CREATE TRIGGER IF NOT EXISTS memory_questions_au AFTER UPDATE OF text ON memory_
     VALUES ('delete', old.rowid, old.text);
     INSERT INTO memory_questions_fts(rowid, text) VALUES (new.rowid, new.text);
 END;
+-- The search log (``retrieval.search_log``): one row per search, kept
+-- ``SEARCH_LOG_DAYS`` days. mode: "linked" (the question was about a known
+-- entity: seeds > 0), "text" (about none) or "browse" (no query text).
+-- best_judged: the judge's highest relevance of the judged pool (NULL when
+-- the search was not judged). keyed: how many memories took the query as a
+-- question key (``MemoryStore._traffic_keys``). Never in a backup unless
+-- asked: it contains what people asked.
+CREATE TABLE IF NOT EXISTS search_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    user_id TEXT,
+    agent_id TEXT,
+    run_id TEXT,
+    query TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    seeds INTEGER NOT NULL DEFAULT 0,
+    first_person INTEGER NOT NULL DEFAULT 0,
+    filtered INTEGER NOT NULL DEFAULT 0,
+    judged INTEGER NOT NULL DEFAULT 0,
+    best_judged REAL DEFAULT NULL,
+    results INTEGER NOT NULL DEFAULT 0,
+    latency_ms REAL NOT NULL DEFAULT 0,
+    keyed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_search_log_ns ON search_log(user_id, at);
+CREATE INDEX IF NOT EXISTS idx_search_log_at ON search_log(at);
 CREATE INDEX IF NOT EXISTS idx_memories_invalid ON memories(invalid_at);
 -- what a memory replaced, read when it is deleted for good (``replaced_by``)
 CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by)
@@ -463,6 +489,12 @@ _BACKUP_TABLE_KEYS: dict[str, tuple[str, ...]] = {
     "relations": ("id",),
 }
 _BACKUP_ORDER = tuple(_BACKUP_TABLE_KEYS)
+#: The columns of a kept search as written (``log_search``). The search log
+#: is not in ``_BACKUP_TABLE_KEYS``: a backup carries it only when asked.
+_SEARCH_LOG_COLS = (
+    "at", "user_id", "agent_id", "run_id", "query", "mode", "seeds", "first_person",
+    "filtered", "judged", "best_judged", "results", "latency_ms",
+)
 #: The tables whose rows carry a namespace, but for the legacy tag index
 #: (``topics``), which ``adopt_unscoped`` moves apart.
 _NAMESPACED_TABLES = (
@@ -3156,6 +3188,29 @@ class LocalBackend(MemoryBackend):
                      embedding_model if vector else None))
             self._commit()
 
+    def add_question(
+        self, memory_id: str, text: str, source: str, vector: list[float] | None = None,
+        embedding_model: str | None = None, *, limit: int,
+    ) -> bool:
+        """Add one question key after a memory's others, unless the memory
+        has it already (ignoring case) or has ``limit`` keys. Returns whether
+        it was added."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT n, text FROM memory_questions WHERE memory_id = ?",
+                (memory_id,)).fetchall()
+            if len(rows) >= limit or any(
+                    row["text"].casefold() == text.casefold() for row in rows):
+                return False
+            n = max((row["n"] for row in rows), default=-1) + 1
+            self._db.execute(
+                "INSERT INTO memory_questions (memory_id, n, text, source, embedding, "
+                "embedding_model) VALUES (?, ?, ?, ?, ?, ?)",
+                (memory_id, n, text, source, _pack_half(vector) if vector else None,
+                 embedding_model if vector else None))
+            self._commit()
+        return True
+
     def set_question_vectors(
         self, vectors: dict[tuple[str, int], list[float]], embedding_model: str,
     ) -> None:
@@ -3365,6 +3420,128 @@ class LocalBackend(MemoryBackend):
             order = sorted(best, key=lambda mid: (-best[mid], mid))[:limit]
             found = self._memories_by_id(order)
         return [(found[mid], best[mid]) for mid in order if mid in found]
+
+    # --- the search log (``retrieval.search_log``) -----------------------------
+
+    def log_search(self, row: dict[str, Any]) -> int:
+        """Keep one search (the columns of ``search_log`` but ``id`` and
+        ``keyed``); returns its id."""
+        cols = [c for c in _SEARCH_LOG_COLS if c in row]
+        with self._lock:
+            cur = self._db.execute(
+                f"INSERT INTO search_log ({', '.join(cols)}) "
+                f"VALUES ({', '.join('?' * len(cols))})",
+                [row[c] for c in cols])
+            self._commit()
+        return int(cur.lastrowid)
+
+    def search_log_rows(
+        self, *, user_id: str | None = None, since: str | None = None,
+        until: str | None = None, run_id: str | None = None,
+        owner_prefix: str | None = None, newest_first: bool = False,
+        limit: int = 1_000_000,
+    ) -> list[dict[str, Any]]:
+        """The kept searches, oldest first (``newest_first`` the other way):
+        of one namespace (``user_id``), one run, an account's namespaces
+        (``owner_prefix``, as ``_backup_owner_matches`` reads one), and
+        ``since`` <= at <= ``until`` (ISO 8601 times)."""
+        clauses, params = ["1=1"], []
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if since is not None:
+            clauses.append("at >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("at <= ?")
+            params.append(until)
+        if owner_prefix is not None:
+            if owner_prefix.endswith("::"):
+                clauses.append("substr(user_id, 1, ?) = ?")
+                params += [len(owner_prefix), owner_prefix]
+            else:
+                clauses.append("user_id = ?")
+                params.append(owner_prefix)
+        order = "DESC" if newest_first else "ASC"
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM search_log WHERE {' AND '.join(clauses)} "
+                f"ORDER BY at {order}, id {order} LIMIT ?", (*params, limit)).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_search_keyed(self, log_ids: dict[int, int]) -> None:
+        """Count, per kept search, the memories that took its query as a key."""
+        with self._lock:
+            for log_id, count in log_ids.items():
+                self._db.execute("UPDATE search_log SET keyed = keyed + ? WHERE id = ?",
+                                 (count, log_id))
+            self._commit()
+
+    def prune_search_log(
+        self, before: str, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> int:
+        """Delete the kept searches older than ``before``: of one namespace
+        (``user_id``; with ``exact_user`` None is the searches without one),
+        or of every namespace. Returns how many."""
+        clause, params = "at < ?", [before]
+        if user_id is not None:
+            clause += " AND user_id = ?"
+            params.append(user_id)
+        elif exact_user:
+            clause += " AND user_id IS NULL"
+        with self._lock:
+            cur = self._db.execute(f"DELETE FROM search_log WHERE {clause}", params)
+            self._commit()
+        return cur.rowcount
+
+    def delete_search_log(self, *, user_id: str | None) -> int:
+        """Delete every kept search of a namespace (None: those without one)."""
+        with self._lock:
+            cur = self._db.execute(
+                "DELETE FROM search_log WHERE user_id IS ?", (user_id,))
+            self._commit()
+        return cur.rowcount
+
+    def restore_search_log(
+        self, rows: list[dict[str, Any]], *, owner_prefix: str | None = None,
+        check_only: bool = False,
+    ) -> int:
+        """Add kept searches from an export that asked for them
+        (``export_backup(..., search_log=True)``), each under a new id; a row
+        outside the account (``owner_prefix``) or with other columns is
+        refused before anything is written. ``check_only``: refuse or pass,
+        and write nothing."""
+        allowed = set(_SEARCH_LOG_COLS) | {"id", "keyed"}
+        if not isinstance(rows, list):
+            raise ValueError("backup search_log must be a list")
+        for row in rows:
+            if not isinstance(row, dict) or not set(row) <= allowed \
+                    or not {"at", "query", "mode"} <= set(row):
+                raise ValueError("search log row has the wrong columns")
+            if not self._backup_owner_matches(row.get("user_id"), owner_prefix):
+                raise ValueError("backup contains search_log outside this account")
+        if check_only:
+            return 0
+        added = 0
+        with self._lock:
+            for row in rows:
+                # a search restored twice is kept once
+                if self._db.execute(
+                        "SELECT 1 FROM search_log WHERE at = ? AND user_id IS ? "
+                        "AND run_id IS ? AND query = ?",
+                        (row["at"], row.get("user_id"), row.get("run_id"),
+                         row["query"])).fetchone():
+                    continue
+                cols = [c for c in row if c != "id"]
+                self._db.execute(
+                    f"INSERT INTO search_log ({', '.join(cols)}) "
+                    f"VALUES ({', '.join('?' * len(cols))})", [row[c] for c in cols])
+                added += 1
+            self._commit()
+        return added
 
     def _memories_by_id(self, memory_ids: list[str]) -> dict[str, Memory]:
         """The memories of these ids that exist. Caller holds the lock."""
@@ -5013,8 +5190,11 @@ class LocalBackend(MemoryBackend):
             table, f"{column} IN ({placeholders})", tuple(sorted(values))
         )
 
-    def export_backup(self, scope: Scope) -> dict[str, Any]:
-        """Export exact source records; FTS and ANN remain derived indexes."""
+    def export_backup(self, scope: Scope, *, search_log: bool = False) -> dict[str, Any]:
+        """Export exact source records; FTS and ANN remain derived indexes.
+        The search log (what people asked) is left out unless ``search_log``:
+        then the backup carries the scope's kept searches under
+        "search_log", beside the tables."""
         with self._lock:
             clause, params = _scope_clause(scope)
             tables: dict[str, list[dict[str, Any]]] = {
@@ -5068,10 +5248,19 @@ class LocalBackend(MemoryBackend):
                 ]
 
             ordered = {table: tables.get(table, []) for table in _BACKUP_ORDER}
-        return {
+            searches = None
+            if search_log:
+                log_clause, log_params = _scope_clause(scope)
+                searches = [dict(row) for row in self._db.execute(
+                    f"SELECT * FROM search_log WHERE {log_clause} ORDER BY at, id",
+                    log_params).fetchall()]
+        backup = {
             "format": "memry-backup", "version": 1, "created_at": utcnow(),
             "scope": scope.model_dump(), "tables": ordered,
         }
+        if searches is not None:
+            backup["search_log"] = searches
+        return backup
 
     @staticmethod
     def _backup_owner_matches(user_id: Any, owner_prefix: str | None) -> bool:

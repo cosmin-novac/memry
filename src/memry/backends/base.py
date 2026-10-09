@@ -718,6 +718,13 @@ class MemoryBackend(ABC):
         vectors where given."""
         return None
 
+    def add_question(
+        self, memory_id: str, text: str, source: str, vector: list[float] | None = None,
+        embedding_model: str | None = None, *, limit: int,
+    ) -> bool:
+        """Add one question key after a memory's others; whether it was."""
+        return False
+
     def set_question_vectors(
         self, vectors: dict[tuple[str, int], list[float]], embedding_model: str,
     ) -> None:
@@ -774,6 +781,43 @@ class MemoryBackend(ABC):
     ) -> list[tuple[Memory, float]]:
         """Cosine over the question keys' vectors; a memory scores as its best."""
         return []
+
+    # The search log (``retrieval.search_log``). A backend without it keeps
+    # no search and counts none.
+
+    def log_search(self, row: dict[str, Any]) -> int:
+        """Keep one search; its id (0: not kept)."""
+        return 0
+
+    def search_log_rows(
+        self, *, user_id: str | None = None, since: str | None = None,
+        until: str | None = None, run_id: str | None = None,
+        owner_prefix: str | None = None, newest_first: bool = False,
+        limit: int = 1_000_000,
+    ) -> list[dict[str, Any]]:
+        """The kept searches, oldest first."""
+        return []
+
+    def mark_search_keyed(self, log_ids: dict[int, int]) -> None:
+        """Count the memories that took each kept search's query as a key."""
+        return None
+
+    def prune_search_log(
+        self, before: str, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> int:
+        """Delete the kept searches older than ``before``."""
+        return 0
+
+    def delete_search_log(self, *, user_id: str | None) -> int:
+        """Delete every kept search of a namespace."""
+        return 0
+
+    def restore_search_log(
+        self, rows: list[dict[str, Any]], *, owner_prefix: str | None = None,
+        check_only: bool = False,
+    ) -> int:
+        """Add kept searches from an export that asked for them."""
+        return 0
 
     def session_memories(
         self, memory: Memory, *, hours: float = 3.0, limit: int = 50
@@ -853,7 +897,7 @@ class MemoryBackend(ABC):
     def history(self, memory_id: str) -> list[MemoryEvent]: ...
 
     # -- lossless backup / restore ---------------------------------------
-    def export_backup(self, scope: Scope) -> dict[str, Any]:
+    def export_backup(self, scope: Scope, *, search_log: bool = False) -> dict[str, Any]:
         raise NotImplementedError("this backend cannot create lossless Memry backups")
 
     def import_backup(
