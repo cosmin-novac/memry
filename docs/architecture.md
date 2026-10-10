@@ -930,6 +930,21 @@ entity or date filter, whether its question names anything, and with `relational
    is taken while it fits `retrieval.evidence_tokens` (600 by default; 0 shows none), and
    they are returned in the order they were said. A result carries the turns credited to
    it (`SearchResult.evidence`).
+
+   Turn search (`retrieval.turn_search`, off by default, an experiment) is a second search
+   over the turns, run only when the judge gave no fact shown a relevance at
+   `retrieval.turn_search_bar` (0.8); a search nobody judged never runs it
+   (`MemoryStore.turn_search`). It reads the turns of the scope searched by their words
+   (BM25) and by their vectors (the query's own vector), 30 of each, fused by rank. A turn
+   already shown, one whose words a result already says whole, one withheld, one under a
+   removed memory and one whose every memory is out of use and not history are left out
+   (`MemoryBackend.turn_search_episodes`); a turn no memory rests on may be shown. The first
+   16 are each read with the turn said before and the two said after, of the same run and
+   day. The decision provider judges these excerpts in one call, and those judged at
+   `retrieval.turn_search_keep` (0.5) are taken, the best first, within
+   `retrieval.turn_search_tokens` (400). `reconstruct_context` shows their turns after the
+   evidence under a heading of their own, dated as the evidence is, and reserves their share
+   of the budget first; a filtered context runs none. The search rows carry none.
 Context reconstruction (`reconstruct_context`) runs a search and puts first the
 descriptions of the entities the query names (`described_entities`: the first three it
 names, each description refreshed where stale, as many as fit a quarter of the budget,

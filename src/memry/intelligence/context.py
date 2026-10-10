@@ -26,6 +26,7 @@ CONTEXT_TOKENS = 1200
 _ENTITY_HEADER = "## Known entities (memry)\n"
 _HEADER = "## Relevant long-term memories (memry)\n"
 _EVIDENCE_HEADER = "\n\nWhat was said, in the order it was said:\n"
+_EXCERPT_HEADER = "\n\nMore of what was said that matches the question, in the order it was said:\n"
 _FOOTER = "\n(Use these silently as background knowledge; they may be incomplete.)"
 
 
@@ -163,14 +164,18 @@ def build_context(
     *,
     token_budget: int = CONTEXT_TOKENS,
     evidence: Sequence[EvidenceTurn] = (),
+    excerpts: Sequence[EvidenceTurn] = (),
     asked: Any = None,
 ) -> ContextResult:
     """The memories that fit, then ``evidence``, the turns already chosen for
-    them within their own budget (``MemoryStore.evidence``). ``asked`` as
-    for ``memory_line``."""
+    them within their own budget (``MemoryStore.evidence``), then
+    ``excerpts``, the turns turn search chose (``MemoryStore.turn_search``),
+    under a heading of their own. ``asked`` as for ``memory_line``."""
     turns_cost = (estimate_tokens(_EVIDENCE_HEADER)
                   + sum(estimate_tokens(turn_line(t)) + 1 for t in evidence)) if evidence else 0
-    shown = fitting(results, token_budget - turns_cost, asked)
+    quoted_cost = (estimate_tokens(_EXCERPT_HEADER)
+                   + sum(estimate_tokens(turn_line(t)) + 1 for t in excerpts)) if excerpts else 0
+    shown = fitting(results, token_budget - turns_cost - quoted_cost, asked)
     if not shown:
         return ContextResult(text="", memory_ids=[], token_estimate=0)
     kept = {r.memory.id for r in shown}
@@ -179,7 +184,9 @@ def build_context(
     text = _HEADER + "\n".join(f"- {line}" for line in lines)
     if turns:
         text += _EVIDENCE_HEADER + "\n".join(f"- {turn_line(t)}" for t in turns)
+    if excerpts:
+        text += _EXCERPT_HEADER + "\n".join(f"- {turn_line(t)}" for t in excerpts)
     text += _FOOTER
     return ContextResult(text=text, memory_ids=[r.memory.id for r in shown],
                          token_estimate=estimate_tokens(text),
-                         episode_ids=[t.episode_id for t in turns])
+                         episode_ids=[t.episode_id for t in [*turns, *excerpts]])

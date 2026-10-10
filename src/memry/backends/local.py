@@ -1312,10 +1312,9 @@ class LocalBackend(MemoryBackend):
             out.update((r["id"], -float(r["rank_score"])) for r in rows)
         return out
 
-    def evidence_episodes(self, episode_ids: list[str]) -> list[Episode]:
+    def _episodes_with_seq(self, episode_ids: list[str]) -> list[tuple[int, Episode]]:
+        """(rowid, episode) of the episodes among these that are not withheld."""
         ids = list(dict.fromkeys(episode_ids))
-        if not ids:
-            return []
         episodes: list[tuple[int, Episode]] = []
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
@@ -1326,16 +1325,22 @@ class LocalBackend(MemoryBackend):
                     chunk,
                 ).fetchall()
             episodes.extend((r["seq"], _row_to_episode(r)) for r in rows)
+        return episodes
+
+    def _resting(self, episodes: list[Episode]) -> tuple[set[str], set[str], set[str]]:
+        """Of these episodes, (those a memory in use or kept as history rests
+        on, those a removed memory rests on, those any memory rests on). Only
+        the memories of an episode's own user count."""
         if not episodes:
-            return []
-        # the memories resting on an episode are of the episode's own user
-        users = sorted({e.user_id for _, e in episodes if e.user_id is not None})
+            return set(), set(), set()
+        users = sorted({e.user_id for e in episodes if e.user_id is not None})
         owner = " OR ".join(
             ([f"m.user_id IN ({','.join('?' * len(users))})"] if users else [])
-            + (["m.user_id IS NULL"] if any(e.user_id is None for _, e in episodes) else []))
-        wanted = [e.id for _, e in episodes]
+            + (["m.user_id IS NULL"] if any(e.user_id is None for e in episodes) else []))
+        wanted = [e.id for e in episodes]
         in_use: set[str] = set()
         removed: set[str] = set()
+        rested: set[str] = set()
         for start in range(0, len(wanted), 500):
             chunk = wanted[start:start + 500]
             with self._lock:
@@ -1347,15 +1352,109 @@ class LocalBackend(MemoryBackend):
                     (*users, *chunk),
                 ).fetchall()
             for r in rows:
+                rested.add(r["episode_id"])
                 # a memory kept as history rests on what was said while it
                 # held: its turns are shown as a memory's in use are
                 if r["invalid_at"] is None or r["history"]:
                     in_use.add(r["episode_id"])
                 elif r["superseded_by"] is None:
                     removed.add(r["episode_id"])
+        return in_use, removed, rested
+
+    def evidence_episodes(self, episode_ids: list[str]) -> list[Episode]:
+        episodes = self._episodes_with_seq(episode_ids)
+        if not episodes:
+            return []
+        in_use, removed, _ = self._resting([e for _, e in episodes])
         shown = [(e.created_at, seq, e) for seq, e in episodes
                  if e.id in in_use and e.id not in removed]
         return [e for *_, e in sorted(shown, key=lambda item: (item[0], item[1]))]
+
+    def turn_search_episodes(self, episode_ids: list[str]) -> list[Episode]:
+        episodes = self._episodes_with_seq(episode_ids)
+        if not episodes:
+            return []
+        in_use, removed, rested = self._resting([e for _, e in episodes])
+        shown = [(e.created_at, seq, e) for seq, e in episodes
+                 if e.id not in removed and (e.id in in_use or e.id not in rested)]
+        return [e for *_, e in sorted(shown, key=lambda item: (item[0], item[1]))]
+
+    def episode_keyword_search(
+        self, query: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        tokens = _WORD_RE.findall(query)
+        if not tokens or limit <= 0:
+            return []
+        match = " OR ".join(f'"{t}"' for t in tokens[:32])
+        clause, params = _scope_clause(scope, prefix="e.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT e.id, bm25(episodes_fts) AS rank_score FROM episodes_fts "
+                "JOIN episodes e ON e.rowid = episodes_fts.rowid "
+                f"WHERE episodes_fts MATCH ? AND {clause} AND e.withheld_at IS NULL "
+                "ORDER BY rank_score, e.rowid LIMIT ?",
+                (match, *params, limit),
+            ).fetchall()
+        # bm25() is lower-is-better (negative); flipped to higher-is-better
+        return [(r["id"], -float(r["rank_score"])) for r in rows]
+
+    def episode_vector_search(
+        self, vector: list[float], embedding_model: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        asked = np.asarray(vector, dtype=np.float32)
+        norm = float(np.linalg.norm(asked))
+        if not norm or limit <= 0:
+            return []
+        asked /= norm
+        clause, params = _scope_clause(scope)
+        best: list[tuple[float, int, str]] = []
+        with self._lock:
+            cursor = self._db.execute(
+                f"SELECT rowid AS seq, id, embedding FROM episodes WHERE {clause} "
+                "AND withheld_at IS NULL AND embedding IS NOT NULL AND embedding_model = ?",
+                (*params, embedding_model),
+            )
+            while rows := cursor.fetchmany(2000):
+                matrix = np.vstack([np.frombuffer(r["embedding"], dtype=np.float32)
+                                    for r in rows])
+                if matrix.shape[1] != asked.shape[0]:
+                    continue
+                norms = np.linalg.norm(matrix, axis=1)
+                norms[norms == 0] = 1.0
+                scores = (matrix @ asked) / norms
+                for r, score in zip(rows, scores):
+                    item = (float(score), -int(r["seq"]), r["id"])
+                    if len(best) < limit:
+                        heapq.heappush(best, item)
+                    elif item > best[0]:
+                        heapq.heapreplace(best, item)
+        return [(eid, round(score, 6)) for score, _, eid in sorted(best, reverse=True)]
+
+    def episode_neighbours(self, episode_id: str, before: int, after: int) -> list[Episode]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT rowid AS seq, user_id, agent_id, run_id, created_at FROM episodes "
+                "WHERE id = ?", (episode_id,)).fetchone()
+            if row is None:
+                return []
+            same = ("user_id IS ? AND agent_id IS ? AND run_id IS ? "
+                    "AND substr(created_at, 1, 10) = substr(?, 1, 10)")
+            key = (row["user_id"], row["agent_id"], row["run_id"], row["created_at"])
+            earlier = self._db.execute(
+                f"SELECT {_EPISODE_COLS} FROM episodes WHERE {same} AND "
+                "(created_at < ? OR (created_at = ? AND rowid < ?)) "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (*key, row["created_at"], row["created_at"], row["seq"], max(before, 0)),
+            ).fetchall()
+            later = self._db.execute(
+                f"SELECT {_EPISODE_COLS} FROM episodes WHERE {same} AND "
+                "(created_at > ? OR (created_at = ? AND rowid > ?)) "
+                "ORDER BY created_at, rowid LIMIT ?",
+                (*key, row["created_at"], row["created_at"], row["seq"], max(after, 0)),
+            ).fetchall()
+            this = self._db.execute(
+                f"SELECT {_EPISODE_COLS} FROM episodes WHERE id = ?", (episode_id,)).fetchone()
+        return [_row_to_episode(r) for r in [*reversed(earlier), this, *later]]
 
     def history_ids(self, memory_ids: list[str]) -> set[str]:
         ids = list(dict.fromkeys(memory_ids))

@@ -400,6 +400,17 @@ def _consolidation_run_key(user_id: str | None) -> str:
 #: The search log (``retrieval.search_log``) keeps a search this many days;
 #: upkeep deletes older ones (``run_upkeep_cycle``).
 SEARCH_LOG_DAYS = 90
+#: Turn search (``MemoryStore.turn_search``): the turns found by their words
+#: and those found by their vectors, this many of each, fused by rank; the
+#: first ``TURN_HITS`` of them, each read with ``TURN_BEFORE`` turns said
+#: before it and ``TURN_AFTER`` said after it (MemMachine's window on
+#: LoCoMo), are the excerpts judged. On LoCoMo's second run, 16 excerpts of
+#: 30 candidates reached a gold turn the facts' evidence did not show for 229
+#: of 405 questions, against 172 with 8 (PhD data, turn-search/candidates).
+TURN_CANDIDATES = 30
+TURN_HITS = 16
+TURN_BEFORE = 1
+TURN_AFTER = 2
 #: Keys from traffic (``MemoryStore._traffic_keys``): a save may answer the
 #: searches of its run this long before it, and those of its namespace this
 #: long before it; at most this many searches are read a save, each ordered
@@ -709,6 +720,30 @@ class _SearchPlan:
     judged: dict[str, tuple[bool, float]] = field(default_factory=dict)
     #: the judge's highest relevance in the first call (None: not judged)
     best_judged: float | None = None
+
+
+def judged_best(results: list[SearchResult]) -> float | None:
+    """The decision provider's highest relevance (P(the memory answers the
+    question), its "relevance" signal) among ``results``; None when it judged
+    none of them."""
+    scores = [r.signals["relevance"] for r in results if "relevance" in r.signals]
+    return max(scores) if scores else None
+
+
+def fill_excerpts(excerpts: list[dict[str, Any]], budget: int, keep: float) -> list[int]:
+    """The excerpts turn search shows (``MemoryStore.turn_search``), as
+    indexes into ``excerpts`` (each with its "score" and its "tokens"): those
+    judged at least ``keep``, the best judged first (a tie in the order found),
+    each while it fits ``budget``."""
+    used = 0
+    chosen: list[int] = []
+    for i in sorted(range(len(excerpts)), key=lambda i: (-excerpts[i]["score"], i)):
+        item = excerpts[i]
+        if item["score"] < keep or not item["tokens"] or used + item["tokens"] > budget:
+            continue
+        chosen.append(i)
+        used += item["tokens"]
+    return chosen
 
 
 def _cut(vector: list[float], keep: int | None) -> list[float]:
@@ -2855,6 +2890,139 @@ class MemoryStore:
             used += cost
         return [turn for turn in turns if turn.episode_id in chosen]
 
+    def turn_search_due(self, results: list[SearchResult]) -> bool:
+        """Whether turn search runs for these results (``turn_search``):
+        ``retrieval.turn_search`` is on, the decision provider judged at least
+        one of them, and the best relevance it gave is under
+        ``retrieval.turn_search_bar``."""
+        cfg = self.config.retrieval
+        if not cfg.turn_search:
+            return False
+        best = judged_best(results)
+        return best is not None and best < cfg.turn_search_bar
+
+    def turn_search(
+        self,
+        query: str,
+        results: list[SearchResult],
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        shown: list[EvidenceTurn] | tuple[EvidenceTurn, ...] = (),
+        query_vector: list[float] | None = None,
+        token_budget: int | None = None,
+        note: dict[str, Any] | None = None,
+    ) -> list[EvidenceTurn]:
+        """Turns of the conversation that may answer ``query`` when the facts
+        found (``results``) do not: a second search, over the turns said in
+        the scope searched, run only when ``turn_search_due``.
+
+        The turns are found by their words (BM25) and by their vectors (the
+        query's own vector, so no other embedding), ``TURN_CANDIDATES`` of
+        each, fused by rank. Of those, a turn is left out when it is already
+        shown (``shown``, the evidence of the facts), when turn search may not
+        show it (``MemoryBackend.turn_search_episodes``: withheld, resting
+        under a removed memory, or only under memories out of use), or when a
+        result already says its words whole. The first ``TURN_HITS`` are each
+        read with the turn said before them and the two said after them, of
+        the same run and day, a turn in one excerpt only. The decision
+        provider judges every excerpt in one call, and those judged at least
+        ``retrieval.turn_search_keep`` are taken, the best first, while they
+        fit ``token_budget`` (default ``retrieval.turn_search_tokens``). The
+        turns taken are returned in the order they were said, as dated
+        quotes (``EvidenceTurn``, resting on no result: ``memory_ids`` is
+        empty, ``score`` is the judged relevance of its excerpt). A turn
+        already shown is read in its excerpt but not returned again.
+
+        ``note`` receives what was searched and judged: "best" (the judge's
+        best relevance over the results), "due", "candidates", "excerpts"
+        (each with its "hit", "episode_ids", "new_ids", "score" and "tokens")
+        and "chosen" (their indexes)."""
+        note = {} if note is None else note
+        note["best"] = judged_best(results)
+        note["due"] = self.turn_search_due(results)
+        if not note["due"]:
+            return []
+        return self._turn_excerpts(query, results, scope=Scope(
+            user_id=user_id, agent_id=agent_id, run_id=run_id), shown=shown,
+            query_vector=query_vector, token_budget=token_budget, note=note)
+
+    def _turn_excerpts(
+        self, query: str, results: list[SearchResult], *, scope: Scope,
+        shown: list[EvidenceTurn] | tuple[EvidenceTurn, ...],
+        query_vector: list[float] | None, token_budget: int | None, note: dict[str, Any],
+    ) -> list[EvidenceTurn]:
+        """The search, the excerpts and their judgement of ``turn_search``."""
+        cfg = self.config.retrieval
+        budget = cfg.turn_search_tokens if token_budget is None else token_budget
+        if budget <= 0 or not (query or "").strip() or not self.decider.available:
+            return []
+        if query_vector is None:
+            query_vector = self._query_vector(query)
+        fused: dict[str, float] = defaultdict(float)
+        lists = [self.backend.episode_keyword_search(query, scope, TURN_CANDIDATES)]
+        if query_vector:
+            lists.append(self.backend.episode_vector_search(
+                query_vector, self.embedder.model_id, scope, TURN_CANDIDATES))
+        for found in lists:
+            for rank, (episode_id, _) in enumerate(found, start=1):
+                fused[episode_id] += 1.0 / (cfg.rrf_k + rank)
+        order = sorted(fused, key=lambda e: -fused[e])  # a tie: words first, as found
+        note["candidates"] = len(order)
+        said = [" ".join(r.memory.content.casefold().split()) for r in results]
+
+        def says_whole(episode: Episode) -> bool:
+            words = " ".join(episode.content.casefold().split())
+            return any(words in text for text in said)
+
+        seen = {t.episode_id for t in shown}
+        allowed = {e.id: e for e in self.backend.turn_search_episodes(order)}
+        hits = [e for e in order
+                if e in allowed and e not in seen and not says_whole(allowed[e])][:TURN_HITS]
+        taken: set[str] = set()
+        excerpts: list[dict[str, Any]] = []
+        for hit in hits:
+            if hit in taken:
+                continue
+            window = self.backend.episode_neighbours(hit, TURN_BEFORE, TURN_AFTER)
+            fine = {e.id for e in self.backend.turn_search_episodes([e.id for e in window])}
+            read = [e for e in window if e.id in fine and e.id not in taken
+                    and not says_whole(e)]
+            if not any(e.id == hit for e in read):
+                continue
+            taken.update(e.id for e in read)
+            turns = [EvidenceTurn(episode_id=e.id, content=e.content, speaker=e.speaker,
+                                  said_at=e.created_at) for e in read]
+            new = [t for t in turns if t.episode_id not in seen]
+            excerpts.append({"hit": hit, "turns": turns,
+                             "tokens": sum(estimate_tokens(turn_line(t)) + 1 for t in new),
+                             "new": new})
+        if not excerpts:
+            note["excerpts"], note["chosen"] = [], []
+            return []
+        questions = {
+            f"x{i}": Noul(instructions="Someone who reads only this part of a conversation "
+                                       "can answer the question. Conversation:\n"
+                          + "\n".join(turn_line(t) for t in item["turns"]))
+            for i, item in enumerate(excerpts)}
+        answers = self.decider.decide(f"QUESTION: {query}", questions)
+        for i, item in enumerate(excerpts):
+            answer = answers[f"x{i}"]
+            item["score"] = float(answer.value) if answer.available else 0.0
+        chosen = fill_excerpts(excerpts, budget, cfg.turn_search_keep)
+        note["excerpts"] = [{"hit": item["hit"], "score": round(item["score"], 4),
+                             "tokens": item["tokens"],
+                             "episode_ids": [t.episode_id for t in item["turns"]],
+                             "new_ids": [t.episode_id for t in item["new"]]}
+                            for item in excerpts]
+        note["chosen"] = chosen
+        picked = {t.episode_id: t.model_copy(update={"score": round(excerpts[i]["score"], 6)})
+                  for i in chosen for t in excerpts[i]["new"]}
+        # in the order said: time, then the order saved
+        return [picked[e.id] for e in self.backend.turn_search_episodes(list(picked))
+                if e.id in picked]
+
     def _reranks(self) -> bool:
         """Whether the decision provider re-ranks. The setting decides where it
         is set; otherwise the provider's default stands. Either way a provider
@@ -3142,6 +3310,7 @@ class MemoryStore:
                 about = result.signals.get("about") or aboutness([act.get(e.id) for e in ents(mid)])
                 result.signals = {**result.signals, "about": round(about, 3)}
             result.signals = {**result.signals, "judged": round(value ** specific * held, 4),
+                              "relevance": round(value, 4),
                               "specific": round(specific, 4), "several": round(several, 4),
                               "calls": calls, "pool": pooled,
                               **({"member": True} if mid in members else {})}
@@ -3499,11 +3668,17 @@ class MemoryStore:
                              for memory in self.backend.entity_memories(entity.id, limit=20)]
         remaining = max(0, token_budget - estimate_tokens(entity_text))
         share = min(max(self.config.retrieval.evidence_tokens, 0), remaining // 2)
-        shown = fitting(results, remaining - share, self._asked_bounds(period))
+        # turn search, when due, takes its share before the memories are packed
+        quoted = (min(max(self.config.retrieval.turn_search_tokens, 0), remaining // 4)
+                  if not header and self.turn_search_due(results) else 0)
+        shown = fitting(results, remaining - share - quoted, self._asked_bounds(period))
         turns = self.evidence(query, shown, user_id=user_id, agent_id=agent_id,
                               run_id=run_id, token_budget=share)
+        excerpts = self.turn_search(query, shown, user_id=user_id, agent_id=agent_id,
+                                    run_id=run_id, shown=turns,
+                                    token_budget=quoted) if quoted else []
         memory_context = build_context(shown, token_budget=remaining, evidence=turns,
-                                       asked=self._asked_bounds(period))
+                                       excerpts=excerpts, asked=self._asked_bounds(period))
         parts = [part for part in (entity_text, memory_context.text) if part]
         combined = "\n\n".join(parts)
         memory_ids = list(dict.fromkeys([*entity_memory_ids, *memory_context.memory_ids]))
