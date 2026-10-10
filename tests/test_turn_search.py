@@ -1,12 +1,13 @@
-"""Turn search (``retrieval.turn_search``, off by default): when the judge
+"""Turn search (``retrieval.turn_search``, on by default at bar 0.8): when the judge
 gives no fact found a relevance at the bar, the turns said in the scope
 searched are searched as well, by their words and their vectors, each with
 the turn said before it and the two said after it; the judge reads these
 excerpts in one call, and those it judges at the keep threshold come after
 the facts and their evidence, within their own token budget, in the order
 they were said. A turn of a deleted or forgotten memory never comes back,
-nor one whose every memory is out of use; a turn no memory rests on (one
-extraction kept nothing of) may. Only the scope searched is read."""
+nor one whose every memory is out of use. A turn no memory rests on may come
+back, unless extraction kept nothing of its save, a delete touched its save,
+or it looks like a secret. Only the scope searched is read."""
 
 from __future__ import annotations
 
@@ -143,8 +144,9 @@ def _found(store, query=_ASKED, *, user_id="ada", run_id=None, note=None):
     return results, shown, turns
 
 
-def test_it_is_off_by_default_and_then_judges_nothing_more():
-    assert Config().retrieval.turn_search is False
+def test_it_is_on_by_default_at_bar_0_8_and_off_it_judges_nothing_more():
+    assert Config().retrieval.turn_search is True
+    assert Config().retrieval.turn_search_bar == 0.8
     judge = ScriptedJudge()
     store = _store(judge, on=False)
     try:
@@ -266,11 +268,14 @@ def test_a_turn_of_a_deleted_or_forgotten_memory_never_comes_back():
         store.delete(shibuya.id, hard=True)  # deleted for good: withheld
         assert in_context() == (False, False)
         assert store.backend.episodes_by_id([turn])[turn].withheld_at
-        # the turns around it, which no memory rests on, are still read
+        # a delete touched the save: its turns no memory rests on are not read
+        # either; the turns its other memory rests on still may be
         note: dict = {}
         _found(store, note=note)
-        read = {e for x in note["excerpts"] for e in x["episode_ids"]}
-        assert {saved.episode_ids[1], saved.episode_ids[3]} <= read and turn not in read
+        read = {e for x in note.get("excerpts", []) for e in x["episode_ids"]}
+        assert not read & {saved.episode_ids[1], saved.episode_ids[3], turn}
+        allowed = {e.id for e in store.backend.turn_search_episodes(saved.episode_ids)}
+        assert allowed == {saved.episode_ids[0], saved.episode_ids[4]}
     finally:
         store.close()
 
@@ -364,8 +369,45 @@ def test_the_context_shows_the_turns_found_after_the_facts_and_their_evidence():
         store.close()
 
 
-def test_the_environment_turns_it_on(monkeypatch, tmp_path):
+@pytest.mark.parametrize("off", ["0", "false", "off", "no"])
+def test_the_environment_turns_it_off(monkeypatch, tmp_path, off):
     monkeypatch.setenv("MEMRY_CONFIG", str(tmp_path / "missing.json"))
-    assert Config.load().retrieval.turn_search is False
-    monkeypatch.setenv("MEMRY_TURN_SEARCH", "1")
     assert Config.load().retrieval.turn_search is True
+    monkeypatch.setenv("MEMRY_TURN_SEARCH", off)
+    assert Config.load().retrieval.turn_search is False
+
+
+def test_a_save_extraction_kept_nothing_of_is_never_shown():
+    store = _store()
+    try:
+        kept = _save(store)
+        nothing = _save(store, run_id="r2", facts=[])  # extraction refused or found nothing
+        allowed = {e.id for e in store.backend.turn_search_episodes(
+            [*kept.episode_ids, *nothing.episode_ids])}
+        assert allowed == set(kept.episode_ids)
+        assert not {t.episode_id for t in _found(store)[2]} & set(nothing.episode_ids)
+    finally:
+        store.close()
+
+
+def test_a_turn_no_memory_rests_on_that_looks_like_a_secret_is_never_shown():
+    from memry.intelligence.extraction import looks_secret
+
+    assert looks_secret("My wifi password is otter-tokyo-77.")
+    assert looks_secret("the key is sk-live-4f9a8b7c6d5e4f3a2b1c")
+    assert not looks_secret("Shibuya Crossing is like Tokyo's Times Square.")
+    store = _store()
+    try:
+        talk = [*_TALK[:3], ("Ada", "My wifi password at the Tokyo hotel was otter-77."),
+                *_TALK[3:]]
+        store.llm_script.facts.append([
+            _fact("Ada went to Tokyo in March for her sister's wedding", 1, 6)])
+        saved = store.add([{"role": who, "content": text} for who, text in talk],
+                          user_id="ada", run_id="r1", created_at="2026-05-02T10:00:00+00:00")
+        allowed = {e.id for e in store.backend.turn_search_episodes(saved.episode_ids)}
+        assert saved.episode_ids[3] not in allowed and saved.episode_ids[2] in allowed
+        note: dict = {}
+        _found(store, "What was the wifi password at the Tokyo hotel?", note=note)
+        assert not any(saved.episode_ids[3] in x["episode_ids"] for x in note["excerpts"])
+    finally:
+        store.close()

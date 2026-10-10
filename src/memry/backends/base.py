@@ -85,6 +85,11 @@ class MemoryBackend(ABC):
         either resting under a memory in use or kept as history, or under no
         memory at all (a turn extraction kept nothing of). A turn whose every
         memory is out of use (replaced, not kept as history) is not shown. A
+        turn under no memory is shown only when its save kept something (a
+        memory in use or kept as history rests on one of its turns), when no
+        delete touched its save (no turn withheld, none under a removed
+        memory), and when it has nothing that looks like a secret
+        (``extraction.looks_secret``): it may be what extraction refused. A
         backend that cannot tell shows none."""
         return []
 

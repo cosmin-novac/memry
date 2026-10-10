@@ -220,18 +220,18 @@ class RetrievalConfig(BaseModel):
     #: (``MemoryStore.evidence``); 0 shows none. A memory is a summary, and the
     #: turn it came from keeps what the summary left out.
     evidence_tokens: int = 600
-    #: Turn search, off by default (an experiment: PhD notes,
-    #: turn-search-plan). When the judge's best relevance over the facts
-    #: shown is under ``turn_search_bar`` (no fact clearly answers; on LoCoMo
-    #: it was under 0.8 for 46% of the questions and under 0.5 for 17%), the turns
-    #: said in the scope searched are searched too, by their words and their
-    #: vectors; each turn found is read with the turn said before it and the
-    #: two said after it; the decision provider judges these excerpts in one
-    #: call; and the excerpts judged at least ``turn_search_keep`` are shown
-    #: after the facts and their evidence, as dated quotes, within
-    #: ``turn_search_tokens`` (``MemoryStore.turn_search``). A search no
-    #: decision provider judged never searches the turns.
-    turn_search: bool = False
+    #: Turn search (``MemoryStore.turn_search``). When the judge's best
+    #: relevance over the facts shown is under ``turn_search_bar`` (no fact
+    #: clearly answers), the turns said in the scope searched are searched
+    #: too, by their words and their vectors; each turn found is read with the
+    #: turn said before it and the two said after it; the decision provider
+    #: judges these excerpts in one call; and the excerpts judged at least
+    #: ``turn_search_keep`` are shown after the facts and their evidence, as
+    #: dated quotes, within ``turn_search_tokens``. A search no decision
+    #: provider judged never searches the turns. On LoCoMo at bar 0.8 it raised
+    #: J at k 20 by 1.2 points (PhD findings, turn-search). On by default
+    #: since 2026-10-10 (``MEMRY_TURN_SEARCH=0`` turns it off).
+    turn_search: bool = True
     turn_search_bar: float = 0.8
     turn_search_keep: float = 0.5
     turn_search_tokens: int = 400

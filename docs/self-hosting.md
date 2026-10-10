@@ -799,6 +799,20 @@ the search must have that memory in its first 20. Traffic keys are off by defaul
 and need the log and question keys. With question keys off, Memry logs one warning at
 startup and leaves traffic keys off.
 
+## Turn search (on by default)
+
+Memry keeps every saved turn. With `retrieval.turn_search` on, Memry searches those turns
+a second time when the judge rates no memory found at `retrieval.turn_search_bar` (0.8) or
+above. Memry reads each turn found with the turn before it and the two after it. The
+decision provider judges these excerpts in one more call. The context then has the excerpts
+judged at `retrieval.turn_search_keep` (0.5) or above, after the memories, as dated quotes,
+within `retrieval.turn_search_tokens` (400). Without a decision provider nothing is judged,
+and Memry runs no turn search. A turn of a deleted or forgotten memory never comes back.
+Neither does a turn of a save of which extraction kept nothing, nor a loose turn of a save
+a delete touched, nor a loose turn that looks like a password or a key. A loose turn is
+one no memory rests on. Only `get_memory_context` shows the excerpts. `MEMRY_TURN_SEARCH=0`
+(or `retrieval.turn_search` set to false in `~/.memry/config.json`) turns it off.
+
 ## Search filters
 
 Memry does not guess dates or names from the words of a question. The caller states them,

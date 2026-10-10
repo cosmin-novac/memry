@@ -43,6 +43,7 @@ from ..models import (
     new_id,
     utcnow,
 )
+from ..intelligence.extraction import looks_secret
 from .ann import HAS_USEARCH, HnswSidecar
 from .base import MemoryBackend
 
@@ -779,6 +780,12 @@ _EPISODE_COLS = (
 )
 
 
+def _save_key(episode: Episode) -> tuple:
+    """The save an episode came from: every turn of one save has its scope and
+    its time (``MemoryStore.add``)."""
+    return (episode.user_id, episode.agent_id, episode.run_id, episode.created_at)
+
+
 def _row_to_episode(row: sqlite3.Row) -> Episode:
     return Episode(
         id=row["id"],
@@ -1375,9 +1382,39 @@ class LocalBackend(MemoryBackend):
         if not episodes:
             return []
         in_use, removed, rested = self._resting([e for _, e in episodes])
-        shown = [(e.created_at, seq, e) for seq, e in episodes
-                 if e.id not in removed and (e.id in in_use or e.id not in rested)]
+        loose = [e for _, e in episodes if e.id not in rested]
+        barred = self._barred_saves(loose)
+
+        def allowed(e: Episode) -> bool:
+            if e.id in removed:
+                return False
+            if e.id in rested:
+                return e.id in in_use
+            # a turn no memory rests on: one extraction may have refused
+            return _save_key(e) not in barred and not looks_secret(e.content)
+
+        shown = [(e.created_at, seq, e) for seq, e in episodes if allowed(e)]
         return [e for *_, e in sorted(shown, key=lambda item: (item[0], item[1]))]
+
+    def _barred_saves(self, episodes: list[Episode]) -> set[tuple]:
+        """The saves (``_save_key``) of these episodes whose loose turns turn
+        search may not show: a save of which extraction kept nothing (no
+        memory in use or kept as history rests on any of its turns), and a
+        save a delete touched (a turn withheld, or under a removed memory)."""
+        barred: set[tuple] = set()
+        for key in {_save_key(e) for e in episodes}:
+            with self._lock:
+                rows = self._db.execute(
+                    f"SELECT {_EPISODE_COLS} FROM episodes WHERE user_id IS ? AND "
+                    "agent_id IS ? AND run_id IS ? AND created_at = ?", key).fetchall()
+            save = [_row_to_episode(r) for r in rows]
+            if any(e.withheld_at for e in save):
+                barred.add(key)
+                continue
+            in_use, removed, _ = self._resting(save)
+            if removed or not in_use:
+                barred.add(key)
+        return barred
 
     def episode_keyword_search(
         self, query: str, scope: Scope, limit: int
