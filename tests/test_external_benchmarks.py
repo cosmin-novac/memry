@@ -610,8 +610,10 @@ def test_cli_writes_default_results_file_and_limits(monkeypatch, tmp_path, no_mo
     shutil.copy(LONGMEMEVAL, tmp_path / "longmemeval_s.json")
     monkeypatch.setenv(xb.DATA_ENV, str(tmp_path))
     assert xb.main(["--dataset", "longmemeval", "--limit", "2", "--seed", "3"]) == 0
-    (written,) = (tmp_path / "results").glob("longmemeval_*.json")
+    (written,) = [p for p in (tmp_path / "results").glob("longmemeval_*.json")
+                  if not p.name.endswith(".meta.json")]
     result = json.loads(written.read_text())
+    assert xb.meta_path(written).exists() and result["meta_file"] == str(xb.meta_path(written))
     assert len(result["rows"]) == 2 and result["config"]["limit"] == 2
     assert result["config"]["variant"] == "s"
     assert all(r["level"] == "session" for r in result["rows"])

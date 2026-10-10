@@ -1,0 +1,25 @@
+{
+  "unit": "USD per million tokens",
+  "rule": "input tokens less the cached ones at input, cached tokens at cached_input (input when absent), output tokens at output (reasoning tokens are part of the output tokens). A model with only an input price is priced on input tokens alone.",
+  "sources": {
+    "openai": "https://developers.openai.com/api/docs/pricing (Standard tier; gpt-6-luna short context)",
+    "openai_gpt-4.1-mini": "https://developers.openai.com/api/docs/models/gpt-4.1-mini (Standard tier)",
+    "typesafe": "https://docs.typesafe.ai/models (Jev 1.13, jev-1.13.0: $42 per billion tokens, $0.042 per million)",
+    "copied_from": "phd papers/memry-field-studies/data/locomo/prices.json and data/longmemeval/prices.json; gpt-4.1-mini from data/locomo/third_run/prices.json"
+  },
+  "models": {
+    "gpt-6-luna": {"input": 0.10, "cached_input": 0.01, "output": 0.50, "retrieved": "2026-09-29", "source": "openai"},
+    "gpt-4o-mini": {"input": 0.15, "cached_input": 0.075, "output": 0.60, "retrieved": "2026-09-29", "source": "openai"},
+    "gpt-4o": {"input": 2.50, "cached_input": 1.25, "output": 10.00, "retrieved": "2026-10-09", "source": "openai",
+               "note": "the page has no row for the snapshot gpt-4o-2024-08-06; its price is taken as gpt-4o's"},
+    "gpt-4.1-mini": {"input": 0.40, "cached_input": 0.10, "output": 1.60, "retrieved": "2026-09-30", "source": "openai_gpt-4.1-mini"},
+    "text-embedding-3-small": {"input": 0.02, "retrieved": "2026-09-29", "source": "openai"},
+    "jev": {"input": 0.042, "retrieved": "2026-09-29", "source": "typesafe",
+            "note": "the page gives one price per token; applied to input tokens, output tokens counted but not priced"}
+  },
+  "aliases": {
+    "jev-latest": "jev",
+    "jev-1.13.0": "jev",
+    "gpt-4o-2024-08-06": "gpt-4o"
+  }
+}

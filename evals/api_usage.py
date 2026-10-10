@@ -5,8 +5,10 @@ call made through httpx is seen once, whatever object made it: the store's
 text model and embedder, a decision provider, the answering model, a judge.
 Each call is one row of a SQLite ledger that the processes of a parallel run
 share. A row holds when the call started, how long it took, the endpoint
-group, the model, the stage the caller was in (``stage``), and the tokens the
-response's ``usage`` reports. A response without ``usage`` leaves the token
+group, the model asked for, the model the reply names (``served_model``: the
+snapshot or version that answered an alias such as "jev-latest"), the stage
+the caller was in (``stage``), and the tokens the response's ``usage``
+reports. A response without ``usage`` leaves the token
 columns empty, and the request and response sizes (``request_chars``,
 ``response_chars``, in bytes of JSON) are what there is. Neither headers nor
 bodies are written, so no key and no content reaches the ledger.
@@ -134,8 +136,11 @@ CREATE TABLE IF NOT EXISTS calls (
     started REAL, seconds REAL, status INTEGER, ok INTEGER,
     input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER,
     reasoning_tokens INTEGER, has_usage INTEGER, items INTEGER,
-    request_chars INTEGER, response_chars INTEGER, error TEXT
+    request_chars INTEGER, response_chars INTEGER, error TEXT, served_model TEXT
 )"""
+
+#: Columns added after the first ledgers were written: (name, type).
+_ADDED_COLUMNS = (("served_model", "TEXT"),)
 
 #: The active meter of this process (one at a time).
 _active: UsageMeter | None = None
@@ -163,6 +168,19 @@ def _write_ahead(db: sqlite3.Connection) -> None:
             time.sleep(0.05)
 
 
+def _add_columns(db: sqlite3.Connection) -> None:
+    """Give a ledger written before a column existed that column. Worker
+    processes open one ledger at once, so another may have added it first."""
+    have = {row[1] for row in db.execute("PRAGMA table_info(calls)")}
+    for name, kind in _ADDED_COLUMNS:
+        if name not in have:
+            try:
+                db.execute(f"ALTER TABLE calls ADD COLUMN {name} {kind}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc):
+                    raise
+
+
 class UsageMeter:
     """One process's view of the shared ledger.
 
@@ -184,6 +202,7 @@ class UsageMeter:
                                    check_same_thread=False)
         _write_ahead(self._db)
         self._db.execute(_SCHEMA)
+        _add_columns(self._db)
 
     # -- installing ---------------------------------------------------------
     def install(self) -> UsageMeter:
@@ -276,6 +295,8 @@ class UsageMeter:
             "seconds": seconds, "status": response.status_code,
             "ok": int(response.is_success), "response_chars": len(content),
             "has_usage": int(isinstance(payload, dict) and isinstance(payload.get("usage"), dict)),
+            "served_model": payload.get("model") if isinstance(payload, dict)
+            and isinstance(payload.get("model"), str) else None,
             **usage,
             "error": None if response.is_success else f"HTTP {response.status_code}",
         })
