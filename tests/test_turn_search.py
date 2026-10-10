@@ -75,18 +75,24 @@ class ScriptedJudge(NoneDecider):
     may_rerank = reranks_by_default = True
 
     def __init__(self, facts: float = 0.2,
-                 excerpts: tuple[tuple[str, float], ...] = (("Times Square", 0.9),)) -> None:
+                 excerpts: tuple[tuple[str, float], ...] = (("Times Square", 0.9),),
+                 several: float = 0.0, complete: float = 1.0) -> None:
         self.facts, self.excerpts = facts, excerpts
+        self.several, self.complete = several, complete
         self.calls: list[list[str]] = []
+        self.keys: list[dict[str, str]] = []
 
     def decide(self, state, questions):
         self.calls.append([q.instructions for q in questions.values()])
+        self.keys.append({key: q.instructions for key, q in questions.items()})
 
         def value(key: str, text: str) -> float:
             if key == "property":
                 return 1.0
             if key == "several":
-                return 0.0
+                return self.several
+            if key == "complete":
+                return self.complete
             if text.startswith(_EXCERPT):
                 return next((v for part, v in self.excerpts if part in text), 0.05)
             return self.facts
@@ -96,6 +102,9 @@ class ScriptedJudge(NoneDecider):
 
     def excerpt_calls(self) -> list[list[str]]:
         return [c for c in self.calls if c and c[0].startswith(_EXCERPT)]
+
+    def fact_calls(self) -> list[dict[str, str]]:
+        return [k for k in self.keys if k and not next(iter(k.values())).startswith(_EXCERPT)]
 
 
 _TALK = [
@@ -411,3 +420,131 @@ def test_a_turn_no_memory_rests_on_that_looks_like_a_secret_is_never_shown():
         assert not any(saved.episode_ids[3] in x["episode_ids"] for x in note["excerpts"])
     finally:
         store.close()
+
+
+# -- the two triggers beside the relevance bar (PhD notes, completeness-trigger-plan) --
+
+
+def test_the_several_answer_runs_turn_search_at_its_bar_with_no_more_calls():
+    """With ``turn_search_several``, turn search also runs when the judge's
+    "several" answer, asked in every judged search, is at least that bar,
+    though a fact is judged above the relevance bar."""
+    judge = ScriptedJudge(facts=0.9, several=0.5)
+    store = _store(judge)
+    try:
+        saved = _save(store)
+        assert Config().retrieval.turn_search_several is None
+        note: dict = {}
+        assert _found(store, note=note)[2] == [] and note["why"] == []  # not read when unset
+        store.config.retrieval.turn_search_several = 0.5
+        before = len(judge.fact_calls())
+        note = {}
+        _, _, turns = _found(store, note=note)
+        assert note["why"] == ["several"] and note["due"]
+        assert saved.episode_ids[2] in [t.episode_id for t in turns]
+        # the facts' call is the search's own: one, as without the trigger
+        assert len(judge.fact_calls()) - before == 1
+        assert all("complete" not in keys for keys in judge.fact_calls())
+        judge.several = 0.49
+        note = {}
+        assert _found(store, note=note)[2] == [] and note["why"] == []
+    finally:
+        store.close()
+
+
+def test_the_completeness_question_is_asked_in_the_judge_call_and_fires_under_its_bar():
+    """With ``turn_search_complete``, the judge's first call also asks
+    whether the facts, read together, contain everything asked, with the
+    question as asked and each fact as a model reads it; turn search runs
+    when the answer is under the bar."""
+    judge = ScriptedJudge(facts=0.9, complete=0.6)
+    store = _store(judge)
+    try:
+        saved = _save(store)
+        assert Config().retrieval.turn_search_complete is None
+        _found(store)
+        assert all("complete" not in keys for keys in judge.fact_calls())  # not asked unset
+        store.config.retrieval.turn_search_complete = 0.7
+        before = len(judge.fact_calls())
+        note: dict = {}
+        results, _, turns = _found(store, note=note)
+        calls = judge.fact_calls()[before:]
+        assert len(calls) == 1  # in the same call as the relevance of each fact
+        asked = calls[0]["complete"]
+        assert asked.startswith("These facts, read together, contain everything the question "
+                                "asks for, about the person or thing it asks about.")
+        assert _ASKED in asked
+        assert "- Ada went to Tokyo in March for her sister's wedding (said 2 May 2026)" in asked
+        assert {f"m{i}" for i in range(len(results))} <= set(calls[0])
+        assert {"property", "several"} <= set(calls[0])
+        assert all(r.signals["complete"] == pytest.approx(0.6) for r in results)
+        assert note["why"] == ["incomplete"]
+        assert saved.episode_ids[2] in [t.episode_id for t in turns]
+        store.config.retrieval.turn_search_complete = 0.5  # 0.6 is not under it
+        note = {}
+        assert _found(store, note=note)[2] == [] and note["why"] == []
+        # the relevance bar and both triggers, each named
+        store.config.retrieval.turn_search_complete = 0.7
+        store.config.retrieval.turn_search_several = 0.5
+        store.config.retrieval.turn_search_bar = 0.95
+        judge.several = 0.8
+        note = {}
+        _found(store, note=note)
+        assert note["why"] == ["relevance", "several", "incomplete"]
+    finally:
+        store.close()
+
+
+def test_neither_trigger_fires_for_a_search_not_judged():
+    judge = ScriptedJudge(facts=0.9, several=0.9, complete=0.1)
+    store = _store(judge)
+    store.config.retrieval.turn_search_several = 0.5
+    store.config.retrieval.turn_search_complete = 0.7
+    try:
+        _save(store)
+        assert _found(store)[2]  # judged: both fire
+        store.config.retrieval.relational_relevance = "vector"  # no search is judged
+        calls = len(judge.calls)
+        results, _, turns = _found(store)
+        assert turns == [] and len(judge.calls) == calls
+        assert judged_best(results) is None
+        store.decider = NoneDecider()
+        store.config.retrieval.relational_relevance = "jev"
+        results, _, turns = _found(store)
+        assert turns == [] and judged_best(results) is None
+        # signals without a relevance were not judged by this search's call
+        unjudged = [SearchResult(memory=r.memory, score=1.0,
+                                 signals={"several": 0.9, "complete": 0.1}) for r in results]
+        assert store.turn_search_reasons(unjudged) == []
+        assert not store.turn_search_due(unjudged)
+    finally:
+        store.close()
+
+
+def test_with_turn_search_off_the_triggers_change_nothing():
+    """The settings are read only with ``retrieval.turn_search`` on: off, the
+    judge is asked what it was asked before, and nothing more is read."""
+
+    def run(several, complete):
+        judge = ScriptedJudge(facts=0.9, several=0.9, complete=0.1)
+        store = _store(judge, on=False)
+        store.config.retrieval.turn_search_several = several
+        store.config.retrieval.turn_search_complete = complete
+        try:
+            _save(store)
+            note: dict = {}
+            results, shown, turns = _found(store, note=note)
+            context = store.reconstruct_context(_ASKED, user_id="ada", token_budget=800).text
+            # recency moves with the clock between the two runs
+            return (judge.keys, [(r.memory.content, {k: v for k, v in r.signals.items()
+                                                     if k != "recency"}) for r in results],
+                    [t.episode_id for t in shown], turns, note, context)
+        finally:
+            store.close()
+
+    unset = run(None, None)
+    keys, results, _, turns, note, context = run(0.5, 0.7)
+    assert keys == unset[0] and results == unset[1] and turns == unset[3] == []
+    assert all("complete" not in k for k in keys)
+    assert not note["due"] and note["why"] == []
+    assert context == unset[5] and "More of what was said" not in context

@@ -235,6 +235,19 @@ class RetrievalConfig(BaseModel):
     turn_search_bar: float = 0.8
     turn_search_keep: float = 0.5
     turn_search_tokens: int = 400
+    #: Two more reasons for turn search, read only with ``turn_search`` on
+    #: (an experiment: PhD notes, completeness-trigger-plan). A relevance is
+    #: that of one fact, so it stays high when the facts shown have only
+    #: part of a list or are about another person.
+    #: ``turn_search_several``: turn search also runs when the judge's answer
+    #: to "the question needs several memories" (asked in every judged
+    #: search, the "several" signal) is at least this. None: not read.
+    turn_search_several: float | None = None
+    #: ``turn_search_complete``: the judge's first call also asks whether the
+    #: facts judged, read together, contain everything the question asks for,
+    #: about the person or thing it asks about (the "complete" signal), and
+    #: turn search also runs when that is under this. None: not asked.
+    turn_search_complete: float | None = None
 
     @field_validator("relational_mode", "relational_fusion", mode="before")
     @classmethod
