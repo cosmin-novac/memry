@@ -127,6 +127,21 @@ call that would pass N calls of that group (chat, embeddings, jev). The
 harness tries a failed call again (a timeout, a rate limit, a server
 error), up to four calls in all; every try is counted.
 
+Every run writes beside its results file (x.json) a metadata file
+(x.meta.json, ``run_meta``) and prints the same as the first lines of its
+tables (``meta_lines``): the data file and its sha256, the questions asked
+and how they were chosen, the memry commit and the tracked files that differ
+from it, the settings (ingest, text model, embedder, decider, k, evidence
+tokens, answer models and prompt, judge, question keys, entity questions),
+the start, end and wall seconds, and the headline numbers: J of each answer
+model at the headline k, recall@5, 10 and 20, the median and 95th
+percentile of a search's time, and the mean context tokens. With
+--usage-db it adds the ledger's calls and tokens per stage and model, the
+model each reply named (a snapshot, or the version behind "jev-latest"),
+and the dollars per model and provider at the prices of --prices (default
+``evals/prices.json``, USD per million tokens with the day each was read).
+The ledger is the whole ledger, so a resumed run counts every segment.
+
 LongMemEval: each question is a conversation of its own, so each question has
 its own store, its haystack saved session by session in time order, each
 session dated with its time (``load_longmemeval``). ``evals/longmemeval_judge.py``
@@ -1920,6 +1935,9 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
             store.config.retrieval.question_keys = True
         entry["question_keys"] = store.config.retrieval.question_keys
         entry["decider"] = store.decider.name
+        entry["decider_model"] = getattr(store.decider, "model", None)
+        entry["text_model"] = getattr(store.llm, "model", None) if store.llm.available else None
+        entry["text_effort"] = getattr(store.llm, "effort", None) if store.llm.available else None
         entry["evidence_tokens"] = store.config.retrieval.evidence_tokens
         try:
             with api_usage.labelled(conv.conv_id):
@@ -1941,9 +1959,9 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                 counts = {key: entry[key] for key in ROW_STORE_FIELDS}
                 warnings.extend(ingested.warnings)
                 for name, factory in passes.items():
-                    decider, kept = factory(), store.decider
-                    if decider is not None:
-                        store.decider = decider
+                    asked_with, kept = factory(), store.decider
+                    if asked_with is not None:
+                        store.decider = asked_with
                     kept_keys = store.config.retrieval.question_keys
                     if reads_keys.get(name) is not None:
                         store.config.retrieval.question_keys = bool(reads_keys[name])
@@ -1961,10 +1979,10 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                     finally:
                         entry[f"seconds_{name}"] = round(time.perf_counter() - started, 2)
                         store.config.retrieval.question_keys = kept_keys
-                        if decider is not None:
+                        if asked_with is not None:
                             store.decider = kept
-                            entry[f"decider_failures_{name}"] = getattr(decider, "failures", 0)
-                            decider.close()
+                            entry[f"decider_failures_{name}"] = getattr(asked_with, "failures", 0)
+                            asked_with.close()
         except api_usage.CapReached as exc:
             stopped = f"{conv.conv_id}: {exc}"
             entry["stopped"] = str(exc)
@@ -2069,6 +2087,357 @@ def load_corrections(path: str | os.PathLike[str],
             raise FormatError(f"{path}: question_id {entry.get('question_id')!r} names no question")
         out[f"{ids[int(found.group(1))]}/q{int(found.group(2))}"] = entry
     return out
+
+
+# --------------------------------------------------------------------------
+# what a run was: <out>.meta.json
+
+
+#: The prices read by default (--prices): USD per million tokens per model.
+PRICES = HERE / "prices.json"
+#: The provider a call is paid to, by the host it went to.
+PROVIDERS = {"api.openai.com": "openai", "api.typesafe.ai": "jev"}
+
+
+def meta_path(out: str | os.PathLike[str]) -> pathlib.Path:
+    """Where a results file's metadata goes: beside it, ``x.json`` ->
+    ``x.meta.json`` (another name gets ``.meta.json`` added)."""
+    out = pathlib.Path(out)
+    stem = out.name[:-len(".json")] if out.name.endswith(".json") else out.name
+    return out.with_name(f"{stem}.meta.json")
+
+
+def file_sha256(path: str | os.PathLike[str] | None) -> str | None:
+    if not path:
+        return None
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def memry_commit(root: str | os.PathLike[str] = HERE.parent) -> dict[str, Any]:
+    """The commit the code runs from, its branch, and the tracked files that
+    differ from it (``changed``); None each where git cannot say."""
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                              timeout=30, check=True).stdout.strip()
+
+    try:
+        commit, branch = git("rev-parse", "HEAD"), git("rev-parse", "--abbrev-ref", "HEAD")
+        changed = [line[3:] for line in git("status", "--porcelain",
+                                            "--untracked-files=no").splitlines()]
+    except (OSError, subprocess.SubprocessError):
+        return {"commit": None, "branch": None, "changed": None}
+    return {"commit": commit, "branch": branch, "changed": changed}
+
+
+def load_prices(path: str | os.PathLike[str]) -> dict[str, Any]:
+    """A prices file: {"models": {name: {"input", "cached_input", "output",
+    "retrieved", ...}}, "aliases": {name asked for: name priced}}, in USD per
+    million tokens."""
+    data = _read_json(path)
+    if not isinstance(data, dict) or not isinstance(data.get("models"), dict):
+        raise FormatError(f"{path}: expected {{\"models\": {{name: prices}}}}")
+    return data
+
+
+def price_of(model: str | None, prices: dict[str, Any]) -> tuple[str | None, dict | None]:
+    """The name a model is priced under and its prices: the model itself,
+    else its alias; (None, None) when the file has neither."""
+    models = prices.get("models") or {}
+    name = model if model in models else (prices.get("aliases") or {}).get(model or "")
+    return (name, models[name]) if name in models else (None, None)
+
+
+def dollars(price: dict[str, Any] | None, input_tokens: int | None, cached_tokens: int | None,
+            output_tokens: int | None) -> float | None:
+    """USD for these tokens: input tokens less the cached ones at "input",
+    cached ones at "cached_input" ("input" where none is given), output
+    tokens at "output" (none given: not priced, as Jev's single price is
+    applied to input tokens only). Reasoning tokens are part of the output
+    tokens. None without a price."""
+    if price is None:
+        return None
+    total_in = input_tokens or 0
+    cached = min(cached_tokens or 0, total_in)
+    rate_in = float(price.get("input") or 0.0)
+    rate_cached = float(price.get("cached_input", rate_in))
+    rate_out = float(price.get("output") or 0.0)
+    return ((total_in - cached) * rate_in + cached * rate_cached
+            + (output_tokens or 0) * rate_out) / 1_000_000
+
+
+def _iso(seconds: float | None) -> str | None:
+    if seconds is None:
+        return None
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="seconds")
+
+
+def ledger_usage(path: str | os.PathLike[str], prices: dict[str, Any]) -> dict[str, Any]:
+    """Calls, tokens and dollars of a whole ledger (``api_usage``): per stage,
+    per model and per provider, the models the replies named
+    (``served_models``), and the first and last call. A resumed run's ledger
+    holds every segment of it, so this is the run's whole spend."""
+    db = sqlite3.connect(str(path), timeout=120)
+    try:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(calls)")}
+        served = "served_model" if "served_model" in columns else "NULL"
+        grouped = db.execute(
+            "SELECT grp, host, model, stage, count(*), sum(ok = 0), sum(input_tokens), "
+            "sum(output_tokens), sum(cached_tokens), sum(reasoning_tokens), sum(seconds) "
+            "FROM calls GROUP BY grp, host, model, stage ORDER BY grp, model, stage").fetchall()
+        named = db.execute(f"SELECT model, {served}, count(*) FROM calls GROUP BY 1, 2 "
+                           "ORDER BY 1, 2").fetchall()
+        first, last = db.execute("SELECT min(started), max(started + seconds) FROM calls"
+                                 ).fetchone()
+    finally:
+        db.close()
+    by_stage: list[dict[str, Any]] = []
+    by_model: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for grp, host, model, stage, calls, failed, tin, tout, tcached, treason, secs in grouped:
+        priced_as, price = price_of(model, prices)
+        row = {"grp": grp, "provider": PROVIDERS.get(host or "", "jev" if grp == "jev" else host),
+               "model": model, "stage": stage, "calls": calls, "failed": failed or 0,
+               "input_tokens": tin or 0, "output_tokens": tout or 0, "cached_tokens": tcached or 0,
+               "reasoning_tokens": treason or 0, "seconds": round(secs or 0.0, 3)}
+        cost = dollars(price, tin, tcached, tout)
+        by_stage.append({**row, "usd": None if cost is None else round(cost, 6)})
+        total = by_model.setdefault((grp, row["provider"], model), {
+            "grp": grp, "provider": row["provider"], "model": model, "priced_as": priced_as,
+            "price": price, "calls": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0,
+            "cached_tokens": 0, "reasoning_tokens": 0, "usd": None if price is None else 0.0})
+        for key in ("calls", "failed", "input_tokens", "output_tokens", "cached_tokens",
+                    "reasoning_tokens"):
+            total[key] += row[key]
+        if cost is not None:
+            total["usd"] += cost
+    models = list(by_model.values())
+    providers: dict[str, float] = {}
+    for entry in models:
+        if entry["usd"] is not None:
+            entry["usd"] = round(entry["usd"], 6)
+            providers[entry["provider"]] = providers.get(entry["provider"], 0.0) + entry["usd"]
+    calls: dict[str, int] = {}
+    for entry in models:
+        calls[entry["grp"]] = calls.get(entry["grp"], 0) + entry["calls"]
+    served_models = [{"model": model, "served_model": name, "calls": count}
+                     for model, name, count in named]
+    return {
+        "ledger": str(path),
+        "calls": {**calls, "all": sum(calls.values())},
+        "first_call": _iso(first), "last_call": _iso(last),
+        "span_seconds": round(last - first, 1) if first is not None and last is not None else None,
+        "usd": {**{name: round(value, 6) for name, value in sorted(providers.items())},
+                "total": round(sum(providers.values()), 6)},
+        "unpriced": [{"model": e["model"], "calls": e["calls"]} for e in models
+                     if e["usd"] is None],
+        "by_model": models,
+        "by_stage": by_stage,
+        "served_models": served_models,
+    }
+
+
+def _percentile(values: list[float], at: float) -> float | None:
+    return round(float(np.percentile(values, at)), 3) if values else None
+
+
+def _answer_accuracy(table: dict[str, Any], **about: Any) -> dict[str, Any]:
+    keep = ("n", "judge", "judge_std", "judge_runs", "judge_corrected", "judge_clean",
+            "judge_task_averaged", "f1", "context_tokens")
+    return {**about, **{key: table[key] for key in keep if key in table}}
+
+
+def run_headline(result: dict[str, Any]) -> dict[str, Any]:
+    """The numbers a run is cited by, from its first question pass: J (the
+    judge's share right) of each answer model at the headline k, recall@5,
+    10 and 20, MRR, the median and 95th percentile of a search's
+    milliseconds, and the mean context tokens of an answer. The questions
+    scored are those of the tables' overall row."""
+    config = result["config"]
+    part = (result.get("passes") or [{"search_decider": None, "tables": result["tables"]}])[0]
+    overall = part["tables"]["overall"]
+    name = part.get("search_decider")
+    rows = [r for r in result["rows"] if r.get("search_decider", name) == name]
+    scored = [r for r in rows if r.get("category_name") not in ABSTAIN_CATEGORIES]
+    k = config.get("k")
+    evidence = sorted({s.get("evidence_tokens") for s in result.get("stores") or []
+                       if s.get("evidence_tokens") is not None})
+    store_budget = config.get("evidence_tokens")
+    if store_budget is None and len(evidence) == 1:
+        store_budget = evidence[0]
+    answers = []
+    if any("prediction" in r for r in rows):
+        model = config.get("answer_model") or config.get("answer_llm")
+        answers.append(_answer_accuracy(overall, answers="answer", model=model, k=k,
+                                        evidence_tokens=store_budget))
+        compared = (part.get("compared_by_k") or {}).get(str(k))
+        if compared:
+            budget = config.get("compare_evidence_tokens")
+            answers.append(_answer_accuracy(
+                compared["overall"], answers="answer:compared",
+                model=config.get("compare_answer_model") or model, k=k,
+                evidence_tokens=store_budget if budget is None else budget))
+    times = [r["search_ms"] for r in scored if r.get("search_ms") is not None]
+    return {
+        "pass": name,
+        "answers": answers,
+        "recall@5": overall.get("recall@5"), "recall@10": overall.get("recall@10"),
+        "recall@20": overall.get("recall@20"), "mrr": overall.get("mrr"),
+        "search_ms_p50": _percentile(times, 50), "search_ms_p95": _percentile(times, 95),
+        "context_tokens_mean": overall.get("context_tokens"),
+    }
+
+
+def _seen(stores: list[dict[str, Any]], key: str) -> Any:
+    """A store setting as the stores had it: one value when all agree, the
+    list of values when they differ, None without stores."""
+    values: list[Any] = []
+    for store in stores:
+        if store.get(key) not in values:
+            values.append(store.get(key))
+    return values[0] if len(values) == 1 else (values or None)
+
+
+def run_meta(result: dict[str, Any], args: argparse.Namespace, *, argv: list[str],
+             dataset_path: str | os.PathLike[str], out: str | os.PathLike[str],
+             started: float, finished: float, prices: dict[str, Any],
+             prices_path: str | os.PathLike[str]) -> dict[str, Any]:
+    """What a run was and what it gave, for ``<out>.meta.json``: the data
+    and its sha256, the questions and how they were chosen, the memry commit,
+    the settings, the times, the ledger's calls, tokens and dollars at
+    ``prices``, and the headline numbers (``run_headline``)."""
+    config, stores = result["config"], result.get("stores") or []
+    headline = run_headline(result)
+    part = (result.get("passes") or [{}])[0]
+    asked = sum(1 for r in result["rows"]
+                if r.get("search_decider", part.get("search_decider")) == part.get("search_decider"))
+    answer_models = [m for m in (config.get("answer_model") or config.get("answer_llm"),
+                                 config.get("compare_answer_model")) if m]
+    meta: dict[str, Any] = {
+        "dataset": result.get("dataset"),
+        "file": str(dataset_path),
+        "file_sha256": file_sha256(dataset_path),
+        "questions": {
+            "asked": asked,
+            "scored": (part.get("tables") or result["tables"])["overall"]["n"],
+            "conversations": len(stores),
+            "selection": {
+                "limit": args.limit, "sample": args.sample, "seed": args.seed,
+                "categories": sorted(args.category_set) if args.category_set else None,
+                "questions_per_conversation": args.questions,
+                "conversation": args.conversation,
+                "variant": args.variant if args.dataset == "longmemeval" else None,
+                "conversation_ids": [s.get("conversation") for s in stores],
+            },
+        },
+        "memry": memry_commit(),
+        "config": {
+            "ingest": config.get("ingest"), "extract_unit": config.get("extract_unit"),
+            "embedder": config.get("embedder"),
+            "text_model": _seen(stores, "text_model"), "text_effort": _seen(stores, "text_effort"),
+            "decider": args.decider, "decider_in_stores": _seen(stores, "decider"),
+            "decider_model": _seen(stores, "decider_model"),
+            "search_deciders": config.get("search_deciders"),
+            "k": config.get("k"), "ks": config.get("ks"), "depth": config.get("depth"),
+            "evidence_tokens": config.get("evidence_tokens"),
+            "evidence_tokens_in_stores": _seen(stores, "evidence_tokens"),
+            "compare_evidence_tokens": config.get("compare_evidence_tokens"),
+            "answer_models": answer_models,
+            "answer_prompt": config.get("answer_prompt"),
+            "judge": config.get("judge_function") or config.get("judge"),
+            "judge_runs": config.get("judge_runs"),
+            "audit": ({"file": args.audit, "sha256": file_sha256(args.audit),
+                       "questions": config.get("audited_questions")} if args.audit else None),
+            "full_context": config.get("full_context"), "context": config.get("context"),
+            "when": config.get("when"), "descriptions": config.get("descriptions"),
+            "question_keys": args.question_keys,
+            "question_keys_in_stores": _seen(stores, "question_keys"),
+            "entity_questions_in_stores": _seen(stores, "entity_questions"),
+            "workers": args.workers, "jobs": args.jobs, "max_calls": args.caps or None,
+        },
+        "command": ["python", "-m", "evals.external_benchmarks", *argv],
+        "time": {"started": _iso(started), "finished": _iso(finished),
+                 "wall_seconds": round(finished - started, 1)},
+        "prices": {"file": str(prices_path), "sha256": file_sha256(prices_path),
+                   "retrieved": {name: entry.get("retrieved")
+                                 for name, entry in (prices.get("models") or {}).items()}},
+        "usage": (ledger_usage(args.usage_db, prices)
+                  if args.usage_db and pathlib.Path(args.usage_db).exists() else None),
+        "results": {**headline, "complete": result.get("complete"),
+                    "stopped": result.get("stopped")},
+        "out": str(out),
+    }
+    return meta
+
+
+def _number(value: Any, digits: int = 3) -> str:
+    return "-" if value is None else f"{value:.{digits}f}"
+
+
+def _listed(value: Any) -> str:
+    return ",".join(str(v) for v in value) if isinstance(value, list) else str(value)
+
+
+def meta_lines(meta: dict[str, Any]) -> list[str]:
+    """The metadata as the first lines of the printed results."""
+    config, results, usage = meta["config"], meta["results"], meta.get("usage")
+    memry = meta["memry"]
+    commit = (memry.get("commit") or "unknown")[:12]
+    if memry.get("changed"):
+        commit += f" with {len(memry['changed'])} changed files"
+    selection = meta["questions"]["selection"]
+    chosen = ", ".join(f"{key} {_listed(value)}" for key, value in selection.items()
+                       if value is not None and key != "conversation_ids") or "all"
+    lines = [
+        f"## run: {meta['dataset']}, {meta['questions']['scored']} questions scored of "
+        f"{meta['questions']['asked']} asked, {meta['questions']['conversations']} conversations"
+        f" ({chosen})",
+        f"data: {meta['file']} (sha256 {meta['file_sha256']})",
+        f"memry: {commit} on {memry.get('branch')}",
+        f"time: {meta['time']['started']} to {meta['time']['finished']}, "
+        f"{meta['time']['wall_seconds']:.0f} s",
+        f"config: ingest {config['ingest']}, text model {config['text_model']}, embedder "
+        f"{config['embedder']}, decider {_listed(config['decider_in_stores'] or config['decider'])}"
+        + (f" {_listed(config['decider_model'])}" if config["decider_model"] else "")
+        + f", k {config['k']} (ks {_listed(config['ks'])}), evidence tokens "
+        f"{_listed(config['evidence_tokens_in_stores'])}, question keys "
+        f"{config['question_keys_in_stores']}, entity questions "
+        f"{config['entity_questions_in_stores']}, descriptions {config['descriptions']}",
+        f"answers: {', '.join(config['answer_models']) or 'none'}, prompt "
+        f"{config['answer_prompt']}; judge {config['judge']} x{config['judge_runs']}",
+    ]
+    for entry in results["answers"]:
+        lines.append(f"  J {_number(entry.get('judge'))} at k {entry['k']}: {entry['model']} "
+                     f"({entry['answers']}, evidence tokens {entry['evidence_tokens']}, "
+                     f"n {entry.get('n')}, context tokens {_number(entry.get('context_tokens'), 0)})")
+    lines.append(f"search: recall@5 {_number(results['recall@5'])}, recall@10 "
+                 f"{_number(results['recall@10'])}, recall@20 {_number(results['recall@20'])}, "
+                 f"p50 {_number(results['search_ms_p50'], 0)} ms, p95 "
+                 f"{_number(results['search_ms_p95'], 0)} ms, context tokens "
+                 f"{_number(results['context_tokens_mean'], 0)}")
+    if usage is None:
+        lines.append("usage: no ledger (--usage-db)")
+    else:
+        groups = ", ".join(f"{grp} {n}" for grp, n in usage["calls"].items() if grp != "all")
+        spend = ", ".join(f"{name} ${value:.4f}" for name, value in usage["usd"].items())
+        lines.append(f"usage: {usage['calls']['all']} calls ({groups or 'none'}), {spend}; "
+                     f"ledger {usage['ledger']}")
+        for entry in usage["by_model"]:
+            served = ", ".join(row["served_model"] for row in usage["served_models"]
+                               if row["model"] == entry["model"] and row["served_model"])
+            lines.append(f"  {entry['model']}: {entry['calls']} calls, {entry['input_tokens']} in "
+                         f"({entry['cached_tokens']} cached), {entry['output_tokens']} out, "
+                         + ("no price" if entry["usd"] is None else f"${entry['usd']:.4f}")
+                         + (f", served {served}" if served else ""))
+    lines.append(f"prices: {meta['prices']['file']}; meta: {meta_path(meta['out'])}")
+    if not results.get("complete", True):
+        lines.append(f"stopped: {results.get('stopped')}")
+    return lines
 
 
 def load(dataset: str, path: str | os.PathLike[str]) -> list[Conversation]:
@@ -2193,6 +2562,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-calls", action="append", default=None, metavar="GROUP=N",
                         help="stop before the call that would pass N calls of GROUP "
                              "(chat, embeddings, jev, other) in the ledger; needs --usage-db")
+    parser.add_argument("--prices", default=str(PRICES), metavar="PATH",
+                        help="USD per million tokens per model, for the dollars in "
+                             "<out>.meta.json (default: evals/prices.json)")
     parser.add_argument("--worker", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--out", default=None,
                         help=f"results file (default ${DATA_ENV}/results/<dataset>_<time>.json)")
@@ -2325,7 +2697,7 @@ def _write_json(path: pathlib.Path, data: Any) -> None:
 
 #: Options that do not change a conversation's results: a per-conversation
 #: file written under other values of these is still reused.
-_RUN_ONLY = ("jobs", "results_dir", "out", "worker", "usage_db", "max_calls", "caps",
+_RUN_ONLY = ("jobs", "results_dir", "out", "worker", "usage_db", "max_calls", "caps", "prices",
              "conversation", "limit", "seed", "sample", "workers", "store_dir", "export_mem0",
              "export_longmemeval", "k_list", "category_set")
 
@@ -2395,6 +2767,12 @@ def write_selected(dataset: str, path: pathlib.Path, conversations: list[Convers
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
+    started = time.time()
+    try:
+        prices = load_prices(args.prices)
+    except (OSError, FormatError) as exc:
+        print(f"--prices: {exc}", file=sys.stderr)
+        return 2
     data_dir = os.environ.get(DATA_ENV, "").strip() or None
     path = find_dataset(args.dataset, data_dir, variant=args.variant, file=args.file)
     if path is None:
@@ -2539,7 +2917,12 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     base = pathlib.Path(data_dir) if data_dir else path.parent
     out = pathlib.Path(args.out) if args.out else base / "results" / f"{args.dataset}_{stamp}.json"
+    meta = run_meta(result, args, argv=argv, dataset_path=path, out=out, started=started,
+                    finished=time.time(), prices=prices, prices_path=args.prices)
+    result["meta_file"] = str(meta_path(out))
+    _write_json(meta_path(out), meta)
     _write_json(out, result)
+    print("\n".join(meta_lines(meta)))
     if args.export_mem0:
         from evals.mem0_judge import export_results
 
