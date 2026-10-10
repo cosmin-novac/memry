@@ -411,6 +411,13 @@ TURN_CANDIDATES = 30
 TURN_HITS = 16
 TURN_BEFORE = 1
 TURN_AFTER = 2
+#: The completeness question of turn search's third trigger
+#: (``retrieval.turn_search_complete``), a Noul asked in the judge's first
+#: call: the question as asked, with its names (the call's state reads one
+#: seed's names as "it"), and the facts judged as a model reads them.
+COMPLETE_QUESTION = ("These facts, read together, contain everything the question asks "
+                     "for, about the person or thing it asks about. The question as asked: "
+                     "{question}\nFacts:\n{facts}")
 #: Keys from traffic (``MemoryStore._traffic_keys``): a save may answer the
 #: searches of its run this long before it, and those of its namespace this
 #: long before it; at most this many searches are read a save, each ordered
@@ -706,6 +713,8 @@ class _SearchPlan:
     seeds: list[str] = field(default_factory=list)
     first_person: bool = False
     question: str = ""
+    #: the question as asked, with its names (the completeness question reads it)
+    query: str = ""
     #: whether the decision provider judges the search (stages 4 to 6)
     judges: bool = False
     #: stages 2 and 3 with seeds: how strongly the links reach each entity,
@@ -2749,7 +2758,7 @@ class MemoryStore:
                 question = mask_first_person(question)
         judges = bool(self.decider.available) and self.relevance_mode() == "jev"
         return _SearchPlan(reads=reads, seeds=seeds, first_person=first_person,
-                           question=question, judges=judges)
+                           question=question, judges=judges, query=query)
 
     def _current_first(self, results: list[SearchResult]) -> list[SearchResult]:
         """A memory kept as history (``models.HISTORY_KINDS``) comes right
@@ -2893,13 +2902,37 @@ class MemoryStore:
     def turn_search_due(self, results: list[SearchResult]) -> bool:
         """Whether turn search runs for these results (``turn_search``):
         ``retrieval.turn_search`` is on, the decision provider judged at least
-        one of them, and the best relevance it gave is under
-        ``retrieval.turn_search_bar``."""
+        one of them, and one of ``turn_search_reasons`` holds."""
+        return bool(self.turn_search_reasons(results))
+
+    def turn_search_reasons(self, results: list[SearchResult]) -> list[str]:
+        """Why turn search runs for these results, none when it does not:
+        "relevance" when the best relevance the decision provider gave is
+        under ``retrieval.turn_search_bar``; "several" when its P(the
+        question needs several memories) is at least
+        ``retrieval.turn_search_several``; "incomplete" when its P(the facts
+        judged, read together, contain everything asked) is under
+        ``retrieval.turn_search_complete``. Nothing when turn search is off
+        or the provider judged none of them."""
         cfg = self.config.retrieval
         if not cfg.turn_search:
-            return False
+            return []
         best = judged_best(results)
-        return best is not None and best < cfg.turn_search_bar
+        if best is None:
+            return []
+        judged = [r.signals for r in results if "relevance" in r.signals]
+        several = max((s["several"] for s in judged if "several" in s), default=None)
+        complete = min((s["complete"] for s in judged if "complete" in s), default=None)
+        reasons = []
+        if best < cfg.turn_search_bar:
+            reasons.append("relevance")
+        if (cfg.turn_search_several is not None and several is not None
+                and several >= cfg.turn_search_several):
+            reasons.append("several")
+        if (cfg.turn_search_complete is not None and complete is not None
+                and complete < cfg.turn_search_complete):
+            reasons.append("incomplete")
+        return reasons
 
     def turn_search(
         self,
@@ -2941,7 +2974,8 @@ class MemoryStore:
         and "chosen" (their indexes)."""
         note = {} if note is None else note
         note["best"] = judged_best(results)
-        note["due"] = self.turn_search_due(results)
+        note["why"] = self.turn_search_reasons(results)
+        note["due"] = bool(note["why"])
         if not note["due"]:
             return []
         return self._turn_excerpts(query, results, scope=Scope(
@@ -3236,19 +3270,30 @@ class MemoryStore:
                 result.memory.content, [n for entity_id in it for n in aliases[entity_id]],
                 keep=[e.name for e in ents(result.memory.id) if e.id not in it])
 
-        def judge(batch: list[SearchResult], meta: bool):
+        def judge(batch: list[SearchResult], meta: bool, complete: dict | None = None):
             if seeds:
                 unread = [r.memory.id for r in batch if r.memory.id not in entities]
                 if unread:  # read at once, not one memory at a time
                     entities.update(self.backend.entities_of_memories(unread))
                 new = {subject(r.memory.id) for r in batch} - homes.keys() - {None}
                 homes.update(homes_of(self.backend, sorted(new)))
-            return self._judged_relevance(
-                question, [(r.memory.id, text_of(r)) for r in batch], meta=meta)
+            pairs = [(r.memory.id, text_of(r)) for r in batch]
+            if complete is None:
+                return self._judged_relevance(question, pairs, meta=meta)
+            return self._judged_relevance(question, pairs, meta=meta, complete=complete)
 
-        judged, specific, several = judge(ranked[:size], True)
+        # With turn search's completeness trigger, the first call also asks
+        # whether the facts it judges, read together, have everything asked:
+        # the question as asked, its names kept, and each fact as a model
+        # reads it, since a fact about someone else reads "it" here too.
+        cfg = self.config.retrieval
+        complete = ({"question": plan.query or question,
+                     "facts": [memory_line(r.memory) for r in ranked[:size]]}
+                    if cfg.turn_search and cfg.turn_search_complete is not None else None)
+        judged, specific, several = judge(ranked[:size], True, complete)
         if not judged:
             return ranked
+        whole = complete.get("value") if complete else None
         plan.best_judged = round(max(judged.values()), 4)
         found: dict[str, SearchResult] = {r.memory.id: r for r in ranked}
         extra: list[SearchResult] = []
@@ -3312,6 +3357,7 @@ class MemoryStore:
             result.signals = {**result.signals, "judged": round(value ** specific * held, 4),
                               "relevance": round(value, 4),
                               "specific": round(specific, 4), "several": round(several, 4),
+                              **({"complete": round(whole, 4)} if whole is not None else {}),
                               "calls": calls, "pool": pooled,
                               **({"member": True} if mid in members else {})}
             # The override comes after aboutness's floor, so what it leaves is
@@ -3484,6 +3530,7 @@ class MemoryStore:
 
     def _judged_relevance(
         self, asked: str, memories: list[tuple[str, str]], meta: bool = True,
+        complete: dict[str, Any] | None = None,
     ) -> tuple[dict[str, float], float, float]:
         """P(the memory answers the question) from the decision provider, for
         (memory id, text) pairs, in one call. With ``meta``, also what kind of
@@ -3491,7 +3538,13 @@ class MemoryStore:
         everything about its entity) and P(it needs several memories: a
         comparison, a list or a total). A memory the provider did not answer
         for is left out; an unanswered meta question counts as a property
-        question with one answer."""
+        question with one answer.
+
+        With ``complete`` ({"question": the question as asked, "facts": the
+        facts as a model reads them}), the same call also asks P(the facts,
+        read together, contain everything the question asks for, about the
+        person or thing it asks about) (``COMPLETE_QUESTION``), and writes it
+        to ``complete["value"]`` (None when unanswered)."""
         if not self.decider.available or not memories:
             return {}, 1.0, 0.0
         questions: dict[str, Noul] = {
@@ -3505,7 +3558,14 @@ class MemoryStore:
             questions["several"] = Noul(instructions="The question needs several memories to "
                                                      "be answered, such as a comparison, a "
                                                      "list or a total.")
+        if complete is not None:
+            questions["complete"] = Noul(instructions=COMPLETE_QUESTION.format(
+                question=complete["question"],
+                facts="\n".join(f"- {line}" for line in complete["facts"])))
         answers = self.decider.decide(f"QUESTION: {asked}", questions)
+        if complete is not None:
+            whole = answers["complete"]
+            complete["value"] = float(whole.value) if whole.available else None
         judged = {mid: float(answers[f"m{i}"].value) for i, (mid, _) in enumerate(memories)
                   if answers[f"m{i}"].available}
         if not meta:
