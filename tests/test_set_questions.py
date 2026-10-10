@@ -122,7 +122,10 @@ def test_a_set_question_is_told_by_the_calibrated_question_at_its_bar(store, sev
                                   scores={"is priced at": 0.12, "Dealer quote": 0.12})
     store.search(QUESTION, user_id="ada", limit=5)
     assert judge.calls == calls
-    assert judge.meta[0] == {
+    first = dict(judge.meta[0])
+    # turn search's completeness question rides in the same call, on by default
+    assert first.pop("complete").startswith("These facts, read together, contain everything")
+    assert first == {
         "property": "The question asks for one particular property or fact of it, not "
                     "for everything about it.",
         "several": "The question needs several memories to be answered, such as a "
@@ -512,7 +515,8 @@ def test_the_second_call_sends_the_question_and_its_memories_and_nothing_else(st
     ask = "Someone who reads only this memory can answer the question. Memory: "
     (first_state, first), (state, second) = judge.sent
     assert first_state == state == f"QUESTION: {QUESTION}"
-    assert set(first) - {f"m{i}" for i in range(20)} == {"property", "several"}
+    # the meta questions, and turn search's completeness question (on by default)
+    assert set(first) - {f"m{i}" for i in range(20)} == {"property", "several", "complete"}
     assert len(second) == store.config.retrieval.set_pool == 80
     assert all(key.startswith("m") and text.startswith(ask) for key, text in second.items())
     texts = [text[len(ask):] for text in second.values()]

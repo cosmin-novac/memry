@@ -386,6 +386,22 @@ def test_the_environment_turns_it_off(monkeypatch, tmp_path, off):
     assert Config.load().retrieval.turn_search is False
 
 
+@pytest.mark.parametrize("name, key, default", [
+    ("MEMRY_TURN_SEARCH_SEVERAL", "turn_search_several", 0.5),
+    ("MEMRY_TURN_SEARCH_COMPLETE", "turn_search_complete", 0.7)])
+def test_the_environment_sets_or_turns_off_each_trigger(monkeypatch, tmp_path, name, key,
+                                                        default):
+    monkeypatch.setenv("MEMRY_CONFIG", str(tmp_path / "missing.json"))
+    assert getattr(Config.load().retrieval, key) == default
+    monkeypatch.setenv(name, "0.6")
+    assert getattr(Config.load().retrieval, key) == 0.6
+    for off in ("0", "off", "false", "no", "none"):
+        monkeypatch.setenv(name, off)
+        assert getattr(Config.load().retrieval, key) is None
+    monkeypatch.setenv(name, "not a number")  # ignored, the default stands
+    assert getattr(Config.load().retrieval, key) == default
+
+
 def test_a_save_extraction_kept_nothing_of_is_never_shown():
     store = _store()
     try:
@@ -433,7 +449,9 @@ def test_the_several_answer_runs_turn_search_at_its_bar_with_no_more_calls():
     store = _store(judge)
     try:
         saved = _save(store)
-        assert Config().retrieval.turn_search_several is None
+        assert Config().retrieval.turn_search_several == 0.5  # on by default
+        store.config.retrieval.turn_search_several = None
+        store.config.retrieval.turn_search_complete = None  # A alone here
         note: dict = {}
         assert _found(store, note=note)[2] == [] and note["why"] == []  # not read when unset
         store.config.retrieval.turn_search_several = 0.5
@@ -461,7 +479,8 @@ def test_the_completeness_question_is_asked_in_the_judge_call_and_fires_under_it
     store = _store(judge)
     try:
         saved = _save(store)
-        assert Config().retrieval.turn_search_complete is None
+        assert Config().retrieval.turn_search_complete == 0.7  # on by default
+        store.config.retrieval.turn_search_complete = None
         _found(store)
         assert all("complete" not in keys for keys in judge.fact_calls())  # not asked unset
         store.config.retrieval.turn_search_complete = 0.7

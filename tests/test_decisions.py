@@ -690,6 +690,8 @@ def _judging(score):
             return Answer(1.0, {}, 0.9, True)
         if key == "several":
             return Answer(0.0, {}, 0.9, True)
+        if key == "complete":  # turn search's completeness question: the facts suffice
+            return Answer(1.0, {}, 0.9, True)
         i = int(re.search(r"Memory: memory (\d+):", question.instructions).group(1))
         return Answer(score(i), {}, 0.9, True)
     stub = _stub(answer)

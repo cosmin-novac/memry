@@ -932,7 +932,7 @@ entity or date filter, whether its question names anything, and with `relational
    it (`SearchResult.evidence`).
 
    Turn search (`retrieval.turn_search`, on by default) is a second search over the
-   turns, run only when the judge gave no fact shown a relevance at
+   turns, run when the judge gave no fact shown a relevance at
    `retrieval.turn_search_bar` (0.8); a search nobody judged never runs it
    (`MemoryStore.turn_search`). It reads the turns of the scope searched by their words
    (BM25) and by their vectors (the query's own vector), 30 of each, fused by rank. A turn
@@ -948,6 +948,13 @@ entity or date filter, whether its question names anything, and with `relational
    `retrieval.turn_search_tokens` (400). `reconstruct_context` shows their turns after the
    evidence under a heading of their own, dated as the evidence is, and reserves their
    share of the budget first; a filtered context runs none. The search rows carry none.
+   Memry also runs it in two more cases, both read from the judge's first call
+   (`MemoryStore.turn_search_reasons`):
+
+   - P(the question needs several memories) is `retrieval.turn_search_several` (0.5) or more;
+   - P(the facts judged, read together, contain everything asked) is under
+     `retrieval.turn_search_complete` (0.7), a question added to that call.
+
 Context reconstruction (`reconstruct_context`) runs a search and puts first the
 descriptions of the entities the query names (`described_entities`: the first three it
 names, each description refreshed where stale, as many as fit a quarter of the budget,

@@ -812,6 +812,14 @@ Neither does a turn of a save of which extraction kept nothing, nor a loose turn
 a delete touched, nor a loose turn that looks like a password or a key. A loose turn is
 one no memory rests on. Only `get_memory_context` shows the excerpts. `MEMRY_TURN_SEARCH=0`
 (or `retrieval.turn_search` set to false in `~/.memry/config.json`) turns it off.
+Memry also runs turn search in two more cases, each with its own setting:
+
+- the judge's probability that the question needs several memories is
+  `retrieval.turn_search_several` (0.5, `MEMRY_TURN_SEARCH_SEVERAL`) or more;
+- the judge's probability that the memories found, read together, contain everything asked
+  is under `retrieval.turn_search_complete` (0.7, `MEMRY_TURN_SEARCH_COMPLETE`).
+
+Set either to 0 or `off` to turn that case off.
 
 ## Search filters
 

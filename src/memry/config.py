@@ -235,19 +235,23 @@ class RetrievalConfig(BaseModel):
     turn_search_bar: float = 0.8
     turn_search_keep: float = 0.5
     turn_search_tokens: int = 400
-    #: Two more reasons for turn search, read only with ``turn_search`` on
-    #: (an experiment: PhD notes, completeness-trigger-plan). A relevance is
-    #: that of one fact, so it stays high when the facts shown have only
-    #: part of a list or are about another person.
+    #: Two more reasons for turn search, read only with ``turn_search`` on. A
+    #: relevance is that of one fact, so it stays high when the facts shown
+    #: have only part of a list or are about another person.
     #: ``turn_search_several``: turn search also runs when the judge's answer
     #: to "the question needs several memories" (asked in every judged
     #: search, the "several" signal) is at least this. None: not read.
-    turn_search_several: float | None = None
     #: ``turn_search_complete``: the judge's first call also asks whether the
     #: facts judged, read together, contain everything the question asks for,
     #: about the person or thing it asks about (the "complete" signal), and
     #: turn search also runs when that is under this. None: not asked.
-    turn_search_complete: float | None = None
+    #: With both at these values, on LoCoMo J at k 20 was 1.58 points above no
+    #: turn search, against 1.21 with the relevance bar alone (PhD findings,
+    #: completeness-trigger). On by default since 2026-10-10
+    #: (``MEMRY_TURN_SEARCH_SEVERAL`` and ``MEMRY_TURN_SEARCH_COMPLETE``: a
+    #: number, or 0 or off for None).
+    turn_search_several: float | None = 0.5
+    turn_search_complete: float | None = 0.7
 
     @field_validator("relational_mode", "relational_fusion", mode="before")
     @classmethod
@@ -511,6 +515,18 @@ def _from_env() -> dict[str, Any]:
         except ValueError:
             return None
 
+    def put_bar(section: str, key: str, value: str | None) -> None:
+        # a number sets the bar; 0, off, false, no or none turn it off (None)
+        if not value or not value.strip():
+            return
+        text = value.strip().lower()
+        if text in ("off", "false", "no", "none"):
+            data.setdefault(section, {})[key] = None
+            return
+        number = _float(text)
+        if number is not None:
+            data.setdefault(section, {})[key] = number if number > 0 else None
+
     put(None, "db_path", e("MEMRY_DB_PATH"))
     put(None, "default_user_id", e("MEMRY_DEFAULT_USER"))
     put(None, "api_key", e("MEMRY_API_KEY"))
@@ -558,6 +574,8 @@ def _from_env() -> dict[str, Any]:
     put("retrieval", "traffic_keys", _bool(e("MEMRY_TRAFFIC_KEYS")))
     put("retrieval", "entity_questions", _bool(e("MEMRY_ENTITY_QUESTIONS")))
     put("retrieval", "turn_search", _bool(e("MEMRY_TURN_SEARCH")))
+    put_bar("retrieval", "turn_search_several", e("MEMRY_TURN_SEARCH_SEVERAL"))
+    put_bar("retrieval", "turn_search_complete", e("MEMRY_TURN_SEARCH_COMPLETE"))
 
     put("embedding", "provider", e("MEMRY_EMBEDDING_PROVIDER"))
     put("embedding", "model", e("MEMRY_EMBEDDING_MODEL"))

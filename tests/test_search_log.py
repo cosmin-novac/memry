@@ -158,7 +158,7 @@ def test_the_judges_best_score_is_kept(store):
 
     store.decider = Judge()
     store.config.retrieval.relational_relevance = "jev"
-    store._judged_relevance = lambda question, items, meta=False: (
+    store._judged_relevance = lambda question, items, meta=False, complete=None: (
         {mid: 0.3 for mid, _ in items}, 1.0, 0.0)
     store.search("where does ada live", user_id="ada")
     row = _rows(store)[0]
