@@ -18,6 +18,30 @@ from ..models import MEMORY_TYPES, NAMED_ENTITY_TYPES, CandidateFact, clean_tags
 from ..providers.llm import LLM
 from .when import WHEN_FACT_SCHEMA, parse_when
 
+#: What a secret or a credential looks like in a turn: the words that name
+#: one, a private key's header, and the shapes of common keys and tokens (a
+#: run of 32 or more letters and digits mixed). Extraction is told never to
+#: store these; turn search never shows a turn no memory rests on that has
+#: one (``looks_secret``), since that turn may be one extraction refused.
+_SECRET_RE = re.compile(
+    r"\b(?:passwords?|passwd|passcodes?|passphrases?|pin\s+(?:code|number)|"
+    r"api[\s_-]?keys?|secret[\s_-]?keys?|access[\s_-]?tokens?|auth[\s_-]?tokens?|"
+    r"bearer\s+tokens?|private[\s_-]?keys?|ssh[\s_-]?keys?|credentials?|"
+    r"security\s+codes?|social\s+security\s+numbers?|iban|cvv|"
+    r"credit\s+card\s+numbers?)\b"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}"
+    r"|\bgh[pousr]_[A-Za-z0-9]{20,}"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b",
+    re.IGNORECASE,
+)
+
+
+def looks_secret(text: str) -> bool:
+    """Whether a text names or contains a secret or a credential (``_SECRET_RE``)."""
+    return bool(_SECRET_RE.search(text or ""))
+
 #: The types extraction assigns: the named kinds, defined once in ``models``
 #: (``models.ENTITY_TYPES`` adds the tag type, which extraction never offers).
 ENTITY_TYPES: tuple[str, ...] = NAMED_ENTITY_TYPES

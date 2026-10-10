@@ -77,6 +77,42 @@ class MemoryBackend(ABC):
         that cannot tell shows none."""
         return []
 
+    # Turn search (``MemoryStore.turn_search``): the turns of a scope searched
+    # by their words and their vectors, when the facts found do not answer.
+    def turn_search_episodes(self, episode_ids: list[str]) -> list[Episode]:
+        """The episodes among these that turn search may show, in the order
+        they were said: not withheld, none resting under a removed memory, and
+        either resting under a memory in use or kept as history, or under no
+        memory at all (a turn extraction kept nothing of). A turn whose every
+        memory is out of use (replaced, not kept as history) is not shown. A
+        turn under no memory is shown only when its save kept something (a
+        memory in use or kept as history rests on one of its turns), when no
+        delete touched its save (no turn withheld, none under a removed
+        memory), and when it has nothing that looks like a secret
+        (``extraction.looks_secret``): it may be what extraction refused. A
+        backend that cannot tell shows none."""
+        return []
+
+    def episode_keyword_search(
+        self, query: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        """(episode id, BM25 score, higher is better) of the ``limit`` episodes
+        of ``scope`` that best match ``query`` by their words, none withheld."""
+        return []
+
+    def episode_vector_search(
+        self, vector: list[float], embedding_model: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        """(episode id, cosine) of the ``limit`` episodes of ``scope`` nearest
+        ``vector`` among those embedded by ``embedding_model``, none withheld."""
+        return []
+
+    def episode_neighbours(self, episode_id: str, before: int, after: int) -> list[Episode]:
+        """The episode with up to ``before`` episodes said just before it and
+        ``after`` said just after it, in the order said: of the same user,
+        agent and run, said the same day. Empty for an unknown episode."""
+        return []
+
     def history_ids(self, memory_ids: list[str]) -> set[str]:
         """The memories among these kept as history (``models.HISTORY_KINDS``):
         out of use, and their latest SUPERSEDE an update, so they held until
