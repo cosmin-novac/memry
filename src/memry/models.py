@@ -70,9 +70,9 @@ def clean_tags(values: Any) -> list[str]:
     Tags travel as comma-separated text in several places (the dashboard
     inputs, client arguments, the list a model is asked to reuse from), so a
     tag that itself holds a comma or a bracket does not survive the trip. It
-    happened: "steuernummer (tin, koeln vingst)" was split into two tags, and
-    a model later read the dangling "steuernummer (tin" plus the fifteen tags
-    listed after it as one tag and "reused" that. So a bracketed aside is
+    happened: "steuernummer (tin, finanzamt nord)" was split into two tags, and
+    a model later read the dangling "steuernummer (tin" plus the tags listed
+    after it as one tag and "reused" that. So a bracketed aside is
     removed, an unclosed bracket ends the tag, what is left is split on commas,
     and anything still longer than a tag can be is dropped.
     """

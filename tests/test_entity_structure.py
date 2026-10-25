@@ -192,7 +192,7 @@ def test_a_stated_part_of_makes_a_home():
 
 
 def test_appearing_together_makes_no_home():
-    """Homes from co-mention measured 68% right and were removed: a part that
+    """Homes from co-mention were measured too often wrong and were removed: a part that
     rides along with a project in every memory has no home until a relation
     or the judge gives it one."""
     assert derive_homes(PART_AND_PROJECT, []) == {}
@@ -643,7 +643,7 @@ def test_accepting_a_value_retires_the_entity_and_it_can_be_brought_back(store, 
 
 def test_accepting_a_role_removes_the_name_and_invents_nothing(store, screened):
     """A role is a word in a memory, not a thing. Guessing its holder from who
-    else the memory mentions was wrong about half the time on a real store (a
+    else the memory mentions was often wrong on a real store (a
     tax memory listing profile types is not a list of what its owner is), so
     accepting retires the name and records no relation in its place."""
     store.run_name_screen(user_id="ada")
@@ -692,7 +692,7 @@ def test_a_pair_under_different_homes_is_never_proposed(store):
 
 def test_a_tag_and_the_thing_of_its_name_are_raised_past_many_name_pairs(store):
     """600 pairs of one name and a limit of 500: the name pairs used the whole
-    limit before the tag "bildy" and the product "Bildy" were reached, on this
+    limit before the tag "zobly" and the product "Zobly" were reached, on this
     pass and on each with as many new name pairs. They have a share of the
     limit of their own, and the name pairs take the rest."""
     from memry.intelligence.entities import propose_same_name_duplicates
@@ -701,8 +701,8 @@ def test_a_tag_and_the_thing_of_its_name_are_raised_past_many_name_pairs(store):
     for i in range(600):
         _entity(store, f"widget {i}", "product")
         _entity(store, f"widget {i}", "product")
-    product = _entity(store, "Bildy", "product")
-    tag = store.backend.topic_entity("bildy", scope)
+    product = _entity(store, "Zobly", "product")
+    tag = store.backend.topic_entity("zobly", scope)
 
     created = propose_same_name_duplicates(backend=store.backend, scope=scope, limit=500)
 

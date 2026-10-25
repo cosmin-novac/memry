@@ -5028,8 +5028,8 @@ def create_app(
         while True:
             # Once a night, at MEMRY_UPKEEP_AT (default 02:05 UTC, before the
             # 03:30 snapshot), never at start: a cycle right after a deploy
-            # judged about 1000 entity pairs and held requests up for 25
-            # minutes on a live server.
+            # judged so many entity pairs that it held requests up for a long
+            # time.
             await asyncio.sleep(seconds_until_upkeep(os.environ.get("MEMRY_UPKEEP_AT", "02:05")))
             try:
                 now = datetime.now(timezone.utc)

@@ -222,9 +222,9 @@ def test_query_entity_detection_uses_bounded_candidate_lookup(store, monkeypatch
 def test_the_linked_search_never_displaces_the_strongest_hybrid_hits(store, graph):
     """Graph distance may fill the page but not take it over.
 
-    Measured on a 456-memory store with a dense entity graph, an earlier
-    fusion of graph neighbours into the text ranking let buried ones leapfrog
-    correct answers and cost 0.18 recall@10 on ordinary queries. The linked
+    In a store with a dense entity graph, an earlier fusion of graph
+    neighbours into the text ranking let buried ones leapfrog correct answers
+    and cost recall on ordinary queries. The linked
     search weighs a memory by how strongly it is about the entity asked, so a
     neighbour reached through a relation (``LINKED_RELATION``) fills the page
     after hybrid's own top hits about Ada, which keep their order.
@@ -264,40 +264,40 @@ def _belongs(store, child, parent, kind="kind", p=0.9, same=0.3):
 
 @pytest.fixture
 def family(store):
-    """bildy with two versions and a part, and a namesake that shares a word."""
-    names = ["bildy", "bildy v3", "bildy v4", "bildy sync service", "Bildy Bakery"]
+    """zobly with two versions and a part, and a namesake that shares a word."""
+    names = ["zobly", "zobly v3", "zobly v4", "zobly sync service", "Zobly Bakery"]
     e = {name: _entity(store, name) for name in names}
-    _memory(store, "bildy stores its data in SQLite", [e["bildy"].id])
-    _memory(store, "bildy runs on Linux and macOS", [e["bildy"].id])
-    _memory(store, "bildy v3 added offline mode", [e["bildy v3"].id])
-    _memory(store, "bildy v4 stores its data in Postgres", [e["bildy v4"].id])
-    _memory(store, "bildy v4 added a timeline view", [e["bildy v4"].id])
-    _memory(store, "The bildy sync service is maintained by Omar", [e["bildy sync service"].id])
-    _memory(store, "Bildy Bakery sells sourdough", [e["Bildy Bakery"].id])
-    _belongs(store, e["bildy v3"], e["bildy"])
-    _belongs(store, e["bildy v4"], e["bildy"])
-    _belongs(store, e["bildy sync service"], e["bildy"], kind="part")
-    _belongs(store, e["Bildy Bakery"], e["bildy"], p=0.0, same=0.02)
+    _memory(store, "zobly stores its data in SQLite", [e["zobly"].id])
+    _memory(store, "zobly runs on Linux and macOS", [e["zobly"].id])
+    _memory(store, "zobly v3 added offline mode", [e["zobly v3"].id])
+    _memory(store, "zobly v4 stores its data in Postgres", [e["zobly v4"].id])
+    _memory(store, "zobly v4 added a timeline view", [e["zobly v4"].id])
+    _memory(store, "The zobly sync service is maintained by Omar", [e["zobly sync service"].id])
+    _memory(store, "Zobly Bakery sells sourdough", [e["Zobly Bakery"].id])
+    _belongs(store, e["zobly v3"], e["zobly"])
+    _belongs(store, e["zobly v4"], e["zobly"])
+    _belongs(store, e["zobly sync service"], e["zobly"], kind="part")
+    _belongs(store, e["Zobly Bakery"], e["zobly"], p=0.0, same=0.02)
     return {name: entity.id for name, entity in e.items()}
 
 
 def test_a_version_takes_its_things_memories_and_little_of_its_siblings(store, family):
     from memry.intelligence.graph_retrieval import DOWN_KIND, TURN, UP_KIND, activation_paths
 
-    act, _ = activation_paths(store.backend, [family["bildy v4"]], depth=2)
-    assert act[family["bildy v4"]] == 1.0
-    assert act[family["bildy"]] == pytest.approx(UP_KIND * 0.9)
-    assert act[family["bildy v3"]] == pytest.approx(UP_KIND * 0.9 * DOWN_KIND * 0.9 * TURN)
-    assert act[family["bildy v3"]] < 0.2
-    assert family["Bildy Bakery"] not in act  # P(same) 0.02 is under the floor
+    act, _ = activation_paths(store.backend, [family["zobly v4"]], depth=2)
+    assert act[family["zobly v4"]] == 1.0
+    assert act[family["zobly"]] == pytest.approx(UP_KIND * 0.9)
+    assert act[family["zobly v3"]] == pytest.approx(UP_KIND * 0.9 * DOWN_KIND * 0.9 * TURN)
+    assert act[family["zobly v3"]] < 0.2
+    assert family["Zobly Bakery"] not in act  # P(same) 0.02 is under the floor
 
 
 def test_a_thing_takes_its_versions_and_parts(store, family):
     from memry.intelligence.graph_retrieval import activation_paths
 
-    act, _ = activation_paths(store.backend, [family["bildy"]], depth=1)
+    act, _ = activation_paths(store.backend, [family["zobly"]], depth=1)
     assert {name for name, eid in family.items() if act.get(eid, 0) >= 0.5} == {
-        "bildy", "bildy v3", "bildy v4", "bildy sync service"}
+        "zobly", "zobly v3", "zobly v4", "zobly sync service"}
 
 
 def _with_property_vectors(store):
@@ -342,33 +342,33 @@ def _linked(store):
 
 def test_linked_search_takes_the_versions_own_fact_over_its_things(store, family):
     _linked(store)
-    top = store.search("Where does bildy v4 store its data?", user_id="ada", limit=3)
+    top = store.search("Where does zobly v4 store its data?", user_id="ada", limit=3)
     contents = [r.memory.content for r in top]
-    assert contents[0] == "bildy v4 stores its data in Postgres"
-    assert contents.index("bildy stores its data in SQLite") > 0
+    assert contents[0] == "zobly v4 stores its data in Postgres"
+    assert contents.index("zobly stores its data in SQLite") > 0
 
 
 def test_linked_search_takes_the_things_fact_where_the_version_has_none(store, family):
     _linked(store)
-    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
-    assert top[0].memory.content == "bildy runs on Linux and macOS"
+    top = store.search("Which systems does zobly v4 run on?", user_id="ada", limit=3)
+    assert top[0].memory.content == "zobly runs on Linux and macOS"
     assert top[0].signals["about"] == pytest.approx(0.72)
 
 
 def test_the_linked_search_lifts_a_linked_memory_the_text_ranking_buried(store, family):
     """Notes that repeat the question's words but are about nothing the store
     knows bury the thing's answer in the text ranking; the linked search lifts
-    it back to the top, since it is about bildy v4's thing and states the
+    it back to the top, since it is about zobly v4's thing and states the
     property asked."""
     for i in range(30):
-        _memory(store, f"Question {i}: which systems does bildy v4 run on? Ask again", [])
+        _memory(store, f"Question {i}: which systems does zobly v4 run on? Ask again", [])
     _linked(store)
     plain = [r.memory.content for r in
-             store.search("Which systems does bildy v4 run on?", user_id="ada", limit=10,
+             store.search("Which systems does zobly v4 run on?", user_id="ada", limit=10,
                           relational=False)]
-    assert "bildy runs on Linux and macOS" not in plain
-    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
-    assert top[0].memory.content == "bildy runs on Linux and macOS"
+    assert "zobly runs on Linux and macOS" not in plain
+    top = store.search("Which systems does zobly v4 run on?", user_id="ada", limit=3)
+    assert top[0].memory.content == "zobly runs on Linux and macOS"
 
 
 def test_linked_search_keeps_the_text_ranking_when_the_query_names_no_hub(store, family):
@@ -380,12 +380,12 @@ def test_linked_search_keeps_the_text_ranking_when_the_query_names_no_hub(store,
 def test_names_are_masked_as_whole_words():
     from memry.intelligence.graph_retrieval import aboutness, mask_names
 
-    assert mask_names("Where does bildy v3 store its data?", ["bildy", "bildy v3"]) == \
+    assert mask_names("Where does zobly v3 store its data?", ["zobly", "zobly v3"]) == \
         "Where does it store its data?"
-    assert mask_names("bildy's database moved; rebuildy stays", ["bildy"]) == \
-        "its database moved; rebuildy stays"
-    assert mask_names("Bildy Bakery sells bildy stickers", ["bildy"], keep=["Bildy Bakery"]) == \
-        "Bildy Bakery sells it stickers"
+    assert mask_names("zobly's database moved; rezobly stays", ["zobly"]) == \
+        "its database moved; rezobly stays"
+    assert mask_names("Zobly Bakery sells zobly stickers", ["zobly"], keep=["Zobly Bakery"]) == \
+        "Zobly Bakery sells it stickers"
     assert aboutness([None, 0.72]) == 0.72  # the strongest linked entity
     assert aboutness([None]) == 0.3          # only entities the links do not reach
     assert aboutness([0.1]) == 0.3           # a weak link is never below no link
@@ -399,13 +399,13 @@ def test_linked_search_keeps_the_names_of_a_memory_the_links_do_not_reach(store,
     that asks no property, and would outscore the family on a roll-up."""
     _linked(store)
     kaven = _entity(store, "Kaven planner")
-    other = _memory(store, "Kaven planner is popular with bildy fans", [kaven.id])
+    other = _memory(store, "Kaven planner is popular with zobly fans", [kaven.id])
     store.backend.set_property_vectors({other.id: [0.0, 1.0, 0.0, 0.0, 0.1]},
                                        store._property_label())  # as if it ran on systems
-    results = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=20)
+    results = store.search("Which systems does zobly v4 run on?", user_id="ada", limit=20)
     stranger = next(r for r in results if r.memory.id == other.id)
     assert stranger.signals["property"] < 0.2  # its own vector, not the masked one
-    assert results[0].memory.content == "bildy runs on Linux and macOS"
+    assert results[0].memory.content == "zobly runs on Linux and macOS"
 
 
 def test_linked_search_can_ask_the_decision_provider_what_answers(store, family):
@@ -431,13 +431,13 @@ def test_linked_search_can_ask_the_decision_provider_what_answers(store, family)
     _linked(store)
     store.decider = Judge()
     store.config.retrieval.relational_relevance = "jev"
-    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=2)
-    assert top[0].memory.content == "bildy runs on Linux and macOS"
+    top = store.search("Which systems does zobly v4 run on?", user_id="ada", limit=2)
+    assert top[0].memory.content == "zobly runs on Linux and macOS"
     assert top[0].signals["judged"] == pytest.approx(0.9 * (1 - 0.1))  # v4's own: no answer
     assert seen == ["QUESTION: Which systems does it run on?"]  # one call, no re-rank
     ask = "Someone who reads only this memory can answer the question. Memory: "
     assert ask + "it runs on Linux and macOS" in asked
-    assert ask + "Bildy Bakery sells sourdough" in asked
+    assert ask + "Zobly Bakery sells sourdough" in asked
 
 
 class _JevLike:
@@ -467,7 +467,7 @@ def test_the_decision_provider_that_reranks_judges_the_linked_search_by_default(
     "vector" set explicitly keeps the provider out of it."""
     assert Config().retrieval.relational_relevance == "auto"
     _linked(store)
-    question = "Which systems does bildy v4 run on?"
+    question = "Which systems does zobly v4 run on?"
     plain = store.search(question, user_id="ada", limit=3)  # no decision provider
     assert store.relevance_mode() == "vector"
     assert all("about" in r.signals and "judged" not in r.signals for r in plain)
@@ -528,9 +528,9 @@ def test_a_versions_own_answer_overrides_its_things_with_the_decision_provider(s
     _linked(store)
     store.decider = Judge()
     store.config.retrieval.relational_relevance = "jev"
-    top = store.search("Where does bildy v4 store its data?", user_id="ada", limit=3)
-    assert top[0].memory.content == "bildy v4 stores its data in Postgres"
-    thing = next(r for r in top if r.memory.content == "bildy stores its data in SQLite")
+    top = store.search("Where does zobly v4 store its data?", user_id="ada", limit=3)
+    assert top[0].memory.content == "zobly v4 stores its data in Postgres"
+    thing = next(r for r in top if r.memory.content == "zobly stores its data in SQLite")
     assert thing.signals["overridden"] == pytest.approx(0.6)
     assert thing.signals["judged"] == pytest.approx(0.9 * 0.4)
 
@@ -540,10 +540,10 @@ def test_only_steps_up_count_as_inherited(store, family):
     version; a thing's versions and parts are reached by steps down."""
     from memry.intelligence.graph_retrieval import activation_paths
 
-    _, above = activation_paths(store.backend, [family["bildy v4"]], depth=2)
-    assert {family["bildy"], family["bildy v3"]} <= above
-    assert family["bildy v4"] not in above
-    _, above = activation_paths(store.backend, [family["bildy"]], depth=1)
+    _, above = activation_paths(store.backend, [family["zobly v4"]], depth=2)
+    assert {family["zobly"], family["zobly v3"]} <= above
+    assert family["zobly v4"] not in above
+    _, above = activation_paths(store.backend, [family["zobly"]], depth=1)
     assert above == set()
 
 
@@ -565,16 +565,16 @@ def test_it_stands_for_one_entity_in_what_the_decision_provider_reads(store, fam
 
     kai = _entity(store, "Kai Lund")
     store.backend.add_relation(Relation(subject=kai.id, predicate="works_on",
-                                        object=family["bildy"], user_id="ada"))
-    _memory(store, "Kai Lund works on bildy", [kai.id, family["bildy"]])
-    _memory(store, "Kai Lund prefers tea with bildy stickers", [kai.id])
-    _memory(store, "With its third release, bildy added sync", [family["bildy v3"]])
+                                        object=family["zobly"], user_id="ada"))
+    _memory(store, "Kai Lund works on zobly", [kai.id, family["zobly"]])
+    _memory(store, "Kai Lund prefers tea with zobly stickers", [kai.id])
+    _memory(store, "With its third release, zobly added sync", [family["zobly v3"]])
     _linked(store)
     store.decider = Judge()
     store.config.retrieval.relational_relevance = "jev"
-    store.search("What do I know about bildy?", user_id="ada", limit=5)
+    store.search("What do I know about zobly?", user_id="ada", limit=5)
     assert "Kai Lund works on it" in asked
-    assert "it prefers tea with bildy stickers" in asked  # about Kai, who belongs to nothing
+    assert "it prefers tea with zobly stickers" in asked  # about Kai, who belongs to nothing
     assert "With its third release, it added sync" in asked  # v3 and the product it is of
 
 
@@ -598,10 +598,10 @@ def test_a_question_about_everything_is_ordered_by_aboutness(store, family):
     _linked(store)
     store.decider = Judge()
     store.config.retrieval.relational_relevance = "jev"
-    top = store.search("Show everything about bildy v4", user_id="ada", limit=4)
-    assert {r.memory.content for r in top[:2]} == {"bildy v4 stores its data in Postgres",
-                                                   "bildy v4 added a timeline view"}
-    thing = next(r for r in top if r.memory.content == "bildy stores its data in SQLite")
+    top = store.search("Show everything about zobly v4", user_id="ada", limit=4)
+    assert {r.memory.content for r in top[:2]} == {"zobly v4 stores its data in Postgres",
+                                                   "zobly v4 added a timeline view"}
+    thing = next(r for r in top if r.memory.content == "zobly stores its data in SQLite")
     assert thing.signals["judged"] == pytest.approx((0.9 * 0.8) ** 0.05, abs=1e-3)
 
 
@@ -633,7 +633,7 @@ def test_a_question_in_the_first_person_is_about_the_owner(store, family):
     results = store.search("Where do I live?", user_id="ada", limit=10)
     about = {r.memory.id: r.signals.get("about") for r in results}
     assert about[lives.id] == 1.0
-    results = store.search("What do I know about bildy?", user_id="ada", limit=10)
+    results = store.search("What do I know about zobly?", user_id="ada", limit=10)
     assert lives.id not in {r.memory.id for r in results if r.signals.get("about") == 1.0}
 
 
@@ -711,8 +711,8 @@ def test_an_untagged_set_question_judges_the_memories_nearest_its_members(store)
 
 
 def test_a_one_answer_question_is_answered_from_the_first_call(store):
-    """Reading on while nothing answered found nothing 5 of 5 times it ran: a
-    question with one answer makes one call, answered or not."""
+    """Reading on while nothing answered found nothing more: a question with
+    one answer makes one call, answered or not."""
     _shopping(store)
     store.decider = _CallJudge(specific=0.9, several=0.1, scores={"Carmodel3 costs": 0.9})
     store.search("How much does the Carmodel3 cost?", user_id="ada", limit=5)
@@ -976,22 +976,22 @@ def test_a_runs_memories_of_a_large_entity_reach_the_linked_search(store):
 
 # ------------------------------------ what the judgement does to the order
 def _versions_of_the_database(store, *, builds_on):
-    """bildy stores its data in SQLite, bildy v3 moved its data to Postgres,
-    bildy v4 says nothing about its data; both versions belong to bildy, and
+    """zobly stores its data in SQLite, zobly v3 moved its data to Postgres,
+    zobly v4 says nothing about its data; both versions belong to zobly, and
     with ``builds_on`` the provider also answered that v4 is a version of v3.
     The provider is surer of the thing's plainer wording (0.9) than of v3's
     change (0.8)."""
-    e = {name: _entity(store, name) for name in ["bildy", "bildy v3", "bildy v4"]}
-    _memory(store, "bildy stores its data in SQLite", [e["bildy"].id])
-    _memory(store, "bildy runs on Linux and macOS", [e["bildy"].id])
-    _memory(store, "bildy v3 moved its data to Postgres", [e["bildy v3"].id])
-    _memory(store, "bildy v3 added offline mode", [e["bildy v3"].id])
-    _memory(store, "bildy v4 added a timeline view", [e["bildy v4"].id])
-    _memory(store, "bildy v4 added dark mode", [e["bildy v4"].id])
-    _belongs(store, e["bildy v3"], e["bildy"])
-    _belongs(store, e["bildy v4"], e["bildy"])
+    e = {name: _entity(store, name) for name in ["zobly", "zobly v3", "zobly v4"]}
+    _memory(store, "zobly stores its data in SQLite", [e["zobly"].id])
+    _memory(store, "zobly runs on Linux and macOS", [e["zobly"].id])
+    _memory(store, "zobly v3 moved its data to Postgres", [e["zobly v3"].id])
+    _memory(store, "zobly v3 added offline mode", [e["zobly v3"].id])
+    _memory(store, "zobly v4 added a timeline view", [e["zobly v4"].id])
+    _memory(store, "zobly v4 added dark mode", [e["zobly v4"].id])
+    _belongs(store, e["zobly v3"], e["zobly"])
+    _belongs(store, e["zobly v4"], e["zobly"])
     if builds_on:
-        _belongs(store, e["bildy v4"], e["bildy v3"])
+        _belongs(store, e["zobly v4"], e["zobly v3"])
     _linked(store)
     store.config.retrieval.relational_relevance = "jev"
     store.decider = _CallJudge(specific=1.0, several=0.0,
@@ -999,17 +999,17 @@ def _versions_of_the_database(store, *, builds_on):
 
 
 def test_a_version_takes_the_change_of_the_version_it_builds_on(store):
-    """bildy v4 is a version of bildy v3 (depth 1, one judged link) and of
-    bildy. Both answers are reached by a step up at 0.72, and v3's change
-    overrides bildy's default for v4 as it does for v3 itself: bildy's answer
+    """zobly v4 is a version of zobly v3 (depth 1, one judged link) and of
+    zobly. Both answers are reached by a step up at 0.72, and v3's change
+    overrides zobly's default for v4 as it does for v3 itself: zobly's answer
     counts as far as v3's does not (0.9 x 0.2), and v3's as far as none of
     v4's own memories answers."""
     _versions_of_the_database(store, builds_on=True)
-    top = store.search("Where does bildy v4 store its data?", user_id="ada", limit=3)
-    assert top[0].memory.content == "bildy v3 moved its data to Postgres"
+    top = store.search("Where does zobly v4 store its data?", user_id="ada", limit=3)
+    assert top[0].memory.content == "zobly v3 moved its data to Postgres"
     assert top[0].signals["about"] == pytest.approx(0.72)
     assert top[0].signals["overridden"] == pytest.approx(0.02)  # v4's own say nothing
-    thing = next(r for r in top if r.memory.content == "bildy stores its data in SQLite")
+    thing = next(r for r in top if r.memory.content == "zobly stores its data in SQLite")
     assert thing.signals["overridden"] == pytest.approx(0.8)
     assert thing.signals["judged"] == pytest.approx(0.9 * 0.2)
 
@@ -1017,33 +1017,33 @@ def test_a_version_takes_the_change_of_the_version_it_builds_on(store):
 def test_a_version_linked_only_to_its_thing_takes_the_things_answer(store):
     """Without the link to v3, v3 is a sibling two links away: at depth 1 the
     search does not reach it, its change is about something else (0.3) and
-    does not override bildy's default, which answers v4's question."""
+    does not override zobly's default, which answers v4's question."""
     _versions_of_the_database(store, builds_on=False)
-    top = store.search("Where does bildy v4 store its data?", user_id="ada", limit=3)
-    assert top[0].memory.content == "bildy stores its data in SQLite"
+    top = store.search("Where does zobly v4 store its data?", user_id="ada", limit=3)
+    assert top[0].memory.content == "zobly stores its data in SQLite"
     assert top[0].signals["overridden"] == pytest.approx(0.02)
-    sibling = next(r for r in top if r.memory.content == "bildy v3 moved its data to Postgres")
+    sibling = next(r for r in top if r.memory.content == "zobly v3 moved its data to Postgres")
     assert sibling.signals["about"] == pytest.approx(0.3)
     assert "overridden" not in sibling.signals
 
 
 def test_a_false_yes_on_the_versions_own_memory_leaves_the_inherited_answer_first(store):
     """The provider says yes (0.3) to one of v4's own memories that does not
-    answer. That takes 30% off the right answer v4 inherits from bildy, which
+    answer. That takes 30% off the right answer v4 inherits from zobly, which
     still ranks first: 0.8 x 0.77 x 0.7 = 0.43 against 0.3 x 1.0."""
-    bildy, v4 = _entity(store, "bildy"), _entity(store, "bildy v4")
-    _memory(store, "bildy runs on Linux and macOS", [bildy.id])
-    _memory(store, "bildy stores its data in SQLite", [bildy.id])
-    _memory(store, "bildy v4 added a timeline view", [v4.id])
-    _memory(store, "bildy v4 added dark mode", [v4.id])
-    _belongs(store, v4, bildy, p=0.77 / 0.8)
+    zobly, v4 = _entity(store, "zobly"), _entity(store, "zobly v4")
+    _memory(store, "zobly runs on Linux and macOS", [zobly.id])
+    _memory(store, "zobly stores its data in SQLite", [zobly.id])
+    _memory(store, "zobly v4 added a timeline view", [v4.id])
+    _memory(store, "zobly v4 added dark mode", [v4.id])
+    _belongs(store, v4, zobly, p=0.77 / 0.8)
     _linked(store)
     store.config.retrieval.relational_relevance = "jev"
     store.decider = _CallJudge(specific=1.0, several=0.0,
                                scores={"runs on": 0.8, "timeline": 0.3})
-    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
-    assert [r.memory.content for r in top[:2]] == ["bildy runs on Linux and macOS",
-                                                   "bildy v4 added a timeline view"]
+    top = store.search("Which systems does zobly v4 run on?", user_id="ada", limit=3)
+    assert [r.memory.content for r in top[:2]] == ["zobly runs on Linux and macOS",
+                                                   "zobly v4 added a timeline view"]
     answer, false_yes = top[0].signals, top[1].signals
     assert (answer["about"], answer["overridden"]) == (pytest.approx(0.77), pytest.approx(0.3))
     assert answer["judged"] * answer["about"] == pytest.approx(0.8 * 0.77 * 0.7)
@@ -1051,8 +1051,8 @@ def test_a_false_yes_on_the_versions_own_memory_leaves_the_inherited_answer_firs
 
 
 @pytest.mark.parametrize("specific, first", [
-    (0.54, "bildy runs on Linux and macOS"),
-    (0.1, "bildy v4"),
+    (0.54, "zobly runs on Linux and macOS"),
+    (0.1, "zobly v4"),
 ])
 def test_how_far_a_property_question_read_as_about_everything_keeps_its_answer(
         store, family, specific, first):
@@ -1066,9 +1066,9 @@ def test_how_far_a_property_question_read_as_about_everything_keeps_its_answer(
     store.config.retrieval.relational_relevance = "jev"
     store.decider = _CallJudge(specific=specific, several=0.0,
                                scores={"runs on": 0.8, "": 0.05})
-    top = store.search("Which systems does bildy v4 run on?", user_id="ada", limit=3)
+    top = store.search("Which systems does zobly v4 run on?", user_id="ada", limit=3)
     assert top[0].memory.content.startswith(first)
-    answer = next(r for r in top if r.memory.content == "bildy runs on Linux and macOS")
+    answer = next(r for r in top if r.memory.content == "zobly runs on Linux and macOS")
     assert answer.signals["judged"] * answer.signals["about"] == pytest.approx(
         (0.8 * 0.95) ** specific * 0.72, abs=1e-3)
 

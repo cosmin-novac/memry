@@ -1,8 +1,7 @@
 """Who the store owner is gets stated, never judged.
 
-"the user" is a role. On a real store the identity judge read the owner (61
-memories) and "Cosmin" (363), the person it was, as two people at P(different)
-0.94-0.95, and the pair was kept apart for good. Here: extraction reports a
+"the user" is a role. Measured, the identity judge read the owner and the named person it
+was as two people, and the pair was kept apart for good. Here: extraction reports a
 stated name, the owner takes it (folded into the person who carries it, or
 renamed), the judge is never asked about the owner while it has no name, its
 earlier answers on such pairs are opened again, one row stays per pair, and
@@ -54,14 +53,14 @@ def _owner(store, name: str = "the user", memories: int = 1) -> Entity:
 # -- extraction ------------------------------------------------------------
 
 def test_extraction_reports_a_stated_name_and_nothing_else():
-    for answer, reported in (("Cos", ["Cos"]), (None, []), ("the user", []),
+    for answer, reported in (("Tobi", ["Tobi"]), (None, []), ("the user", []),
                              ("", []), ("The user's name is not given here at all", [])):
-        llm = FakeLLM([json.dumps({"facts": [fact("The user's name is Cos.")],
+        llm = FakeLLM([json.dumps({"facts": [fact("The user's name is Tobi.")],
                                    "user_name": answer})])
         identity: list[str] = []
-        facts = extract_facts(llm, [{"role": "user", "content": "I'm Cos, hi"}],
+        facts = extract_facts(llm, [{"role": "user", "content": "I'm Tobi, hi"}],
                               identity=identity)
-        assert identity == reported and [f.content for f in facts] == ["The user's name is Cos."]
+        assert identity == reported and [f.content for f in facts] == ["The user's name is Tobi."]
     [(system, _)] = llm.calls
     assert "Never guess it" in system and '"user_name": str|null' in system
 
@@ -77,7 +76,7 @@ def test_an_output_without_the_field_reports_no_name():
 def test_a_save_that_states_no_name_names_nobody():
     store, llm, judge = _store()
     _save(store, llm, "The user sails", "the user")
-    _entity_with(store, "Cosmin", ["Cosmin sails in Cluj"], "person")
+    _entity_with(store, "Tobias", ["Tobias sails in Salzburg"], "person")
     _save(store, llm, "The user bought a boat", "the user")
     assert store.owner_name("ada") == "the user"
     assert store._upkeep_get("owner_stated", "ada", None) is None
@@ -87,37 +86,37 @@ def test_a_save_that_states_no_name_names_nobody():
 # -- a stated name names the owner -----------------------------------------
 
 def test_a_stated_short_name_folds_the_owner_into_the_one_person_it_begins():
-    """"Cos" begins "Cosmin" and no other person's name: the owner is folded
-    into Cosmin, who keeps the name and becomes the owner, "the user" one of
+    """"Tobi" begins "Tobias" and no other person's name: the owner is folded
+    into Tobias, who keeps the name and becomes the owner, "the user" one of
     their names, recorded with the statement and undone like any merge."""
     store, llm, judge = _store()
     _save(store, llm, "The user sails", "the user")
     owner = store.owner_entity("ada")
-    cosmin = _entity_with(store, "Cosmin", [f"Cosmin fact {i}" for i in range(5)], "person")
+    tobias = _entity_with(store, "Tobias", [f"Tobias fact {i}" for i in range(5)], "person")
     _entity_with(store, "Bea", ["Bea paints"], "person")
-    _save(store, llm, "The user's name is Cos.", "the user", user_name="Cos")
+    _save(store, llm, "The user's name is Tobi.", "the user", user_name="Tobi")
 
     person = store.owner_entity("ada")
-    assert person.id == cosmin.id and person.name == "Cosmin"
+    assert person.id == tobias.id and person.name == "Tobias"
     assert person.metadata["owner"] is True
-    assert "the user" in store.backend.entity_aliases(cosmin.id)
-    assert store.owner_name("ada") == "Cosmin"
+    assert "the user" in store.backend.entity_aliases(tobias.id)
+    assert store.owner_name("ada") == "Tobias"
     [merge] = store.merges(user_id="ada")
-    assert merge["entity_id"] == owner.id and merge["keep_id"] == cosmin.id
-    assert merge["decided"] == 'the owner\'s name was stated: "The user\'s name is Cos."'
+    assert merge["entity_id"] == owner.id and merge["keep_id"] == tobias.id
+    assert merge["decided"] == 'the owner\'s name was stated: "The user\'s name is Tobi."'
     state = store._upkeep_get("owner_stated", "ada", None)
-    assert state["name"] == "Cos" and state["outcome"]["action"] == "folded"
+    assert state["name"] == "Tobi" and state["outcome"]["action"] == "folded"
     assert state["evidence"][0]["memory_ids"]
     assert judge.states == []  # nobody judged anything
 
     # the extractor now lists the owner under its real name
-    _save(store, llm, "The user bought a boat", "Cosmin")
-    assert 'is the entity "Cosmin"' in [u for _, u in llm.calls
+    _save(store, llm, "The user bought a boat", "Tobias")
+    assert 'is the entity "Tobias"' in [u for _, u in llm.calls
                                         if u.startswith("Conversation:")][-1]
 
     assert store.undo_merge(owner.id)["undone"]
     assert store.owner_entity("ada").id == owner.id
-    assert not store.backend.get_entity(cosmin.id).metadata.get("owner")
+    assert not store.backend.get_entity(tobias.id).metadata.get("owner")
     store.close()
 
 
@@ -139,12 +138,12 @@ def test_a_stated_identity_overrides_the_judges_different():
 def test_a_pair_a_person_kept_apart_is_not_folded_and_the_owner_takes_the_name():
     store, llm, _ = _store()
     owner = _owner(store)
-    cosmin = _entity_with(store, "Cosmin", ["Cosmin sails"], "person")
+    tobias = _entity_with(store, "Tobias", ["Tobias sails"], "person")
     store.backend.add_proposal(MergeProposal(
-        entity_a=owner.id, entity_b=cosmin.id, user_id="ada", status="rejected",
+        entity_a=owner.id, entity_b=tobias.id, user_id="ada", status="rejected",
         reason="undone by you"))
-    assert store.learn_owner_name("ada", "Cosmin")["action"] == "renamed"
-    assert store.owner_entity("ada").id == owner.id and store.owner_name("ada") == "Cosmin"
+    assert store.learn_owner_name("ada", "Tobias")["action"] == "renamed"
+    assert store.owner_entity("ada").id == owner.id and store.owner_name("ada") == "Tobias"
     store.close()
 
 
@@ -213,12 +212,12 @@ def test_an_account_names_an_owner_made_before_it():
     stayed "the user". The person who carries exactly that name is it."""
     store, llm, _ = _store()
     owner = _owner(store)
-    cosmin = _entity_with(store, "Cosmin", ["Cosmin sails"], "person")
-    store.set_owner_name("ada", "cosmin")
-    assert store.owner_entity("ada").id == cosmin.id
+    tobias = _entity_with(store, "Tobias", ["Tobias sails"], "person")
+    store.set_owner_name("ada", "tobias")
+    assert store.owner_entity("ada").id == tobias.id
     store.set_owner_name("bea", "Bea")  # no owner entity: the name waits for one
     assert store.owner_name("bea") == "Bea"
-    assert store.backend.get_entity(owner.id).merged_into == cosmin.id
+    assert store.backend.get_entity(owner.id).merged_into == tobias.id
     store.close()
 
 
@@ -240,31 +239,31 @@ def test_the_first_name_stated_stays_unless_a_later_one_corrects_it():
 def test_a_correction_after_a_fold_is_left_to_a_person():
     store, llm, _ = _store()
     _owner(store)
-    _entity_with(store, "Cosmin", ["Cosmin sails"], "person")
-    assert store.learn_owner_name("ada", "Cosmin")["action"] == "folded"
-    outcome = store.learn_owner_name("ada", "Cosima",
-                                     evidence={"text": "Actually I'm Cosima, not Cosmin"})
+    _entity_with(store, "Tobias", ["Tobias sails"], "person")
+    assert store.learn_owner_name("ada", "Tobias")["action"] == "folded"
+    outcome = store.learn_owner_name("ada", "Tobia",
+                                     evidence={"text": "Actually I'm Tobia, not Tobias"})
     assert outcome["action"] == "conflict" and "Merged names" in outcome["reason"]
-    assert store.owner_name("ada") == "Cosmin"
+    assert store.owner_name("ada") == "Tobias"
     store.close()
 
 
 def test_the_matching_rule():
-    people = [("c", ["Cosmin", "Cosmin Novac"]), ("d", ["Dana"]), ("e", ["Dan Popescu"]),
+    people = [("c", ["Tobias", "Tobias Lindgren"]), ("d", ["Jana"]), ("e", ["Jan Hollis"]),
               ("f", ["José"])]
-    assert person_for("cosmin novac", people) == "c"
-    assert person_for("Cos", people) == "c"           # begins one person's name
-    assert person_for("Dan", people) == "e"           # a whole first name
-    assert person_for("Da", people) is None           # too short to point at one
+    assert person_for("tobias lindgren", people) == "c"
+    assert person_for("Tobi", people) == "c"           # begins one person's name
+    assert person_for("Jan", people) == "e"           # a whole first name
+    assert person_for("Ja", people) is None           # too short to point at one
     assert person_for("Jose", people) == "f"          # accents left out
-    assert person_for("Cos", people, short_names=False) is None
+    assert person_for("Tobi", people, short_names=False) is None
     assert person_for("Ana", [("a", ["Anabel"]), ("b", ["Anastasia"])]) is None  # two begin it
     assert person_for("Ana", [("a", ["Ana Maria"]), ("b", ["Anastasia"])]) == "a"
-    assert statements_in("The user's name is Cos and he sails") == [("Cos", True)]
-    assert statements_in("Hi Cos, welcome back", role="assistant") == [("Cos", False)]
+    assert statements_in("The user's name is Tobi and he sails") == [("Tobi", True)]
+    assert statements_in("Hi Tobi, welcome back", role="assistant") == [("Tobi", False)]
     assert statements_in("my name is Ada", role="Bea") == []
-    assert is_correction("My name is Cosima, not Cosmin", "Cosmin", "Cosima")
-    assert not is_correction("My name is Cosima", "Cosmin", "Cosima")
+    assert is_correction("My name is Tobia, not Tobias", "Tobias", "Tobia")
+    assert not is_correction("My name is Tobia", "Tobias", "Tobia")
 
 
 # -- the judge is never asked about the owner without a name -----------------
@@ -299,17 +298,17 @@ def test_the_unnamed_owner_is_never_put_to_the_judge():
 def test_the_judges_answers_on_an_unnamed_owner_are_opened_again_once():
     store, _, _ = _store()
     owner = _owner(store, memories=3)
-    cosmin = _entity_with(store, "Cosmin", ["Cosmin sails"], "person")
+    tobias = _entity_with(store, "Tobias", ["Tobias sails"], "person")
     bea = _entity_with(store, "Bea", ["Bea paints"], "person")
-    dana = _entity_with(store, "Dana", ["Dana sings"], "person")
+    jana = _entity_with(store, "Jana", ["Jana sings"], "person")
     acme = _entity_with(store, "Acme", ["Acme sells boats"])
     rows = {
-        "judged": MergeProposal(entity_a=owner.id, entity_b=cosmin.id, user_id="ada",
+        "judged": MergeProposal(entity_a=owner.id, entity_b=tobias.id, user_id="ada",
                                 status="rejected", reason="jev: different", different=0.94,
                                 compared_step=10, decided_at="2026-09-27T19:02:24+00:00"),
         "person": MergeProposal(entity_a=owner.id, entity_b=bea.id, user_id="ada",
                                 status="rejected", reason="kept apart by you"),
-        "open": MergeProposal(entity_a=dana.id, entity_b=owner.id, user_id="ada",
+        "open": MergeProposal(entity_a=jana.id, entity_b=owner.id, user_id="ada",
                               reason="jev: unsure", compared_step=3, different=0.3),
         "thing": MergeProposal(entity_a=owner.id, entity_b=acme.id, user_id="ada",
                                status="rejected", reason="jev: different"),
@@ -380,30 +379,30 @@ def test_one_row_per_pair(tmp_path):
 
 
 def test_a_merge_keeps_one_row_for_the_owners_pair():
-    """What left two rows for the owner and "Cosmin" on a real store: one pass
-    paired the owner with "Cosmin" and "Cosmin Novac", and the two were merged
+    """What left two rows for the owner and one person: one pass
+    paired the owner with "Tobias" and "Tobias Lindgren", and the two were merged
     later, by a version that moved the pair without looking for the other."""
     store, _, _ = _store()
     owner = _owner(store, "sailor42")
-    cosmin = _entity_with(store, "Cosmin", ["Cosmin sails"], "person")
-    novac = _entity_with(store, "Cosmin Novac", ["Cosmin Novac sails"], "person")
-    for person in (cosmin, novac):
+    tobias = _entity_with(store, "Tobias", ["Tobias sails"], "person")
+    lindgren = _entity_with(store, "Tobias Lindgren", ["Tobias Lindgren sails"], "person")
+    for person in (tobias, lindgren):
         store.backend.add_proposal(MergeProposal(entity_a=owner.id, entity_b=person.id,
                                                  user_id="ada"))
-    store.backend.merge_entities(cosmin.id, novac.id)
+    store.backend.merge_entities(tobias.id, lindgren.id)
     pairs = [p for p in store.backend.list_proposals(Scope(user_id="ada"), status=None)
              if owner.id in (p.entity_a, p.entity_b)]
     assert len(pairs) == 1
     store.close()
 
 
-def _forgotten_cos(store) -> None:
-    """The owner, "Cosmin" with many memories, and "The user's name is Cos."
+def _forgotten_tobi(store) -> None:
+    """The owner, "Tobias" with many memories, and "The user's name is Tobi."
     only in a forgotten duplicate."""
     owner = _owner(store, memories=3)
-    _entity_with(store, "Cosmin", [f"Cosmin fact {i}" for i in range(12)], "person")
-    _entity_with(store, "Constantin", ["Constantin fixes the roof"], "person")
-    memory = store.backend.insert_memory(Memory(content="The user's name is Cos.",
+    _entity_with(store, "Tobias", [f"Tobias fact {i}" for i in range(12)], "person")
+    _entity_with(store, "Tomas", ["Tomas fixes the roof"], "person")
+    memory = store.backend.insert_memory(Memory(content="The user's name is Tobi.",
                                                 user_id="ada"))
     store.backend.add_mention(EntityMention(entity_id=owner.id, memory_id=memory.id,
                                             surface="the user"))
@@ -412,45 +411,45 @@ def _forgotten_cos(store) -> None:
 
 def test_learn_owner_reads_a_forgotten_statement_with_one_model_call():
     store, llm, _ = _store()
-    _forgotten_cos(store)
-    llm.queue(json.dumps({"person": "Cosmin", "name": "Cos"}))
+    _forgotten_tobi(store)
+    llm.queue(json.dumps({"person": "Tobias", "name": "Tobi"}))
     report = store.learn_owner(user_id="ada", dry_run=True)
     [(system, asked)] = llm.calls
-    assert "The user's name is Cos. (forgotten)" in asked and '"Cosmin": 12 memories' in asked
-    assert report["evidence"][0] == {"text": "The user's name is Cos.", "name": "Cos",
+    assert "The user's name is Tobi. (forgotten)" in asked and '"Tobias": 12 memories' in asked
+    assert report["evidence"][0] == {"text": "The user's name is Tobi.", "name": "Tobi",
                                      "strong": True, "memory_id": report["evidence"][0]["memory_id"],
                                      "forgotten": True}
-    assert report["decision"]["person"] == "Cosmin" and report["decision"]["by"] == "the text model"
-    assert report["action"]["action"] == "would fold" and report["action"]["into"] == "Cosmin"
+    assert report["decision"]["person"] == "Tobias" and report["decision"]["by"] == "the text model"
+    assert report["action"]["action"] == "would fold" and report["action"]["into"] == "Tobias"
     assert report["action"]["owner_memories"] == 3 and report["action"]["into_memories"] == 12
     # the dry run wrote nothing
     assert store.owner_name("ada") == "the user"
     assert store._upkeep_get("owner_learned", "ada", None) is None
     assert store._upkeep_get("owner_stated", "ada", None) is None
 
-    llm.queue(json.dumps({"person": "Cosmin", "name": "Cos"}))
+    llm.queue(json.dumps({"person": "Tobias", "name": "Tobi"}))
     report = store.learn_owner(user_id="ada")
-    assert report["action"]["action"] == "folded" and store.owner_name("ada") == "Cosmin"
+    assert report["action"]["action"] == "folded" and store.owner_name("ada") == "Tobias"
     [merge] = store.merges(user_id="ada")
-    assert "The user's name is Cos." in merge["decided"]
+    assert "The user's name is Tobi." in merge["decided"]
     assert store._upkeep_get("owner_learned", "ada", None)["action"] == "folded"
     store.close()
 
 
 def test_learn_owner_without_a_text_model_counts_only_what_says_the_name_outright():
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
-    _forgotten_cos(store)
-    store.backend.insert_memory(Memory(content="I'm Constantin's neighbour", user_id="ada"))
+    _forgotten_tobi(store)
+    store.backend.insert_memory(Memory(content="I'm Tomas's neighbour", user_id="ada"))
     report = store.learn_owner(user_id="ada")
     assert report["decision"]["by"] == "the matching rule"
-    assert report["action"]["action"] == "folded" and store.owner_name("ada") == "Cosmin"
+    assert report["action"]["action"] == "folded" and store.owner_name("ada") == "Tobias"
     store.close()
 
 
 def test_learn_owner_without_evidence_asks_nothing_and_changes_nothing():
     store, llm, _ = _store()
     _owner(store, memories=3)
-    _entity_with(store, "Cosmin", ["Cosmin sails"], "person")
+    _entity_with(store, "Tobias", ["Tobias sails"], "person")
     report = store.learn_owner(user_id="ada")  # the FakeLLM has no answer to give
     assert report["action"] == {"action": "none", "reason": "nothing states who the user is"}
     assert store.owner_name("ada") == "the user" and llm.calls == []
@@ -459,8 +458,8 @@ def test_learn_owner_without_evidence_asks_nothing_and_changes_nothing():
 
 def test_the_upkeep_cycle_learns_the_owner_once():
     store, llm, _ = _store()
-    _forgotten_cos(store)
-    llm.queue(json.dumps({"person": "Cosmin", "name": "Cos"}))
+    _forgotten_tobi(store)
+    llm.queue(json.dumps({"person": "Tobias", "name": "Tobi"}))
     ran = store.run_upkeep_cycle(user_id="ada")
     assert ran["learn_owner"]["action"] == "folded"
     asked = len(llm.calls)
@@ -479,7 +478,7 @@ def test_memry_learn_owner(capsys, monkeypatch, tmp_path):
                 "MEMRY_LLM_PROVIDER", "MEMRY_EMBEDDING_PROVIDER", "MEMRY_DECISION_PROVIDER"):
         monkeypatch.delenv(key, raising=False)
     store = MemoryStore(Config(db_path=str(path)), llm=NoneLLM(), embedder=HashEmbedder(64))
-    _forgotten_cos(store)
+    _forgotten_tobi(store)
     store.close()
 
     assert main(["learn-owner", "-u", "ada", "--dry-run"]) == 0
@@ -487,7 +486,7 @@ def test_memry_learn_owner(capsys, monkeypatch, tmp_path):
     assert report["dry_run"] and report["action"]["action"] == "would fold"
     assert main(["learn-owner", "-u", "ada"]) == 0
     [report] = json.loads(capsys.readouterr().out)
-    assert report["action"]["action"] == "folded" and report["action"]["into"] == "Cosmin"
+    assert report["action"]["action"] == "folded" and report["action"]["into"] == "Tobias"
     store = MemoryStore(Config(db_path=str(path)), llm=NoneLLM(), embedder=HashEmbedder(64))
-    assert store.owner_name("ada") == "Cosmin"
+    assert store.owner_name("ada") == "Tobias"
     store.close()

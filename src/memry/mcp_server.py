@@ -52,7 +52,7 @@ Filters narrow recall before ranking; Memry does not read them from the query.
 Pass when= for the time a question is about (a day, "2025-04", "2025" or
 "A..B") and about= for the people, projects, things or tags it is about:
 "Was habe ich am 01. April 2025 gemacht?" -> when="2025-04-01"; "what did
-Bochra work on?" -> about="Bochra Saffar". A phrase in double quotes in the
+Bodil work on?" -> about="Bodil Saarinen". A phrase in double quotes in the
 query must appear exactly.
 
 In what comes back:
@@ -534,7 +534,7 @@ def create_server(
         matches a day in it. about: names of people, projects, things or tags,
         comma-separated. A phrase in double quotes in the query must appear
         exactly. "Was habe ich am 01. April 2025 gemacht?" -> when="2025-04-01";
-        "what did Bochra work on?" -> about="Bochra Saffar". An empty query
+        "what did Bodil work on?" -> about="Bodil Saarinen". An empty query
         lists what the filters match; no match says so and shows the nearest
         dated memories. (categories, entity_id, since, until, when_since,
         when_until: deprecated.)

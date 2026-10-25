@@ -3,12 +3,11 @@
 Each namespace has one owner entity, the person the memories belong to.
 Without an account name it is called "the user" (``OWNER_PLACEHOLDER``), and
 "the user" is a role, not a name. Asked whether that entity and a named person
-are one, the identity judge compares two sets of memories, and on a real store
-it read the owner (61 memories) and "Cosmin" (363), the person it was, as two
-people at P(different) 0.94-0.95; the pair was kept apart for good and the
-owner stayed "the user". Who the owner is gets stated instead: the user says
+are one, the identity judge compares two sets of memories, and, measured, it
+read the owner and the person it was as two people; the pair was kept apart
+for good and the owner stayed "the user". Who the owner is gets stated instead: the user says
 their name, signs a message, is called by it, or a memory says it ("The
-user's name is Cos."). This module holds what reads such statements; the
+user's name is Tobi."). This module holds what reads such statements; the
 store decides what they name (``MemoryStore.learn_owner_name``).
 
 Three readers, cheapest first:
@@ -25,9 +24,9 @@ Three readers, cheapest first:
 **Which person a stated name is** (``person_for``): the person who carries
 that name or alias, ignoring case and accents, when exactly one does. Failing
 that, for a stated name of one word: the one person whose name or alias starts
-with that word ("Dan" is "Dan Popescu", also beside a "Dana"), else, from three
+with that word ("Jan" is "Jan Hollis", also beside a "Jana"), else, from three
 letters on, the one person with a name or alias whose first word begins with
-it ("Cos" is "Cosmin" when no other person's name starts with "Cos"). Two
+it ("Tobi" is "Tobias" when no other person's name starts with "Tobi"). Two
 people who fit at the step that decides are no answer: the owner then takes
 the stated name itself and is compared as any named entity is.
 """
@@ -44,7 +43,7 @@ from typing import Any, Iterable
 from ..providers.llm import LLM
 from .extraction import OWNER_PLACEHOLDER, clean_stated_name, parse_lenient_json
 
-#: Shortest stated name that may stand for a longer one ("Cos" for "Cosmin").
+#: Shortest stated name that may stand for a longer one ("Tobi" for "Tobias").
 #: Two letters began too many first names to point at one.
 SHORT_NAME_LETTERS = 3
 #: Most statements one text-model call reads, and most people it is offered.
@@ -63,8 +62,8 @@ _STRONG = [re.compile(cue + _NAME) for cue in (
     r"(?i:\bthe user\s+(?:is\s+)?(?:called|named|goes by)\s+)",
     r"(?i:\b(?:call me|my name'?s|i go by)\s+)",
 )]
-#: Cues that may introduce the user's name or someone else's ("I'm Cos", "I'm
-#: Romanian", "the user is Cosmin", "the user is German"): read by the text
+#: Cues that may introduce the user's name or someone else's ("I'm Tobi", "I'm
+#: Austrian", "the user is Tobias", "the user is German"): read by the text
 #: model only.
 _WEAK = [re.compile(cue + _NAME) for cue in (
     r"(?i:\b(?:i'?m|i am|this is|the user is)\s+)",
@@ -84,7 +83,7 @@ def fold(text: str) -> str:
 
 def _leading_name(raw: str) -> str:
     """The words of ``raw`` up to the first one that does not start with a
-    capital letter: "Cos and I" is "Cos"."""
+    capital letter: "Tobi and I" is "Tobi"."""
     words: list[str] = []
     for word in raw.split():
         if not word[:1].isupper():
@@ -98,7 +97,7 @@ def statements_in(text: str, *, role: str = "user") -> list[tuple[str, bool]]:
     outright (a strong cue such as "my name is" or "the user's name is").
     ``role`` is who said it: a stored memory or a turn in role user reads
     every cue; an assistant turn is read only for a greeting by name ("Hi
-    Cos,"); any other speaker states nobody's name for the user."""
+    Tobi,"); any other speaker states nobody's name for the user."""
     text = text or ""
     found: list[tuple[str, bool]] = []
     if role == "assistant":
@@ -117,8 +116,8 @@ def statements_in(text: str, *, role: str = "user") -> list[tuple[str, bool]]:
 
 def is_correction(text: str, earlier: str, later: str) -> bool:
     """Whether a statement of ``later`` says that ``earlier`` was wrong: it
-    names both and says so ("my name is Cosima, not Cosmin", "actually it's
-    Cosima"). A later name stated without that is a conflict, not a
+    names both and says so ("my name is Tobia, not Tobias", "actually it's
+    Tobia"). A later name stated without that is a conflict, not a
     correction, and changes nothing."""
     folded = fold(text)
     return (bool(earlier) and fold(earlier) in folded and fold(later) in folded

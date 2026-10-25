@@ -271,8 +271,8 @@ class Filters:
         return replace(self, when=None, happened=None, when_since="", when_until="")
 
     def describe(self) -> str:
-        """The filters applied, in one line: 'when=2025-04-01, about=Bochra
-        Saffar'."""
+        """The filters applied, in one line: 'when=2025-04-01, about=Bodil
+        Saarinen'."""
         return ", ".join(f"{key}={value}" for key, value in self.applied().items())
 
 

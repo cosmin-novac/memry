@@ -383,9 +383,8 @@ reporting a number about itself scores its wrong answers about as high as its ri
 so the gate has to sit high and little gets automated. Override with
 `MEMRY_DECISION_MERGE_CONFIDENCE`.
 
-**A text model does not decide identity.** On the same 56 cases, gpt-5.6-luna got 52
-verdicts safe, better than gpt-5-mini's 49, and put its worst wrong "same" at 0.98, above
-any threshold: a number a model reports about itself says too little to merge on, and a
+**A text model does not decide identity.** A text model can put a wrong "same" above any
+threshold: a number a model reports about itself says too little to merge on, and a
 confident "different" from it would keep two records of one person apart for good. So
 without a calibrated decision provider (a text model only, or `MEMRY_DECISION_PROVIDER=llm`)
 Memry asks no model whether two entities are one, at save or in upkeep, and writes no
@@ -422,12 +421,10 @@ memry reconcile-queue --apply   # act on the new decisions; undo a replacement u
 It costs one decision-provider call per question and writes nothing without `--apply`.
 
 **Re-ranking** has the decision provider judge the first 20 of a search in one call and
-orders the results by that judgement. When it first asked whether a memory "helps answer
-the question", the judgement alone measured worse than not re-ranking at all, and it was
-blended with the hybrid rank instead. Every search now asks one question, whether someone
-who reads only the memory can answer it, and measured again on the same 228 memories and
-90 questions (`evals/datasets/distractors_v1.jsonl`, the `memry eval` protocol) the
-judgement alone did as well as any blend, so the blend is gone. A question naming
+orders the results by that judgement. Every search asks one question, whether someone who
+reads only the memory can answer it, and the judgement alone orders the results, with no
+blend with the hybrid rank (`evals/datasets/distractors_v1.jsonl` and the `memry eval`
+protocol measure it on your setup). A question naming
 something Memry knows is ordered by the linked search first (see `docs/architecture.md`,
 read path), which follows the links from it directed and weighted, one link deep; that is
 the only link mode (`retrieval.relational_mode` "directed", `relational_fusion` "linked"),
@@ -435,20 +432,17 @@ and a config naming a removed one ("typed", "undirected", "rescue", "weighted", 
 "gated") is refused at startup. Where re-ranking is on, the provider judges its first 20
 (`retrieval.relational_relevance` "auto", see the table).
 
-It is on by default with Jev. With a text model it depends on which one, measured over
-the same 228 memories and 90 questions in the wording every search now asks in: judging
-every search, gpt-5.6-luna and gpt-5-mini both put the answer higher than no judging at
-all, and both below Jev, gpt-5.6-luna at about 2.6 seconds a call and gpt-5-mini at about
-9. So `MEMRY_DECISION_RERANK=1` turns either on, neither is on by default, and for any
-model not measured the setting is refused. (In the wording re-ranking first asked in,
-gpt-5-mini had scored below no re-ranking and was refused.)
+It is on by default with Jev. With a text model it depends on which one: gpt-5.6-luna and
+gpt-5-mini were measured to help, and both wait seconds a call where Jev waits a fraction
+of one. So `MEMRY_DECISION_RERANK=1` turns either on, neither is on by default, and for
+any model not measured the setting is refused.
 
 ### A trap worth remembering
 
-An early probe scored 2 out of 16 because the names only ever appeared in the shared
-state, never in the questions, so sixteen identical questions got sixteen identical
-answers at around 0.75 confidence. Confidence describes the answer to the question that
-was asked. A question carrying no information still gets a confident-looking reply.
+When the names only appear in the shared state and never in the questions, every
+question is the same question and gets the same answer, with a confident-looking
+probability. Confidence describes the answer to the question that was asked. A question
+carrying no information still gets a confident-looking reply.
 
 ## Scaling up
 
@@ -577,14 +571,14 @@ memry adopt-unscoped             # the move; a second run finds nothing to do
 Each namespace has an owner entity, the person the memories belong to. It takes the
 account's name where an account named it, and is otherwise called "the user" until a
 conversation states who the user is: the user gives their name, signs, is called by it, or
-a memory says it ("The user's name is Cos."). Extraction asks for the name only while the
+a memory says it ("The user's name is Tobi."). Extraction asks for the name only while the
 owner is "the user", so a named owner's saves pay nothing for it. The owner is then folded into the person who
 carries that name (the person keeps it and becomes the owner; undo under Archive > Merged
 names), or renamed to it when nobody does. The identity judge is never asked about an
 owner still called "the user": "the user" is a role, and on a real store the judge read the
 owner and the person it was as two people. Once named, the owner is compared like anyone.
 The first name stated holds; a later different one is recorded and changes nothing unless
-it corrects the first ("Cosima, not Cosmin"). An account's name wins over a stated one.
+it corrects the first ("Tobia, not Tobias"). An account's name wins over a stated one.
 
 For a store saved before extraction reported stated names, `memry learn-owner [--user USER]
 [--dry-run]` looks for them in what the namespace holds, and the upkeep cycle runs it once
@@ -659,10 +653,9 @@ runs neither there nor on its interval, and no run of it is recorded.
 
 ### Hubs, homes and shared names
 
-An extractor turns far more phrases into entities than a store has things. On the store
-these rules were built on, 3,314 entities came out of 985 memories, and 2,073 of them
-appeared in exactly one memory. Memry keeps every one of them and shows you the ones that
-earned it.
+An extractor turns far more phrases into entities than a store has things, and most of
+them appear in exactly one memory. Memry keeps every one of them and shows you the ones
+that earned it.
 
 - **A hub** is a name the map and the Entities list show. With a decision
   provider, a name is a hub when the provider called it a named thing, or when it is a
@@ -670,15 +663,14 @@ earned it.
   a role. Without a provider, it is one of those five types, or a name two memories mention.
   Hub status is computed each time, so a phrase you mention again next month is a hub then.
   The map asks for a little more: a planet is a hub that came up in at least two memories,
-  and a person is one from the first mention. On the store above the hubs alone were 1,424
-  planets, 610 of them things seen exactly once.
+  and a person is one from the first mention, since many hubs are things seen exactly once.
 - **A home** is the project, product or organization a part belongs to, shown as
-  `AI-Flow / privacy policy`. A stated `part_of` relation sets it, or the comparison below.
-  Appearing together in memories does not: homes from co-mention measured 68% right (86%
-  restricted) and are no longer derived.
+  `Zobly / privacy policy`. A stated `part_of` relation sets it, or the comparison below.
+  Appearing together in memories does not: homes from co-mention were too often wrong and
+  are no longer derived.
 - **A version or a part** gets a home from the comparison itself. Whenever Memry compares
   two entities with Jev, it asks in the same call whether one is a version, a dated
-  occurrence or a part of the other. At 0.80 or more, "bildy v4" gets "bildy" as its home
+  occurrence or a part of the other. At 0.80 or more, "zobly v4" gets "zobly" as its home
   and "Tovel Forum 2025" gets "Tovel Forum", whatever their type, and Memry doesn't merge
   the two. A home stated in a memory comes first. A person or a place never gets a home
   this way.
@@ -701,22 +693,10 @@ An entity is never deleted. When you or a rule removes a name, Memry retires it,
 `POST /api/v1/maintenance/run/structure` with `{"dry_run": true}` returns every home and
 every merge the pass would make, and changes nothing.
 
-| Rule | Measured on | Result |
-|---|---|---|
-| Measurement and count rules | 360 labelled names | matched 12, none of them a real thing; 96 of 3,314 names store-wide |
-| Name screen at the 0.80 gate | 360 labelled names | screened out 31, none of them a real thing; clean from 0.70 up |
-| Hub rule using the provider's verdict | 360 labelled names | 72% of hubs are real things, and 98% of real things are hubs |
-| Hub rule, first draft: type, or two memories, or a relation | the same names | 52% and 88% |
-| Home from co-mention, restricted (no longer derived) | 141 labelled homes | 86% correct |
-| Home from co-mention alone (no longer derived) | the same homes | 68% correct, and 47% when the home is an organization |
-| Same name, not a person, nothing setting them apart | 78 past merge decisions | all 78 had been confirmed |
-| Version or part at 0.80 | 427 pairs: the identity benchmark and 271 generated | no true merge held back; no wrong home outside web domains and handles; none pointing the wrong way |
-
-An independent reader labelled the names and homes, all from one real store. Two first
-drafts failed the labels and were changed: recurrence turned out to find topics like
-"billing", and the first screening question listed "path" among the values, so the provider
-screened out source files and street addresses. `evals/entity_structure_benchmark.py` runs
-the same scoring on your own store.
+The rules and their bars (the measurement and count rules, the name screen's 0.80 gate,
+the hub rule, the version-or-part bar of 0.80) were measured against labelled names and
+homes before they were adopted. `evals/entity_structure_benchmark.py` runs the same
+scoring on your own store.
 
 ## The fields you can send to POST /api/v1/memories
 
@@ -762,7 +742,7 @@ The agent tools (`search_memories`, `get_memory_context`, `list_memories`) take 
 
 A phrase in double quotes inside the query (`the "Blue Fig" dinner`) must appear in the
 memory exactly, case aside. So "Was habe ich am 01. April 2025 gemacht?" is
-`when="2025-04-01"`, and "what did Bochra work on?" is `about="Bochra Saffar"`.
+`when="2025-04-01"`, and "what did Bodil work on?" is `about="Bodil Saarinen"`.
 
 Overlap means a memory dated only to April 2025 matches a question about 1 April. Its row
 then says so: `"happened": "happened 2025-04 (month)"` (and `[happened 2025-04 (month)]`
@@ -839,24 +819,19 @@ A dry run writes nothing and returns what it would set. Without `dry_run` it sto
 spends nothing. The pass needs an LLM; without one it reports that and changes nothing.
 
 A date in a memory does not make it an event, and how far a text model can be trusted to
-tell the difference depends on the model. Measured on 160 labelled memories from one store,
-44 of them events, with two checks Memry runs on every `when` a model proposes, on the
-write path and in the backfill:
+tell the difference depends on the model: some date work logs and price checks after being
+told not to. So Memry runs two checks on every `when` a model proposes, on the write path
+and in the backfill:
 
-| | gpt-5.6-luna | gpt-5-mini |
-|---|---|---|
-| The text model alone | 85% precise, 75% of events found | 56%, 77% |
-| Minus write dates read back (a `when` on the recording day, in a text naming no date) | 86%, 68% | 63%, 70% |
-| And the decision provider vetoes what it calls a record with 0.80 probability or more | 97%, 66% | 86%, 68% |
+- a `when` on the day the memory was recorded, in a text naming no date, is the write date
+  read back, and is dropped;
+- the decision provider vetoes a `when` on a memory it calls a record with 0.80
+  probability or more.
 
-gpt-5-mini dates work logs and price checks after being told not to, which is one reason
-it is not the OpenAI default; gpt-5.6-luna also read the 160 memories four times faster.
-gpt-6-luna, the default now, has not been measured on this set; Memry applies the decision
-provider's veto to its dates the same way. A wrong
-`when` is worse than none, so the veto applies whenever a decision provider is configured.
-Requiring the provider to say "event" was tried first and lost a fifth of the real events
-for no gain in precision.
+A wrong `when` is worse than none, so the veto applies whenever a decision provider is
+configured. The veto asks whether the memory is a record rather than requiring the
+provider to say "event", which would drop real events too.
 
 ### When upkeep runs
 
-The server runs the upkeep cycle once a night at 02:05 UTC (`MEMRY_UPKEEP_AT`, HH:MM in UTC), before the 03:30 snapshot, and never at start. Each pass still keeps its own interval (the identity pass weekly), so the nightly cycle runs only what is due. A night the server is down is skipped. "Run now" under Upkeep runs a pass at once. A cycle right after a deploy once judged about 1000 entity pairs and held requests up for 25 minutes.
+The server runs the upkeep cycle once a night at 02:05 UTC (`MEMRY_UPKEEP_AT`, HH:MM in UTC), before the 03:30 snapshot, and never at start. Each pass still keeps its own interval (the identity pass weekly), so the nightly cycle runs only what is due. A night the server is down is skipped. "Run now" under Upkeep runs a pass at once. A cycle right after a deploy once judged so many entity pairs that it held requests up for a long time.

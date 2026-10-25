@@ -109,7 +109,7 @@ def test_quoted_phrases_and_rejected_values():
 
 # ------------------------------------------------------------------- periods
 def test_a_day_matches_a_month_and_a_month_matches_a_day_inside_it(store):
-    month = remember(store, "In April 2025 AI-Flow built a tool-calling stack", when=APRIL)
+    month = remember(store, "In April 2025 Loom-Deck built a tool-calling stack", when=APRIL)
     day = remember(store, "Ada flew to Lisbon", when={"start": "2025-04-12"})
     remember(store, "Ada flew to Porto", when={"start": "2025-05-02"})
     undated = remember(store, "Ada likes tool-calling stacks")  # said 2026-01-01
@@ -140,10 +140,10 @@ def test_the_filter_applies_before_ranking_however_many_better_matches(store):
     """80 memories of April 2027 match the question better; the one of April
     2025 is still found, and none of 2027 is returned."""
     for i in range(80):
-        remember(store, f"AI-Flow tool-calling stack tool-calling stack note {i}",
+        remember(store, f"Loom-Deck tool-calling stack tool-calling stack note {i}",
                  when={"start": "2027-04-01", "end": "2027-04-30"})
-    answer = remember(store, "In April 2025 AI-Flow developed an agent stack", when=APRIL)
-    found = store.search("AI-Flow tool-calling stack", user_id="u", limit=3,
+    answer = remember(store, "In April 2025 Loom-Deck developed an agent stack", when=APRIL)
+    found = store.search("Loom-Deck tool-calling stack", user_id="u", limit=3,
                          filters=Filters.parse(when="2025-04-01"))
     assert ids(found) == [answer.id]
 
@@ -173,17 +173,17 @@ def test_linked_search_and_context_keep_to_the_filter(store):
 
 # -------------------------------------------------------------- names, tags
 def test_about_resolves_names_aliases_merges_and_tags(store):
-    bochra = entity(store, "Bochra Saffar")
-    store.add_entity_alias(bochra.id, "Bo")
-    hers = remember(store, "Bochra built the eval harness", entities=[bochra])
-    other = entity(store, "B. Saffar")
-    merged = remember(store, "B. Saffar reviewed the paper", entities=[other])
+    bodil = entity(store, "Bodil Saarinen")
+    store.add_entity_alias(bodil.id, "Bo")
+    hers = remember(store, "Bodil built the eval harness", entities=[bodil])
+    other = entity(store, "B. Saarinen")
+    merged = remember(store, "B. Saarinen reviewed the paper", entities=[other])
     tagged = remember(store, "Bought milk", tags=["groceries"])
     remember(store, "Unrelated note")
-    assert ids(store.get_all(user_id="u", filters=Filters.parse(about="bochra saffar"))) == [hers.id]
+    assert ids(store.get_all(user_id="u", filters=Filters.parse(about="bodil saarinen"))) == [hers.id]
     assert ids(store.get_all(user_id="u", filters=Filters.parse(about="BO"))) == [hers.id]
-    assert store.merge_entities(bochra.id, other.id)
-    after = store.get_all(user_id="u", filters=Filters.parse(about="B. Saffar"))
+    assert store.merge_entities(bodil.id, other.id)
+    after = store.get_all(user_id="u", filters=Filters.parse(about="B. Saarinen"))
     assert set(ids(after)) == {hers.id, merged.id}
     both = store.get_all(user_id="u", filters=Filters.parse(about="Groceries, Bo"))
     assert set(ids(both)) == {hers.id, merged.id, tagged.id}
@@ -194,11 +194,11 @@ def test_about_resolves_names_aliases_merges_and_tags(store):
 
 
 def test_an_unknown_name_says_so_with_close_names(store):
-    entity(store, "Bochra Saffar")
-    found = store.search_filtered("eval", Filters.parse(about="Bochra Safar"), user_id="u")
+    entity(store, "Bodil Saarinen")
+    found = store.search_filtered("eval", Filters.parse(about="Bodil Sarinen"), user_id="u")
     assert found.results == []
-    assert 'named "Bochra Safar"' in found.note and "Bochra Saffar" in found.note
-    partly = store.search_filtered("", Filters.parse(entity="Bochra Saffar, Zed"),
+    assert 'named "Bodil Sarinen"' in found.note and "Bodil Saarinen" in found.note
+    partly = store.search_filtered("", Filters.parse(entity="Bodil Saarinen, Zed"),
                                    user_id="u")
     assert 'named "Zed"' in partly.note and not partly.filters.matches_nothing
 
@@ -214,9 +214,9 @@ def test_names_resolve_only_in_the_callers_namespace(store):
 
 
 def test_entity_type_contains_and_memory_type(store):
-    flow = entity(store, "AI-Flow", "project")
+    flow = entity(store, "Loom-Deck", "project")
     ada = entity(store, "Ada")
-    project = remember(store, "AI-Flow started in 2025", entities=[flow], when={"start": "2025-02-01"})
+    project = remember(store, "Loom-Deck started in 2025", entities=[flow], when={"start": "2025-02-01"})
     remember(store, "Ada started yoga in 2025", entities=[ada], when={"start": "2025-03-01"})
     odd = remember(store, 'Paid 50% of "Café_X" (100%) bill', memory_type="episodic")
     remember(store, "Paid 50 of CafeX bill", memory_type="procedural")
@@ -233,7 +233,7 @@ def test_entity_type_contains_and_memory_type(store):
 
 # ----------------------------------------------------------- honest emptiness
 def test_nothing_on_that_day_shows_the_nearest_dated(store):
-    april = remember(store, "In April 2025 AI-Flow built a stack", when=APRIL)
+    april = remember(store, "In April 2025 Loom-Deck built a stack", when=APRIL)
     march = remember(store, "Ada visited Lisbon", when={"start": "2025-03-02"})
     later = remember(store, "Ada planned a trip", when={"start": "2027-04-01"})
     found = store.search_filtered("what did I do", Filters.parse(when="2025-05-10"), user_id="u")
@@ -253,13 +253,13 @@ def test_mcp_tools_expose_when_and_about_only():
                             "memory_type"}, name
     for name in ("search_memories", "get_memory_context"):
         assert 'when="2025-04-01"' in tools[name].description, name
-    assert 'about="Bochra Saffar"' in tools["search_memories"].description
+    assert 'about="Bodil Saarinen"' in tools["search_memories"].description
     assert "in double quotes" in tools["search_memories"].description
 
 
 def test_mcp_marks_a_coarse_date_and_answers_empty_honestly(store):
-    remember(store, "In April 2025 AI-Flow built a tool-calling stack", when=APRIL)
-    remember(store, "In April 2027 AI-Flow plans a tool-calling stack rewrite",
+    remember(store, "In April 2025 Loom-Deck built a tool-calling stack", when=APRIL)
+    remember(store, "In April 2027 Loom-Deck plans a tool-calling stack rewrite",
              when={"start": "2027-04-01", "end": "2027-04-30"})
     server = create_server(store, manage_enrichment_worker=False)
     hit = call(server, "search_memories", {
@@ -281,14 +281,14 @@ def test_mcp_marks_a_coarse_date_and_answers_empty_honestly(store):
 
 # ---------------------------------------------------------------------- REST
 def test_rest_endpoints_take_the_full_filter_set(store):
-    flow = entity(store, "AI-Flow", "project")
-    april = remember(store, "In April 2025 AI-Flow built a stack", when=APRIL, entities=[flow],
+    flow = entity(store, "Loom-Deck", "project")
+    april = remember(store, "In April 2025 Loom-Deck built a stack", when=APRIL, entities=[flow],
                      memory_type="episodic", tags=["work"])
-    remember(store, "In April 2027 AI-Flow plans a rewrite", entities=[flow],
+    remember(store, "In April 2027 Loom-Deck plans a rewrite", entities=[flow],
              when={"start": "2027-04-01", "end": "2027-04-30"})
     with TestClient(create_app(store)) as client:
-        body = {"query": "AI-Flow stack", "user_id": "u", "happened": "2025-04-01",
-                "entity": "ai-flow", "entity_type": "project", "tag": "work",
+        body = {"query": "Loom-Deck stack", "user_id": "u", "happened": "2025-04-01",
+                "entity": "loom-deck", "entity_type": "project", "tag": "work",
                 "contains": "built a", "memory_type": "episodic"}
         found = client.post("/api/v1/search", json=body).json()
         assert [r["memory"]["id"] for r in found["results"]] == [april.id]
@@ -297,7 +297,7 @@ def test_rest_endpoints_take_the_full_filter_set(store):
         empty = client.post("/api/v1/search", json={"query": "", "user_id": "u",
                                                     "when": "2026"}).json()
         assert empty["results"] == [] and empty["nearest"]
-        listed = client.get("/api/v1/memories?user_id=u&about=AI-Flow&said=2026-01").json()
+        listed = client.get("/api/v1/memories?user_id=u&about=Loom-Deck&said=2026-01").json()
         assert len(listed) == 2
         unknown = client.get("/api/v1/memories?user_id=u&entity=Nobody")
         assert unknown.status_code == 404 and "Nobody" in unknown.json()["error"]

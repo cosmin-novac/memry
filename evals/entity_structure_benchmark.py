@@ -1,8 +1,7 @@
 """Entity structure: which names deserve to be hubs, and where parts belong?
 
-Most of what an extractor calls an "entity" is not one. On the store this was
-measured against, 3,314 names came out of 985 memories and 2,073 of them
-appeared exactly once - counts, quoted fragments, ordinary nouns. Treating
+Most of what an extractor calls an "entity" is not one: most names appear
+exactly once - counts, quoted fragments, ordinary nouns. Treating
 every one as a hub is what fills a knowledge map with noise and an upkeep
 queue with questions nobody can answer. ``intelligence/structure.py`` and the
 name screen in ``intelligence/entities.py`` are the rules that sort them out,
@@ -43,8 +42,8 @@ Subcommands:
                 gate that harms nothing, with headroom. ``SCREEN_GATE`` is 0.80
                 because of this sweep.
 ``hubs``        ``is_hub`` against the "thing" label, with and without the
-                provider's verdict. The verdict is what took the rule from 52%
-                precision to 72% at 98% recall.
+                provider's verdict, which is what raised the rule's
+                precision.
 ``homes``       precision of a proposed home, split by share threshold, by the
                 type of the home, and by whether the part was seen once or
                 more. ``HOME_MIN_SHARE`` and the organization rule come from
@@ -61,14 +60,8 @@ Run:
     python evals/entity_structure_benchmark.py hubs       --data local/d
     python evals/entity_structure_benchmark.py homes      --data local/d
 
-Measured on a 985-memory store, 360 labelled names and 141 labelled homes:
-the mechanical rule fires on 12 of the labelled names, 83% of them values and
-none of them things; Jev agrees with the reader on 78% of names and screens
-out no "thing" from a gate of 0.60 up; the hub rule goes from 60% precision at
-78% recall without a verdict to 72% at 98% with one; and a home restricted to
-a project or product at share >= 0.7, sole anchor when the part was seen once,
-is 85% right against 68% unrestricted. Memry has since stopped deriving homes
-from co-mention: a home comes from a stated relation or the judge's answer.
+Memry has since stopped deriving homes from co-mention: a home comes from a
+stated relation or the judge's answer.
 """
 
 from __future__ import annotations

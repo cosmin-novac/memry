@@ -14,13 +14,12 @@ The occurrence time lives in ``metadata["when"]``:
 ``--MM-DD`` is a yearly date whose year is unknown or does not matter, which is
 what a birthday is: one recurring fact about a person, not one event per year.
 
-A date in the text is NOT a "when". Of 160 labelled episodic memories from a
-real store, only 44 described an event, while 46 non-events carried a calendar
-date anyway: prices observed on a day, test logs, specifications. Reading every
-date as an occurrence would therefore be wrong about as often as it was right,
-so a "when" is set only when the fact describes something that happened or will
-happen at a particular time. The same store recurred once in 160 memories,
-which is why recurrence is a plain field rather than a rule engine.
+A date in the text is NOT a "when". Many memories that are not events carry a
+calendar date anyway: prices observed on a day, test logs, specifications.
+Reading every date as an occurrence would be wrong about as often as right, so
+a "when" is set only when the fact describes something that happened or will
+happen at a particular time. Recurrence is rare, which is why it is a plain
+field rather than a rule engine.
 
 Everything above ``extract_when`` is pure: no store, no provider, no clock
 except the ``now`` the caller passes in.
@@ -413,9 +412,9 @@ WHEN_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-#: The rule, in the words the model reads. Written from 160 labelled memories
-#: of a real store: a date in the text is common in non-events, so the test is
-#: whether the fact describes something that occurs, not whether it has a date.
+#: The rule, in the words the model reads: a date in the text is common in
+#: non-events, so the test is whether the fact describes something that
+#: occurs, not whether it has a date.
 WHEN_SYSTEM = """You read stored memories and say when the thing each one
 describes happens, if it happens at a time at all.
 
@@ -459,20 +458,16 @@ Set start to null for a memory that has no "when"."""
 # on its own
 # ----------------------------------------------------------------------
 #
-# Measured on 160 labelled memories of a real store, 44 of them events. How
-# much a text model can be trusted here depends on the model: gpt-5-mini gave a
-# "when" to 61 memories and was right about 56% of them, dating work logs after
-# being told in capitals not to; gpt-5.6-luna gave 39 and was right about 85%,
-# four times faster. Two checks sit on top of either.
+# How much a text model can be trusted here depends on the model: some date
+# work logs even after being told in capitals not to. Two checks sit on top of
+# any of them.
 #
 # * A "when" equal to the day the memory was recorded, in a memory whose text
 #   names no date, is the write date read back.
 # * The decision provider is asked the one thing it is good at, whether the
 #   memory is an event or a record, and holds a veto: a "when" is dropped when
 #   it calls the memory a record with at least 0.80 probability. Requiring an
-#   "event" verdict instead cost a fifth of the real events for nothing. With
-#   gpt-5.6-luna the veto gives 97% precision with 66% of events found (86% and
-#   68% without a provider); with gpt-5-mini, 86% and 68%.
+#   "event" verdict instead drops real events for no gain in precision.
 
 _NAMES_A_DATE = re.compile(
     r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\.\d{1,2}\.\d{2,4}|\d{1,2}/\d{1,2}/\d{2,4}"

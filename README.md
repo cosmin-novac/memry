@@ -352,8 +352,8 @@ of a search, and for a question whose answer is a set (a list, a total, a compar
 more batch of memories. Scoring how long each memory stays relevant is off unless
 `MEMRY_DURABILITY=1`. You still need a text model for extraction. If you set
 `MEMRY_DECISION_PROVIDER=llm`, Memry sends these questions to the text model, merges
-entities only by fixed rules, and you confirm the other merges yourself. The
-measurements and the remaining settings are in [docs/self-hosting.md](docs/self-hosting.md#where-memry-sends-its-decision-questions).
+entities only by fixed rules, and you confirm the other merges yourself. The remaining
+settings are in [docs/self-hosting.md](docs/self-hosting.md#where-memry-sends-its-decision-questions).
 
 ## Evaluation
 

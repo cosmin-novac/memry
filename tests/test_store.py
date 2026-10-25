@@ -108,14 +108,14 @@ def test_batch_facts_stay_discrete(store, fake_llm):
     excluded from each other's similarity sets, so no reconcile LLM call."""
     fake_llm.queue(
         facts_response(
-            fact("The zeitnachweis skill fills timesheets"),
-            fact("The zeitnachweis skill must edit XML directly rather than openpyxl"),
-            fact("openpyxl corrupts the timesheet template, hence direct XML"),
+            fact("The rota skill fills shift rotas"),
+            fact("The rota skill must edit XML directly rather than openpyxl"),
+            fact("openpyxl corrupts the rota template, hence direct XML"),
         ),
         coverage(),  # audit pass: nothing missing
     )
     result = store.add(
-        "zeitnachweis fills timesheets; must edit XML directly, not openpyxl, "
+        "the rota skill fills shift rotas; must edit XML directly, not openpyxl, "
         "because openpyxl corrupts the template",
         user_id="u",
     )
@@ -128,11 +128,11 @@ def test_batch_facts_stay_discrete(store, fake_llm):
 
 def test_coverage_audit_reports_dropped_details(store, fake_llm):
     fake_llm.queue(
-        facts_response(fact("The skill fills timesheets")),
+        facts_response(fact("The skill fills shift rotas")),
         coverage("must edit XML directly rather than openpyxl"),
     )
     result = store.add(
-        "The skill fills timesheets and must edit XML directly rather than "
+        "The skill fills shift rotas and must edit XML directly rather than "
         "openpyxl because openpyxl corrupts the template.",
         user_id="u",
     )
@@ -403,9 +403,9 @@ def test_what_a_memory_replaced_is_forgotten_once_it_is_deleted_for_good(verbati
     store, backend = verbatim_store, verbatim_store.backend
     embedder = store.embedder
     copies = [backend.insert_memory(
-        Memory(content="Kestrel eats salmon kibble", user_id="ada",
+        Memory(content="Pippin eats salmon kibble", user_id="ada",
                embedding_model=embedder.model_id),
-        embedder.embed(["Kestrel eats salmon kibble"])[0]) for _ in range(2)]
+        embedder.embed(["Pippin eats salmon kibble"])[0]) for _ in range(2)]
     [group] = store.consolidate_memories(user_id="ada")["groups"]
     survivor = group["survivor"]
     assert {backend.get_memory(c.id).superseded_by for c in copies} == {survivor}

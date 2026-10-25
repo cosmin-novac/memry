@@ -8,30 +8,23 @@ that is rare among the store's own entity names, when they are spelled alike
 when one is the initial letters of the other, or when a semantic embedder puts
 the two names close together. Rarity comes from the store: a word such as
 "GmbH", "Ltd" or "Dr." that many names carry stops counting on its own, and
-nobody has to list it. On 156 labelled pairs these four signals found all 32
-true pairs whose names differ (legal forms from six countries, titles,
-nicknames, acronyms, translations) and proposed 40 other pairs out of 8,385.
+nobody has to list it. Together these signals find names that differ by a legal
+form, a title, a nickname, an acronym or a translation.
 
 **Deciding a pair.** The judge sees both entities side by side, each with its
 name, type, description and facts, and answers one question with three
 options. The question is asked in both orders and the probabilities are
-averaged, because the answer must not depend on which entity came first. Asked
-in one order, the threshold that merged nothing wrong moved from 0.90 in one
-run to 0.95 in the next, and with the first wording tried, swapping the two
-entities left no safe threshold at all. Measured with Jev over the 156 pairs
-in ``evals/identity_resolution_benchmark.py``, five runs:
+averaged, because the answer must not depend on which entity came first: asked
+in one order, the safe threshold moved from run to run. The bars below were
+measured with Jev (``evals/identity_resolution_benchmark.py``):
 
 * a pair merges from a P(same) that falls with the evidence: the provider's
-  ``pair_merge_by_step``, per step of the funnel below. On 18,885 comparisons
-  of a new name against the entity it may belong to (synthetic stores with
-  exact labels), keeping wrong merges at or under 2% of merges needed about
-  0.97 with one memory on the smaller side, 0.85-0.96 with three, 0.79-0.84
-  with eight and 0.78-0.79 with fifteen to thirty. At one memory Jev's
-  P(same) is close to the real share; with more it is too cautious, by about
-  half. A deployment can set one bar for all steps
-  (``DecisionConfig.pair_merge_probability``);
+  ``pair_merge_by_step``, per step of the funnel below. With one memory on the
+  smaller side Jev's P(same) is close to the real share; with more it is too
+  cautious, so the bar falls as the smaller side grows. A deployment can set
+  one bar for all steps (``DecisionConfig.pair_merge_probability``);
 * a pair is kept apart from P(different) = 0.5, once its smaller side has 10
-  memories (``APART_STEP``); before, it waits. No true pair scored above 0.43;
+  memories (``APART_STEP``); before, it waits;
 * anything else waits, and nobody is asked. A waiting pair is compared again
   only when its smaller side reaches the next step of ``PAIR_STEPS``
   (3, 10, then 50 memories), and never after the last: at most four
@@ -43,19 +36,13 @@ of a name an entity already carries joins the likeliest entity of that name
 unless the judge says "different" (``entities._judged_join``). That check reads
 no merge bar, only P(different) against 0.5, which candidate has the higher
 P(same), and ``BELONGS_BAR``, so it is asked with the entity first only: one
-call a candidate instead of two, and most of a save's pair calls. In two runs
-it decided as well as both orders (PhD notes, O-35). Every other comparison
-keeps both orders: it reads a merge bar, and one order moves the merge bars.
+call a candidate instead of two, and most of a save's pair calls. Every other
+comparison keeps both orders: it reads a merge bar, and one order moves the
+merge bars.
 
 Every fact carries its date (when it became true where that is known, else
 when it was recorded). Without dates, "lives in Munich" against "moved to
-Amsterdam last month" read as two people (P(same) 0.54), and a promotion as
-two roles (0.78); with dates, 0.97 and 1.00. Over the 156 pairs, two runs,
-dates raised the true merges at 0.90 from 67-68 to 72-73, with no pair of
-two things merged and one unsettleable pair instead of three.
-
-The question Memry asked before (the existing entity's facts against one new
-fact, decided on Jev's own confidence) merged nothing safely on the same pairs.
+Amsterdam last month" reads as two people, and a promotion as two roles.
 """
 
 from __future__ import annotations
@@ -103,13 +90,11 @@ PAIR_QUESTION = Choice(
 )
 
 #: Asked with the pair question in the same call: is one entity a version or a
-#: part of the other? "bildy v4" is not the same thing as "bildy", so the pair
-#: question alone either waits or, with enough memories, merges them: on 427
-#: measured pairs, versions, dated occurrences and owned items of a model
-#: scored P(same) 0.6-0.99. Asked in the same call, it left the pair question's
-#: answers within their run-to-run noise (0.011 against 0.013), cost no time,
-#: and from 0.8 on it set no wrong home outside web domains and handles and
-#: none in the wrong direction. See the PhD notes, belongs-to-question.
+#: part of the other? "zobly v4" is not the same thing as "zobly", so the pair
+#: question alone either waits or, with enough memories, merges them: versions,
+#: dated occurrences and owned items of a model read as close to one thing.
+#: Asked in the same call, it leaves the pair question's answers as they were
+#: and costs no extra call.
 BELONGS_QUESTION = Choice(
     instructions=(
         "In one person's memory store, entity A and entity B may be two different "
@@ -149,9 +134,8 @@ BELONGS_SWAP = {"a_kind_of_b": "b_kind_of_a", "b_kind_of_a": "a_kind_of_b",
                 "a_part_of_b": "b_part_of_a", "b_part_of_a": "a_part_of_b",
                 "neither": "neither"}
 #: P(one belongs to the other) from which the child gets the other as its home,
-#: and from which the pair is not merged. On 427 pairs, 145 true pairs reached
-#: their merge bar with P(belongs) at most 0.55; at 0.8 none was held back,
-#: and every version that reached the bar was.
+#: and from which the pair is not merged. Measured: at this bar no true pair
+#: is held back, and a version that reaches the merge bar is.
 BELONGS_BAR = 0.8
 #: Types that never get a home, whatever the judge says: a person is not a
 #: version or a part of a group, and a place inside another stays a place.
@@ -164,11 +148,11 @@ RARE_WORD_SHARE = 0.02
 #: ("OpenAI" and "Open AI", "PostgreSQL" and "Postgres").
 SPELLING_SIMILARITY = 0.5
 #: Share of characters that may change, by edit distance, for two names to
-#: count as spelled alike ("colonge" and "cologne"). Trigrams miss a typo that
+#: count as spelled alike ("muncih" and "munich"). Trigrams miss a typo that
 #: swaps two letters, since the swap breaks the trigrams around it.
 EDIT_SIMILARITY = 0.8
 #: Cosine between name embeddings from which two names count as close in
-#: meaning ("Köln" and "Cologne" scored 0.68, unrelated names rarely 0.6).
+#: meaning ("Köln" and "Cologne"); unrelated names rarely reach it.
 MEANING_SIMILARITY = 0.6
 #: Most candidates compared for one name, best first.
 CANDIDATES_PER_NAME = 5
@@ -184,10 +168,9 @@ NAME_CHECK_SKIP = 0.9
 #: A name with few memories that could be one of several entities ("Sofia":
 #: "Sofia Marin" or "Sofia Petrescu") joins the likeliest once every pair has
 #: been asked with the rest of its conversation (``CONTEXT_STEP``), when it
-#: leads the next by ``CHOICE_LEAD`` and is not less likely than not. On 40
-#: generated cases of namesakes in unrelated parts of a life, the lead of 0.10
-#: picked right 29 times and wrong once (a case whose conversation belonged to
-#: the other person); none reached the merge bar on its own.
+#: leads the next by ``CHOICE_LEAD`` and is not less likely than not. No
+#: answer about a first name alone reaches the merge bar; the lead was
+#: measured on generated namesakes in unrelated parts of a life.
 CHOICE_LEAD = 0.10
 CHOICE_FLOOR = 0.5
 #: The comparison funnel. A pair is compared when it is found, and again only
@@ -204,16 +187,15 @@ PAIR_POOL = 200
 #: are those most similar to any of the other side's memories. A fact that links
 #: the two or contradicts one of them ("lives in Munich", "moved to Amsterdam")
 #: shares a topic with the other side. The most recent memories of a large
-#: entity mostly do not, and they left the judge unsure: "Fundation" against
-#: "Fundation GmbH" scored 0.76 with 3 recent facts per side and 0.59 with 10.
+#: entity mostly do not, and they leave the judge unsure: "Veldmark" against
+#: "Veldmark GmbH" reads as less likely one thing the more recent facts it is
+#: shown.
 RECENT_SHARE = 0.3
 #: A pair is kept apart for good only from this step on; before, "apart"
-#: waits, since keeping apart ends all comparing. On 39 pairs from a real
-#: store, "Fundation" (1 memory) against "Fundation GmbH" gave P(different)
-#: 0.68-0.70 and at 10 memories P(same) 0.91-0.93; the store owner (1 or 3
-#: memories) against "Cosmin Novac" gave P(different) 0.90-0.95 and at 10
-#: P(same) 0.99. Keeping apart from the first step lost that pair for good;
-#: from step 10 no true pair was lost, for 74-76 comparisons instead of 45-47.
+#: waits, since keeping apart ends all comparing. With one or three memories a
+#: side, a short name against its long form, or the store owner against the
+#: owner's full name, can read as two things and, with ten, as one. Keeping
+#: apart from the first step would lose such a pair for good.
 APART_STEP = 10
 #: A step between the first two of ``PAIR_STEPS``. A pair still waiting after
 #: its first comparison, with a side of fewer than ``PAIR_STEPS[1]`` memories,
@@ -239,8 +221,7 @@ OWNER_CANDIDATES = 3
 
 def memories_shown(step: int) -> int:
     """Memories shown per side at a step: 10, and 50 at the last step. Jev reads
-    long profiles: one contradicting fact placed last among 100 facts still gave
-    P(different) = 0.95."""
+    long profiles: one contradicting fact placed last among many still counts."""
     return PAIR_STEPS[-1] if step >= PAIR_STEPS[-1] else PAIR_STEPS[-2]
 
 
@@ -301,8 +282,8 @@ def edit_similarity(a: str, b: str) -> float:
 def is_acronym_of(short: str, long: str) -> bool:
     """Whether ``short`` is built from the letters of ``long`` in order,
     starting with its first letter, and holds the first letter of every word
-    of ``long`` in order: "AWS" and "Amazon Web Services", "BSFZ" and
-    "Bescheinigungsstelle Forschungszulage", "KfW" and "Kreditanstalt für
+    of ``long`` in order: "AWS" and "Amazon Web Services", "DWD" and
+    "Deutscher Wetterdienst", "KfW" and "Kreditanstalt für
     Wiederaufbau". Without the second condition "action" counted as an
     acronym of "ai applications". In a name that capitalizes its words, the
     words written in lower case ("de", "la", "für") may be left out: "ICAM" and
@@ -335,8 +316,8 @@ class NameIndex:
         self.entities = {e.id: e for e in entities if e.merged_into is None}
         #: Whether a shared rare word pairs two names. Off for tags: tags are
         #: short phrases that share words across related subjects ("art assets"
-        #: and "art direction"). On 417 real tags it raised 263 of 379 pairs
-        #: and was the only signal for none of the 16 duplicates.
+        #: and "art direction"), so on tags it raises mostly pairs of two
+        #: subjects and finds no duplicate the other signals miss.
         self.rare_words = rare_words
         self.vectors = vectors or {}
         self._tokens = {eid: set(name_tokens(e.name)) for eid, e in self.entities.items()}
@@ -371,7 +352,7 @@ class NameIndex:
     def named_in(self, text: str, limit: int = 60) -> list[Entity]:
         """Entities with a name word that appears in ``text`` and is rare among
         the store's names, most shared words first: the ones a text about
-        "Fundation" may be naming, such as "Fundation GmbH"."""
+        "Veldmark" may be naming, such as "Veldmark GmbH"."""
         shared: Counter[str] = Counter()
         tokens = set(name_tokens(text))
         for token in tokens:
@@ -556,7 +537,7 @@ class Profile:
     home: str = ""
     #: The date of each fact (YYYY-MM-DD), parallel to ``facts``, for callers
     #: that only have dates (the benchmark). Without dates, "lives in Munich"
-    #: against "moved to Amsterdam last month" read as two people (0.54).
+    #: against "moved to Amsterdam last month" reads as two people.
     dates: list[str] = field(default_factory=list)
     #: Where each fact came from, parallel to ``facts``. Shown as stored; the
     #: judge decides what a shared saved text or session means.
@@ -820,8 +801,8 @@ def compare(
     of two: the known-name check at save, where A is an entity that carries
     the mention's name and B the mention (``entities._judged_join``). It
     reads no merge bar, only P(different) against the apart bar, which
-    candidate is likelier, and ``BELONGS_BAR``: measured in the module
-    docstring.
+    candidate is likelier, and ``BELONGS_BAR``, so one order is enough (see
+    the module docstring).
 
     Two tags (topic entities) are asked the tag question instead
     (``compare_topics``).
@@ -838,8 +819,8 @@ def compare(
               else backend.entity_memories(b.id, limit=PAIR_POOL))
     # A memory that names both entries says nothing about whether they are one
     # thing: the extractor listed two names for it. Shown on both sides it
-    # read as the same fact twice, and "Michaela Neumann" merged with
-    # "Dr. Neumann", named in one note, at P(same) 1.0. It is left out. A side
+    # reads as the same fact twice, and two people named in one note ("Michaela
+    # Neumann" and "Dr. Neumann") read as one. It is left out. A side
     # left with no memory is not asked about and keeps its step: no answer,
     # which says neither "same" nor "different". A mention whose memory an
     # entity of its name already holds is that entity's; ``resolve_mentions``
@@ -959,9 +940,9 @@ def unnamed_owner(entity: Entity | Mention | None) -> bool:
     """Whether this is the store owner while it has no name: still called "the
     user" (``extraction.OWNER_PLACEHOLDER``). "the user" is a role, so whether
     it is a named person is a question of what was said, not of how alike two
-    sets of memories are: the judge is never asked about it. On a real store
-    the owner (61 memories) against the person it was, "Cosmin" (363), read as
-    two people at P(different) 0.94-0.95, and the pair was kept apart for good.
+    sets of memories are: the judge is never asked about it. Measured, the
+    owner against the person it was read as two people, and the pair was kept
+    apart for good.
     Who the owner is gets stated instead (``MemoryStore.learn_owner_name``)."""
     return (entity is not None and is_owner(entity)
             and _fold(entity.name).strip() == OWNER_PLACEHOLDER)
@@ -1063,9 +1044,9 @@ def pair_reason(decider: Decider, probabilities: dict[str, float]) -> str:
 
 def judges_pairs(decider: Decider | None) -> bool:
     """Whether this provider decides identity pairs: it must answer with
-    probabilities it computed. A text model's self-reported confidence was 0.9
-    on its wrong answers too, and merged 8 of 81 true pairs at its safe
-    threshold."""
+    probabilities it computed. A text model's self-reported confidence is as
+    high on its wrong answers as on its right ones, so no threshold on it both
+    merges and stays safe."""
     return decider is not None and decider.available and decider.calibrated
 
 
@@ -1097,16 +1078,15 @@ def parallel(fn: Callable[[Any], Any], items: list[Any], workers: int = 8) -> li
 
 
 # -- tags ------------------------------------------------------------------
-#: Most recent memories shown per tag. Measured on 379 candidate pairs from a
-#: real store: with the names alone "memry" read as a typo of "memory" (0.98);
-#: with two example memories "colonge" fell to 0.20 because one example cannot
-#: show what a tag is used for; with 10 no pair of two subjects scored above
-#: 0.46, and 25 were no better.
+#: Most recent memories shown per tag, as measured: with the names alone
+#: "memry" reads as a typo of "memory"; with one or two examples a tag's use
+#: does not show, so a misspelt tag reads as another subject; more than 10
+#: were no better.
 TAG_EXAMPLES = 10
 #: A tag pair is compared when it is found, and once more when both tags are on
 #: ``TAG_EXAMPLES`` memories and the judge sees all it will ever see; never
-#: after. Comparing every candidate pair on every pass cost 758 judge calls a
-#: pass on a 417-tag store, for the same answers.
+#: after. Comparing every candidate pair on every pass costs hundreds of judge
+#: calls a pass on a store with a few hundred tags, for the same answers.
 TAG_STEPS = (1, TAG_EXAMPLES)
 
 
@@ -1175,9 +1155,9 @@ def topic_pairs(
 ) -> list[tuple[Entity, Entity]]:
     """The pairs of tags (topic entities) worth the tag question: names
     spelled alike, an acronym, or, with ``vectors``, names close in meaning;
-    never a shared word alone (``NameIndex(rare_words=False)``). On the 417
-    tags of a real store a shared rare word raised 263 of the 379 candidate
-    pairs and was the only signal for none of the 16 duplicates."""
+    never a shared word alone (``NameIndex(rare_words=False)``): on the tags
+    of a real store a shared rare word raises mostly pairs of two subjects and
+    finds no duplicate the other signals miss."""
     index = NameIndex(topics, vectors, rare_words=False)
     found = {
         tuple(sorted((topic.id, other.id)))
@@ -1200,13 +1180,11 @@ def compare_topics(
     ``decider.tag_merge_probability``, and otherwise waits: no bar was
     measured for keeping two tags apart.
 
-    Measured on the 379 candidate pairs of a real 417-tag store, 10 memories
-    per tag, two runs: from 0.55 it merged 7-9 of the 16 pairs I labelled one
-    subject ("fundation" and "fundation gmbh" at 0.86-0.88, "bildy" and
-    "bildy.ai", "steuer" and "tax", "cologne" and "colonge") and none of the
-    41 borderline or 322 two-subject pairs; the highest two-subject pair was
-    "restart" and "shutdown" at 0.46. The entity pair question, asked of the
-    same pairs as the funnel asks it, merged fewer of the one-subject pairs
+    The bar is measured per provider (Jev's 0.55): the lowest at which no
+    pair of two subjects merged, while tags of one subject written another
+    way ("veldmark" and "veldmark gmbh", "zobly" and "zobly.ai", "rechnung"
+    and "invoice", "muncih" and "munich") do. The entity pair question, asked
+    of the same pairs as the funnel asks it, merged fewer of the one-subject pairs
     and some of two subjects: tags in one person's store mostly file
     memories about that person, so no fact contradicts "one thing".
     """

@@ -7,10 +7,10 @@ reworded, an exact restatement, a contradiction nobody announces, an added
 detail, a plan that happened, a time-bound fact, a recurring event, a
 preference that changes, a project's status, two events or things of one
 kind (two trips, injuries, deals, paintings, games), a relative time in a
-fact that is merged (with LoCoMo conv-41's two road trips in fictional form,
-R1), claims about one subject that must stay one memory each (S1 to S3,
-graded "joined" when one memory holds two of them), and a detail of the same
-claim that must merge (T1, T2). Each case runs twice on fresh
+fact that is merged (two road trips, R1), claims about one subject that must
+stay one memory each (S1 to S3, graded "joined" when one memory holds two of
+them), and a detail of the same claim that must merge (T1, T2). Each case
+runs twice on fresh
 in-memory stores through ``MemoryStore.add(infer=True)``, saved as the LoCoMo
 runner saves a session: one message whose role is the speaker, with the
 context "conversation between Maria and Tom, <date>" and the save's date as
@@ -72,7 +72,7 @@ the answers given on the way. ``merges`` asks the installed memry's merge
 writer (the text model, ``OPENAI_API_KEY``) to join each fixed pair of
 ``MERGE_PAIRS`` (texts as extraction wrote them, with their dates), and
 grades the text it writes: two things of one kind must not be joined, and
-no time may move (``misdated``). LoCoMo conv-41 is P1. ``CLAIM_PAIRS`` (Q, a
+no time may move (``misdated``). ``CLAIM_PAIRS`` (Q, a
 new claim about the memory's subject, which must stay apart; D, a detail of
 the same claim, which must merge) are among those pairs, and ``claims`` asks
 Jev the reconcile question on them (``claims-text``: the text model as judge,
@@ -375,9 +375,9 @@ CASES: list[dict[str, Any]] = [
         query="What happened to Maria's Science Fund grant proposal?", ok=[("CHANGED", "MORE")]),
     # -- two events or things of one kind (must stay separate) -------------------
     # Each pair is two trips, injuries, deals, paintings or games, the second
-    # told later and often about an earlier time. In the LoCoMo stores Jev
-    # answered such pairs MORE at 0.80 to 0.97 and one text of both was
-    # written, the second event taking the first one's date.
+    # told later and often about an earlier time. Jev can answer such pairs
+    # MORE as surely as a right merge, and then one text of both is written,
+    # the second event taking the first one's date.
     case("L1", "two of one kind", "separate", [
         (0, "Maria", "We took the kids camping at Lake Arden last weekend; they loved the canoe."),
         (40, "Maria", "I'll never forget our camping trip last summer, when we watched the "
@@ -430,14 +430,13 @@ CASES: list[dict[str, Any]] = [
         new=r"endgame", old=r"riverside|tournament", topic=r"chess|riverside",
         misdated=r"\bnext month\b", anchored=r"\bapril\b|\b2026-04",
         query="When is the Riverside chess tournament?", ok=[("MORE",)]),
-    # -- regression: LoCoMo conv-41 in fictional form ----------------------------
+    # -- regression: a relative time in a merged fact ---------------------------
     # A family road trip that ended the day before a December save, then, in
-    # April, "a road trip we took last year" up the coast. Jev answered MORE at
-    # 0.96 and the merged text read "returned from a family road trip on
-    # 2022-12-16 ... the previous year's road trip explored the coast", so a
-    # model dated the coast trip a year too early. Whatever the answer, a
-    # memory written in April that holds both trips must give the coast trip
-    # its year, 2026, and not a year relative to the December trip.
+    # April, "a road trip we took last year" up the coast. Merged into "returned
+    # from a family road trip on <December date> ... the previous year's road
+    # trip explored the coast", the coast trip reads a year too early. Whatever
+    # the answer, a memory written in April that holds both trips must give the
+    # coast trip its year, 2026, and not a year relative to the December trip.
     case("R1", "relative time", "keep", [
         (290, "Tom", "Hey Maria! Just got back from a family road trip yesterday, it was fun!"),
         (404, "Tom", "This photo reminds me of a road trip we took last year; we explored the "
@@ -513,8 +512,8 @@ def merge_pair(id: str, kind: str, expect: str, old: tuple, new: tuple,
 #: does that day. "merge": one thing, the writer must write one text, and a
 #: time must not move (``misdated``, unless ``anchored`` finds its date);
 #: "apart": two events or things of one kind, which the writer should not
-#: join. P1 is LoCoMo conv-41 in fictional form: extraction kept "the
-#: previous year", and the merged text put it after the December date.
+#: join. P1 is a relative time in fictional form: extraction kept "the
+#: previous year", and a merged text can put it after the December date.
 MERGE_PAIRS: list[dict[str, Any]] = [
     merge_pair("P1", "relative time", "apart",
                (290, "Tom returned from a family road trip on 2026-12-16 and said it was fun.",

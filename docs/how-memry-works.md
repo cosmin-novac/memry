@@ -203,7 +203,7 @@ one per user and normalized name, and every memory filed under it mentions it. T
 `categories` column and the legacy `topics`/`memory_topics` index, which the filters read,
 are written from the same tags. Two tags are a merge proposal like two names, compared by
 the tag question (each shown with its 10 most recent memories); a tag and a named thing of
-the same name ("bildy" and the product Bildy) by the entity pair question. A tag is never a hub and never what a
+the same name ("zobly" and the product Zobly) by the entity pair question. A tag is never a hub and never what a
 search is about.
 
 - The dashboard's Upkeep > Entities lists tags with the people and things, filtered by

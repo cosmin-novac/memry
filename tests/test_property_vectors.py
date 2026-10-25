@@ -79,7 +79,7 @@ def _memory(store, content, entities):
 
 def test_a_saved_memory_gets_its_property_vector_once_its_mentions_are_attached(store):
     actions = store._apply_candidates(
-        [CandidateFact(content="bildy stores its data in SQLite", entities=["bildy"])],
+        [CandidateFact(content="zobly stores its data in SQLite", entities=["zobly"])],
         Scope(user_id="ada"), [])
     memory_id = actions[0].memory_id
     assert "it stores its data in SQLite" in store.embedder.texts
@@ -150,8 +150,8 @@ def test_a_new_home_the_judge_answers_masks_the_things_name_at_once(store, answe
 
 
 def test_a_vector_from_another_embedding_model_is_not_read_and_is_replaced(store):
-    bildy = _entity(store, "bildy")
-    memory = _memory(store, "bildy runs on Linux", [bildy])
+    zobly = _entity(store, "zobly")
+    memory = _memory(store, "zobly runs on Linux", [zobly])
     store.backend.set_property_vectors({memory.id: [0.0] * 32}, "old-model",
                                        {memory.id: _text_hash("it runs on Linux")})
     assert store.backend.property_vectors_of([memory.id], store._property_label()) == {}
@@ -160,8 +160,8 @@ def test_a_vector_from_another_embedding_model_is_not_read_and_is_replaced(store
 
 
 def test_deleting_a_memory_deletes_its_property_vector(store):
-    bildy = _entity(store, "bildy")
-    memory = _memory(store, "bildy runs on Linux", [bildy])
+    zobly = _entity(store, "zobly")
+    memory = _memory(store, "zobly runs on Linux", [zobly])
     store.refresh_property_vectors(user_id="ada")
     assert store.backend.property_vector_hashes([memory.id])
     store.backend.delete_memory(memory.id)
@@ -320,8 +320,8 @@ def test_a_name_that_is_also_a_common_word_reads_it_in_its_own_memories(store):
 
 
 def test_the_weekly_upkeep_refreshes_them(store):
-    bildy = _entity(store, "bildy")
-    _memory(store, "bildy runs on Linux", [bildy])
+    zobly = _entity(store, "zobly")
+    _memory(store, "zobly runs on Linux", [zobly])
     ran = store.run_upkeep_cycle(user_id="ada")
     assert ran.get("property_vectors") == {"embedded": 1}
 
@@ -330,8 +330,8 @@ def test_property_vectors_can_be_stored_short(store):
     """With ``property_dimensions`` a property vector keeps its first numbers,
     at length 1; a vector stored at another length is not read and is
     re-embedded."""
-    bildy = _entity(store, "bildy")
-    memory = _memory(store, "bildy runs on Linux", [bildy])
+    zobly = _entity(store, "zobly")
+    memory = _memory(store, "zobly runs on Linux", [zobly])
     store.refresh_property_vectors(user_id="ada")
     store.config.retrieval.property_dimensions = 8
     assert store.backend.property_vectors_of([memory.id], store._property_label()) == {}
@@ -343,10 +343,10 @@ def test_property_vectors_can_be_stored_short(store):
 
 class _NamesWeigh(HashEmbedder):
     """Word counts in which a name's words weigh ten times any other word:
-    the vector of "bildy v3 added offline mode" is mostly "bildy v3", as in
+    the vector of "zobly v3 added offline mode" is mostly "zobly v3", as in
     an embedder that follows names. "added" counts as "add"."""
 
-    NAMES = {"bildy", "v3"}
+    NAMES = {"zobly", "v3"}
 
     def __init__(self) -> None:
         super().__init__(997)
@@ -364,7 +364,7 @@ class _NamesWeigh(HashEmbedder):
 
 
 def test_property_vectors_keep_a_versions_answer_among_the_first_twenty():
-    """Why property vectors exist. "What did bildy v3 add?" is read "What did
+    """Why property vectors exist. "What did zobly v3 add?" is read "What did
     it add?"; its answer is v3's own memory. Compared by its ordinary vector,
     the answer is mostly its name and barely near the question (0.03 x 1.0),
     and 25 notes about adding things, linked to nothing, pass it
@@ -373,18 +373,18 @@ def test_property_vectors_keep_a_versions_answer_among_the_first_twenty():
     alone, and it comes first."""
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=_NamesWeigh())
     try:
-        bildy, v3 = _entity(store, "bildy"), _entity(store, "bildy v3")
-        answer = _memory(store, "bildy v3 added offline mode for travellers on long flights",
+        zobly, v3 = _entity(store, "zobly"), _entity(store, "zobly v3")
+        answer = _memory(store, "zobly v3 added offline mode for travellers on long flights",
                          [v3])
-        _memory(store, "bildy v3 was released in May", [v3])
-        _memory(store, "bildy runs on Linux", [bildy])
-        _memory(store, "bildy stores its data in SQLite", [bildy])
+        _memory(store, "zobly v3 was released in May", [v3])
+        _memory(store, "zobly runs on Linux", [zobly])
+        _memory(store, "zobly stores its data in SQLite", [zobly])
         for i in range(25):
             _memory(store, f"Remember to add note {i} to the list", [])
         store.backend.add_proposal(MergeProposal(
-            entity_a=v3.id, entity_b=bildy.id, user_id="ada", confidence=0.3,
+            entity_a=v3.id, entity_b=zobly.id, user_id="ada", confidence=0.3,
             belongs=NEITHER_BUT, compared_step=1))
-        question = "What did bildy v3 add?"
+        question = "What did zobly v3 add?"
         ordinary = [r.memory.id for r in store.search(question, user_id="ada", limit=20)]
         assert len(ordinary) == 20 and answer.id not in ordinary
         assert store.refresh_property_vectors(user_id="ada") == 4
@@ -400,7 +400,7 @@ def test_a_save_asks_no_text_model_for_its_property_vector():
     by a text model instead, the statement with its subject taken out, cost
     one call a memory on every save and left the design for it.) The save's
     text-model calls are the extraction and the coverage audit alone."""
-    llm = FakeLLM([facts_response(fact("bildy stores its data in SQLite", entities=["bildy"])),
+    llm = FakeLLM([facts_response(fact("zobly stores its data in SQLite", entities=["zobly"])),
                    json.dumps({"missing": []})])
     store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=_Recording())
     try:
@@ -414,7 +414,7 @@ def test_a_save_asks_no_text_model_for_its_property_vector():
             return embedded
 
         store.refresh_property_vectors = counted
-        store.add("bildy keeps everything in SQLite", user_id="ada")
+        store.add("zobly keeps everything in SQLite", user_id="ada")
         assert during == {"calls": 0, "texts": ["it stores its data in SQLite"]}
         assert len(llm.calls) == 2 and not llm.responses
     finally:
