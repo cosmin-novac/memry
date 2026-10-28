@@ -178,8 +178,7 @@ def _split_cli(monkeypatch, llm):
 def test_maintenance_commands_go_through_each_namespace_once(capsys, monkeypatch):
     """No user means every user's memories: the pass for the memories
     without one took in every namespace, and each named one was done again
-    after it (in production 1446 memories asked, then the 1440 of "default"
-    once more)."""
+    after it, so most memories were asked twice."""
     from memry.models import Memory
 
     llm = _SentenceSplitter()

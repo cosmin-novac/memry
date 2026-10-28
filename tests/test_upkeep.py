@@ -496,7 +496,7 @@ def test_the_scheduler_walks_the_namespaces_exactly(store, monkeypatch):
 
 def test_upkeep_waits_for_the_night_and_never_runs_at_start():
     """The scheduler sleeps until the next 02:05 UTC (MEMRY_UPKEEP_AT): a cycle
-    right after a deploy held requests up for 25 minutes on a live server."""
+    right after a deploy held requests up on a live server."""
     from datetime import datetime, timezone
     wait = seconds_until_upkeep("02:05")
     assert 0 < wait <= 86400

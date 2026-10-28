@@ -135,10 +135,10 @@ def test_the_owner_is_folded_into_the_person_it_is_found_to_be():
 
 
 def test_a_pair_is_kept_apart_only_from_10_memories():
-    """Keeping apart ends all comparing. With a few memories the owner read as
-    someone "Cosmin Novac" is not (P(different) 0.90-0.95 on a real store), and
-    "Fundation" as a different thing from "Fundation GmbH" (0.68-0.70); at 10
-    memories both read as one (P(same) 0.99 and 0.91-0.93)."""
+    """Keeping apart ends all comparing. With a few memories "the user" can
+    read as someone other than the entity of the owner's full name, and
+    "Veldmark" as a different thing from "Veldmark GmbH"; at 10 memories both
+    read as one."""
     from memry.intelligence.identity import compare
 
     store, save, _, judge = _store(lambda state: (0.02, 0.95))
@@ -195,12 +195,12 @@ def test_a_merge_starts_the_funnel_again_for_the_merged_entitys_open_pairs():
 def test_an_account_names_the_owner_of_its_namespace():
     accounts = AccountStore(":memory:")
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64))
-    admin_key = accounts.issue_key(accounts.create("cosmin").name)
+    admin_key = accounts.issue_key(accounts.create("morgan").name)
     member_key = accounts.issue_key(accounts.create("alice").name)
     client = TestClient(create_app(store, accounts=accounts))
     for key in (admin_key, member_key):
         client.get("/api/v1/memories", headers={"Authorization": f"Bearer {key}"})
-    assert store.owner_name("default") == "cosmin"
+    assert store.owner_name("default") == "morgan"
     assert store.owner_name("alice::default") == "alice"
     assert store.owner_name("nobody") == "the user"
     store.close()
@@ -235,10 +235,10 @@ def test_the_name_screen_leaves_the_owner_alone():
 
 def test_the_extractor_is_offered_the_stored_names_a_text_may_mean():
     store, save, llm, _ = _store()
-    for name in ("Fundation GmbH", "Amazon Web Services", "Raluca Novac"):
+    for name in ("Veldmark GmbH", "Amazon Web Services", "Hanna Lindgren"):
         _entity_with(store, name, [f"{name} is in the store"])
-    save("Fundation paid the AWS bill", "Fundation")
+    save("Veldmark paid the AWS bill", "Veldmark")
     prompt = _extraction_prompts(llm)[-1]
     offered = json.loads(prompt.split("does:\n")[1].split("\n\n")[0])
-    assert {e["name"] for e in offered} == {"Fundation GmbH", "Amazon Web Services"}
+    assert {e["name"] for e in offered} == {"Veldmark GmbH", "Amazon Web Services"}
     store.close()

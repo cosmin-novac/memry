@@ -350,18 +350,18 @@ def test_the_coverage_audit_runs_after_distillation(tmp_path):
     after distillation, one call compares the saved text with the facts, and
     a gap is reported and noted where the raw text went."""
     llm = FakeLLM([
-        facts_response(fact("The skill fills timesheets")),
+        facts_response(fact("The skill fills shift rotas")),
         _audit("must edit XML directly rather than openpyxl"),
     ])
     store = _store(str(tmp_path / "memry.db"), llm)
     raw = store.add_deferred(
-        "The skill fills timesheets and must edit XML directly rather than openpyxl.",
+        "The skill fills shift rotas and must edit XML directly rather than openpyxl.",
         user_id="u").actions[0].memory_id
 
     result = store.distill(raw)
 
     assert llm.calls[1][0] == COVERAGE_SYSTEM
-    assert "STORED FACTS:\n- The skill fills timesheets" in llm.calls[1][1]
+    assert "STORED FACTS:\n- The skill fills shift rotas" in llm.calls[1][1]
     assert result.warnings and "XML directly" in result.warnings[0]
     distilled = next(e for e in store.history(raw) if e.event == "SUPERSEDE")
     assert distilled.reason == ("distilled with its context into 1 fact(s); not captured "

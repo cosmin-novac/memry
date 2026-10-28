@@ -280,12 +280,12 @@ def test_the_tag_questions_answers_from_before_are_carried_to_their_pairs(verbat
     judge = _tag_judge(0.3)
     verbatim_store.decider = judge
     for tag, times in (("quality assurance", 5), ("qa", 1), ("tech", 3), ("technical", 3),
-                       ("cologne", 2), ("colonge", 1)):
+                       ("munich", 2), ("muncih", 1)):
         _tagged(verbatim_store, tag, times)
     verbatim_store._upkeep_set("tag_pairs", "ada", {"qa\nquality assurance": 1, "gone\nqa": 1})
     verbatim_store._upkeep_set("tag_split:ignored", "ada", [["tech", "technical"]])
     _weekly(verbatim_store)
-    assert len(judge.states) == 2 and all('"colonge"' in state for state in judge.states)
+    assert len(judge.states) == 2 and all('"muncih"' in state for state in judge.states)
 
     def named(proposal):
         return tuple(sorted(verbatim_store.backend.get_entity(e).name
@@ -295,7 +295,7 @@ def test_the_tag_questions_answers_from_before_are_carried_to_their_pairs(verbat
              for p in verbatim_store.backend.list_proposals(Scope(user_id="ada"), status=None)}
     assert pairs == {("qa", "quality assurance"): ("proposed", 1),
                      ("tech", "technical"): ("rejected", 0),
-                     ("cologne", "colonge"): ("proposed", 1)}
+                     ("muncih", "munich"): ("proposed", 1)}
     assert verbatim_store._upkeep_get("tag_pairs", "ada", None) is None
     assert verbatim_store._upkeep_get("tag_split:ignored", "ada", None) is None
     _weekly(verbatim_store)

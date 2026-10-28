@@ -73,14 +73,14 @@ class _SenseEmbedder(Embedder):
       and "Windows", "think" and "loved").
     - "it" and "its" count as the word they are: a text emptied of its names
       ("it met it at the gym") is near another emptied text ("What did it
-      think of it?"). Measured with OpenAI vectors, masked "it works on it."
-      and "it liked the food at it." outranked the answer to "What does Raj
-      Osei like?" (registry R-113), and "Did it like it?" put every liked
-      restaurant above the one asked about (R-35).
+      think of it?"). With real vectors, masked "it works on it." and "it
+      liked the food at it." can outrank the answer to "What does Raj Osei
+      like?", and "Did it like it?" puts every liked restaurant above the one
+      asked about.
     - A name's words weigh ``name_weight`` times a word: an embedder follows
       names.
-    - A number is a number: the vectors cannot tell 2024-117 from 2024-118
-      (registry R-21), only the keyword search can.
+    - A number is a number: the vectors cannot tell 2024-117 from 2024-118,
+      only the keyword search can.
     - Every other word lands in one of ``FILLER`` dimensions, so a longer text
       is less near a short question, as with real vectors.
     """
@@ -253,7 +253,7 @@ def _through_the_judged_pool(store, query, *, limit=5, **filters):
     return plan, results, store._search_linked(query, reads.scope, results, False, plan=plan)
 
 
-# ================================================================== R-35
+# ================================================= several hubs named
 # "Did Ilva Marsh like Olive Kitchen?" must not be read "Did it like it?".
 # With several hubs named, the question the order and the judge read keeps
 # their names (``MemoryStore._plan``), and the linked order compares it with
@@ -326,7 +326,7 @@ def _several_things_are_answered(store, answer):
 
 
 def test_gap_a_question_naming_several_things_keeps_their_names_in_the_linked_order(stores):
-    """R-35 / S16-S18 at the linked order. "What did Ilva Marsh think of
+    """At the linked order. "What did Ilva Marsh think of
     Olive Kitchen?" names two hubs. Masked over both it reads "What did it
     think of it?": nearer that are her 12 opinions of other restaurants
     ("it loved the curry at it") and her 40 meetings ("it met it at the
@@ -348,12 +348,12 @@ def test_a_question_naming_several_things_is_ordered_as_written(stores):
     assert answer.id in _ids(ranked)[:store.config.decision.rerank_pool]
 
 
-# ================================================================== R-21
+# ========================================== an identifier only words match
 # An identifier only the keyword search matches ("invoice 2024-117") keeps a
 # place among the 20 the judge reads, on every search, judged or not
 # (``MemoryStore._with_the_keyword_place``). a06db33 built it into the linked
 # search only, so at ce2b49f it held for a question naming a hub and not for
-# the registry's scenario, which names none ("invoice 2024-117 untagged"):
+# a question that names none ("invoice 2024-117 untagged"):
 # judged on the text ranking as it stood, by ``_judge_ranking`` or ``_rerank``.
 INVOICE_QUESTION = "Did we pay invoice 2024-117?"
 
@@ -394,7 +394,7 @@ def _the_identifier_is_answered(store, answer, route):
 @pytest.mark.parametrize("route", ["judge", "rerank"])
 def test_gap_an_identifier_only_the_words_match_reaches_the_judge_on_the_text_route(
         stores, route):
-    """R-21 for a question naming no hub. 65 memories about paying invoices
+    """For a question naming no hub. 65 memories about paying invoices
     and bills are nearer "Did we pay invoice 2024-117?" by vector, and the
     invoices match two of its words; the answer matches three (the
     identifier), by keyword alone, and is two months older. The fused ranking
@@ -420,78 +420,78 @@ def test_the_best_keyword_match_keeps_a_place_in_the_judged_pool(stores, judged)
     assert _ids(ranked).index(answer.id) == store.config.decision.rerank_pool - 1
 
 
-# ================================================================== R-12
+# ============================================= only a hub seeds the search
 # Only a hub starts the linked search: a stray phrase stored as an entity does
 # not decide what a search is about (``MemoryStore._is_hub``). The hubs are
 # kept first and the longest-name rule runs among them (``_seeds``,
 # ``graph_retrieval.longest_names``). At ce2b49f the longest-name rule ran
 # first (``detect_query_entities(longest=True)``): a stray entity whose name
-# holds a hub's ("bildy sync", one memory, no type) hid the hub, and a question
-# about bildy was searched as naming nothing. The test of 063cb97 used
+# holds a hub's ("zobly sync", one memory, no type) hid the hub, and a question
+# about zobly was searched as naming nothing. The test of 063cb97 used
 # "budget", which holds no hub's name, in a store of 3 memories.
-SYNC_QUESTION = "Does bildy sync work offline?"
-SYNC_ANSWER = "bildy keeps working without a network since v3"
+SYNC_QUESTION = "Does zobly sync work offline?"
+SYNC_ANSWER = "zobly keeps working without a network since v3"
 APPS = ["Kaven planner", "Luma notes", "Orbit mail", "Tessel tasks", "Quill docs",
         "Brio calendar", "Nimbo drive", "Sable chat", "Vanta boards", "Pico wiki",
         "Rook sheets", "Dune photos", "Fable reader", "Mosaic crm", "Umber todo"]
 
 
 def _a_stray_name_holds_a_hub(stores):
-    """bildy, a product with 20 memories and the answer, and a stray entity
-    "bildy sync" that extraction took from one of them; 60 notes on whether
+    """zobly, a product with 20 memories and the answer, and a stray entity
+    "zobly sync" that extraction took from one of them; 60 notes on whether
     other apps sync offline, which match the question's words better and
     name nothing the store knows: 81 memories."""
-    store = stores(_SenseEmbedder(names=["bildy"]))
-    bildy = _entity(store, "bildy", "product")
-    stray = _entity(store, "bildy sync")
-    answer = _remember(store, SYNC_ANSWER, [bildy], days_ago=30)
-    _remember(store, "bildy sync keeps failing on Mondays", [bildy, stray])
+    store = stores(_SenseEmbedder(names=["zobly"]))
+    zobly = _entity(store, "zobly", "product")
+    stray = _entity(store, "zobly sync")
+    answer = _remember(store, SYNC_ANSWER, [zobly], days_ago=30)
+    _remember(store, "zobly sync keeps failing on Mondays", [zobly, stray])
     for day in ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
-        _remember(store, f"bildy crashed on {day} after the update", [bildy])
+        _remember(store, f"zobly crashed on {day} after the update", [zobly])
     for fact in ["is written in Go", "stores its data in SQLite", "is led by Mara Ruiz",
                  "is released under the MIT license", "has a dark theme",
                  "exports notes as Markdown", "ships every two weeks",
                  "has 4,000 users", "started in 2021", "has a public roadmap",
                  "charges 5 euros a month", "runs a Discord server", "has a web clipper"]:
-        _remember(store, f"bildy {fact}", [bildy])
+        _remember(store, f"zobly {fact}", [zobly])
     for app in APPS:
         for tail in ["sync works offline", "sync does not work offline on the train",
                      "sync works offline since the update", "sync needs work offline"]:
             _remember(store, f"The {app} {tail}")
-    assert store._is_hub(bildy.id) and not store._is_hub(stray.id)
-    return store, bildy, answer
+    assert store._is_hub(zobly.id) and not store._is_hub(stray.id)
+    return store, zobly, answer
 
 
-def _the_hub_is_searched(store, bildy, answer):
+def _the_hub_is_searched(store, zobly, answer):
     scope = Scope(user_id=USER)
-    assert bildy.id in detect_query_entities(store.backend, scope, SYNC_QUESTION)
+    assert zobly.id in detect_query_entities(store.backend, scope, SYNC_QUESTION)
     assert answer.id not in _text(store, SYNC_QUESTION)[:20]  # the words alone do not find it
     store.decider = judge = _Judge(scores={"without a network": 0.9}, rest=0.05)
     results = store.search(SYNC_QUESTION, user_id=USER, limit=5)
-    assert "about" in results[0].signals, "the linked search did not start at bildy"
-    assert answer.content.replace("bildy", "it") in judge.read
+    assert "about" in results[0].signals, "the linked search did not start at zobly"
+    assert answer.content.replace("zobly", "it") in judge.read
     assert results[0].memory.id == answer.id
 
 
 def test_gap_a_stray_name_holding_a_hubs_name_does_not_hide_the_hub(stores):
-    """R-12 at the seeds. "Does bildy sync work offline?" names bildy, a hub,
-    and "bildy sync", a stray entity of one memory. At ce2b49f the longer
-    stray name dropped bildy, and then the stray was dropped as no hub: the
+    """At the seeds. "Does zobly sync work offline?" names zobly, a hub,
+    and "zobly sync", a stray entity of one memory. At ce2b49f the longer
+    stray name dropped zobly, and then the stray was dropped as no hub: the
     question named nothing, the text ranking was judged, and the answer,
-    which shares only "bildy" with the question, was not among its first
+    which shares only "zobly" with the question, was not among its first
     20."""
-    store, bildy, answer = _a_stray_name_holds_a_hub(stores)
-    _the_hub_is_searched(store, bildy, answer)
+    store, zobly, answer = _a_stray_name_holds_a_hub(stores)
+    _the_hub_is_searched(store, zobly, answer)
 
 
 def test_the_seeds_are_the_longest_names_among_the_hubs(stores):
-    """Stage 1: of the names the question holds, the hub bildy and the stray
-    "bildy sync", the hubs are kept first and the longest name is chosen
-    among them, so bildy seeds the search. The longest over every name found
+    """Stage 1: of the names the question holds, the hub zobly and the stray
+    "zobly sync", the hubs are kept first and the longest name is chosen
+    among them, so zobly seeds the search. The longest over every name found
     is the stray's, which is no hub."""
-    store, bildy, _ = _a_stray_name_holds_a_hub(stores)
+    store, zobly, _ = _a_stray_name_holds_a_hub(stores)
     scope = Scope(user_id=USER)
-    assert store._seeds(SYNC_QUESTION, scope) == ([bildy.id], False)
+    assert store._seeds(SYNC_QUESTION, scope) == ([zobly.id], False)
     longest = detect_query_entities(store.backend, scope, SYNC_QUESTION, longest=True)
     assert longest and not any(store._is_hub(e) for e in longest)
 
@@ -502,8 +502,7 @@ def test_the_seeds_are_the_longest_names_among_the_hubs(stores):
 # judged. At ce2b49f they were applied after the linked search, which had
 # already judged its first 20: the judge read memories the date window then
 # dropped, and none of those the search returned. The re-rank of the other
-# route ran after the filter. No registry row covers it; it is the route
-# difference the audit found.
+# route ran after the filter. It is the route difference the audit found.
 PARK_QUESTION = "Where did Harlow park the car?"
 PARK_ANSWER = "Harlow left the car at the Nordpark lot on Tuesday"
 STREETS = ["Linden", "Birch", "Mill", "Canal", "Market", "Church", "Station", "Bridge",
@@ -573,9 +572,9 @@ def test_every_candidate_is_inside_the_date_window_before_it_is_ordered(stores):
 # ``categories`` and ``entity_id`` turned the linked search off and fetched
 # only ``limit`` candidates: the judge (``_rerank``) read ``limit`` memories,
 # and there was no second call and no member past the limit (only
-# ``_judge_ranking`` marked members). R-26 and R-39 say one call reads 20 "on
-# every search, linked or not"; R-82 and R-97 that a set question returns
-# every member. Both held only unfiltered.
+# ``_judge_ranking`` marked members). One call reads 20 "on every search,
+# linked or not", and a set question returns every member: both held only
+# unfiltered.
 GROCERY_QUESTION = "How much did I spend on groceries?"
 SHOPS = ["Lidl", "Aldi", "Rewe", "Edeka", "Penny", "Netto", "Kaufland", "Spar"]
 
@@ -623,7 +622,7 @@ def test_a_set_question_returns_every_member_unfiltered(stores):
 # mention was written first (``max`` over ``entities_of_memories``, ``ORDER BY
 # em.created_at, em.id``): two entities reached as strongly (two projects a
 # person works on, each at ``LINKED_RELATION``) were told apart by write
-# order. 3623c71 broke every ranked read's tie by id (R-121); its test writes
+# order. 3623c71 broke every ranked read's tie by id; its test writes
 # mentions with fixed ids at one time, so this one never differs there.
 def _two_projects(stores, *, helios_first):
     store = stores(_SenseEmbedder(names=["Ada", "Helios", "Orion"]))
@@ -677,8 +676,8 @@ def test_the_entity_read_as_it_is_the_one_reached_most_strongly_a_tie_by_id(stor
 
 
 # ============================================ rules that hold, tested where they decide
-# R-78 / OF1. "Where do I live?" names nobody; the owner seeds the linked
-# search (``MemoryStore._seeds``). Its test (TG
+# "Where do I live?" names nobody; the owner seeds the linked
+# search (``MemoryStore._seeds``). Its test (test_graph_retrieval.py
 # ``test_a_question_in_the_first_person_is_about_the_owner``) reads the
 # "about" signal in a store of 13 memories. Here the owner's answer is not
 # in the first 20 of the text ranking, which 30 friends' homes fill.
@@ -735,10 +734,11 @@ def test_a_first_person_question_starts_at_the_owner_at_scale_fails_without_the_
     assert answer.id not in _ids(results)
 
 
-# R-1 / R-58 / R-73 / R-10. The multi-hop answer ("Helios uses Postgres in
+# The multi-hop answer ("Helios uses Postgres in
 # production" for "What tools does Ada use for her work?") reaches the
 # linked search only as one of the ``FAMILY_TOP`` of Helios's memories that
-# best state the property asked (``MemoryStore._linked_order``). Its tests (TG
+# best state the property asked (``MemoryStore._linked_order``). Its tests
+# (test_graph_retrieval.py
 # ``test_multi_hop_answer_is_recovered``, ``test_multi_hop_works_at_the_
 # default_depth``) use 53 memories, all inside the text ranking's 80, so the
 # family pick never decided there.
@@ -798,7 +798,7 @@ def test_a_projects_answer_joins_the_pool_by_what_it_says_at_scale_fails_without
     assert answer.id not in _ids(results)
 
 
-# ================================================================== R-128
+# ========================================= a word of one name seeds a search
 # A question names an entity by one word of a longer name: "Arvel" for the
 # place stored as "Mount Arvel". The word seeds the search when it is a word
 # of that entity's names alone and the store uses it for that entity more
@@ -817,7 +817,7 @@ def _a_place_named_by_a_word(stores):
     one other memory. One memory matches more of the question's words than
     the answer does ("When Harlow has nothing to do, Harlow does yoga at
     home"), and the store holds no turns that would weigh those words down
-    (R-129): it takes the keyword place. 30 notes name nobody: 73 memories.
+    (below): it takes the keyword place. 30 notes name nobody: 73 memories.
     A name's words weigh twice a word in the vectors: an embedder follows a
     rare name."""
     store = stores(_SenseEmbedder(names=["Harlow", "Mount Arvel"], name_weight=2.0))
@@ -842,7 +842,7 @@ def _yoga_on_arvel(store, answer):
 
 
 def test_a_word_of_one_name_seeds_the_search_at_scale(stores):
-    """R-128. "Arvel" is a word of Mount Arvel's name alone, and both memories
+    """Here "Arvel" is a word of Mount Arvel's name alone, and both memories
     that say it are Mount Arvel's: it seeds the search beside Harlow. Naming
     two hubs, the question is read as written, the answer meets it on both
     names, and judged, it comes first. It failed at fe094fc."""
@@ -913,18 +913,18 @@ def test_a_word_one_name_holds_that_the_store_says_of_other_things_seeds_nothing
     assert store._seeds("When did Harlow do yoga in the studio?", scope) == ([harlow.id], False)
 
 
-# ================================================================== R-129
+# ========================================= words weighed by what was said
 # The keyword search weighs each word of the question by how rare it is in
 # everything the store holds: its memories and the turns they were said in
 # (``LocalBackend.keyword_search``). At fe094fc it weighed a word by the
 # memories alone. In a store of third-person facts "did" and "we" are rare
 # there and common in what was said, and the one keyword match a search keeps
-# in its judged pool (R-21) went to a memory that shares only those words.
+# in its judged pool went to a memory that shares only those words.
 PAID_QUESTION = "Did we pay invoice 2024-117?"
 
 
 def _invoices_and_turns(stores, *, turns=True):
-    """R-21's 66 invoices and bills (``_invoices``), and one memory more that
+    """The 66 invoices and bills of ``_invoices``, and one memory more that
     says "we did": "We did the quarterly tax filing with the accountant".
     With ``turns``, each memory rests on the turn it was said in, in the
     first person ("Did we pay invoice 2024-201? We did, by card."): 67
@@ -961,7 +961,7 @@ def _paid(store, answer):
 
 
 def test_the_keyword_place_weighs_words_by_what_was_said_at_scale(stores):
-    """R-129. "did" and "we" are in one memory and in most turns; the
+    """Here "did" and "we" are in one memory and in most turns; the
     identifier is in one memory and one turn. Weighed over both, the answer
     is the keyword search's best match, keeps its place among the 20 judged,
     and comes first. It failed at fe094fc."""
@@ -1053,26 +1053,27 @@ def _links_weigh_nothing(monkeypatch, store):
 # ``relational_sharpness``, times aboutness (``_linked_order``). At 1.0 a
 # version's own answer comes before its thing's where it states the property
 # at least 0.72 as well as the thing's does (UP_KIND x 0.9); at 2.0 or 3.0
-# the worded overrides of the benchmark fell to 0.06 and 0.00.
-OVERRIDE = "With its third release, bildy moved its data to CouchDB"
+# the worded overrides of the benchmark were measured to fall to almost
+# nothing.
+OVERRIDE = "With its third release, zobly moved its data to CouchDB"
 
 
 def _a_worded_override(stores):
-    """bildy, a product with 25 memories, "bildy stores its data in SQLite"
+    """zobly, a product with 25 memories, "zobly stores its data in SQLite"
     among them; its versions v1 to v3, 11 memories each, and v3's worded
     override; 30 notes: 89 memories, searched by vectors alone."""
-    store = stores(_ReleaseEmbedder(names=["bildy", "bildy v1", "bildy v2", "bildy v3"]))
-    bildy = _entity(store, "bildy", "product")
-    thing = _remember(store, "bildy stores its data in SQLite", [bildy])
+    store = stores(_ReleaseEmbedder(names=["zobly", "zobly v1", "zobly v2", "zobly v3"]))
+    zobly = _entity(store, "zobly", "product")
+    thing = _remember(store, "zobly stores its data in SQLite", [zobly])
     for i in range(24):
-        _remember(store, f"bildy had its sprint review number {i} on {STREETS[i % 20]} day",
-                  [bildy])
+        _remember(store, f"zobly had its sprint review number {i} on {STREETS[i % 20]} day",
+                  [zobly])
     versions = {}
     for n in (1, 2, 3):
-        version = versions[n] = _entity(store, f"bildy v{n}", "product")
-        _belongs(store, version, bildy)
+        version = versions[n] = _entity(store, f"zobly v{n}", "product")
+        _belongs(store, version, zobly)
         for i in range(11):
-            _remember(store, f"bildy v{n} fixed bug number {100 * n + i}", [version])
+            _remember(store, f"zobly v{n} fixed bug number {100 * n + i}", [version])
     answer = _remember(store, OVERRIDE, [versions[3]])
     for i in range(30):
         _remember(store, f"Note {i}: renew the parking permit before the month ends")
@@ -1082,14 +1083,14 @@ def _a_worded_override(stores):
 
 
 def test_a_versions_worded_override_comes_first_at_the_default_sharpness(stores):
-    """"Where does bildy v3 store its data?" reads "Where does it
+    """"Where does zobly v3 store its data?" reads "Where does it
     store its data?". v3's own answer ("With its third release, it moved
-    its data to CouchDB") states it at 0.8 of bildy's ("it stores its data
+    its data to CouchDB") states it at 0.8 of zobly's ("it stores its data
     in SQLite"), whose memories count 0.72: at the default sharpness of 1.0
     v3's answer comes first."""
     assert Config().retrieval.relational_sharpness == 1.0
     store, answer, thing = _a_worded_override(stores)
-    results = store.search("Where does bildy v3 store its data?", user_id=USER, limit=5)
+    results = store.search("Where does zobly v3 store its data?", user_id=USER, limit=5)
     assert "about" in results[0].signals
     assert _ids(results)[:2] == [answer.id, thing.id]
 
@@ -1097,15 +1098,15 @@ def test_a_versions_worded_override_comes_first_at_the_default_sharpness(stores)
 def test_a_versions_worded_override_comes_first_at_the_default_sharpness_fails_without_the_rule(
         stores):
     """At a sharpness of 2.0 the similarities are squared, 0.8 becomes 0.64,
-    under 0.72, and bildy's default comes before v3's own answer."""
+    under 0.72, and zobly's default comes before v3's own answer."""
     store, answer, thing = _a_worded_override(stores)
     store.config.retrieval.relational_sharpness = 2.0
-    results = store.search("Where does bildy v3 store its data?", user_id=USER, limit=5)
+    results = store.search("Where does zobly v3 store its data?", user_id=USER, limit=5)
     assert _ids(results)[:2] == [thing.id, answer.id]
 
 
 # ------------------------------------------------------ versions in words
-# Worded versions: "The first release of bildy added ..." says no "v1", so
+# Worded versions: "The first release of zobly added ..." says no "v1", so
 # the text cannot tell the releases apart; the entity each memory is tagged
 # with does (aboutness: the version asked 1.0, another release, which the
 # links do not reach, ``LOW``).
@@ -1116,33 +1117,33 @@ FEATURES = ["a timeline view", "dark mode", "CSV export", "two-factor login", "a
             "a kanban board", "spell check", "read receipts", "a dark icon"]
 ORDINALS = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
             "ninth"]
-FIRST_RELEASE = ("The first release of bildy added a timeline view, which the team had "
+FIRST_RELEASE = ("The first release of zobly added a timeline view, which the team had "
                  "promised for a year")
 
 
 def _worded_releases(stores):
-    """bildy (20 memories) and nine releases, each a version of bildy, each
+    """zobly (20 memories) and nine releases, each a version of zobly, each
     tagged on its own memories. The first release: the answer, worded as
     people write it, and five more. The other eight: three features each,
-    "The second release of bildy added dark mode", shorter than the
+    "The second release of zobly added dark mode", shorter than the
     answer. 30 notes: 80 memories."""
-    names = ["bildy", *[f"bildy v{n}" for n in range(1, 10)]]
+    names = ["zobly", *[f"zobly v{n}" for n in range(1, 10)]]
     store = stores(_ReleaseEmbedder(names=names))
-    bildy = _entity(store, "bildy", "product")
+    zobly = _entity(store, "zobly", "product")
     for i in range(20):
-        _remember(store, f"bildy had its sprint review number {i} on {STREETS[i % 20]} day",
-                  [bildy])
+        _remember(store, f"zobly had its sprint review number {i} on {STREETS[i % 20]} day",
+                  [zobly])
     releases = {}
     for n in range(1, 10):
-        releases[n] = _entity(store, f"bildy v{n}", "product")
-        _belongs(store, releases[n], bildy)
+        releases[n] = _entity(store, f"zobly v{n}", "product")
+        _belongs(store, releases[n], zobly)
     answer = _remember(store, FIRST_RELEASE, [releases[1]], days_ago=400)
     for i in range(5):
-        _remember(store, f"The first release of bildy fixed bug number {i}", [releases[1]],
+        _remember(store, f"The first release of zobly fixed bug number {i}", [releases[1]],
                   days_ago=400)
     for n in range(2, 10):
         for k in range(3):
-            _remember(store, f"The {ORDINALS[n - 1]} release of bildy added "
+            _remember(store, f"The {ORDINALS[n - 1]} release of zobly added "
                              f"{FEATURES[(3 * n + k) % len(FEATURES)]}", [releases[n]],
                       days_ago=10 - n)
     for i in range(30):
@@ -1153,21 +1154,21 @@ def _worded_releases(stores):
 
 def _what_v1_added(store):
     store.decider = judge = _Judge(scores={"added": 0.9}, rest=0.05)
-    return judge, store.search("What did bildy v1 add?", user_id=USER, limit=5)
+    return judge, store.search("What did zobly v1 add?", user_id=USER, limit=5)
 
 
 def test_only_the_entity_tells_worded_releases_apart_at_scale(stores):
-    """"What did bildy v1 add?" reads "What did it add?". The answer says
-    no "v1" ("The first release of bildy added a timeline view, ..."), and
+    """"What did zobly v1 add?" reads "What did it add?". The answer says
+    no "v1" ("The first release of zobly added a timeline view, ..."), and
     the 24 features of the eight other releases say as much ("The second
-    release of bildy added dark mode"). What tells them apart is the entity
-    each is tagged with: bildy v1, the one asked (1.0, its names and
-    bildy's read "it"), or a release the links do not reach (0.3, read as
+    release of zobly added dark mode"). What tells them apart is the entity
+    each is tagged with: zobly v1, the one asked (1.0, its names and
+    zobly's read "it"), or a release the links do not reach (0.3, read as
     written). Judged alike, the answer comes first."""
     store, answer = _worded_releases(stores)
     judge, results = _what_v1_added(store)
     assert judge.states == ["QUESTION: What did it add?"]
-    assert answer.content.replace("bildy", "it") in judge.read
+    assert answer.content.replace("zobly", "it") in judge.read
     assert results[0].memory.id == answer.id and results[0].signals["about"] == 1.0
 
 
@@ -1181,7 +1182,7 @@ def test_only_the_entity_tells_worded_releases_apart_at_scale_fails_without_the_
     store, answer = _worded_releases(stores)
     _links_weigh_nothing(monkeypatch, store)
     judge, results = _what_v1_added(store)
-    assert answer.content.replace("bildy", "it") not in judge.read
+    assert answer.content.replace("zobly", "it") not in judge.read
     assert answer.id not in _ids(results)
 
 
@@ -1312,7 +1313,7 @@ NINE_PARTS = ("opening", "party", "workshop day", "gala", "hackathon", "closing"
 @pytest.mark.parametrize("p", WEAK)
 def test_an_occurrence_linked_weakly_takes_its_series_fact_over_a_siblings_own_at_scale(
         stores, p):
-    """R-52's store with each edition linked to the forum at ``p``. The
+    """A store with each edition linked to the forum at ``p``. The
     judge reads the series' city and scores it and the other editions'
     "took place" alike (0.9). The city yields to 2024's own memories, none
     of which answers (0.03 off), and what the override leaves is floored
@@ -1380,37 +1381,37 @@ def test_a_weakly_linked_series_answer_joins_the_pool_fails_without_the_rule(
 
 
 # ------------------------------------------- a thing's answer and a version
-# The dense world's "Which platforms does bildy v2 run on?": the answer is
-# bildy's (0.72 for v2), and v2's own memories (1.0), none of which answers,
+# The dense world's "Which platforms does zobly v2 run on?": the answer is
+# zobly's (0.72 for v2), and v2's own memories (1.0), none of which answers,
 # compete. The judge reads the first 20 of the linked order and orders them
 # by its judgement times aboutness: 0.9 x 0.72 for the answer against 0.05 x
 # 1.0 for each of v2's own. By vectors alone v2's own near miss comes first.
-PLATFORMS = "bildy runs on Linux and macOS"
-NEAR_MISS = "bildy v2 runs its Windows installer silently"
+PLATFORMS = "zobly runs on Linux and macOS"
+NEAR_MISS = "zobly v2 runs its Windows installer silently"
 
 
 def _a_version_among_its_own(stores):
-    """bildy (40 memories: the answer, two near misses of the dense world,
+    """zobly (40 memories: the answer, two near misses of the dense world,
     37 more) and its versions v1 to v3, each with 40 memories of its own;
     v2's hold a near miss that says "runs" and "Windows". 30 notes: 190
     memories."""
-    store = stores(_ReleaseEmbedder(names=["bildy", "bildy v1", "bildy v2", "bildy v3"]))
-    bildy = _entity(store, "bildy", "product")
-    answer = _remember(store, PLATFORMS, [bildy], days_ago=300)
-    _remember(store, "the bildy sync backend is deployed on Fly.io", [bildy])
-    _remember(store, "bildy's CI builds run on Ubuntu runners", [bildy])
+    store = stores(_ReleaseEmbedder(names=["zobly", "zobly v1", "zobly v2", "zobly v3"]))
+    zobly = _entity(store, "zobly", "product")
+    answer = _remember(store, PLATFORMS, [zobly], days_ago=300)
+    _remember(store, "the zobly sync backend is deployed on Fly.io", [zobly])
+    _remember(store, "zobly's CI builds run on Ubuntu runners", [zobly])
     for i in range(37):
-        _remember(store, f"bildy had its sprint review number {i} on {STREETS[i % 20]} day",
-                  [bildy])
+        _remember(store, f"zobly had its sprint review number {i} on {STREETS[i % 20]} day",
+                  [zobly])
     near = None
     for n in (1, 2, 3):
-        version = _entity(store, f"bildy v{n}", "product")
-        _belongs(store, version, bildy)
+        version = _entity(store, f"zobly v{n}", "product")
+        _belongs(store, version, zobly)
         if n == 2:
             near = _remember(store, NEAR_MISS, [version])
         while store.backend.count_entity_memories(version.id) < 40:
             k = store.backend.count_entity_memories(version.id)
-            _remember(store, f"bildy v{n} fixed bug number {100 * n + k}", [version])
+            _remember(store, f"zobly v{n} fixed bug number {100 * n + k}", [version])
     for i in range(30):
         _remember(store, f"Note {i}: renew the parking permit before the month ends")
     store.refresh_property_vectors(user_id=USER)
@@ -1419,12 +1420,12 @@ def _a_version_among_its_own(stores):
 
 def _which_platforms(store):
     store.decider = judge = _Judge(scores={"Linux and macOS": 0.9}, rest=0.05)
-    return judge, store.search("Which platforms does bildy v2 run on?", user_id=USER, limit=5)
+    return judge, store.search("Which platforms does zobly v2 run on?", user_id=USER, limit=5)
 
 
 def test_a_things_answer_comes_before_the_versions_own_at_scale(stores):
-    """"Which platforms does bildy v2 run on?" Of 190 memories, the judge
-    reads 20, bildy's answer among them ("it runs on Linux and macOS"), and
+    """"Which platforms does zobly v2 run on?" Of 190 memories, the judge
+    reads 20, zobly's answer among them ("it runs on Linux and macOS"), and
     it comes first past v2's 40 of its own."""
     store, answer, _ = _a_version_among_its_own(stores)
     judge, results = _which_platforms(store)
@@ -1437,7 +1438,7 @@ def test_a_things_answer_comes_before_the_versions_own_at_scale_fails_without_th
         stores):
     """Without the judge picking from the first 20 (relevance by vectors
     alone), v2's own near miss ("it runs its Windows installer silently",
-    1.0) comes before bildy's answer (0.72)."""
+    1.0) comes before zobly's answer (0.72)."""
     store, answer, near = _a_version_among_its_own(stores)
     store.config.retrieval.relational_relevance = "vector"
     _, results = _which_platforms(store)

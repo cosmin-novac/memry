@@ -1,8 +1,8 @@
 """Relational retrieval: reach the memories that similarity cannot.
 
-Experiments (see evals) showed pure hybrid retrieval scores a flat zero on
-multi-hop questions - "what tool does Ada use?" is answered by a memory that
-names neither "Ada" nor "tool", so no embedder can find it. Following the links
+Pure hybrid retrieval cannot answer multi-hop questions - "what tool does Ada
+use?" is answered by a memory that names neither "Ada" nor "tool", so no
+embedder can find it (``evals/retrieval_benchmark.py``). Following the links
 from the query's entities does find it: the "linked" search
 (``store._search_linked``) walks them directed and weighted
 (``activation_paths``), takes the memories of the entities they reach as
@@ -60,8 +60,8 @@ def detect_query_entities(
     The phrases and the words are looked up by indexes, whatever the number
     of stored entities.
     Longest phrases are tried first so multi-word names remain precise.
-    ``longest`` keeps only the longest names found: "bildy v4" and not also
-    "bildy", which it contains. A search that starts at "bildy" reaches every
+    ``longest`` keeps only the longest names found: "zobly v4" and not also
+    "zobly", which it contains. A search that starts at "zobly" reaches every
     version below it, so a question about v4 would take v3's memories too.
     """
     # a dot inside a word stays: "VW ID.3", "Node.js"; a full stop does not
@@ -136,9 +136,9 @@ def named_by_a_word(
 
 
 def longest_names(backend: MemoryBackend, entity_ids: list[str]) -> list[str]:
-    """Of these entities, those whose name no other one's holds: "bildy v4"
-    and not also "bildy". Search chooses among the hubs a question names
-    (``MemoryStore._seeds``), so a stray name holding a hub's ("bildy sync")
+    """Of these entities, those whose name no other one's holds: "zobly v4"
+    and not also "zobly". Search chooses among the hubs a question names
+    (``MemoryStore._seeds``), so a stray name holding a hub's ("zobly sync")
     does not hide the hub."""
     names: dict[str, str] = {}
     for entity_id in entity_ids:
@@ -156,10 +156,10 @@ def longest_names(backend: MemoryBackend, entity_ids: list[str]) -> list[str]:
 # Loftus 1975): along each link by how much of the linked entity holds for
 # this one. What holds depends on the kind and the direction of the link:
 #
-# * a version's thing: what is true of "bildy" is true of "bildy v4" unless a
-#   memory says otherwise, so a question about v4 takes bildy's memories;
+# * a version's thing: what is true of "zobly" is true of "zobly v4" unless a
+#   memory says otherwise, so a question about v4 takes zobly's memories;
 # * a thing's versions and parts: their memories are about the thing, so a
-#   question about bildy takes them too;
+#   question about zobly takes them too;
 # * a part's whole: context only, since what is true of a company is not true
 #   of its dye lab;
 # * up to a thing and down again reaches a sibling: v3's memories answer
@@ -309,7 +309,7 @@ def activation_paths(
 # 2024 take place?" was closest to "Tovel Forum 2024 had 420 attendees" only
 # because both say "Tovel Forum 2024". With names replaced by "it", "Where did
 # it take place?" is closest to "It takes place in Lisbon", the forum's memory,
-# which the 2024 edition inherits. See the PhD notes, relative-retrieval.
+# which the 2024 edition inherits.
 
 #: Every entity the links reach (``activation_paths`` follows none under
 #: ``FLOOR``) has its memories that best state the property asked searched as
@@ -320,25 +320,23 @@ def activation_paths(
 FAMILY_TOP = 10
 FAMILY_SCAN = 500
 #: A memory that names only entities the links do not reach is about something
-#: else (``LOW``), and so, as measured, is one that names none: at 0.5, notes
-#: naming nothing outranked a product's own parts on "What do I know about
-#: it?" (roll-up recall 0.78 against 1.00). A memory about the entity a query
-#: names names it.
+#: else (``LOW``), and so, as measured, is one that names none: weighed higher,
+#: notes naming nothing outranked a product's own parts on "What do I know about
+#: it?". A memory about the entity a query names names it.
 NO_ENTITY = LOW
 
 _POSSESSIVE = "(?:'s|\u2019s)?"
 
 
 #: Judging (``store._judge_ranking``). A question whose answer is one memory
-#: is answered from the first call: reading on while nothing scored 0.5 (Jev:
-#: answers 0.54 to 0.86, non-answers 0.02 to 0.13) found nothing 5 of 5 times
-#: it ran. One that needs several (SET_BAR on its "needs several memories"
-#: answer: sets 0.73 to 0.90, one-answer 0.09 to 0.47) has one more call, on
-#: the memories filed under the topics the first ones share
+#: is answered from the first call: reading on when nothing scored 0.5 found
+#: nothing more. One that needs several (SET_BAR on its "needs several
+#: memories" answer, which separates set questions from one-answer ones) has
+#: one more call, on the memories filed under the topics the first ones share
 #: (``store._set_pool``); its members are the top tier of both calls' scores
 #: (``set_members``), returned past the limit up to SET_RESULT_CAP.
 SET_BAR = 0.5
-MEMBER_FLOOR = 0.07  # non-members of the traced sets scored 0.06 or less
+MEMBER_FLOOR = 0.07  # under it, a score is noise rather than a set member
 SET_RESULT_CAP = 100
 #: A topic (a tag) is shared by the first judged memories when at least this
 #: many of them carry it; each shared topic's newest ``SET_SCAN`` memories are
@@ -357,15 +355,14 @@ SET_NEAREST = 200
 
 def set_members(judged: dict[str, float]) -> set[str]:
     """The memories of a set question that belong to the set, from Jev's scores
-    alone. Its scale differs by question: a car's price scores 0.08 to 0.16
-    for "Which car is the cheapest?" beside insurance costs at 0.02 to 0.06; a
-    liked restaurant 0.42 to 0.64 for "Which restaurants did I like?" beside
-    "had lunch at" at 0.15 to 0.25 and noise at 0.02 to 0.05. The members are
-    the top tier: the scores split in two where they separate best on a log
-    scale (Otsu's threshold), the upper group is kept while it stands at
-    least twice above the lower, and split again. Scores with no such split
-    are all members or all noise, by ``MEMBER_FLOOR`` (a first call can hold
-    nothing but the set: 20 of 21 test drives)."""
+    alone. Its scale differs by question: the car prices asked for by "Which
+    car is the cheapest?" can score low in absolute terms, yet above the
+    insurance costs beside them, while liked restaurants score well above
+    "had lunch at" and noise. The members are the top tier: the scores split
+    in two where they separate best on a log scale (Otsu's threshold), the
+    upper group is kept while it stands at least twice above the lower, and
+    split again. Scores with no such split are all members or all noise, by
+    ``MEMBER_FLOOR`` (a first call can hold nothing but the set)."""
     import math
 
     tier = sorted((max(v, 0.01), mid) for mid, v in judged.items())
@@ -385,7 +382,7 @@ def set_members(judged: dict[str, float]) -> set[str]:
 
 
 #: A thing an entity more likely than not belongs to reads "it" in that
-#: entity's memories too ("The first release of bildy" in bildy v1's).
+#: entity's memories too ("The first release of zobly" in zobly v1's).
 HOME_P = 0.5
 
 
@@ -413,7 +410,7 @@ def mask_names(text: str, names: Iterable[str], keep: Iterable[str] = ()) -> str
     """``text`` with each of ``names`` replaced by "it" ("its" for a
     possessive), matched as whole words in any case, the longest name first.
     A name in ``keep`` stays as written, and so does a shorter name inside it
-    ("Bildy Bakery" keeps its "bildy")."""
+    ("Zobly Bakery" keeps its "zobly")."""
     masked = {n.strip().lower() for n in names if n and n.strip()}
     every = masked | {n.strip().lower() for n in keep if n and n.strip()}
     if not masked:
@@ -435,10 +432,10 @@ def aboutness(activations: list[float | None]) -> float:
     activation of each entity it names (None for an entity the links do not
     reach): the strongest linked one, ``LOW`` if it names only unlinked ones,
     ``NO_ENTITY`` if it names none. A link, however weak, never ranks below no
-    link: a version Jev linked at 0.4 (0.28 on the way down) is still more
-    likely about the product than a memory about something else. What an
-    override leaves of a link (a thing's answer yielding to the entity's
-    own, ``store._judge_ranking``) is floored the same way."""
+    link: a version Jev linked weakly is still more likely about the product
+    than a memory about something else. What an override leaves of a link (a
+    thing's answer yielding to the entity's own, ``store._judge_ranking``) is
+    floored the same way."""
     linked = [a for a in activations if a is not None]
     if linked:
         return max(max(linked), LOW)

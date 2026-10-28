@@ -107,7 +107,7 @@ _SOURCES = (
 _SOURCES_SHAPE = (',\n"sources": [int]}]}.', "}]}.")
 #: The rule that leaves out the assistant's own notes on how it uses the
 #: memory (which context label or run to reuse, that a conversation belongs to
-#: a context): 12 memories of one store were such notes.
+#: a context): measured, a store held such notes as memories.
 _AGENT_NOTES = (
     "- notes about how the assistant uses this memory: which context label, run or\n"
     "  tag to use or reuse, that a conversation belongs to a context, or that\n"
@@ -120,7 +120,7 @@ _AGENT_NOTES = (
 #: has no name (``extract_facts(identity=...)``).
 _USER_NAME = (
     "- user_name: the user's own name, only when the conversation states it: the\n"
-    '  user gives it ("I\'m Cos", "my name is", a signature), the assistant calls the\n'
+    '  user gives it ("I\'m Tobi", "my name is", a signature), the assistant calls the\n'
     "  user by it, or a line says what the user's name is. Never guess it, and never\n"
     "  give the name of someone the user only talks about. null otherwise.\n")
 _USER_NAME_SHAPE = (('], "user_name": str|null}.', ']}.'),
@@ -258,7 +258,7 @@ def test_the_assistants_own_notes_on_how_it_uses_the_memory_are_not_facts():
     """A saving agent's notes on its own use of Memry ("This conversation
     belongs to the shared context 'AGI article ideas' ... and should be reused
     for future related prompts") say nothing about the user or the world, yet
-    12 memories of one store were such notes. The rule is among what not to
+    a store held such notes as memories. The rule is among what not to
     extract, and it names the shared context the prompt offers, which such a
     note repeats."""
     system, _ = _asked(_PLAIN)

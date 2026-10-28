@@ -330,7 +330,7 @@ def test_merges_are_listed_and_undone_over_rest_and_the_cli(monkeypatch, tmp_pat
 def test_a_merge_restarts_only_the_pairs_the_merged_entity_brought(tmp_path):
     """The kept entity's own open pairs keep their funnel step after a merge;
     only the pairs that moved over from the merged entity start again. All of
-    them restarting re-judged about 1000 pairs after one owner merge."""
+    them restarting re-judged hundreds of pairs after one owner merge."""
     from memry.backends.local import LocalBackend
     from memry.models import Entity, MergeProposal
 

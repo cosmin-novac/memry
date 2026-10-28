@@ -37,9 +37,9 @@ EmbeddingProvider = Literal["openai", "ollama", "voyage", "hash", "none"]
 DecisionProvider = Literal["none", "llm", "jev"]
 
 #: The OpenAI default is gpt-6-luna, at half the price of gpt-5.6-luna. As the
-#: extraction model it matched gpt-5.6-luna on every measure (details kept,
-#: entities listed, same-name naming, coverage audit; two runs each on 118
-#: saves) and listed fewer ordinary nouns as entities. gpt-6-luna has not been
+#: extraction model it was measured to match gpt-5.6-luna (details kept,
+#: entities listed, same-name naming, coverage audit) and listed fewer ordinary
+#: nouns as entities. gpt-6-luna has not been
 #: measured for re-ranking (``MEASURED_RERANKERS``). Nobody has calibrated a text
 #: model's confidence, so Memry never merges entities on it alone (see
 #: providers/decisions.py); it sends those questions to the decision model.
@@ -93,10 +93,9 @@ class DecisionConfig(BaseModel):
     #: value measured for that provider.
     auto_confirm_confidence: float | None = None
     #: Override for the probability from which a calibrated judge merges two
-    #: entities (0.95 for Jev). Measured on 156 labelled pairs: at 0.85, 73-74
-    #: of 81 true pairs merged against 57-58 at 0.95, no pair of two different
-    #: things merged, but 4 pairs that no fact settles did ("PR #92" twice,
-    #: "Maria" twice). See evals/identity_resolution_benchmark.py.
+    #: entities (0.95 for Jev). A lower bar merges more true pairs, and also
+    #: pairs that no fact settles (a bare "PR #42" twice, a bare first name
+    #: twice). See evals/identity_resolution_benchmark.py.
     pair_merge_probability: float | None = None
     #: Turn re-ranking on or off. Unset leaves it as the provider has it: on
     #: with Jev, off otherwise. Turning it on only works for a provider that
@@ -176,8 +175,7 @@ class RetrievalConfig(BaseModel):
     #: has at most this many more judged in one further call, after the first
     #: ``decision.rerank_pool``: the memories filed under the topics the first
     #: ones share, then those nearest the members found (``store._set_pool``).
-    #: Measured, the topics' held 85 to 100% of each set within 100
-    #: candidates.
+    #: Measured, the topics' memories hold most of each set within this budget.
     set_pool: int = 80
     #: The memories found are shown with the source turns they rest on that
     #: best match the query, up to this many tokens in all

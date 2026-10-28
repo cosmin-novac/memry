@@ -20,11 +20,11 @@ limit a person may set, not the rule.
 
 A fact read alone later has nothing around it, so each must state its
 subject. The prompt asks for it, and ``without_subject`` checks it before
-anything is written: of twelve two-fact splits of a real store made by the
-first prompt, two had a fact that no longer said which project it was about
-("Merge the first change first"), which is worse than the memory it came
-from. A list stays one fact: asked without that rule, the model split one
-memory's list of skills into 23 facts that each named one skill.
+anything is written: measured with the first prompt, some splits had a fact
+that no longer said which project it was about ("Merge the first change
+first"), which is worse than the memory it came from. A list stays one fact:
+asked without that rule, the model split a list of skills into one fact per
+skill.
 
 The same call says what each fact is about, among the entities the memory
 is linked to (named things and tags, numbered under the memory). Given the
@@ -42,9 +42,9 @@ run with that plan (``plan_entries``) makes exactly those, without the model.
 
 Each fact keeps the memory's dates, so a date heading the whole memory
 ("Decision (2026-09-12): ...") is kept once, in the first fact: written in
-front of every fact, as a real store's split did, it read as the date of
-each. Its tense is kept too: the model put a present state of that store
-("Reporting ... are included in every tier") in the past.
+front of every fact, as an early split did, it read as the date of each.
+Its tense is kept too: the model once put a present state ("Reports are
+included in every tier") in the past.
 """
 
 from __future__ import annotations
@@ -247,7 +247,7 @@ def entity_gaps(homes: list[list[str]], linked: list[str]) -> tuple[list[int], l
 
 def names_in(text: str, names: list[str]) -> bool:
     """Whether a text names a thing by any of ``names`` (whole words, any
-    case, a genitive "s" allowed: "Cosmins Umsatz")."""
+    case, a genitive "s" allowed: "Jakobs Umsatz")."""
     lowered = text.casefold()
     return any(re.search(rf"(?<!\w){re.escape(name.casefold())}s?(?!\w)", lowered)
                for name in names if name.strip())

@@ -205,8 +205,8 @@ def _same_name_and_no_evidence(
     name. Forking a second entity there is strictly worse than reusing it - it
     fragments the graph and emits a merge proposal that nobody can adjudicate,
     because the question it asks ("are these the same?") has no evidence on
-    either side. Real stores fill up with exactly that: 4x "sehr geehrte",
-    3x "the father of photography", 206 of 519 entities with zero mentions.
+    either side. Real stores fill up with exactly that: the same salutation or
+    phrase several times over, and many entities with zero mentions.
 
     The usual worry, two different people sharing a common name, needs the
     existing record to actually say something about the first person. Once this
@@ -332,9 +332,9 @@ _TYPE_SYSTEM = """Classify each entity name into one type: person, organization,
 project, product, place, event, document, code, concept, or other.
 
 - document: a contract, invoice, certificate, form, report, or the reference
-  number that identifies one ("HRB 110232", "TÜV Kaufvertrag")
-- code: a file, function, table, endpoint, or config key ("lib/sync.ts",
-  "canUserSync", "BILDY_AWS_S3_BUCKET")
+  number that identifies one ("HRB 123456", "TÜV Kaufvertrag")
+- code: a file, function, table, endpoint, or config key ("lib/export.ts",
+  "canUserExport", "REPORTS_S3_BUCKET")
 
 Use "other" only when none fit.
 JSON only: {"types": [{"name": str, "type": str}]}."""
@@ -533,8 +533,8 @@ def judge_entity_referents(llm: LLM, names: list[str]) -> list[str]:
 SCREEN_CRITERIA = {
     # The wording was measured. A first draft listed "path" among the values
     # and the provider dutifully screened out source files, repositories and
-    # street addresses; naming them as things took the harm from 6 names in
-    # 360 to none at every gate from 0.70 up.
+    # street addresses; naming them as things stopped that at every gate from
+    # 0.70 up.
     "named_thing": ("A specific person, organization, product, project, place, "
                     "street address, document, source file, folder, repository "
                     "path, API endpoint, named feature or other thing that has "
@@ -660,7 +660,7 @@ def resolve_mentions(
     ]
     verdicts = screen_names(decider, memory_content, unseen)
     # A calibrated judge also compares names that are not spelled the same
-    # ("Fundation" and "Fundation GmbH"); without one, only exact names meet.
+    # ("Veldmark" and "Veldmark GmbH"); without one, only exact names meet.
     judge = decider if judges_pairs(decider) else None
     index: NameIndex | None = None
     saved = backend.get_memory(memory_id)
@@ -898,7 +898,7 @@ def propose_same_name_duplicates(
     judge could answer it and no person should be asked.
 
     A tag (a topic entity) is paired with each named thing of its very name
-    ("bildy" the tag, "Bildy" the product), with or without a judge, and the
+    ("zobly" the tag, "Zobly" the product), with or without a judge, and the
     pair goes through the same comparison as any: the tag's memories are its
     side. Two tags are paired as tags are (``identity.topic_pairs``: never on
     a shared word alone), with or without a judge, and compared by the tag
@@ -1145,8 +1145,8 @@ def resolve_open_proposals(
                                else (proposal.confidence, proposal.different))
             belongs = verdict.belongs if probabilities is not None else proposal.belongs
             if auto_confirm and _one_name(entity_a, entity_b) and different is not None:
-                # A version or a part of one name ("FacTShirt" the shop and
-                # "FacTShirt" the brand) stays apart like a pair ruled out.
+                # A version or a part of one name ("Mugwell" the shop and
+                # "Mugwell" the product line) stays apart like a pair ruled out.
                 if (different < judge.pair_apart_probability and not belongs_blocks(
                         belongs, entity_a.entity_type, entity_b.entity_type)):
                     namesakes.append((same, proposal, entity_a, entity_b))
@@ -1197,8 +1197,8 @@ def join_namesakes(
     A mention of a name the store already has joins the likeliest entity of
     that name unless the judge says "different" (``resolve_mentions``).
     Entities of one name that split before that rule existed waited for the
-    merge bar instead, and with one memory each they never reached it: six
-    "FacTShirt" entities in a real store. Here they get the same rule, the
+    merge bar instead, and with one memory each they never reached it: one
+    shop's name stayed several entities. Here they get the same rule, the
     likeliest pair first, and the one with more memories is kept. Without a
     calibrated judge every pair of one name is joined so, by rule
     (``reason``). Two entities kept apart, by the judge (P(different) at the
@@ -1246,9 +1246,9 @@ def choose_among_candidates(
     next by ``identity.CHOICE_LEAD`` and has a P(same) of at least
     ``identity.CHOICE_FLOOR``. Only candidates the judge has not ruled out
     (P(different) under ``apart``) count: "the ICAM PR" against the ICAM bar
-    association (0.575) and two PR #42s ruled out at 0.84 and 0.96 is one
-    candidate, not three, and a lead over ruled-out ones merged it at a bar of
-    0.5. With one candidate it keeps waiting: it may be a third Sofia. Asks
+    association and two PR #42s the judge ruled out is one candidate, not
+    three, and a lead over ruled-out ones would merge it on too little. With
+    one candidate it keeps waiting: it may be a third Sofia. Asks
     the judge nothing: it reads the answers stored on the open pairs. A pair
     with the owner while it has no name is left out (``identity.unnamed_owner``)."""
     options: dict[str, list[tuple[MergeProposal, str]]] = defaultdict(list)

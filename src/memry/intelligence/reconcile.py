@@ -150,24 +150,18 @@ def _normalize(text: str) -> str:
 
 
 #: CHANGED carries two worked examples, a plan that then happened and a status
-#: that moved on. Without them Jev read a plan followed by its outcome ("is
-#: planning to run the marathon in April", then "ran the marathon") as MORE
-#: at 0.34 to 0.80, mostly under MORE's bar, so the plan stayed in use beside
-#: what happened. With them (``evals/reconcile_benchmark.py``, the questions
-#: of two cases runs asked again, two runs each) those answers were CHANGED at
-#: 0.54 to 0.81, and a renovation started, then finished, CHANGED at 0.75 to
-#: 0.98; the plan cases ended right in 3 of 4 in both layouts in two runs.
-#: Recurring events stayed NEW, added details MORE and corrections WRONG, and
-#: the measured bars (``JevDecider.reconcile_bars``) still fit the labelled
-#: answers. The cost: a plan followed by a later stage ("plans to apply", then
-#: "was accepted, starting in the fall", then "started"), which MORE merged at
-#: 0.46 to 0.90, is MORE at 0.24 to 0.69 and stays beside the plan. An example
-#: in MORE as well lowered MORE on real added details, so MORE has none.
-#: MORE worded as "about the same event or thing", with NEW as "another event
-#: or thing of the same kind, before or after it", was asked of the MORE
-#: merges of the LoCoMo stores (two runs): it left the merges of two trips or
-#: games where they were and stopped a few right ones, so the question stays
-#: and the merge writer keeps such pairs apart (``MERGE_REQUEST``).
+#: that moved on. Without them Jev reads a plan followed by its outcome ("is
+#: planning to run the marathon in April", then "ran the marathon") as MORE,
+#: mostly under MORE's bar, so the plan stays in use beside what happened.
+#: With them (measured with ``evals/reconcile_benchmark.py``) those answers are
+#: CHANGED; recurring events stay NEW, added details MORE and corrections
+#: WRONG, and the measured bars (``JevDecider.reconcile_bars``) still fit. The
+#: cost: a plan followed by a later stage ("plans to apply", then "was
+#: accepted, starting in the fall", then "started") is less often merged and
+#: can stay beside the plan. An example in MORE as well lowered MORE on real
+#: added details, so MORE has none. Rewording MORE and NEW did not keep two
+#: events of one kind apart either, so the question stays and the merge writer
+#: keeps such pairs apart (``MERGE_REQUEST``).
 ACTION_QUESTION = Choice(
     instructions=("Each EXISTING memory was said on the date shown; the NEW fact was just "
                   "said, on its date. What is the NEW fact, compared with the existing "
@@ -192,9 +186,9 @@ ACTION_QUESTION = Choice(
 #: Asked in the same call as ``ACTION_QUESTION`` when one of the memories is
 #: protected (``protection``): what the memory the new fact would replace is.
 #: Importance alone held every replacement of an important memory, ordinary
-#: dated changes of state too: of 7 questions a real store's Upkeep queue held
-#: on 4 October 2026, all held for importance 0.8-0.9, 6 were a listing,
-#: task or document whose state had moved on and one was no conflict at all.
+#: dated changes of state too: measured on an Upkeep queue, most questions held
+#: for importance were a listing, task or document whose state had moved on,
+#: and some were no conflict at all.
 #: About 110 tokens, only on calls that involve a protected memory.
 STANDING_QUESTION = Choice(
     instructions=("Take the existing memory the NEW fact changes, corrects or comes closest "
@@ -291,26 +285,20 @@ def _decide_action(
 #: claim about the memory's subject, which is then stored as NEW
 #: (``Merged.apart``). Jev's MORE on two different trips, games or injuries is
 #: as sure as on a detail added to one, so no bar tells them apart; the
-#: writer, reading both texts with their dates, tells many of them apart (PhD
-#: notes, reconcile-more).
+#: writer, reading both texts with their dates, tells many of them apart.
 #:
 #: A merge keeps a memory to one fact: it adds a detail to the same claim,
 #: event or attribute, and a new claim about the same subject is a memory of
 #: its own. Without that rule, saves that each stated another claim about one
-#: thesis were folded one by one into one memory of five claims, whose one
-#: vector matched none of them well. Asked to merge fixed pairs
-#: (``evals/reconcile_benchmark.py merges``, two runs each), the writer joined
-#: 11 and 12 of 16 new claims about one subject before, and none after; it
-#: merged 15 of 15 details of the same claim after (15 and 14 before), and
-#: the other kinds much as before (a car-show detail kept apart once). On the
-#: 153 recorded LoCoMo merges it keeps apart 28 of the 128 that join one
-#: thing (5 before), most of them another claim about that thing. The rule
-#: is here alone: in ``RECONCILE_SYSTEM`` it made the text model as judge
-#: answer NEW to restatements and changed values, and Jev's MORE worded as
-#: "the same statement, with more detail" fell on right merges, while Jev's
-#: MORE on new claims already stayed under its bar. Where the text model
-#: judges alone, its MORE goes to this writer too (``reconcile_candidate``)
-#: (PhD notes, atomic-memories).
+#: subject were folded one by one into one memory of several claims, whose one
+#: vector matched none of them well. Measured with
+#: ``evals/reconcile_benchmark.py merges``, the writer with the rule keeps new
+#: claims about one subject apart and still merges the details of one claim.
+#: The rule is here alone: in ``RECONCILE_SYSTEM`` it made the text model as
+#: judge answer NEW to restatements and changed values, and Jev's MORE worded
+#: as "the same statement, with more detail" fell on right merges, while
+#: Jev's MORE on new claims already stayed under its bar. Where the text model
+#: judges alone, its MORE goes to this writer too (``reconcile_candidate``).
 MERGE_REQUEST = ('The answer is MORE of memory [0]: reply with action "MORE", target 0 and, as '
                  "content, the merged text. If the NEW fact is about another event or thing "
                  "than memory [0], of the same kind (another trip, game, purchase or photo), or "
@@ -455,10 +443,10 @@ def standing_of(decision: dict[str, Any]) -> str | None:
 def no_longer_holds(decision: dict[str, Any]) -> float | None:
     """P(the memory no longer holds): P(CHANGED) + P(WRONG) of the action
     question's distribution, or the answer's own confidence where no
-    distribution came with it; None with neither. On a real queue Jev
-    answered CHANGED at 0.35 and 0.37 to a listing deleted and a task
-    stopped, with most of the rest on WRONG: either way the state no longer
-    held, and the top answer alone kept both in the queue."""
+    distribution came with it; None with neither. Measured, Jev can answer
+    a listing deleted or a task stopped with a low CHANGED and most of the
+    rest on WRONG: either way the state no longer holds, and the top answer
+    alone kept both in the queue."""
     probabilities = decision.get("probabilities") or {}
     if probabilities:
         return (float(probabilities.get("CHANGED") or 0.0)

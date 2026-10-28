@@ -108,11 +108,8 @@ def test_a_set_question_is_told_by_the_calibrated_question_at_its_bar(store, sev
     """The first call asks, beside the memories, whether "The question needs
     several memories to be answered, such as a comparison, a list or a
     total", and a question at ``SET_BAR`` (0.5) or more on it gets the second
-    call. Calibrated on 30 questions, 14 whose answer is a set and 16 with one
-    answer: 13 of the 14 scored 0.73 to 0.90 and all 16 scored 0.09 to 0.47.
-    The measurement is in the PhD repo, papers/memry-field-studies:
-    findings/relative-retrieval-and-rounds.md (section 4) and
-    notes/scenario-registry.md (R-83)."""
+    call: the measured bar that separates questions whose answer is a set
+    from those with one answer."""
     from memry.intelligence.graph_retrieval import SET_BAR
 
     assert SET_BAR == 0.5
@@ -529,7 +526,7 @@ def _parking(store, entities=()):
 
 
 def test_a_question_naming_no_hub_is_ordered_by_the_judgement_as_one_naming_a_hub_is(store):
-    """R-117. A one-answer question naming no hub was ordered by a blend of
+    """A one-answer question naming no hub was ordered by a blend of
     the judged score and the text ranking's position, because the judgement
     alone measured worse in the re-rank's wording. Judged in the wording
     every search now asks in, the judgement alone did as well as any blend,

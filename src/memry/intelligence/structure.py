@@ -1,10 +1,10 @@
 """Entity structure: which names are hubs, where a part belongs, and what a
 shared name means.
 
-Measured on a real store: 3,314 entities over 985 memories, of which 2,073
-appeared in exactly one memory. Most extracted "entities" are one-off noun
-phrases, and treating every one as a hub is what filled the map with noise and
-the queue with questions nobody can answer ("round 1 and Round 1?").
+In a real store most extracted "entities" appear in exactly one memory: they
+are one-off noun phrases, and treating every one as a hub is what filled the
+map with noise and the queue with questions nobody can answer ("round 1 and
+Round 1?").
 
 Three rules, all computed from what the store already holds, none of which
 deletes anything:
@@ -18,22 +18,19 @@ deletes anything:
 * **Home is one level, and derived.** A part belongs where a stated
   membership relation (``part_of`` and the like) puts it, or else where the
   decision provider answered it is a version or a part of another entity.
-  Appearing together is not enough: homes from co-mention measured 68% right
-  (47% for an organization) and were removed.
+  Appearing together is not enough: homes from co-mention were measured too
+  often wrong (organizations most of all) and were removed.
 
 * **A shared name is read through home.** Same name under the same home is the
   same thing. Same name under different homes is two things and no question.
   People are never merged on a name alone, and a pair the judge or a person
   held apart is never merged, nor joined through a third.
 
-Each rule was scored against 360 names, 141 homes and 310 past merge decisions
-from a real store, labelled by an independent reader (see
-``evals/entity_structure_benchmark.py``). The first draft of the hub rule
-("anchor, or two memories, or a relation") was right about 52% of the names it
-promoted: recurrence finds topics like "billing", not things. Using the
-provider's verdict it is 72% at 98% recall. Homes from co-mention alone were
-68% right, 86% restricted to a project or product at a share of 0.7; they are
-no longer derived.
+Each rule was scored against labelled names, homes and past merge decisions
+(see ``evals/entity_structure_benchmark.py``). The first draft of the hub rule
+("anchor, or two memories, or a relation") promoted topics like "billing":
+recurrence finds topics, not things. Using the provider's verdict fixed that.
+Homes from co-mention are no longer derived.
 
 Everything here is pure: lists in, plans out. The store applies the plans, so
 a dry run is the same code with the last step left out.

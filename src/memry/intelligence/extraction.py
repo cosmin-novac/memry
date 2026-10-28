@@ -204,7 +204,7 @@ Return {{"facts": []}} if nothing is worth remembering."""
 #: the field cost about 80 prompt tokens and 6 output tokens a call, and a
 #: prompt that stays the same byte for byte keeps the provider's prompt cache.
 USER_NAME_RULE = """- user_name: the user's own name, only when the conversation states it: the
-  user gives it ("I'm Cos", "my name is", a signature), the assistant calls the
+  user gives it ("I'm Tobi", "my name is", a signature), the assistant calls the
   user by it, or a line says what the user's name is. Never guess it, and never
   give the name of someone the user only talks about. null otherwise.
 """
@@ -356,7 +356,7 @@ def extract_facts(
 
     ``entity_names`` are existing entities the conversation may be naming, as
     (name, type). A fact that names one of them writes its name as stored, so
-    "Fundation" does not become a second entity beside "Fundation GmbH".
+    "Veldmark" does not become a second entity beside "Veldmark GmbH".
 
     ``vocabulary`` is the tags this namespace already uses. Offering them is
     what keeps tagging convergent: extraction that cannot see the existing

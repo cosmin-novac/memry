@@ -16,14 +16,14 @@ from memry.models import Memory, clean_tags
 
 
 def _mother_and_the_misreading(store, fake_llm):
-    fake_llm.queue(facts_response(fact("Violeta is Cosmin's mother", importance=0.9)))
-    store.add("My mother is Violeta", user_id="cos")
-    old = store.get_all(user_id="cos")[0]
+    fake_llm.queue(facts_response(fact("Greta is Jakob's mother", importance=0.9)))
+    store.add("My mother is Greta", user_id="jakob")
+    old = store.get_all(user_id="jakob")[0]
     fake_llm.queue(
-        facts_response(fact("Raluca is Cosmin's mother", importance=0.9)),
+        facts_response(fact("Hanna is Jakob's mother", importance=0.9)),
         decision("WRONG", target=0, reason="the stored mother is wrong"),
     )
-    result = store.add("rental form: applicant Raluca, for his mother", user_id="cos")
+    result = store.add("rental form: applicant Hanna, for his mother", user_id="jakob")
     return old, result
 
 
@@ -38,10 +38,10 @@ def test_an_important_memory_is_not_replaced_without_asking(store, fake_llm):
     assert new.metadata[CONFLICT_KEY]["with"] == old.id
     assert "important" in new.metadata[CONFLICT_KEY]["held"]
 
-    assert store.upkeep_count(user_id="cos") == 1
-    row = next(r for r in store.upkeep_queue(user_id="cos") if r["kind"] == "conflict")
+    assert store.upkeep_count(user_id="jakob") == 1
+    row = next(r for r in store.upkeep_queue(user_id="jakob") if r["kind"] == "conflict")
     assert row["id"] == new.id
-    assert row["replaces"] == ["Violeta is Cosmin's mother"]
+    assert row["replaces"] == ["Greta is Jakob's mother"]
     assert (row["accept"], row["decline"], row["other"]) == (
         "the new one is right", "the old one is right", "both are true",
     )
@@ -51,19 +51,19 @@ def test_saying_the_old_one_is_right_forgets_the_new_one(store, fake_llm):
     old, result = _mother_and_the_misreading(store, fake_llm)
     new_id = result.actions[0].memory_id
 
-    assert store.decide_upkeep("conflict", new_id, "decline", user_id="cos")
+    assert store.decide_upkeep("conflict", new_id, "decline", user_id="jakob")
 
-    assert [m.content for m in store.get_all(user_id="cos")] == [old.content]
-    forgotten = store.forgotten(user_id="cos")
+    assert [m.content for m in store.get_all(user_id="jakob")] == [old.content]
+    forgotten = store.forgotten(user_id="jakob")
     assert [row["memory"].id for row in forgotten] == [new_id], "and it can come back"
-    assert store.upkeep_count(user_id="cos") == 0
+    assert store.upkeep_count(user_id="jakob") == 0
 
 
 def test_saying_the_new_one_is_right_replaces_the_old_one(store, fake_llm):
     old, result = _mother_and_the_misreading(store, fake_llm)
     new_id = result.actions[0].memory_id
 
-    assert store.decide_upkeep("conflict", new_id, "accept", user_id="cos")
+    assert store.decide_upkeep("conflict", new_id, "accept", user_id="jakob")
 
     assert store.get(old.id).superseded_by == new_id
     assert CONFLICT_KEY not in store.get(new_id).metadata
@@ -75,20 +75,20 @@ def test_both_can_be_true(store, fake_llm):
     old, result = _mother_and_the_misreading(store, fake_llm)
     new_id = result.actions[0].memory_id
 
-    assert store.decide_upkeep("conflict", new_id, "other", user_id="cos")
+    assert store.decide_upkeep("conflict", new_id, "other", user_id="jakob")
 
-    assert {m.id for m in store.get_all(user_id="cos")} == {old.id, new_id}
+    assert {m.id for m in store.get_all(user_id="jakob")} == {old.id, new_id}
     assert CONFLICT_KEY not in store.get(new_id).metadata
-    assert store.upkeep_queue(user_id="cos") == []
+    assert store.upkeep_queue(user_id="jakob") == []
     # "other" means nothing for the rows that only have a yes and a no
-    assert not store.decide_upkeep("consolidation", "nope", "other", user_id="cos")
+    assert not store.decide_upkeep("consolidation", "nope", "other", user_id="jakob")
 
 
 def test_a_conflict_settled_by_deleting_one_side_leaves_the_queue(store, fake_llm):
     _, result = _mother_and_the_misreading(store, fake_llm)
     store.delete(result.actions[0].memory_id)
-    assert store.upkeep_queue(user_id="cos") == []
-    assert store.upkeep_count(user_id="cos") == 0
+    assert store.upkeep_queue(user_id="jakob") == []
+    assert store.upkeep_count(user_id="jakob") == 0
 
 
 def _corrected(store, fake_llm):
@@ -169,11 +169,11 @@ def test_what_holds_a_replacement_back():
 
 def test_tags_hold_one_subject_each():
     # the three broken tags found on a real store, and what they should have been
-    assert clean_tags(["Steuernummer (TIN, Köln Vingst)"]) == ["Steuernummer"]
-    assert clean_tags(["steuernummer (tin", "köln vingst)"]) == [
-        "steuernummer", "köln vingst",
+    assert clean_tags(["Steuernummer (TIN, Finanzamt Nord)"]) == ["Steuernummer"]
+    assert clean_tags(["steuernummer (tin", "finanzamt nord)"]) == [
+        "steuernummer", "finanzamt nord",
     ]
-    assert clean_tags(["steuernummer (tin, stooq, system, tax, yfinance)", "person"]) == [
+    assert clean_tags(["steuernummer (tin, portal, system, tax, elster)", "person"]) == [
         "steuernummer", "person",
     ]
     assert clean_tags("tax, identity; Tax") == ["tax", "identity"]
@@ -185,8 +185,8 @@ def test_tags_hold_one_subject_each():
 
 def test_tags_are_cleaned_wherever_they_come_in(store, fake_llm, verbatim_store):
     fake_llm.queue(facts_response(
-        fact("Fundation Steuernummer 218/5713/1681",
-             categories=["Steuernummer (TIN, Köln Vingst)"])
+        fact("Veldmark Steuernummer 123/4567/8901",
+             categories=["Steuernummer (TIN, Finanzamt Nord)"])
     ))
     store.add("our tax number", user_id="ada")
     assert store.get_all(user_id="ada")[0].categories == ["steuernummer"]

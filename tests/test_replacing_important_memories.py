@@ -3,9 +3,9 @@
 Importance says how much a fact matters, not how risky replacing it is, and a
 memory superseded as an update stays as history and the Archive undoes it.
 Held for importance alone, every ordinary change of state to an important
-memory went to the Upkeep queue: on 4 October 2026 a real store held 7, all for
-importance 0.8-0.9. Six were a listing, task or document whose state had moved
-on, and one was no conflict at all. The cases below are those 7, with judge
+memory went to the Upkeep queue: measured, nearly every held item was a
+listing, task or document whose state had moved on. The cases below are of
+that kind, with judge
 answers shaped like the decision provider's, and the cases that must still ask:
 a lasting fact, a standing rule, an identity, and anything the judge is unsure
 of (``reconcile.replacement_verdict``).
@@ -74,71 +74,69 @@ def _saved(store, llm, old: str, importance: float, new: str, user: str = "ada")
 
 
 STATE = {"state": 0.84, "still": 0.08, "stable": 0.08}
-#: The 7 questions of the live queue: new, old, importance, the judge's
-#: answer, what it read the old memory as, and the outcome the owner of that
-#: store approved.
+#: Seven questions of that kind: new, old, importance, the judge's answer,
+#: what it read the old memory as, and the outcome wanted.
 QUEUE = [
-    ("Cosmin löschte das Umkirch-Inserat 170540982 am 30.09.2026 selbst über das "
+    ("Tobias löschte das Kleinau-Inserat LV-2024-0001 am 12.03.2026 selbst über das "
      "Drei-Punkte-Menü.",
-     "Das aktive ImmoScout-Inserat 170540982 in Umkirch hat 8 unbeantwortete Anfragen vom "
-     "11.09.2026 bis 22.09.2026; Cosmin entscheidet, ob er antwortet, das Inserat pausiert "
+     "Das aktive Inserat LV-2024-0001 in Kleinau hat 8 unbeantwortete Anfragen vom "
+     "01.03.2026 bis 10.03.2026; Tobias entscheidet, ob er antwortet, das Inserat pausiert "
      "oder es löscht.", 0.9, ("CHANGED", 0.86, STATE), "update"),
-    ("Seit 03.10.2026 liefert das öffentliche Exposé von ImmoScout listing 170540982, "
-     "Feldbergstraße 5, Umkirch einen 404-Fehler.",
-     "Das ImmoScout-Inserat 170540982 in der Feldbergstraße 5, Umkirch ist aktiv: 840 €, "
-     "3 Zimmer, 82 m², im Mieter-Netzwerk.", 0.8, ("CHANGED", 0.91, STATE), "update"),
-    ("Die geplante Aufgabe „Miet-Alerts für Violeta filtern“ brach am 03.10.2026 nach "
+    ("Seit 14.03.2026 liefert die öffentliche Anzeige LV-2024-0001, "
+     "Lindenweg 12, Kleinau einen 404-Fehler.",
+     "Das Inserat LV-2024-0001 im Lindenweg 12, Kleinau ist aktiv: 2.400 €, "
+     "Segelboot, 5,8 m, mit Trailer.", 0.8, ("CHANGED", 0.91, STATE), "update"),
+    ("Die geplante Aufgabe „Boots-Alerts für Greta filtern“ brach am 15.03.2026 nach "
      "wenigen Sekunden ab und ist auf claude-opus-5 festgelegt.",
-     "Die Aufgabe „Miet-Alerts für Violeta filtern“ läuft seit 30.09.2026 mit 15 "
-     "Stadtteilen, 40-70 m², bis etwa 950 € warm und ohne WBS.", 0.9,
+     "Die Aufgabe „Boots-Alerts für Greta filtern“ läuft seit 12.03.2026 mit 15 "
+     "Häfen, 5-7 m, bis etwa 3.000 € und ohne Motor.", 0.9,
      ("CHANGED", 0.82, {"state": 0.78, "still": 0.12, "stable": 0.10}), "update"),
-    ("Die Aufgabe „Miet-Alerts für Violeta filtern“ hat seit dem Abend des 30.09.2026 "
+    ("Die Aufgabe „Boots-Alerts für Greta filtern“ hat seit dem Abend des 12.03.2026 "
      "nichts mehr ins Projekt geschrieben.",
-     "Die Aufgabe „Miet-Alerts für Violeta filtern“ läuft seit 30.09.2026 mit 15 "
-     "Stadtteilen, 40-70 m², bis etwa 950 € warm und ohne WBS.", 0.9,
+     "Die Aufgabe „Boots-Alerts für Greta filtern“ läuft seit 12.03.2026 mit 15 "
+     "Häfen, 5-7 m, bis etwa 3.000 € und ohne Motor.", 0.9,
      ("CHANGED", 0.83, {"state": 0.80, "still": 0.14, "stable": 0.06}), "update"),
-    ("Cosmin Novacs ImmoScout-Bewerbermappe enthielt seine SCHUFA, seinen "
-     "Einkommensnachweis, Mietzahlungsnachweis und Identitätsnachweis; eine "
-     "Selbstauskunft war nicht angelegt.",
-     "Bei den Bewerbungen wurden nie Dateien mitgeschickt. Wenn bei ImmoScout „Profil "
-     "mitgeschickt“ ausgewählt ist, wird Cosmins Profil samt Bewerbermappe übermittelt: "
-     "Selbstauskunft, SCHUFA-BonitätsCheck, Einkommensnachweis, Mietzahlungsnachweis und "
-     "Identitätsnachweis; alle Unterlagen stammen von Cosmin.", 0.9,
+    ("Tobias Lindgrens Bewerbung beim Segelverein enthielt sein Anschreiben, seinen "
+     "Segelschein, einen Bootsnachweis und eine Haftpflichtbestätigung; ein "
+     "Mitgliedsantrag war nicht angelegt.",
+     "Bei den Bewerbungen wurden nie Dateien mitgeschickt. Wenn im Vereinsportal „Profil "
+     "mitgeschickt“ ausgewählt ist, wird Tobias' Profil samt Bewerbung übermittelt: "
+     "Mitgliedsantrag, Anschreiben, Segelschein, Bootsnachweis und "
+     "Haftpflichtbestätigung; alle Unterlagen stammen von Tobias.", 0.9,
      ("WRONG", 0.88, {"state": 0.72, "still": 0.10, "stable": 0.18}), "update"),
-    ("Cosmins ImmoScout-Profil zeigte unter „Eigene Dokumente: 6 Dokumente hinzugefügt“ "
-     "drei geschwärzte Gehaltsabrechnungen von Violeta Steguweit, eine doppelte "
-     "Meldebescheinigung und eine Bürgschaftserklärung; die Dokumente wurden am "
-     "30.09.2026 hochgeladen.",
-     "Violetas eigene Unterlagen und die Bürgschaftserklärung sind nicht in Cosmins "
-     "ImmoScout-Profil enthalten.", 0.9,
+    ("Tobias' Vereinsprofil zeigte unter „Eigene Dokumente: 6 Dokumente hinzugefügt“ "
+     "drei Fotos von Greta Lindgrens Jolle, einen doppelten "
+     "Segelschein und eine Empfehlung; die Dokumente wurden am "
+     "12.03.2026 hochgeladen.",
+     "Gretas eigene Unterlagen und die Empfehlung sind nicht in Tobias' "
+     "Vereinsprofil enthalten.", 0.9,
      ("WRONG", 0.90, {"state": 0.81, "still": 0.04, "stable": 0.15}), "update"),
-    ("Cosmins Versuch, den Umzugsgrund im ImmoScout-Profil zu ändern, wurde am 04.10.2026 "
+    ("Tobias' Versuch, den Beitrittsgrund im Vereinsprofil zu ändern, wurde am 16.03.2026 "
      "ohne Änderung abgebrochen, weil er die erforderlichen Angaben selbst eintragen muss.",
-     "Cosmin lädt die Unterlagen aus bewerbungsmappe/fuer-upload/ selbst in ImmoScout "
-     "„Eigene Dokumente“ hoch und ändert selbst den Umzugsgrund im Profil.", 0.9,
+     "Tobias lädt die Unterlagen aus vereinsbewerbung/upload/ selbst in das Vereinsportal "
+     "„Eigene Dokumente“ hoch und ändert selbst den Beitrittsgrund im Profil.", 0.9,
      ("CHANGED", 0.62, {"state": 0.22, "still": 0.70, "stable": 0.08}), "both"),
 ]
 STABLE = {"state": 0.05, "still": 0.07, "stable": 0.88}
 #: What must still ask: a lasting fact, a standing rule and an identity read as
 #: such, a state the judge is not sure enough of, and a reading under its bar.
 GUARDS = [
-    ("Cosmin is not allergic to penicillin.", "Cosmin is allergic to penicillin.", 0.9,
+    ("Tobias is not a vegetarian.", "Tobias is a vegetarian.", 0.9,
      ("WRONG", 0.72, STABLE), "ask"),
-    ("For this one commit, add a Co-Authored-By trailer.",
-     "Never add Co-Authored-By trailers in memry commits.", 0.9,
+    ("For this one meeting note, write it in German.",
+     "Always write meeting notes in English.", 0.9,
      ("CHANGED", 0.66, STABLE), "ask"),
-    ("Cosmin was born in Cluj.", "Cosmin was born in Bucharest.", 0.9,
+    ("Tobias was born in Salzburg.", "Tobias was born in Innsbruck.", 0.9,
      ("WRONG", 0.91, STABLE), "ask"),
-    ("The listing 170540982 is paused.", "The listing 170540982 is active.", 0.9,
+    ("The listing LV-2024-0001 is paused.", "The listing LV-2024-0001 is active.", 0.9,
      ("CHANGED", 0.61, STATE), "ask"),
-    ("The listing 170540982 is paused.", "The listing 170540982 is active.", 0.9,
+    ("The listing LV-2024-0001 is paused.", "The listing LV-2024-0001 is active.", 0.9,
      ("CHANGED", 0.92, {"state": 0.48, "still": 0.04, "stable": 0.48}), "ask"),
 ]
 
-
 @pytest.mark.parametrize("new, old, importance, answer, outcome", QUEUE + GUARDS,
                          ids=[f"queue-{i + 1}" for i in range(len(QUEUE))]
-                         + ["penicillin", "standing-rule", "birthplace", "unsure-state",
+                         + ["vegetarian", "standing-rule", "birthplace", "unsure-state",
                             "unsure-reading"])
 def test_what_an_important_memory_meets(new, old, importance, answer, outcome):
     judge = _Judge(*answer)
@@ -170,11 +168,11 @@ def _reading(state):
     return {"state": state, "still": (1 - state) / 2, "stable": (1 - state) / 2}
 
 
-#: Jev's answers to the 7 questions of the live queue on 4 October 2026 (the
-#: top answer and its confidence, and P(state), as it gave them), each with
-#: the rest of the distribution reconstructed where it gave only the top: a
-#: low CHANGED to a listing deleted or a task stopped had most of the rest on
-#: WRONG. On the top answer alone items 1, 3, 4 and 6 stayed in the queue.
+#: Answers shaped like Jev's to the seven questions (the top answer and its
+#: confidence, and P(state)), each with the rest of the distribution filled
+#: in: a low CHANGED to a listing deleted or a task stopped has most of the
+#: rest on WRONG. On the top answer alone items 1, 3, 4 and 6 would stay in
+#: the queue.
 LIVE = [
     ("CHANGED", 0.37, _reading(0.97), _p(0.37, 0.50, 0.08, 0.03), "update"),
     ("CHANGED", 0.95, _reading(1.00), _p(0.95, 0.03, 0.01), "update"),
@@ -227,12 +225,12 @@ def test_the_text_models_answer_still_holds_an_important_memory():
     """Its answers carry no probabilities, so nothing can raise the bar."""
     llm = FakeLLM()
     store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64))
-    store.backend.insert_memory(Memory(content="The listing 170540982 is active.",
+    store.backend.insert_memory(Memory(content="The listing LV-2024-0001 is active.",
                                        user_id="ada", importance=0.9))
-    llm.queue(facts_response(fact("The listing 170540982 was deleted.")),
+    llm.queue(facts_response(fact("The listing LV-2024-0001 was deleted.")),
               json.dumps({"action": "CHANGED", "target": 0, "content": None,
                           "reason": "deleted"}))
-    store.add("The listing 170540982 was deleted.", user_id="ada")
+    store.add("The listing LV-2024-0001 was deleted.", user_id="ada")
     assert len(store._upkeep_get("conflict:pending", "ada", [])) == 1
     store.close()
 
@@ -249,7 +247,7 @@ def test_the_queue_is_decided_again_on_a_dry_run_then_applied():
     assert [len(store._upkeep_get("conflict:pending", u, [])) for u in ("ada", "bea")] == [1, 1]
 
     def answering(state, questions):
-        chosen = judge2 if "Umzugsgrund" in state else _Judge("CHANGED", 0.86, STATE)
+        chosen = judge2 if "Beitrittsgrund" in state else _Judge("CHANGED", 0.86, STATE)
         return chosen.decide(state, questions)
 
     store.decider.decide = answering

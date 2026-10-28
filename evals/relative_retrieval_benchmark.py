@@ -751,7 +751,7 @@ OWNER_VALUES = {
     "phone": ["Pixel 8", "iPhone 15", "Fairphone 5", "Galaxy S23"], "laptop": ["ThinkPad X1", "MacBook Air", "Framework 13"],
     "car": ["Skoda Octavia", "Renault Zoe", "Toyota Yaris", "VW ID.3", "Fiat Panda"],
     "allergen": ["penicillin", "pollen", "cats' hair", "walnuts"], "dislike": ["olives", "coriander", "loud offices"],
-    "company": ["Nordlicht GmbH", "Brightline", "Kestrel Labs", "Oakfield", "Vantage Health"],
+    "company": ["Nordlicht GmbH", "Brightline", "Wrenfield Labs", "Oakfield", "Vantage Health"],
     "book": ["The Left Hand of Darkness", "Middlemarch", "Stoner", "The Dispossessed", "Piranesi"],
     "day": DAYS, "lang": ["Italian", "Japanese", "Dutch", "Portuguese", "Greek"],
     "isp": ["Telekom", "Vodafone", "O2", "1&1"], "energy": ["a green energy co-op", "the city utility"],
@@ -1120,8 +1120,8 @@ def build_world_dense(size: int, seed: int = 11, owner: bool = False) -> dict:
             "queries": dict(queries), "types": types}
 
 
-# Tags as an agent writes them when it saves (the real store: 1 to 3 a memory,
-# the most specific a median 7 members): a topic, sometimes a synonym of it or
+# Tags as an agent writes them when it saves (1 to 3 a memory, the most
+# specific ones small): a topic, sometimes a synonym of it or
 # none, a detail, a broad tag. Topics, not answer sets: the car topic holds
 # prices beside insurance, dealers and test drives.
 TOPIC_TAGS = {
@@ -1198,7 +1198,7 @@ def tag_world(world: dict, seed: int = 21) -> None:
             kind = world["types"].get(thing, "")
             tags.append(thing.lower() if rnd.random() < .8 else
                         names[0].lower() if rnd.random() < .5 else None)
-            if rnd.random() < .7:  # a task within the thing, like "bildy-billing"
+            if rnd.random() < .7:  # a task within the thing, like "zobly-billing"
                 tags.append(f"{thing.split()[0].lower()}-{rnd.choice(details[thing])}")
             elif rnd.random() < .3:
                 tags.append(rnd.choice(SUBTOPICS))

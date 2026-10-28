@@ -127,20 +127,20 @@ def _unavailable(questions: dict[str, Question]) -> Answers:
 #: merge happen without asking.
 NEVER_AUTO_MERGE = 1.01
 
-#: Automatic-merge gates measured per text model over the 56 labelled identity
+#: Automatic-merge gates measured per text model with the labelled identity
 #: cases in evals/identity_benchmark.py: the lowest threshold that let no wrong
 #: merge through, with headroom. A model that is not in here never merges on
 #: its own, because there is no threshold that is safe for a model nobody has
-#: measured: gpt-5.6-luna put a wrong "same" at 0.98, above any gate.
+#: measured: a text model can put a wrong "same" above any gate.
 MEASURED_MERGE_GATES: dict[str, float] = {
     "gpt-5-mini": 0.95,
 }
 
 #: Text models measured to make search better by judging it than without a
-#: judge, in the wording every search asks in (registry R-118, measured again
-#: after the pipeline was unified): both may be turned on (``decision.rerank``)
-#: and neither is on by default, since each waits seconds a call where Jev
-#: waits a fraction of one. A model not measured cannot be turned on.
+#: judge, in the wording every search asks in: both may be turned on
+#: (``decision.rerank``) and neither is on by default, since each waits seconds
+#: a call where Jev waits a fraction of one. A model not measured cannot be
+#: turned on.
 MEASURED_RERANKERS: frozenset[str] = frozenset({"gpt-5.6-luna", "gpt-5-mini"})
 
 
@@ -170,13 +170,14 @@ class Decider(ABC):
     fallback_gate: float = NEVER_AUTO_MERGE
 
     #: Whether re-ranking search results with this provider is on unless it is
-    #: turned off. Only Jev earned that: 190 ms a search for better recall.
+    #: turned off. Only Jev earned that: a fraction of a second a search for
+    #: better recall.
     reranks_by_default: bool = False
 
     #: Whether the answers carry probabilities the provider computed, rather
     #: than a number a text model reports about itself. Only then does Memry
-    #: decide entity pairs on them (intelligence/identity.py): gpt-5-mini
-    #: reported 0.9 on its wrong answers too.
+    #: decide entity pairs on them (intelligence/identity.py): a text model
+    #: reports a high confidence on its wrong answers too.
     calibrated: bool = False
 
     #: P(same), averaged over both orders of the pair question, from which two
@@ -355,34 +356,28 @@ class JevDecider(Decider):
     """
 
     name = "jev"
-    # Measured over 56 labelled identity cases: the worst wrong "same" scored
-    # 0.50, correct ones ran 0.40-0.95 with a median of 0.89. 0.70 leaves 0.20
-    # of headroom over the worst observed mistake and still merges 20 of 22
-    # correct pairs without asking.
+    # Measured with the labelled identity cases (evals/identity_benchmark.py):
+    # the lowest gate that let no wrong "same" through, with headroom, that
+    # still merges most correct pairs without asking.
     auto_confirm_confidence = 0.7
-    # Judging every search, it put an answer first on every question of
-    # distractors_v1, better than either text model measured, at a fraction
-    # of their wait (registry R-117, R-118).
+    # Measured to put answers higher when it judges every search, at a
+    # fraction of a text model's wait.
     reranks_by_default = True
     may_rerank = True
-    # An identity question took a median 211 ms, against 2.5 s through a text
-    # model, so asking again inside a save costs little.
+    # An identity question takes a fraction of a second, against seconds
+    # through a text model, so asking again inside a save costs little.
     rejudges_on_new_evidence = True
-    # Measured over 156 labelled pairs, three runs, both orders averaged: from
-    # 0.95 no wrong merge, 58-59 of 81 true pairs merged; no pair of two
-    # different things scored above 0.79 (evals/identity_resolution_benchmark.py).
+    # Both orders averaged, measured with evals/identity_resolution_benchmark.py:
+    # the lowest P(same) at which no pair of two different things merged.
     calibrated = True
     pair_merge_probability = 0.95
-    # Per step of the funnel: the lowest P(same) that kept wrong merges at or
-    # under 2% of merges, the stricter of two sets of synthetic stores with
-    # exact labels (18,885 comparisons of a new name against the entity it may
-    # belong to, 1 to 50 memories on its side). One memory: 2% was not reached
-    # in one set, 0.97 gave 1.7% and 3.0%; three: 0.85 and 0.96; eight: 0.79
-    # and 0.84; fifteen to thirty: 0.78-0.79. Waiting costs little, since the
-    # pair is compared again at the next step.
+    # Per step of the funnel (memories on the smaller side): the lowest P(same)
+    # that kept wrong merges rare, measured on synthetic stores with exact
+    # labels. The bar falls as the evidence grows. Waiting costs little, since
+    # the pair is compared again at the next step.
     pair_merge_by_step = {1: 0.97, 3: 0.96, 10: 0.85, 50: 0.80}
-    # 379 candidate tag pairs from a real store, 10 memories per tag, two runs:
-    # nothing wrong from 0.55, the highest pair of two subjects at 0.46.
+    # Measured with 10 memories per tag: the lowest bar at which no pair of two
+    # subjects merged.
     tag_merge_probability = 0.55
     # Measured with evals/reconcile_benchmark.py: Jev's answers to the
     # reconcile question, with the dates shown, on its synthetic update cases
@@ -392,19 +387,13 @@ class JevDecider(Decider):
     # headroom. MORE sits above every MORE that merged two separate events;
     # the few above it that the labels file under another answer joined a
     # plan with its outcome or two accounts of one event, which the merged
-    # text holds whole. No CHANGED and no WRONG was wrong in either set, so
-    # the data sets no bar for them: they act from the middle of the scale,
-    # and one Jev is less sure of still waits for a person. Measured again
-    # with the worked examples in CHANGED (``reconcile.ACTION_QUESTION``), two
-    # runs: the wrong SAMEs at 0.83 and below, the same three MOREs above 0.8
-    # (a plan with its outcome, two accounts of one event), and one CHANGED
-    # outside the labels, at 0.31 and 0.33, under its bar. The bars stand.
-    # Measured again with cases of two events of one kind and of a relative
-    # time in a merged fact (two runs): no new wrong SAME, CHANGED or WRONG;
-    # the only new wrong MORE is two road trips told months apart (LoCoMo
-    # conv-41 in fictional form) at 0.88 to 0.97, as high as right merges, so
-    # no bar separates it. The merge writer keeps such a pair apart or dates
-    # each trip (``reconcile.MERGE_REQUEST``). The bars stand.
+    # text holds whole. No CHANGED and no WRONG was wrong, so the data sets no
+    # bar for them: they act from the middle of the scale, and one Jev is less
+    # sure of still waits for a person. The bars held with the worked examples
+    # in CHANGED (``reconcile.ACTION_QUESTION``). Two events of one kind told
+    # months apart (two road trips) can get a MORE as sure as a right merge,
+    # so no bar separates them; the merge writer keeps such a pair apart or
+    # dates each event (``reconcile.MERGE_REQUEST``).
     reconcile_bars = {"SAME": 0.85, "MORE": 0.8, "CHANGED": 0.5, "WRONG": 0.5}
 
     def __init__(self, cfg: DecisionConfig) -> None:

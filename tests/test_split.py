@@ -322,8 +322,8 @@ def test_many_memories_are_asked_at_once_and_written_in_order():
 
 
 def test_the_split_prompt_asks_every_fact_to_name_its_subject():
-    """Read alone, months later, a fact must say what it is about: 2 of 12
-    two-fact splits of a real store lost it ("Merge the first change first"
+    """Read alone, months later, a fact must say what it is about: measured,
+    some two-fact splits lost it ("Merge the first change first"
     with no project), and such a fact is worse than the memory it came
     from."""
     rule = " ".join(SPLIT_SYSTEM.split())
@@ -335,9 +335,9 @@ def test_the_split_prompt_asks_every_fact_to_name_its_subject():
 
 
 def test_the_split_prompt_keeps_a_list_as_one_fact():
-    """Without the rule, the model split one memory's list of skills into 23
-    facts that each named one skill, and a review's seven unmeasured cells
-    into seven facts: one vector each for what is one fact."""
+    """Without the rule, the model split one memory's list of skills into one
+    fact per skill, and a review's unmeasured cells into one fact per
+    cell: one vector each for what is one fact."""
     rule = " ".join(SPLIT_SYSTEM.split())
     assert ('A list is one fact too: "Ada\'s skills include Python, SQL and Go." stays '
             "whole") in rule
@@ -374,7 +374,7 @@ def test_a_fact_that_does_not_state_its_subject_is_found():
 
 
 def test_a_fact_may_name_the_owner_a_linked_thing_or_a_name_the_memory_states():
-    """Of 51 long memories of a real store, the first check kept 18 whole,
+    """Measured, the first check kept too many long memories whole,
     several for facts that did say what they were about: "The user prefers
     ...", a linked thing the memory's text spells another way, a model name
     the text states. A one-word abbreviation names no subject."""
@@ -388,8 +388,8 @@ def test_a_fact_may_name_the_owner_a_linked_thing_or_a_name_the_memory_states():
     assert without_subject(["Prefers green tea."], about_owner, linked, ["Ada Lind"]) == [
         "Prefers green tea."]
     # a German genitive names the owner too
-    assert without_subject(["Adas Umsatz 2025 betrug 7.300 €."],
-                           Memory(content="Umsatz 2025: 7.300 €. Kunde: Corlan Labs."),
+    assert without_subject(["Adas Umsatz 2025 betrug 4.200 €."],
+                           Memory(content="Umsatz 2025: 4.200 €. Kunde: Corlan Labs."),
                            linked, ["Ada"]) == []
     # a linked thing the text spells another way, and a name the text states
     prices = Memory(content="The M4 Max costs €2,829 refurbished. The M3 Ultra starts at €4,295.")
@@ -669,7 +669,7 @@ def test_a_plan_is_checked_whole_before_any_split():
 def test_a_walk_over_namespaces_asks_about_each_memory_once():
     """No user means every user's memories: the pass for the memories
     without a user once took in every namespace, and each named one was
-    asked about again (1446 memories, then the 1440 of "default")."""
+    asked about again, nearly every memory twice."""
     llm = SentenceSplitter()
     store = _store(llm)
     for user in (None, "a", "b"):

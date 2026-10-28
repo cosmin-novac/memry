@@ -373,23 +373,23 @@ from memry.providers.llm import NoneLLM  # noqa: E402
 def test_same_name_with_no_evidence_reuses_instead_of_forking(verbatim_store):
     """An identically-named record with no facts has no identity to differ from.
 
-    Forking there produced the duplicate pile a real store accumulated: 4x
-    "sehr geehrte", 3x "the father of photography", and 206 of 519 entities
-    with zero mentions, each dragging along an unanswerable merge proposal.
+    Forking there produced the duplicate pile a real store accumulated: the
+    same phrase several times over, and many entities with zero mentions,
+    each dragging along an unanswerable merge proposal.
     """
     backend = verbatim_store.backend
     empty = backend.insert_entity(
-        Entity(name="Fundation GmbH", normalized="fundation gmbh", user_id="ada")
+        Entity(name="Veldmark GmbH", normalized="veldmark gmbh", user_id="ada")
     )
     memory = backend.insert_memory(
-        Memory(content="Fundation GmbH has VAT ID DE123.", user_id="ada")
+        Memory(content="Veldmark GmbH has VAT ID DE123.", user_id="ada")
     )
     resolved = resolve_mentions(
         backend=backend, llm=NoneLLM(), scope=Scope(user_id="ada"),
         memory_id=memory.id, memory_content=memory.content,
-        surfaces=["Fundation GmbH"],
+        surfaces=["Veldmark GmbH"],
     )
-    assert resolved["fundation gmbh"].id == empty.id
+    assert resolved["veldmark gmbh"].id == empty.id
     assert len(verbatim_store.entities(user_id="ada")) == 1
     assert backend.list_proposals(Scope(user_id="ada"), status="proposed") == []
 
@@ -422,16 +422,16 @@ def test_a_record_with_evidence_is_still_judged_not_blindly_reused(verbatim_stor
 def test_maintenance_settles_unanswerable_same_name_proposals(verbatim_store):
     backend = verbatim_store.backend
     with_facts = backend.insert_entity(
-        Entity(name="Fundation GmbH", normalized="fundation gmbh", user_id="ada")
+        Entity(name="Veldmark GmbH", normalized="veldmark gmbh", user_id="ada")
     )
     memory = backend.insert_memory(
-        Memory(content="Fundation GmbH is registered in Cologne.", user_id="ada")
+        Memory(content="Veldmark GmbH is registered in Leipzig.", user_id="ada")
     )
     backend.add_mention(
-        EntityMention(entity_id=with_facts.id, memory_id=memory.id, surface="Fundation GmbH")
+        EntityMention(entity_id=with_facts.id, memory_id=memory.id, surface="Veldmark GmbH")
     )
     empty = backend.insert_entity(
-        Entity(name="Fundation GmbH", normalized="fundation gmbh", user_id="ada")
+        Entity(name="Veldmark GmbH", normalized="veldmark gmbh", user_id="ada")
     )
     backend.add_proposal(
         MergeProposal(entity_a=with_facts.id, entity_b=empty.id, user_id="ada")
@@ -473,16 +473,16 @@ def test_preexisting_duplicates_get_a_proposal_so_they_can_be_reconsidered(verba
     backend = verbatim_store.backend
     scope = Scope(user_id="ada")
     first = backend.insert_entity(
-        Entity(name="AI Flow", normalized="ai flow", user_id="ada")
+        Entity(name="Loom Deck", normalized="loom deck", user_id="ada")
     )
     second = backend.insert_entity(
-        Entity(name="AI Flow", normalized="ai flow", user_id="ada")
+        Entity(name="Loom Deck", normalized="loom deck", user_id="ada")
     )
-    for entity, text in ((first, "AI Flow ships weekly."),
-                         (second, "AI Flow uses Postgres.")):
+    for entity, text in ((first, "Loom Deck ships weekly."),
+                         (second, "Loom Deck uses Postgres.")):
         memory = backend.insert_memory(Memory(content=text, user_id="ada"))
         backend.add_mention(
-            EntityMention(entity_id=entity.id, memory_id=memory.id, surface="AI Flow")
+            EntityMention(entity_id=entity.id, memory_id=memory.id, surface="Loom Deck")
         )
     assert backend.list_proposals(scope, status="proposed") == []
 
@@ -532,12 +532,12 @@ def test_mechanical_non_referents_match_the_real_junk():
     junk = ["2019", "2027", "2045", "2026-07-24", "July 2026", "$149",
             "0.33%", "192 GB", "256 GB RAM", "24 GB GPU", "[date]",
             "Sehr geehrte", "Sehr geehrte salutations",
-            "https://forms.gle/37VX5yLXdZGFqWY26", "billing@example.com"]
+            "https://forms.example/f/3kQ9xZ", "billing@example.com"]
     for name in junk:
         assert non_referent_reason(name), f"should be flagged: {name!r}"
 
     real = ["Abgeltungssteuer", "RAG", "MSCI World", "Bitcoin", "GmbH",
-            "FZulG", "HRB 110232", "World Cup 2026", "Next.js", "SG Ready",
+            "FZulG", "HRB 123456", "World Cup 2026", "Next.js", "SG Ready",
             "Marcus Vandenberg", "2013 master's degree", "6000i dual-split"]
     for name in real:
         assert non_referent_reason(name) is None, f"wrongly flagged: {name!r}"
@@ -601,13 +601,8 @@ LEXNOVA = "Invoice 2024-117 from LexNova GmbH"
 def test_the_extraction_prompt_names_two_things_that_share_a_name_apart():
     """A save naming two invoices numbered 2024-117 listed one "Invoice
     2024-117", so one entity stood for both and a Noord Legal memory later
-    joined it. With this instruction, on the 13 saves of world 3 that mention
-    the invoices, facts naming both kept them apart 6 of 6 times (1-2 of 6
-    before) and facts naming one carried the sender 23 of 23 times (0 of 14):
-    commit 973d0ca; the PhD repo's scenario registry, I-44
-    (papers/memry-field-studies/notes/scenario-registry.md, with
-    code/identity-replay/samename_test.py and
-    data/identity_context/samename_extraction.json)."""
+    joined it. With this instruction (commit 973d0ca), facts naming both keep
+    them apart and facts naming one carry the sender."""
     from conftest import FakeLLM
     from memry.intelligence.extraction import extract_facts
 
