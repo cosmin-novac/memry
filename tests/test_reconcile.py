@@ -304,8 +304,8 @@ def test_the_merge_writer_reads_each_fact_with_its_dates_and_keeps_each_time_wit
     known, and when it was said) and is told to write each time as the date
     it names, read against its own text's date, with the event it belongs
     to. Before, it read the two texts with no date at all, and "a road trip
-    last year" said in April 2023 became "the previous year's road trip"
-    beside a trip of 16 December 2022 (LoCoMo conv-41)."""
+    last year" said in April could become "the previous year's road trip"
+    beside a trip of the December before."""
     from memry.intelligence.reconcile import MERGE_REQUEST, RECONCILE_SYSTEM
 
     llm = FakeLLM()
@@ -332,8 +332,8 @@ def test_the_merge_writer_reads_each_fact_with_its_dates_and_keeps_each_time_wit
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_a_more_the_merge_writer_reads_as_two_things_is_added_as_new(layout):
     """Jev's MORE on a second event of one kind (a trip "last year" beside a
-    trip of March) stood at 0.80 to 0.97 in the LoCoMo stores, as high as its
-    right merges, so no bar tells them apart. The writer reads both texts with
+    trip of March) can be as sure as on its right merges, so no bar tells
+    them apart. The writer reads both texts with
     their dates; when it answers that the new fact is another event or thing
     of the same kind, nothing is merged and the fact is stored beside the
     memory, as a NEW is. Before, a writer that wrote no text left the new fact
@@ -617,8 +617,8 @@ def test_jev_has_a_measured_bar_for_every_answer_that_acts():
 def test_jevs_reconcile_bars_are_the_measured_values():
     """Jev's bars are the values measured on its recorded answers to the
     reconcile question, in both wordings: ``evals/reconcile_benchmark.py
-    bars`` recomputes them from the recorded answers and labels kept in the
-    PhD repository's ``data/reconcile`` folder. A bar moved without a new
+    bars`` recomputes them from recorded answers and labels, which are kept
+    outside this repository. A bar moved without a new
     measurement fails here, and the stub these tests act through
     (``BARS``) holds the same values, so what they test is what Jev does."""
     measured = {"SAME": 0.85, "MORE": 0.8, "CHANGED": 0.5, "WRONG": 0.5}

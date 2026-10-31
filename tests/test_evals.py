@@ -217,7 +217,7 @@ def test_multi_hop_answers_do_not_name_the_person_asked_about():
 
 def test_the_identity_comparison_runs_from_the_committed_dataset(monkeypatch, capsys):
     """The Jev and text-model comparison of the identity gate was published
-    with no dataset, and two runs differed (53 and 52 of 56). The 56 cases
+    with no dataset, and two runs differed. The 56 cases
     are committed where ``identity_benchmark.py`` reads them (22 one
     entity, 22 two, 12 that nothing settles), and the script scores them
     offline with the decider swapped out: a judge that is unsure of

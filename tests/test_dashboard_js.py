@@ -623,14 +623,14 @@ const reply=name=>({entity:{name,description:name+' facts'},aliases:[],memories:
   check(box.innerHTML.includes('Fast')&&!box.innerHTML.includes('Slow'),'and it is what the panel shows');
   // a name the page knows shows with its buttons before the server answers,
   // which may first write a description
-  known.samurai={id:'samurai',name:'armored samurai',entity_type:'person',memories:3};
-  const third=openEntity('samurai');
-  check(box.innerHTML.includes('armored samurai')&&box.innerHTML.includes('>not an entity</button>')
+  known.pirate={id:'pirate',name:'armored space pirate',entity_type:'person',memories:3};
+  const third=openEntity('pirate');
+  check(box.innerHTML.includes('armored space pirate')&&box.innerHTML.includes('>not an entity</button>')
     &&box.innerHTML.includes('>change type...</button>')&&box.innerHTML.includes('<loading description>'),
     'name and buttons at once: '+box.innerHTML.slice(0,200));
   check(box.dataset.memories==3,'the count for "not an entity" is known at once');
-  pending.samurai(reply('armored samurai'));await third;
-  check(others.knowledgeentityidentity.innerHTML.includes('armored samurai facts'),'the description fills in');
+  pending.pirate(reply('armored space pirate'));await third;
+  check(others.knowledgeentityidentity.innerHTML.includes('armored space pirate facts'),'the description fills in');
   check(others.knowledgeentitybody.innerHTML.includes('No active supporting memories.'),'and the memories');
 })().catch(e=>{console.error(e.message);process.exit(1)});
 """
@@ -1209,7 +1209,7 @@ def test_entity_merge_proposals_are_asked_under_upkeep():
 
 
 def test_combine_keeps_a_real_name_over_the_owner_placeholder():
-    """Combining "the user" with Cosmin must not preselect "the user", even
+    """Combining "the user" with Tobias must not preselect "the user", even
     with more memories: a real name comes first, then the most memories, and
     the placeholder is still offered, last."""
     from memry.intelligence.extraction import OWNER_PLACEHOLDER
@@ -1226,21 +1226,21 @@ const api=async()=>[];
 function check(condition,message){if(!condition)throw new Error(message)}
 const names=rows=>combineKeepOptions(rows).map(e=>e.name).join();
 const owner={id:'u',name:'the user',entity_type:'person',memories:40};
-const cosmin={id:'c',name:'Cosmin',entity_type:'person',memories:3};
-const cos={id:'k',name:'Cos',entity_type:'person',memories:9};
+const tobias={id:'c',name:'Tobias',entity_type:'person',memories:3};
+const tobi={id:'k',name:'Tobi',entity_type:'person',memories:9};
 const tag={id:'t',name:'work',entity_type:'topic',memories:50};
-check(names([owner,cosmin])==='Cosmin,the user','a real name before the placeholder: '+names([owner,cosmin]));
-check(names([{...owner,name:' The User '},cosmin])==='Cosmin, The User ','in any case');
-check(names([owner,cosmin,cos])==='Cos,Cosmin,the user','then the most memories');
+check(names([owner,tobias])==='Tobias,the user','a real name before the placeholder: '+names([owner,tobias]));
+check(names([{...owner,name:' The User '},tobias])==='Tobias, The User ','in any case');
+check(names([owner,tobias,tobi])==='Tobi,Tobias,the user','then the most memories');
 check(names([owner,tag])==='the user','the placeholder can still be kept');
 check(names([tag,{...tag,id:'t2',name:'job',memories:60}])==='job,work','two tags: the most memories');
-entityRows=[owner,cosmin];
+entityRows=[owner,tobias];
 pickEntity('u',true);pickEntity('c',true);
 (async()=>{
   await combineSelected();
   const panel=nodes.entcombine.innerHTML;
   check(panel.indexOf('value="c"')>-1&&panel.indexOf('value="c"')<panel.indexOf('value="u"'),
-        'Cosmin is the first option, so the one picked to keep');
+        'Tobias is the first option, so the one picked to keep');
 })().catch(e=>{console.error(e.message);process.exit(1)});
 """
     _run_node(contract)

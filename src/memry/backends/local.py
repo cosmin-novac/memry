@@ -2706,7 +2706,7 @@ class LocalBackend(MemoryBackend):
         another): (the tag name a column files it under, the active entity
         its mention goes to). Its tombstone is followed topic to topic
         ("taxes" into "tax" into "levies": "levies"); where the chain reaches
-        a named thing ("bildy" the tag into "Bildy" the product) the name is
+        a named thing ("zobly" the tag into "Zobly" the product) the name is
         the last tag's and the entity the thing. None when no topic of that
         name was merged."""
         for tombstone in self._db.execute(
@@ -4674,8 +4674,8 @@ class LocalBackend(MemoryBackend):
 
     def _unfold_tags_locked(self, entity_id: str) -> None:
         """Make each tag folded into ``entity_id`` (a topic entity whose
-        tombstone points at it, or at a named thing merged into it: "bildy"
-        the tag into "Bildy" the product) a topic again, before the entity
+        tombstone points at it, or at a named thing merged into it: "zobly"
+        the tag into "Zobly" the product) a topic again, before the entity
         is retired: its tombstone becomes the active topic of its name (or,
         where one is active already, points at that one), and the memories
         filed under the name are filed again, so their mentions go to the
@@ -4724,8 +4724,8 @@ class LocalBackend(MemoryBackend):
         tag, the mention whose surface is the tag as the column writes it
         (``_mention_tags_locked`` writes a tag's mention under that name, and
         a merge moved the topic's mentions, written so, onto the entity). A
-        mention under another surface ("Bildy" in "Bildy runs on AWS", beside
-        the tag "bildy") names the entity, and stays."""
+        mention under another surface ("Zobly" in "Zobly runs on AWS", beside
+        the tag "zobly") names the entity, and stays."""
         for row in self._memories_naming_locked(user_id, names):
             surfaces = sorted({
                 str(tag).strip() for tag in json.loads(row["categories"])
@@ -4964,7 +4964,7 @@ class LocalBackend(MemoryBackend):
     def merge_entities(self, keep_id: str, merge_id: str) -> bool:
         """Idempotently fold both IDs' active roots into one entity.
 
-        A tag folded together with a named thing ("bildy" the tag and "Bildy"
+        A tag folded together with a named thing ("zobly" the tag and "Zobly"
         the product) always goes into the thing, whichever side the caller
         kept: the thing keeps its type, relations and name, and the tag's
         memories become its mentions. A side found folded meanwhile (the
@@ -5070,8 +5070,8 @@ class LocalBackend(MemoryBackend):
         # they were judged against its memories alone. The kept entity's own
         # pairs keep their step, since the funnel compares a pair again once
         # its smaller side reaches the next step anyway (``identity.rounds``).
-        # Restarting them all re-judged about 1000 pairs after one owner merge
-        # on a live store, 987 of them to the same "wait".
+        # Restarting them all re-judged hundreds of pairs after one owner merge,
+        # nearly all of them to the same "wait".
         self._db.executemany(
             "UPDATE entity_proposals SET compared_step = 0 WHERE id = ?",
             [(proposal_id,) for proposal_id in moved],
@@ -5175,8 +5175,8 @@ class LocalBackend(MemoryBackend):
         """Once per database: each pair of entities keeps one row. A merge
         before 0.2.40 pointed the merged entity's pairs at the kept one without
         looking for a row the kept one had for the same third entity, so a
-        pass that paired the store owner with "Cosmin" and "Cosmin Novac"
-        left, once those two were merged, two rows for the owner and "Cosmin",
+        pass that paired the store owner with "Tobias" and "Tobias Lindgren"
+        left, once those two were merged, two rows for the owner and "Tobias",
         both created in that pass. Of each pair's rows the one a merge keeps
         stays (``_one_row_per_pair_locked``): confirmed rows all stay as they
         are, and beside one the rest go (the two are one, the pair is moot);

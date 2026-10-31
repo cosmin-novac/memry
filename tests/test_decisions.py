@@ -318,18 +318,18 @@ def test_the_served_model_is_recorded_because_jev_latest_is_an_alias():
 # ---------------------------------------------------------------- merge gate
 def test_each_provider_carries_its_own_merge_gate():
     """The gate is only meaningful relative to a provider's confidence spread.
-    Measured over 56 labelled cases: gpt-5-mini's wrong answers score as high
-    as its right ones, so its gate is 0.95; Jev's separate, so it can sit lower
-    and still merge nothing it should not."""
+    Measured with the labelled identity cases: gpt-5-mini's wrong answers score
+    as high as its right ones, so its gate is 0.95; Jev's separate, so it can
+    sit lower and still merge nothing it should not."""
     mini = FakeLLM(); mini.model = "gpt-5-mini"
     assert LLMDecider(mini).auto_confirm_confidence == 0.95
     assert JevDecider(DecisionConfig(provider="jev", api_key="k")).auto_confirm_confidence == 0.7
 
 
 def test_a_text_model_nobody_measured_never_merges_on_its_own():
-    """gpt-5.6-luna got more verdicts right than gpt-5-mini and put its worst
-    wrong "same" at 0.98, above any gate. So there is no safe number for a model
-    that has not been run through evals/identity_benchmark.py."""
+    """A text model can put a wrong "same" above any gate. So there is no safe
+    number for a model that has not been run through
+    evals/identity_benchmark.py."""
     luna = FakeLLM(); luna.model = "gpt-5.6-luna"
     assert LLMDecider(luna).auto_confirm_confidence == NEVER_AUTO_MERGE > 1.0
     assert LLMDecider(FakeLLM()).auto_confirm_confidence == NEVER_AUTO_MERGE
@@ -715,10 +715,9 @@ def _searched(store):
 
 def test_rerank_orders_by_the_judgement_a_tie_keeping_the_ranking():
     """A search is ordered by the judgement, whether its question names
-    anything or not: measured again in the wording every search now asks in
-    (R-117), the judgement alone put an answer first on every question, and
-    the blend with the text ranking's position no longer earned a rule of
-    its own. A tie keeps the ranking's order."""
+    anything or not: in the wording every search now asks in, the judgement
+    alone does as well as a blend with the text ranking's position, so the
+    blend has no rule of its own. A tie keeps the ranking's order."""
     rel = {0: 0.55, 1: 0.50, 2: 0.50, 3: 0.75}
     stub = _judging(rel.get)
     store = _store_with(stub)
@@ -916,16 +915,10 @@ def test_tags_merge_by_the_measured_question_at_its_measured_bar():
     """Two tags are an entity pair the funnel asks the tag question of: each
     tag shown with how many memories it is on and its 10 most recent
     memories, in both orders, merged from Jev's ``tag_merge_probability``,
-    0.55, into the more used tag. Measured on the 379 candidate pairs of a
-    real 417-tag store, labelled by hand (16 one subject, 41 borderline, 322
-    two subjects), two runs: no pair of two subjects scored above 0.46, and
-    from 0.55 the judge merged 7-9 of the 16 and nothing wrong; the entity
-    pair question on the same pairs merged fewer and some of two subjects.
-    The measurements are in the PhD repo, papers/memry-field-studies:
-    findings/identity-obvious-merges.md ("Tags on the same store") with
-    data/tag_pairs_jev.json, findings/identity-threshold-by-evidence.md ("Tag
-    question"), notes/scenario-registry.md, T-4 and T-8, and
-    data/topics-as-things/README.md. A judge with no measured bar is not asked."""
+    0.55, into the more used tag. Measured, from that bar the judge merged
+    tags of one subject and no pair of two subjects; the entity pair
+    question on the same pairs merged fewer, and some of two subjects. A
+    judge with no measured bar is not asked."""
     from memry.intelligence.identity import TAG_EXAMPLES, TAG_QUESTION
 
     assert JevDecider.tag_merge_probability == 0.55
@@ -971,7 +964,7 @@ def test_tags_merge_by_the_measured_question_at_its_measured_bar():
 def test_tags_the_names_alone_would_join_stay_apart_when_their_memories_differ():
     """By their names "apple" and "apple inc" are one subject written with and
     without its legal form, and a judge shown the names alone joins them, as
-    names-only judging put "memry" and "memory" at 0.98. The tag question
+    names-only judging joins "memry" and "memory". The tag question
     shows the memories under each tag: where one tag files the fruit and the
     other the company, they stay two tags; where both file the company, the
     same two names merge."""
@@ -1009,7 +1002,7 @@ def test_tags_the_names_alone_would_join_stay_apart_when_their_memories_differ()
 
 def test_rerank_cannot_be_forced_onto_a_provider_that_did_not_earn_it():
     """For a provider that was not measured to beat no re-ranking the
-    setting is refused (R-118): no search asks it."""
+    setting is refused: no search asks it."""
     from memry.config import Config
 
     reversing = _judging(lambda i: i / 10.0)
@@ -1049,9 +1042,9 @@ def test_rerank_can_be_turned_off_where_it_is_on():
 
 
 def test_rerank_may_be_turned_on_for_a_text_model_measured_to_help():
-    """A text model measured to help (R-118, measured again in the wording
-    every search asks in: gpt-5.6-luna and gpt-5-mini) may be turned on by
-    the setting; neither is on by default. A model not measured is refused."""
+    """A text model measured to help, in the wording every search asks in
+    (gpt-5.6-luna and gpt-5-mini), may be turned on by the setting; neither
+    is on by default. A model not measured is refused."""
     from memry.config import Config
 
     for model in ("gpt-5.6-luna", "gpt-5-mini"):
@@ -1273,7 +1266,7 @@ class _PairJudge(NoneDecider):
 
 def _judged_store(answer, entity_type: str | None = None):
     judge = _PairJudge(answer)
-    store, save = _jonas_store(judge, "Fundation GmbH", entity_type or "organization")
+    store, save = _jonas_store(judge, "Veldmark GmbH", entity_type or "organization")
     return store, save, judge
 
 
@@ -1285,8 +1278,8 @@ def test_a_pair_merges_on_the_average_of_both_orders():
         return (1.0, 0.0) if "Finanzamt" in state[first:state.index("ENTITY B")] else (0.85, 0.0)
 
     store, save, judge = _judged_store(answer)
-    save("Fundation GmbH's Finanzamt file number is 218/5713")
-    save("Fundation has 150,000 euros in cash after taxes", as_name="Fundation")
+    save("Veldmark GmbH's Finanzamt file number is 123/4567")
+    save("Veldmark has 90,000 euros in cash after taxes", as_name="Veldmark")
     assert len(store.entities(user_id="ada")) == 2
     [proposal] = store.merge_proposals(user_id="ada")
     assert proposal.confidence == pytest.approx(0.925)
@@ -1298,16 +1291,16 @@ def test_a_known_name_is_asked_with_the_entity_first_only():
     """A mention of a name the store has is compared with the entity of that
     name in one call, the entity as A. Here the judge says "another" with the
     entity first (0.6) and "one thing" with the mention first: averaged
-    (0.3), the mention would have joined. The check reads no merge bar, and
-    one order did no worse on the namesakes it must keep apart (O-35)."""
+    (0.3), the mention would have joined. The check reads no merge bar, so
+    one order is enough."""
     def answer(state):
         first = state.index("ENTITY A")
         entity_first = "Finanzamt" in state[first:state.index("ENTITY B")]
         return (0.3, 0.6) if entity_first else (0.9, 0.0)
 
     store, save, judge = _judged_store(answer)
-    save("Fundation GmbH's Finanzamt file number is 218/5713")
-    save("Fundation GmbH has 150,000 euros in cash after taxes")
+    save("Veldmark GmbH's Finanzamt file number is 123/4567")
+    save("Veldmark GmbH has 90,000 euros in cash after taxes")
     assert len(judge.states) == 1
     assert len(store.entities(user_id="ada")) == 2
     [proposal] = store.merge_proposals(user_id="ada")
@@ -1321,10 +1314,10 @@ def test_one_order_keeps_the_answer_as_the_judge_gave_it():
     from memry.intelligence.identity import Profile, judge_pair_and_belongs
 
     judge = _BelongsJudge(lambda state: (0.7, 0.2), _version_of(0.9))
-    a = Profile("Kestrel planner", "product", ["Kestrel planner runs on Linux"])
-    b = Profile("Kestrel planner v2", "product", ["Kestrel planner v2 added offline mode"])
+    a = Profile("Osprey planner", "product", ["Osprey planner runs on Linux"])
+    b = Profile("Osprey planner v2", "product", ["Osprey planner v2 added offline mode"])
     pair, belongs = judge_pair_and_belongs(judge, a, b, one_order=True)
-    assert [_names(state) for state in judge.states] == [("Kestrel planner", "Kestrel planner v2")]
+    assert [_names(state) for state in judge.states] == [("Osprey planner", "Osprey planner v2")]
     assert pair == pytest.approx({"same": 0.7, "different": 0.2, "unsure": 0.1})
     assert (belongs["b_kind_of_a"], belongs["a_kind_of_b"]) == (0.9, 0.0)
     pair, belongs = judge_pair_and_belongs(judge, a, b)
@@ -1339,8 +1332,8 @@ def test_one_order_keeps_the_answer_as_the_judge_gave_it():
 ])
 def test_the_three_outcomes(same, different, entities, proposals):
     store, save, _ = _judged_store(lambda state: (same, different))
-    save("Fundation GmbH's Finanzamt file number is 218/5713")
-    save("Fundation has 150,000 euros in cash after taxes", as_name="Fundation")
+    save("Veldmark GmbH's Finanzamt file number is 123/4567")
+    save("Veldmark has 90,000 euros in cash after taxes", as_name="Veldmark")
     assert len(store.entities(user_id="ada")) == entities
     assert len(store.merge_proposals(user_id="ada")) == proposals
     store.close()
@@ -1360,28 +1353,28 @@ def test_a_known_name_attaches_unless_the_judge_says_it_is_another(
     store, and a one-memory entity never gains the evidence to be compared
     again."""
     store, save, _ = _judged_store(lambda state: (same, different))
-    save("Fundation GmbH's Finanzamt file number is 218/5713")
-    save("Fundation GmbH has 150,000 euros in cash after taxes")
+    save("Veldmark GmbH's Finanzamt file number is 123/4567")
+    save("Veldmark GmbH has 90,000 euros in cash after taxes")
     assert len(store.entities(user_id="ada")) == entities
     assert len(store.merge_proposals(user_id="ada")) == proposals
     store.close()
 
 
 def test_one_memory_naming_an_entity_two_ways_makes_no_second_entity():
-    """The memory names "Fundation" and "Fundation GmbH". "Fundation" merges
-    into "Fundation GmbH" first; "Fundation GmbH" then joins it too, instead
-    of becoming a second "Fundation GmbH" with nothing left to compare."""
+    """The memory names "Veldmark" and "Veldmark GmbH". "Veldmark" merges
+    into "Veldmark GmbH" first; "Veldmark GmbH" then joins it too, instead
+    of becoming a second "Veldmark GmbH" with nothing left to compare."""
     from conftest import fact, facts_response
 
     store, save, _ = _judged_store(lambda state: (0.99, 0.0))
-    save("Fundation GmbH's Finanzamt file number is 218/5713")
+    save("Veldmark GmbH's Finanzamt file number is 123/4567")
     llm = store.llm
-    llm.queue(facts_response(fact("Fundation (Fundation GmbH) has 150,000 euros in cash", entities=[
-        {"name": "Fundation", "type": "organization"},
-        {"name": "Fundation GmbH", "type": "organization"}])))
+    llm.queue(facts_response(fact("Veldmark (Veldmark GmbH) has 90,000 euros in cash", entities=[
+        {"name": "Veldmark", "type": "organization"},
+        {"name": "Veldmark GmbH", "type": "organization"}])))
     llm.queue(json.dumps({"action": "ADD", "target": None, "content": None, "reason": "new"}))
-    store.add("Fundation (Fundation GmbH) has 150,000 euros in cash", user_id="ada")
-    assert [e.name for e in store.entities(user_id="ada")] == ["Fundation GmbH"]
+    store.add("Veldmark (Veldmark GmbH) has 90,000 euros in cash", user_id="ada")
+    assert [e.name for e in store.entities(user_id="ada")] == ["Veldmark GmbH"]
     store.close()
 
 
@@ -1394,15 +1387,15 @@ def test_one_memory_naming_an_entity_two_ways_makes_no_second_entity():
     ("Jonas Brandt", "person", ["Jonas Brandt is the partner of the user and cooks on Sundays"],
      "Jonas", "Jonas, the vendor's architect, reviewed the design doc on Sunday"),
     # a reference without its namespace, in two repositories
-    ("PR #92", "code", ["PR #92 in the Pixlo repository moves video slots between cards"],
-     "PR #92", "PR #92 in the Prompt Party repository gates the next-game vote"),
+    ("PR #64", "code", ["PR #64 in the Tidely repository moves tide tables into cards"],
+     "PR #64", "PR #64 in the Prompt Party repository gates the next-game vote"),
 ])
 @pytest.mark.parametrize("judged,entities", [((0.05, 0.9), 2), ((0.99, 0.0), 1)])
 def test_two_things_of_one_name_are_told_apart_by_the_judge_not_by_the_names(
         name, kind, known, mention, new, judged, entities):
     """Two things that share a name ("Anna Weber" the team lead and "Anna
     Weber" the architect, the partner "Jonas Brandt" and a vendor's "Jonas",
-    "PR #92" in two repositories). Rules on the names merged them before
+    "PR #64" in two repositories). Rules on the names merged them before
     3a2aa13: the same full name and two shared words of context, a first
     name shared with a full name. The judge decides now: they stay two where
     it says "different" and are one where it says "same", whatever the
@@ -1419,16 +1412,16 @@ def test_two_things_of_one_name_are_told_apart_by_the_judge_not_by_the_names(
 
 
 def test_a_known_name_joins_the_likeliest_of_its_entities():
-    """Two "Fundation GmbH" entities: the mention about Cologne joins the one
-    whose memories are about Cologne, and no proposal is left behind."""
+    """Two "Veldmark GmbH" entities: the mention about Leipzig joins the one
+    whose memories are about Leipzig, and no proposal is left behind."""
     def answer(state):
-        return (0.9, 0.05) if state.count("Cologne") > 1 else (0.7, 0.1)
+        return (0.9, 0.05) if state.count("Leipzig") > 1 else (0.7, 0.1)
 
     store, save, _ = _judged_store(answer)
-    _entity_with(store, "Fundation GmbH", ["Fundation GmbH paid invoice 12"])
-    cologne = _entity_with(store, "Fundation GmbH", ["Fundation GmbH has an office in Cologne"])
-    save("Fundation GmbH moved its Cologne office to Ehrenfeld")
-    joined = [m.memory_id for m in store.backend.entity_mentions(cologne.id)]
+    _entity_with(store, "Veldmark GmbH", ["Veldmark GmbH paid invoice 12"])
+    leipzig = _entity_with(store, "Veldmark GmbH", ["Veldmark GmbH has an office in Leipzig"])
+    save("Veldmark GmbH moved its Leipzig office to Plagwitz")
+    joined = [m.memory_id for m in store.backend.entity_mentions(leipzig.id)]
     assert len(joined) == 2
     assert len(store.entities(user_id="ada")) == 2
     assert store.merge_proposals(user_id="ada") == []
@@ -1469,20 +1462,20 @@ def test_the_funnel_owes_a_pair_a_comparison_only_at_a_new_step():
 
 
 def test_a_waiting_pair_is_compared_again_when_its_smaller_side_reaches_a_step():
-    """"Fundation GmbH" has 12 memories and "Fundation" gains one per save. The
-    pair is compared when found and when "Fundation" reaches 3 and 10
+    """"Veldmark GmbH" has 12 memories and "Veldmark" gains one per save. The
+    pair is compared when found and when "Veldmark" reaches 3 and 10
     memories, not on the saves in between."""
     def answer(state):
         a, b = _names(state)
         return (0.99, 0.0) if a == b else (0.8, 0.0)
 
     store, save, judge = _judged_store(answer)
-    _entity_with(store, "Fundation GmbH", [f"Fundation GmbH invoice {i} was paid" for i in range(12)])
+    _entity_with(store, "Veldmark GmbH", [f"Veldmark GmbH invoice {i} was paid" for i in range(12)])
     asked = []
     for i in range(10):
-        save(f"Fundation office note {i}", as_name="Fundation")
+        save(f"Veldmark office note {i}", as_name="Veldmark")
         asked.append(sum(1 for state in judge.states if set(_names(state)) == {
-            "Fundation", "Fundation GmbH"}) // 2)
+            "Veldmark", "Veldmark GmbH"}) // 2)
     assert asked == [1, 1, 2, 2, 2, 2, 2, 2, 2, 3]
     [proposal] = store.merge_proposals(user_id="ada")
     assert proposal.compared_step == 10
@@ -1494,8 +1487,8 @@ def test_a_pair_with_50_memories_a_side_is_compared_with_10_then_50():
 
     store, _, judge = _judged_store(
         lambda state: (0.99, 0.0) if state.count("\n- [") > 40 else (0.8, 0.0))
-    a = _entity_with(store, "Fundation GmbH", [f"Fundation GmbH invoice {i}" for i in range(60)])
-    b = _entity_with(store, "Fundation", [f"Fundation office note {i}" for i in range(55)])
+    a = _entity_with(store, "Veldmark GmbH", [f"Veldmark GmbH invoice {i}" for i in range(60)])
+    b = _entity_with(store, "Veldmark", [f"Veldmark office note {i}" for i in range(55)])
     verdict = compare(judge, store.backend, a, b)
     assert (verdict.action, verdict.step) == ("merge", 50)
     assert [state.count("\n- [") for state in judge.states] == [20, 20, 100, 100]
@@ -1513,8 +1506,8 @@ def test_a_pair_kept_apart_is_not_compared_again():
         return (0.99, 0.0) if a == b else (0.2, 0.7)
 
     store, _, judge = _judged_store(answer)
-    _entity_with(store, "Fundation GmbH", [f"Fundation GmbH invoice {i}" for i in range(10)])
-    _entity_with(store, "Fundation Ventures", [f"Fundation Ventures deal {i}" for i in range(10)])
+    _entity_with(store, "Veldmark GmbH", [f"Veldmark GmbH invoice {i}" for i in range(10)])
+    _entity_with(store, "Veldmark Ventures", [f"Veldmark Ventures deal {i}" for i in range(10)])
     assert store.resolve_entities(user_id="ada")["rejected"] == 1
     asked = len(judge.states)
     store.resolve_entities(user_id="ada")
@@ -1590,16 +1583,16 @@ def test_a_comparison_shows_each_side_from_its_200_most_recent_memories():
 
 def test_a_name_written_another_way_is_found_and_compared():
     store, save, _ = _judged_store(lambda state: (0.99, 0.0))
-    save("Fundation GmbH's Finanzamt file number is 218/5713")
-    save("Fundation builds an Office add-in", as_name="Fundation")
-    assert [e.name for e in store.entities(user_id="ada")] == ["Fundation GmbH"]
+    save("Veldmark GmbH's Finanzamt file number is 123/4567")
+    save("Veldmark builds an irrigation controller", as_name="Veldmark")
+    assert [e.name for e in store.entities(user_id="ada")] == ["Veldmark GmbH"]
     store.close()
 
 
 def test_a_judged_pair_never_reaches_the_upkeep_queue():
     store, save, _ = _judged_store(lambda state: (0.8, 0.1))
-    save("Fundation GmbH's Finanzamt file number is 218/5713")
-    save("Fundation has 150,000 euros in cash after taxes", as_name="Fundation")
+    save("Veldmark GmbH's Finanzamt file number is 123/4567")
+    save("Veldmark has 90,000 euros in cash after taxes", as_name="Veldmark")
     assert len(store.merge_proposals(user_id="ada")) == 1
     assert [i for i in store.upkeep_queue(user_id="ada") if i["kind"] == "proposal"] == []
     assert store.upkeep_count(user_id="ada") == 0
@@ -1607,7 +1600,7 @@ def test_a_judged_pair_never_reaches_the_upkeep_queue():
 
 
 def test_a_text_model_does_not_decide_pairs():
-    """Its confidence is self-reported: gpt-5-mini said 0.9 on wrong answers."""
+    """Its confidence is self-reported, and as high on wrong answers."""
     from memry.intelligence.identity import judges_pairs
     from memry.providers.decisions import LLMDecider
 
@@ -1647,16 +1640,16 @@ def _index(*names, vectors=None):
 
 
 @pytest.mark.parametrize("known,written", [
-    ("Pixlo", "pixlo.ai"),                   # the brand's domain
-    ("Andrei Dumitru", "Andrei"),            # the first name of a full name
+    ("Tidely", "tidely.app"),                # the brand's domain
+    ("Lorenz Vogt", "Lorenz"),               # the first name of a full name
     ("Priya Raghunathan", "Priya"),
-    ("Tomasz Wierzbicki", "Tomasz"),
-    ("Kestrel GmbH", "Kestrel"),             # the legal form dropped
+    ("Henrik Solberg", "Henrik"),
+    ("Osprey GmbH", "Osprey"),               # the legal form dropped
     ("Lumen Labs", "Lumen Labs UG"),         # and added
 ])
 def test_a_domain_or_a_first_name_is_compared_with_the_name_it_stands_for(known, written):
-    """One thing written two ways ("pixlo.ai" for Pixlo, "Andrei" for Andrei
-    Dumitru, "Kestrel" for Kestrel GmbH) is only merged if the two are
+    """One thing written two ways ("tidely.app" for Tidely, "Lorenz" for Lorenz
+    Vogt, "Osprey" for Osprey GmbH) is only merged if the two are
     compared. Among 90 other names, 40 companies whose "gmbh" is common and
     50 people, each form finds the name it stands for."""
     others = ([f"Firma{i} GmbH" for i in range(40)]
@@ -1669,11 +1662,11 @@ def test_a_domain_or_a_first_name_is_compared_with_the_name_it_stands_for(known,
 
 def test_names_worth_comparing_come_from_the_store_not_from_lists():
     fillers = [f"Firma{i} GmbH" for i in range(60)]  # "gmbh" is common in this store
-    index = _index("Valmera S.à r.l.", "Kestrel UG (haftungsbeschränkt)", "Amazon Web Services",
-                   "OpenAI", "Kestrel Holding GmbH", *fillers)
+    index = _index("Valmera S.à r.l.", "Veldmark UG (haftungsbeschränkt)", "Amazon Web Services",
+                   "OpenAI", "Veldmark Holding GmbH", *fillers)
     found = lambda name: [e.name for e in index.candidates(name)]
     assert "Valmera S.à r.l." in found("Valmera")                        # rare shared word
-    assert "Kestrel UG (haftungsbeschränkt)" in found("Kestrel GmbH")    # rare shared word
+    assert "Veldmark UG (haftungsbeschränkt)" in found("Veldmark GmbH")    # rare shared word
     assert "Amazon Web Services" in found("AWS")                         # initial letters
     assert "OpenAI" in found("Open AI")                                  # spelling
     assert found("Nordwind GmbH") == [] or all("Firma" not in n for n in found("Nordwind GmbH"))
@@ -1683,7 +1676,7 @@ def test_an_acronym_holds_the_first_letter_of_every_word():
     from memry.intelligence.identity import is_acronym_of
 
     for short, long in (("AWS", "Amazon Web Services"), ("KfW", "Kreditanstalt für Wiederaufbau"),
-                        ("BSFZ", "Bescheinigungsstelle Forschungszulage"),
+                        ("DWD", "Deutscher Wetterdienst"),
                         ("GTM", "Google Tag Manager"), ("qa", "quality assurance"),
                         ("ICAM", "Ilustre Colegio de la Abogacía de Madrid")):
         assert is_acronym_of(short, long), short
@@ -2089,7 +2082,7 @@ def test_words_written_in_capitals():
     assert upper_words("PR #42") == {"pr"}
     assert upper_words("the Dutch address PR") == {"pr"}
     assert upper_words("ICAM") == {"icam"}
-    assert upper_words("Fundation GmbH") == set()
+    assert upper_words("Veldmark GmbH") == set()
     assert upper_words("A") == set()
 
 
@@ -2232,8 +2225,8 @@ def test_the_pair_merge_threshold_can_be_set_per_deployment():
 def test_a_typo_that_swaps_two_letters_is_compared():
     from memry.intelligence.identity import edit_similarity
 
-    assert edit_similarity("colonge", "cologne") > 0.8
-    assert [e.name for e in _index("Cologne", "Berlin").candidates("Colonge")] == ["Cologne"]
+    assert edit_similarity("muncih", "munich") > 0.8
+    assert [e.name for e in _index("Munich", "Berlin").candidates("Muncih")] == ["Munich"]
 
 
 def test_the_judge_sees_when_each_fact_was_recorded():
@@ -2269,20 +2262,20 @@ def test_the_judge_sees_where_each_fact_came_from():
     other = Source(recorded="2026-09-20 18:30", text="ep-y", session="run-9")
     same_text = Source(recorded="2026-09-01 10:00", text="ep-x", session="run-7")
     state = pair_state(
-        Profile("Andrei", "person", ["Andrei reviews the budget", "Andrei is on holiday"],
+        Profile("Lorenz", "person", ["Lorenz reviews the budget", "Lorenz is on holiday"],
                 sources=[one, other]),
-        Profile("Andrei Dumitru", "person", ["Andrei Dumitru leads finance"],
+        Profile("Lorenz Vogt", "person", ["Lorenz Vogt leads finance"],
                 sources=[same_text]),
     )
     assert ('- [recorded 2026-09-01 10:00; saved text 1; session 1; client claude; '
-            'context "grant application"] Andrei reviews the budget') in state
-    assert "- [recorded 2026-09-20 18:30; saved text 2; session 2] Andrei is on holiday" in state
-    assert ("- [recorded 2026-09-01 10:00; saved text 1; session 1] Andrei Dumitru leads finance"
+            'context "grant application"] Lorenz reviews the budget') in state
+    assert "- [recorded 2026-09-20 18:30; saved text 2; session 2] Lorenz is on holiday" in state
+    assert ("- [recorded 2026-09-01 10:00; saved text 1; session 1] Lorenz Vogt leads finance"
             in state)
     assert "ep-x" not in state and "run-7" not in state
     assert "owner of the memory store" not in state
     owner = pair_state(Profile("the user", "person", ["User prefers tea"], owner=True),
-                       Profile("Cosmin", "person", ["Cosmin drinks tea"]))
+                       Profile("Tobias", "person", ["Tobias drinks tea"]))
     assert "This entity is the owner of the memory store" in owner.split("ENTITY B")[0]
 
 
@@ -2295,10 +2288,10 @@ def test_one_name_saved_in_two_sessions_is_one_entity():
     judge = _PairJudge(lambda state: (0.99, 0.0))
     store = MemoryStore(Config(db_path=":memory:"), llm=llm, embedder=HashEmbedder(64),
                         decider=judge)
-    for text, run in (("Fundation GmbH's tax number is 218/5713", "r1"),
-                      ("Fundation GmbH has 150,000 euros in cash", "r2")):
+    for text, run in (("Veldmark GmbH's tax number is 123/4567", "r1"),
+                      ("Veldmark GmbH has 90,000 euros in cash", "r2")):
         llm.queue(facts_response(fact(text, entities=[
-            {"name": "Fundation GmbH", "type": "organization"}])))
+            {"name": "Veldmark GmbH", "type": "organization"}])))
         if store.get_all(user_id="ada"):
             llm.queue(json.dumps({"action": "ADD", "target": None, "content": None,
                                   "reason": "new"}))
@@ -2310,8 +2303,8 @@ def test_one_name_saved_in_two_sessions_is_one_entity():
 def test_the_weekly_pass_compares_two_entities_that_carry_one_name():
     store = MemoryStore(Config(db_path=":memory:"), llm=NoneLLM(), embedder=HashEmbedder(64),
                         decider=_PairJudge(lambda state: (0.99, 0.0)))
-    _entity_with(store, "Fundation GmbH", ["Fundation GmbH's tax number is 218/5713"])
-    _entity_with(store, "Fundation GmbH", ["Fundation GmbH has 150,000 euros in cash"])
+    _entity_with(store, "Veldmark GmbH", ["Veldmark GmbH's tax number is 123/4567"])
+    _entity_with(store, "Veldmark GmbH", ["Veldmark GmbH has 90,000 euros in cash"])
     assert store.resolve_entities(user_id="ada")["confirmed"] == 1
     assert len(store.entities(user_id="ada")) == 1
     store.close()
@@ -2380,12 +2373,12 @@ def _one_name_pairs(store, names, pairs, compared_step=2):
     (0.20, 0.70, False),   # it did: two
 ])
 def test_entities_of_one_name_join_unless_the_judge_says_different(same, different, joined):
-    """Two "FacTShirt" entities split before a known name joined its entity,
+    """Two "Mugwell" entities split before a known name joined its entity,
     and one memory each never reached the merge bar. Their pair never had
     P(different) stored, so it is asked once more, and it joins on the rule a
     save uses."""
     store, _, judge = _judged_store(lambda state: (same, different))
-    first, second = _one_name_pairs(store, ["FacTShirt", "FacTShirt"],
+    first, second = _one_name_pairs(store, ["Mugwell", "Mugwell"],
                                     [(0, 1, 0.5, None)])
     store.resolve_entities(user_id="ada")
     assert judge.states  # asked again: nothing about "different" was stored
@@ -2396,7 +2389,7 @@ def test_entities_of_one_name_join_unless_the_judge_says_different(same, differe
 
 def test_a_pair_of_one_name_uses_the_stored_answer():
     store, _, judge = _judged_store(lambda state: (0.5, 0.2))
-    first, second = _one_name_pairs(store, ["FacTShirt", "FacTShirt"], [(0, 1, 0.6, 0.2)])
+    first, second = _one_name_pairs(store, ["Mugwell", "Mugwell"], [(0, 1, 0.6, 0.2)])
     store.resolve_entities(user_id="ada")
     assert not judge.states
     assert store.backend.resolve_entity_id(second.id) == first.id or \
@@ -2420,7 +2413,7 @@ def test_two_entities_kept_apart_are_never_joined_through_a_third():
     from memry.models import MergeProposal
 
     store, _, _ = _judged_store(lambda state: (0.5, 0.2))
-    a, b, c = _one_name_pairs(store, ["FacTShirt"] * 3,
+    a, b, c = _one_name_pairs(store, ["Mugwell"] * 3,
                               [(0, 1, 0.7, 0.1), (1, 2, 0.6, 0.2)])
     store.backend.add_proposal(MergeProposal(
         entity_a=a.id, entity_b=c.id, user_id="ada", confidence=0.5, status="rejected"))
@@ -2468,8 +2461,8 @@ def _version_of(p):
 def _version_pair(store, entity_type="product", belongs=None, step=0):
     from memry.models import MergeProposal
 
-    thing = _entity_with(store, "Kestrel planner", ["Kestrel planner runs on Linux"], entity_type)
-    version = _entity_with(store, "Kestrel planner v2", ["Kestrel planner v2 added offline mode"],
+    thing = _entity_with(store, "Osprey planner", ["Osprey planner runs on Linux"], entity_type)
+    version = _entity_with(store, "Osprey planner v2", ["Osprey planner v2 added offline mode"],
                            entity_type)
     store.backend.add_proposal(MergeProposal(
         entity_a=thing.id, entity_b=version.id, user_id="ada", confidence=0.5,
@@ -2479,7 +2472,7 @@ def _version_pair(store, entity_type="product", belongs=None, step=0):
 
 def test_the_belongs_question_is_asked_in_the_same_call_as_the_pair_question():
     judge = _BelongsJudge(lambda state: (0.5, 0.2), _version_of(0.9))
-    store, _ = _jonas_store(judge, "Kestrel planner", "product")
+    store, _ = _jonas_store(judge, "Osprey planner", "product")
     _version_pair(store)
     store.resolve_entities(user_id="ada")
     assert judge.asked and all(asked == {"pair", "belongs"} for asked in judge.asked
@@ -2494,7 +2487,7 @@ def test_the_belongs_question_is_asked_in_the_same_call_as_the_pair_question():
 ])
 def test_a_version_is_not_merged_into_its_thing(entity_type, belongs, merged):
     judge = _BelongsJudge(lambda state: (0.99, 0.0), _version_of(belongs))
-    store, _ = _jonas_store(judge, "Kestrel planner", entity_type)
+    store, _ = _jonas_store(judge, "Osprey planner", entity_type)
     thing, version = _version_pair(store, entity_type)
     store.resolve_entities(user_id="ada")
     resolve = store.backend.resolve_entity_id
@@ -2509,7 +2502,7 @@ def test_a_version_is_not_merged_into_its_thing(entity_type, belongs, merged):
 
 def test_a_pair_compared_before_the_belongs_question_is_asked_once_in_the_weekly_pass():
     judge = _BelongsJudge(lambda state: (0.5, 0.2), _version_of(0.0))
-    store, _ = _jonas_store(judge, "Kestrel planner", "product")
+    store, _ = _jonas_store(judge, "Osprey planner", "product")
     _version_pair(store, step=1)
     store.resolve_entities(user_id="ada")
     asked = len(judge.states)
@@ -2522,7 +2515,7 @@ def test_a_pair_compared_before_the_belongs_question_is_asked_once_in_the_weekly
 
 
 def test_a_known_name_does_not_join_the_entity_it_is_a_part_of():
-    """A save names "FacTShirt", and the store's "FacTShirt" is a shop the new
+    """A save names "Mugwell", and the store's "Mugwell" is a shop the new
     mention is a product line of: the mention becomes its own entity with the
     shop as its home, instead of joining the shop."""
     def part_of(state):
@@ -2530,10 +2523,10 @@ def test_a_known_name_does_not_join_the_entity_it_is_a_part_of():
         return (0.9, 0.0) if product_first else (0.0, 0.9)
 
     judge = _BelongsJudge(lambda state: (0.6, 0.2), part_of)
-    store, save = _jonas_store(judge, "FacTShirt", "organization")
-    save("FacTShirt opened its Etsy shop in 2025")
-    save("FacTShirt sells a dinosaur shirt for 24 euros", as_type="product")
-    shops = [e for e in store.entities(user_id="ada") if e.name == "FacTShirt"]
+    store, save = _jonas_store(judge, "Mugwell", "organization")
+    save("Mugwell opened its online shop in 2025")
+    save("Mugwell sells a dinosaur mug for 24 euros", as_type="product")
+    shops = [e for e in store.entities(user_id="ada") if e.name == "Mugwell"]
     assert len(shops) == 2
     [proposal] = store.merge_proposals(user_id="ada")
     assert max(proposal.belongs.values()) == pytest.approx(0.9)

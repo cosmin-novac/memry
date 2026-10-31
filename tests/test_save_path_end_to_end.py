@@ -154,7 +154,7 @@ ENTITIES: dict[str, tuple[str, str, int]] = {
     "pell": ("Dr. Pell", "person", 1),
     "vessa": ("Vessa Holm", "person", 1),
     "oskar": ("Oskar Brem", "person", 1),
-    "kestrel": ("Kestrel", "other", 1),
+    "pippin": ("Pippin", "other", 1),
     "ember": ("Ember Grid", "project", 1),
     "trip": ("Ferrow Valley trip", "event", 1),
 }
@@ -177,7 +177,7 @@ TAG_SYNONYMS = {frozenset({"2026 taxes", "taxes 2026"})}
 GROUPS = {
     "shop": ["quirk", "lumen", "client"],
     "work": ["plot", "plot3", "plot4", "sync", "nordvik", "tomas"],
-    "home": ["johnny_e", "vessa", "kestrel", "ember"],
+    "home": ["johnny_e", "vessa", "pippin", "ember"],
     "climbing": ["johnny_c", "gym"],
     "personal": ["owner", "orbit", "pell", "oskar", "trip"],
 }
@@ -282,9 +282,9 @@ SLOTS: list[Slot] = [
          ("apartment",), importance=0.85, question="What did Vessa Holm raise the rent to?"),
     Slot("balcony", "vessa", "{E} will fix the balcony door by {v}",
          ("mid-February", "the end of March"), ("apartment",)),
-    Slot("food", "kestrel", "{E} the cat eats {v} twice a day", ("salmon kibble", "duck pâté"),
-         ("cat care",), question="What does Kestrel the cat eat?"),
-    Slot("vet", "kestrel", "{E} has a vet check-up on {v}", ("February 20", "March 3"),
+    Slot("food", "pippin", "{E} the cat eats {v} twice a day", ("salmon kibble", "duck pâté"),
+         ("cat care",), question="What does Pippin the cat eat?"),
+    Slot("vet", "pippin", "{E} has a vet check-up on {v}", ("February 20", "March 3"),
          ("cat care",)),
     Slot("tracks", "ember", "{E} tracks {v} for the solar panels",
          ("battery charge", "grid export"), ("ember grid",)),

@@ -110,12 +110,12 @@ def test_entity_memories_of_one_time_read_alike_in_two_builds():
     ``entity_memories`` in one order, by id, and a limit cuts the same ones."""
     def build(order):
         backend = LocalBackend(":memory:")
-        backend.insert_entity(Entity(id="e1", name="Bildy", normalized="bildy", user_id="ada"))
+        backend.insert_entity(Entity(id="e1", name="Zobly", normalized="zobly", user_id="ada"))
         for n in order:
-            backend.insert_memory(Memory(id=f"m{n}", content=f"Bildy fact {n}", user_id="ada",
+            backend.insert_memory(Memory(id=f"m{n}", content=f"Zobly fact {n}", user_id="ada",
                                          created_at=STAMP, updated_at=STAMP))
             backend.add_mention(EntityMention(entity_id="e1", memory_id=f"m{n}",
-                                              surface="Bildy", created_at=STAMP))
+                                              surface="Zobly", created_at=STAMP))
         return backend
 
     ids = [3, 7, 1, 9, 5, 0, 8, 2, 6, 4]

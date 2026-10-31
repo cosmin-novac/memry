@@ -8,12 +8,11 @@ compares retrieval strategies on three query families:
   multi_hop   : answer names none of the query terms (needs relation traversal)
   by_entity   : recall everything about an entity (anchor index is exact)
 
-Findings that shaped the code:
-  - hybrid scores a flat zero on multi_hop, at every store size and even with
-    real embeddings - the gap is structural, not semantic;
-  - naive co-occurrence-graph expansion helps at 1k but decays to zero at scale;
-  - typed-relation 2-hop is exact and scale-stable (1.00), PPR is a robust
-    relation-free fallback (~0.90) but must never be used for direct lookups.
+What it checks: hybrid retrieval cannot reach multi_hop answers, whatever the
+embedder, since the answer shares no terms with the query; naive
+co-occurrence-graph expansion does not hold up as the store grows; following
+typed relations is exact, and PPR is a relation-free fallback that must never
+be used for direct lookups.
 
 Memry has since replaced the typed-relation walk with the linked search, which
 ``relative_retrieval_benchmark.py`` measures on these families as well.
@@ -50,10 +49,10 @@ else:
 
 
 FIRST = ["Priya", "Jonas", "Mara", "Wei", "Ada", "Tom", "Lena", "Omar", "Sofia", "Kai",
-         "Nina", "Raj", "Elsa", "Yuki", "Cosmin", "Bea", "Ivan", "Zoe", "Hugo", "Mila"]
+         "Nina", "Raj", "Elsa", "Yuki", "Tariq", "Bea", "Ivan", "Zoe", "Hugo", "Mila"]
 LAST = ["Nair", "Berg", "Ruiz", "Chen", "Novak", "Diaz", "Kraus", "Sato", "Meyer", "Osei",
         "Popov", "Haas", "Lund", "Ferro", "Blum", "Costa", "Weber", "Reid", "Falk", "Roy"]
-PROJECTS = ["Helios", "Nimbus", "Kestrel", "Orion", "Tessera", "Vantage", "Cobalt", "Marlin",
+PROJECTS = ["Helios", "Nimbus", "Osprey", "Orion", "Tessera", "Vantage", "Cobalt", "Marlin",
             "Aster", "Pallas", "Quill", "Vireo", "Solace", "Zephyr", "Drift", "Halcyon"]
 TOOLS = ["Postgres", "Redis", "Kafka", "Docker", "Terraform", "Grafana", "Rust", "Numpy",
          "Caddy", "usearch", "SQLite", "Starlette", "pgvector", "Nginx", "Bun", "Deno"]

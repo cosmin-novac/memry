@@ -1,10 +1,9 @@
 """A proposed "when" is not believed on the text model's word alone.
 
-Measured on 160 labelled memories: a text model dates work logs (gpt-5-mini was
-right about 56% of the "when"s it gave, gpt-5.6-luna about 85%). Dropping write
+A text model dates work logs, some models more than others. Dropping write
 dates read back, and letting the decision provider veto what it is sure is a
-record, takes gpt-5.6-luna to 97%. These tests pin the two checks, not the
-numbers.
+record, makes the "when"s it gives far more precise. These tests pin the two
+checks.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ def test_a_when_on_the_recording_day_with_no_date_in_the_text_is_the_write_date(
     assert not is_write_date(WHEN, "Pushed on 2026-09-11 after review", "2026-09-11T10:00:00+00:00")
     assert not is_write_date(WHEN, "We met the landlord yesterday", "2026-09-11T10:00:00+00:00")
     assert not is_write_date({"start": "2026-10-03"}, "Dentist appointment", "2026-09-11T10:00:00+00:00")
-    assert not is_write_date({"start": "--03-03", "recurrence": "yearly"}, "Raluca's birthday",
+    assert not is_write_date({"start": "--03-03", "recurrence": "yearly"}, "Hanna's birthday",
                              "2026-03-03T10:00:00+00:00")
 
 

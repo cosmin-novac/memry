@@ -2,7 +2,7 @@
 
 The type of a named thing is the one most of its mentions give, recounted on
 every save that types it otherwise and on every merge. A thing the extractor
-called a person ("armored samurai", a game's enemy) and the owner then called
+called a person ("armored space pirate", a game's enemy) and the owner then called
 a concept would turn back into a person on the next save, so a type the owner
 chose is marked and the recounts leave it alone.
 """
@@ -32,17 +32,17 @@ def _mention(store: MemoryStore, entity: Entity, text: str, entity_type: str) ->
 def test_a_type_the_owner_chose_outlasts_the_mentions_that_say_otherwise():
     store = _store()
     try:
-        samurai = store.backend.insert_entity(Entity(
-            name="armored samurai", entity_type="person", user_id="default"))
-        for text in ("ONE CUT has armored samurai", "armored samurai parry"):
-            _mention(store, samurai, text, "person")
-        typed = store.set_entity_type(samurai.id, "concept")
+        pirate = store.backend.insert_entity(Entity(
+            name="armored space pirate", entity_type="person", user_id="default"))
+        for text in ("Comet Hop has armored space pirates", "armored space pirate parry"):
+            _mention(store, pirate, text, "person")
+        typed = store.set_entity_type(pirate.id, "concept")
         assert typed.entity_type == "concept"
         assert typed.metadata[TYPE_SET_BY_OWNER] is True
         # a later save calls it a person again; without the mark the recount
         # of three person mentions would make it a person
-        _mention(store, samurai, "an armored samurai blocks", "person")
-        assert store.backend.get_entity(samurai.id).entity_type == "concept"
+        _mention(store, pirate, "an armored space pirate blocks", "person")
+        assert store.backend.get_entity(pirate.id).entity_type == "concept"
     finally:
         store.close()
 
@@ -52,7 +52,7 @@ def test_without_the_owners_choice_the_mentions_decide_as_before():
     try:
         shop = store.backend.insert_entity(Entity(
             name="the shop", entity_type="product", user_id="default"))
-        for text in ("the shop sells shirts", "the shop ships today"):
+        for text in ("the shop sells mugs", "the shop ships today"):
             _mention(store, shop, text, "project")
         assert store.backend.get_entity(shop.id).entity_type == "project"
     finally:
@@ -99,16 +99,16 @@ def test_a_tag_is_not_given_a_named_type_and_an_unknown_type_is_refused():
 def test_the_entity_route_changes_the_type_and_says_what_it_is_now():
     store = _store()
     try:
-        samurai = store.backend.insert_entity(Entity(
-            name="armored samurai", entity_type="person", user_id="default"))
+        pirate = store.backend.insert_entity(Entity(
+            name="armored space pirate", entity_type="person", user_id="default"))
         with TestClient(create_app(store)) as client:
-            ok = client.patch(f"/api/v1/entities/{samurai.id}", json={"entity_type": "concept"})
-            bad = client.patch(f"/api/v1/entities/{samurai.id}", json={"entity_type": "wizard"})
-            none = client.patch(f"/api/v1/entities/{samurai.id}", json={})
+            ok = client.patch(f"/api/v1/entities/{pirate.id}", json={"entity_type": "concept"})
+            bad = client.patch(f"/api/v1/entities/{pirate.id}", json={"entity_type": "wizard"})
+            none = client.patch(f"/api/v1/entities/{pirate.id}", json={})
             missing = client.patch("/api/v1/entities/nope", json={"entity_type": "concept"})
         assert ok.status_code == 200, ok.text
         assert ok.json()["entity"]["entity_type"] == "concept"
-        assert ok.json()["entity"]["name"] == "armored samurai"
+        assert ok.json()["entity"]["name"] == "armored space pirate"
         assert bad.status_code == 400 and none.status_code == 400
         assert missing.status_code == 404
     finally:

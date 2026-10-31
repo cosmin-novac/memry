@@ -340,19 +340,19 @@ def test_a_name_merged_away_is_not_merged_again_through_its_tombstone(tagged):
 
 
 def test_a_tag_merged_into_the_name_of_a_named_thing_goes_into_that_thing(tagged):
-    """ "bildy" the tag was found to be "Bildy" the product. Merging "bildy
-    app" into "bildy" folds it into the product, as a memory filed under
-    "bildy" mentions the product: no topic "bildy" is created."""
+    """ "zobly" the tag was found to be "Zobly" the product. Merging "zobly
+    app" into "zobly" folds it into the product, as a memory filed under
+    "zobly" mentions the product: no topic "zobly" is created."""
     product = tagged.backend.insert_entity(Entity(
-        name="Bildy", normalized="bildy", entity_type="product", user_id="ada"))
-    tagged.backend.insert_memory(Memory(content="x", user_id="ada", categories=["bildy"]))
-    topic = tagged.backend.topic_entity("bildy", Scope(user_id="ada"), create=False)
+        name="Zobly", normalized="zobly", entity_type="product", user_id="ada"))
+    tagged.backend.insert_memory(Memory(content="x", user_id="ada", categories=["zobly"]))
+    topic = tagged.backend.topic_entity("zobly", Scope(user_id="ada"), create=False)
     assert tagged.backend.merge_entities(product.id, topic.id)
-    tagged.backend.insert_memory(Memory(content="y", user_id="ada", categories=["bildy app"]))
-    variant = tagged.backend.topic_entity("bildy app", Scope(user_id="ada"), create=False)
-    assert tagged.merge_tags(["bildy app"], "bildy", user_id="ada") == 1
+    tagged.backend.insert_memory(Memory(content="y", user_id="ada", categories=["zobly app"]))
+    variant = tagged.backend.topic_entity("zobly app", Scope(user_id="ada"), create=False)
+    assert tagged.merge_tags(["zobly app"], "zobly", user_id="ada") == 1
     assert tagged.backend.get_entity(variant.id).merged_into == product.id
-    assert _active_topics(tagged, "bildy") == []
+    assert _active_topics(tagged, "zobly") == []
     assert tagged.backend.count_entity_memories(product.id) == 2
 
 
@@ -506,7 +506,7 @@ def _pair_judge():
 
 @pytest.mark.parametrize("judged", [True, False], ids=["calibrated judge", "text model only"])
 def test_a_tag_folds_into_the_named_thing_of_its_name(judged):
-    """ "bildy" the tag and "Bildy" the product. A calibrated judge answers
+    """ "zobly" the tag and "Zobly" the product. A calibrated judge answers
     the ordinary pair question, with the tag's memories as its side. Without
     one the text model is not asked (its answer could fold nothing, and a
     "different" from it kept the two apart for good): one name is one thing,
@@ -518,21 +518,21 @@ def test_a_tag_folds_into_the_named_thing_of_its_name(judged):
     backend = store.backend
     try:
         product = backend.insert_entity(Entity(
-            name="Bildy", normalized="bildy", entity_type="product", user_id="ada"))
-        for text in ("Bildy is a construction app", "Bildy runs on AWS"):
+            name="Zobly", normalized="zobly", entity_type="product", user_id="ada"))
+        for text in ("Zobly is a construction app", "Zobly runs on AWS"):
             memory = backend.insert_memory(Memory(content=text, user_id="ada"))
             backend.add_mention(EntityMention(
-                entity_id=product.id, memory_id=memory.id, surface="Bildy"))
+                entity_id=product.id, memory_id=memory.id, surface="Zobly"))
         for text in ("Shipped the invoice export", "Fixed the login bug"):
-            backend.insert_memory(Memory(content=text, user_id="ada", categories=["bildy"]))
-        topic = backend.topic_entity("bildy", Scope(user_id="ada"), create=False)
+            backend.insert_memory(Memory(content=text, user_id="ada", categories=["zobly"]))
+        topic = backend.topic_entity("zobly", Scope(user_id="ada"), create=False)
 
         outcome = store.resolve_entities(user_id="ada")
         assert (outcome["proposed"], outcome["confirmed"]) == (1, 1)
         assert llm.calls == []
         if judge is not None:
             assert judge.states and all(
-                "Shipped the invoice export" in state and "Bildy runs on AWS" in state
+                "Shipped the invoice export" in state and "Zobly runs on AWS" in state
                 for state in judge.states)
         [pair] = store.merge_proposals(user_id="ada", status="confirmed")
         assert pair.reason == ("stub: same" if judged else "one name, joined by rule")
@@ -542,10 +542,10 @@ def test_a_tag_folds_into_the_named_thing_of_its_name(judged):
         assert backend.count_entity_memories(product.id) == 4
         # the column keeps the tag and its filter still works; a new memory
         # filed under it mentions the thing the tag was found to be
-        assert {m.content for m in store.get_all(user_id="ada", categories=["bildy"])} == {
+        assert {m.content for m in store.get_all(user_id="ada", categories=["zobly"])} == {
             "Fixed the login bug", "Shipped the invoice export"}
         later = backend.insert_memory(Memory(content="Added dark mode", user_id="ada",
-                                             categories=["bildy"]))
+                                             categories=["zobly"]))
         assert [e.id for e in backend.entities_of_memory(later.id)] == [product.id]
         assert store.entities(user_id="ada", kind="topic") == []
     finally:
@@ -554,9 +554,9 @@ def test_a_tag_folds_into_the_named_thing_of_its_name(judged):
 
 def test_a_topic_folded_the_wrong_way_round_still_leaves_the_named_thing(tagged):
     product = tagged.backend.insert_entity(Entity(
-        name="Bildy", normalized="bildy", entity_type="product", user_id="ada"))
-    tagged.add("x", user_id="ada", infer=False, categories=["bildy"])
-    topic = tagged.backend.topic_entity("bildy", Scope(user_id="ada"), create=False)
+        name="Zobly", normalized="zobly", entity_type="product", user_id="ada"))
+    tagged.add("x", user_id="ada", infer=False, categories=["zobly"])
+    topic = tagged.backend.topic_entity("zobly", Scope(user_id="ada"), create=False)
     assert tagged.backend.merge_entities(topic.id, product.id)
     assert tagged.backend.get_entity(product.id).merged_into is None
     assert tagged.backend.get_entity(topic.id).merged_into == product.id
@@ -1505,13 +1505,13 @@ def test_a_column_follows_tombstones_topic_to_topic_and_keeps_the_tag_of_a_thing
 @pytest.mark.parametrize("retire", ["not an entity", "name kept as a tag", "snapshot of before"])
 def test_a_tag_folded_into_a_thing_is_a_tag_again_once_the_thing_is_retired(
         tagged, retire, monkeypatch):
-    """"bildy" the tag went into "Bildy" the product, which was then retired
+    """"zobly" the tag went into "Zobly" the product, which was then retired
     (removed as not an entity, or removed keeping its name as a tag): the tag
     is a topic again and its memories are filed under it, a later save with
     the tag files there too, and restoring the product does not fold the tag
     back. Before, the tag's tombstone went with the product, the save made a
     fresh topic beside memories that mentioned nothing, and the restore
-    brought the tombstone back: two entities claimed "bildy", and the count
+    brought the tombstone back: two entities claimed "zobly", and the count
     said 1 where the filter found 3. A product retired before this rule (its
     snapshot holds the tag's tombstone) is restored the same way: the
     tombstone points at the topic the save made, and the memories are filed
@@ -1520,10 +1520,10 @@ def test_a_tag_folded_into_a_thing_is_a_tag_again_once_the_thing_is_retired(
 
     scope = Scope(user_id="ada")
     old = [tagged.add(f"note {i}", user_id="ada", infer=False,
-                      categories=["bildy"]).actions[0].memory_id for i in range(2)]
+                      categories=["zobly"]).actions[0].memory_id for i in range(2)]
     product = tagged.backend.insert_entity(Entity(
-        name="Bildy", normalized="bildy", entity_type="product", user_id="ada"))
-    tag = tagged.backend.topic_entity("bildy", scope, create=False)
+        name="Zobly", normalized="zobly", entity_type="product", user_id="ada"))
+    tag = tagged.backend.topic_entity("zobly", scope, create=False)
     assert tagged.merge_entities(product.id, tag.id)
     assert tagged.backend.get_entity(tag.id).merged_into == product.id
     if retire == "name kept as a tag":
@@ -1534,19 +1534,19 @@ def test_a_tag_folded_into_a_thing_is_a_tag_again_once_the_thing_is_retired(
                 patch.setattr(LocalBackend, "_unfold_tags_locked", lambda self, entity_id: None)
             assert tagged.remove_entities([product.id], reason="not an entity") == 1
     new = tagged.add("note 2", user_id="ada", infer=False,
-                     categories=["bildy"]).actions[0].memory_id
+                     categories=["zobly"]).actions[0].memory_id
     assert tagged.restore_entities([product.id]) == 1
 
     claimants = {tagged.backend.resolve_entity_id(row["id"]) for row in tagged.backend._db.execute(
-        "SELECT id FROM entities WHERE entity_type = 'topic' AND normalized = 'bildy' "
+        "SELECT id FROM entities WHERE entity_type = 'topic' AND normalized = 'zobly' "
         "AND user_id = 'ada'")}
     [claimant] = claimants
     assert tagged.backend.get_entity(claimant).entity_type == TOPIC_TYPE
     if retire != "snapshot of before":
         assert claimant == tag.id  # the tag's own topic, active again
-    filtered = {m.id for m in tagged.get_all(user_id="ada", categories=["bildy"])}
+    filtered = {m.id for m in tagged.get_all(user_id="ada", categories=["zobly"])}
     assert filtered == {*old, new}
-    assert tagged.categories(user_id="ada") == [{"category": "bildy", "count": 3}]
+    assert tagged.categories(user_id="ada") == [{"category": "zobly", "count": 3}]
     assert {m.id for m in tagged.backend.entity_memories(claimant, limit=10)} == filtered
     assert tagged.backend.get_entity(product.id).merged_into is None  # restored, a thing
     _agree(tagged, "ada")
@@ -1592,7 +1592,7 @@ def test_an_edit_with_no_user_is_made_in_every_namespace_that_carries_the_tag(ta
 
 
 # ------------------------------------------------------- fifth review round
-@pytest.mark.parametrize("name", ["x" * 70, "steuernummer (tin, koeln vingst)"])
+@pytest.mark.parametrize("name", ["x" * 70, "steuernummer (tin, finanzamt nord)"])
 def test_a_tag_merges_into_the_chosen_topic_by_id_whatever_its_stored_name(tagged, name):
     """A stored tag name that ``clean_tags`` refuses (longer than a tag may be,
     or holding brackets and commas, as older imports and the migration left
@@ -1695,7 +1695,7 @@ def test_each_name_merged_away_is_filed_under_its_own_survivor(tagged):
 
 
 def test_a_restored_thing_brings_back_its_named_mentions_only(tagged):
-    """"bildy" the tag was found to be "Bildy" the product (a pair raised and
+    """"zobly" the tag was found to be "Zobly" the product (a pair raised and
     confirmed), then the product was retired and restored. Retiring unfolds
     the tag and takes the product's mentions that came from the tag with it,
     so the restore brings back the named mention only: each memory mentions
@@ -1707,13 +1707,13 @@ def test_a_restored_thing_brings_back_its_named_mentions_only(tagged):
 
     scope = Scope(user_id="ada")
     product = tagged.backend.insert_entity(Entity(
-        name="Bildy", normalized="bildy", entity_type="product", user_id="ada"))
-    named = tagged.backend.insert_memory(Memory(content="Bildy runs on AWS", user_id="ada"))
+        name="Zobly", normalized="zobly", entity_type="product", user_id="ada"))
+    named = tagged.backend.insert_memory(Memory(content="Zobly runs on AWS", user_id="ada"))
     tagged.backend.add_mention(EntityMention(entity_id=product.id, memory_id=named.id,
-                                             surface="Bildy"))
+                                             surface="Zobly"))
     notes = [tagged.add(f"note {i}", user_id="ada", infer=False,
-                        categories=["bildy"]).actions[0].memory_id for i in range(2)]
-    tag = tagged.backend.topic_entity("bildy", scope, create=False)
+                        categories=["zobly"]).actions[0].memory_id for i in range(2)]
+    tag = tagged.backend.topic_entity("zobly", scope, create=False)
     assert propose_same_name_duplicates(backend=tagged.backend, scope=scope) == 1
     [pair] = tagged.merge_proposals(user_id="ada")
     assert {pair.entity_a, pair.entity_b} == {product.id, tag.id}
@@ -1728,8 +1728,8 @@ def test_a_restored_thing_brings_back_its_named_mentions_only(tagged):
         assert [e.id for e in tagged.backend.entities_of_memory(note, kind="any")] == [tag.id]
     assert tagged.backend.count_entity_memories(product.id) == 1
     assert tagged.backend.count_entity_memories(tag.id) == 2
-    assert tagged.categories(user_id="ada") == [{"category": "bildy", "count": 2}]
-    assert {m.id for m in tagged.get_all(user_id="ada", categories=["bildy"])} == set(notes)
+    assert tagged.categories(user_id="ada") == [{"category": "zobly", "count": 2}]
+    assert {m.id for m in tagged.get_all(user_id="ada", categories=["zobly"])} == set(notes)
     assert propose_same_name_duplicates(backend=tagged.backend, scope=scope) == 0
     assert tagged.merge_proposals(user_id="ada") == []
     _agree(tagged, "ada")

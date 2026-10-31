@@ -65,8 +65,7 @@ that is a new, reviewed architecture decision with a migration plan. It is not a
 alternative backend.
 
 Decision provenance: the PostgreSQL path first entered the original Git history in commit
-`162b4eee3652752f70b301e7a330aa18b701492a` on 2026-07-17. The commit was authored by
-Cosmin Novac and carries `Co-Authored-By: Claude Fable 5`; its stated reason was the generic
+`162b4eee3652752f70b301e7a330aa18b701492a` on 2026-07-17. Its stated reason was the generic
 phrase "multi-writer deployments." The repository contained no named customer, deployment,
 load target, or product requirement that needed that topology. A later history rewrite
 folded the change into root commit `6e74c9c902f1198ef135777b3f642d74d2519e68`. The
@@ -197,9 +196,7 @@ tags that may be one are listed with the other merge proposals. The map is the e
 of its types, off at first (the choice kept per browser with the other types), drawn as
 the nodes of their topic entities and linked by co-mentions like any node; the planet and
 part rules stay for named things. `GET /api/v1/map?kind=any` reads them, and `kind=named`,
-the default, reads none. On a sample store of 4,000 memories, 399 tags and 800 named things
-the map took a median of 257 ms before this change (with the old tag graph, which is gone),
-191 ms after without tags and 307 ms with them. The memory list has one About filter over
+the default, reads none. The memory list has one About filter over
 every entity with a memory, grouped by type: a tag picked goes to `categories` and anything
 else to `entity_id`, as the two filters did before. Several picks of one kind match any of
 them, and a tag with a person or thing matches the memories that have both. A memory card
@@ -226,8 +223,8 @@ link from a memory to an entity and keeps the observed surface text.
 The set is `person`, `organization`, `project`, `product`, `place`, `event`, `document`,
 `code`, `concept`, `other`. `document` and `code` were added after auditing what a real
 store had dumped into `other`: on one side contracts, invoices, certificates and
-registration numbers (`HRB 110232`, `TÜV Kaufvertrag`), on the other files, symbols,
-tables and config keys (`lib/sync.ts`, `canUserSync`, `BILDY_AWS_S3_BUCKET`). Both are
+registration numbers (`HRB 123456`, `TÜV Kaufvertrag`), on the other files, symbols,
+tables and config keys (`lib/export.ts`, `canUserExport`, `REPORTS_S3_BUCKET`). Both are
 large, coherent groups in ordinary use.
 
 **The type does not affect search ranking.** Nothing in retrieval reads it: hybrid scoring
@@ -287,17 +284,17 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `owner.py
    candidate for any other name ("User Research" shares the word "user" with it).
    A name the store already has joins the entity of that name with the highest P(same),
    unless the judge says "different" at 0.5 or more; the merge bar does not apply. (Held
-   to it, 88 of 431 mentions of a known name became one-memory entities in a replayed
-   store, and those never reached step 3.) For a name written another way, the first
+   to it, mentions of a known name became one-memory entities that never reached step
+   3.) For a name written another way, the first
    "merge" wins. Otherwise a new entity is made and each waiting pair is recorded as a
    proposal (a kept-apart pair is recorded too). When the judge cannot answer (an
    outage), the pair waits at step 0 and the weekly pass compares it again.
 3. **The comparison (`compare`).** The judge (Jev) gets both entries side by side, in
-   both orders, and the answers are averaged: asked in one order, the merge bars moved
-   between runs. The check of a name the store already has is the exception: it is asked
-   once, with the entity first and the new memory second, because it reads no merge bar,
-   only P(different) at 0.5, which candidate is likelier, and the belongs bar. That halves
-   the calls of most saves, and in two runs it decided as well as both orders. Each side
+   both orders, and the answers are averaged, so the answer does not depend on which
+   entry came first. The check of a name the store already has is the exception: it is
+   asked once, with the entity first and the new memory second, because it reads no merge
+   bar, only P(different) at 0.5, which candidate is likelier, and the belongs bar. That
+   halves the calls of most saves. Each side
    shows its name, type, description (if one has been built), whether it is the store owner, and up to 10
    memories (50 at the last step): the most recent 30% and the rest closest in embedding
    to the other side's. A memory naming both entries is left out of both sides. Every
@@ -325,11 +322,10 @@ Where it happens (`src/memry/intelligence/identity.py`, `entities.py`, `owner.py
    skipped (counted as done) when there is nothing to add. It uses the first step's bar
    until it is measured on its own.
    **Choosing among namesakes.** No answer about a first name reaches the merge bar, but
-   the rest of a conversation tells namesakes apart (on 40 generated cases the right
-   person scored higher in 37 instead of 34). So in the weekly pass, a name with fewer
-   than 3 memories and open pairs to two or more entities, all asked at step 2, joins
-   the likeliest when it leads the next by 0.10 and has P(same) of at least 0.5
-   (`choose_among_candidates`; 29 right and 1 wrong on those cases). Only candidates the
+   the rest of a conversation helps tell namesakes apart. So in the weekly pass, a name
+   with fewer than 3 memories and open pairs to two or more entities, all asked at step
+   2, joins the likeliest when it leads the next by 0.10 and has P(same) of at least 0.5
+   (`choose_among_candidates`). Only candidates the
    judge has not ruled out (P(different) under 0.5, stored on each pair) count: with one
    candidate left it keeps waiting, since it may be a third person. It asks the judge
    nothing.
@@ -380,17 +376,16 @@ running at once cannot both add it.
 
 Each namespace has one owner entity, the person the memories belong to. Without an
 account name it is called "the user", and "the user" is a role, not a name. Asked whether
-that entity and a named person are one, the judge compares two sets of memories: on a real
-store it read the owner (61 memories) and "Cosmin" (363), the person it was, as two people
-at P(different) 0.94-0.95, and the pair was kept apart for good, so the owner stayed "the
-user". Who the owner is is stated instead, and the judge is never asked about the owner
+that entity and a named person are one, the judge compares two sets of memories: measured,
+it read the owner and the person it was as two people, and the pair was kept apart for
+good, so the owner stayed "the user". Who the owner is is stated instead, and the judge is never asked about the owner
 while it is called "the user" (`identity.unnamed_owner`): not at save, not in the weekly
 pass, not in the choice among namesakes, the structure pass or the check of a restored
 name. Once the owner has a name it is compared like any person.
 
 - **Where a name is stated.** Extraction reports `user_name` when the user gives their
-  name ("I'm Cos", "my name is", a signature), the assistant calls the user by it, or a
-  line says it ("The user's name is Cos."); never as a guess. A save whose turns in role
+  name ("I'm Tobi", "my name is", a signature), the assistant calls the user by it, or a
+  line says it ("The user's name is Tobi."); never as a guess. A save whose turns in role
   user carry one speaker's name (`name`) names the owner too. Neither costs an extra call.
   The question (a rule in the prompt and a field in the answer, about 80 prompt and 6
   output tokens) is asked only while the owner is called "the user" and no account names
@@ -410,13 +405,13 @@ name. Once the owner has a name it is compared like any person.
   are kept in the namespace's upkeep state (`owner_stated`).
 - **Which person a name is** (`owner.person_for`): the one person who carries it as name
   or alias, ignoring case and accents. Failing that, for one word: the one person whose
-  name starts with that word ("Dan" is "Dan Popescu", also beside a "Dana"), else, from
-  three letters on, the one person whose first name begins with it ("Cos" is "Cosmin" when
-  no other person's name starts with "Cos"). Two people who fit are no answer, and the
+  name starts with that word ("Jan" is "Jan Hollis", also beside a "Jana"), else, from
+  three letters on, the one person whose first name begins with it ("Tobi" is "Tobias" when
+  no other person's name starts with "Tobi"). Two people who fit are no answer, and the
   owner takes the stated name itself.
 - **One name holds.** The first name stated is kept. A later different name is recorded
   as a conflict and changes nothing, unless it is a correction (it names the first name
-  and says it was wrong: "my name is Cosima, not Cosmin") and the owner still carries the
+  and says it was wrong: "my name is Tobia, not Tobias") and the owner still carries the
   first name itself. After a fold into a person, a correction is left to you: undo the
   merge. An account's name wins over any stated one; with an account name, statements are
   only recorded. An owner entity made before its account named it takes the account's
@@ -424,7 +419,7 @@ name. Once the owner has a name it is compared like any person.
 - **Stores saved before** (`learn_owner`, `memry learn-owner`, and once per namespace by
   the upkeep cycle while the owner is "the user"). Patterns pick out the memories, in use
   and forgotten (a forgotten duplicate still states the fact), and the saved turns that may
-  state the name: "my name is", "the user's name is", "I'm", "call me", "the user (Cos)", a
+  state the name: "my name is", "the user's name is", "I'm", "call me", "the user (Tobi)", a
   greeting by name in an assistant turn, turns in role user that carry a name. With none,
   nothing is asked. Otherwise one text-model call reads them against the namespace's people
   (names, aliases and memory counts) and says which person the statements say the owner is,
@@ -439,7 +434,7 @@ name. Once the owner has a name it is compared like any person.
   reason and is opened again too. Rows written twice for one pair are collapsed to the one
   a merge keeps, confirmed rows staying as they are: a merge before 0.2.40 moved the merged
   entity's pairs without looking for one the kept entity had, so the owner paired with
-  "Cosmin" and "Cosmin Novac" in one pass had two rows once those two were merged. What the
+  "Tobias" and "Tobias Lindgren" in one pass had two rows once those two were merged. What the
   upgrade opened or dropped is kept under its marker (`schema:owner-pairs:v1`,
   `schema:one-row-per-pair:v1`).
 
@@ -497,10 +492,6 @@ under Upkeep with the other pairs; a yes merges them as the judge's merge does. 
 from before this kept the step of each pair of tags it had compared, and the pairs a person
 had kept apart; the weekly pass turns each into its pair's proposal, so none is asked
 again.
-
-The measurements behind these numbers are in the PhD repository,
-`papers/memry-field-studies/findings/identity-obvious-merges.md` and
-`identity-threshold-by-evidence.md`.
 
 Each entity has two derived profile fields only:
 
@@ -607,9 +598,8 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
      reads both facts as Memry shows any memory to a model, with the date each was said and
      the date it happened where that is known, and is told to write every time as the date
      or period it names, reading "last year" or "yesterday" against the day its own text
-     was said, and to keep each date with its own event. Without the dates, "a road trip
-     last year", said in April, was merged beside a trip of the December before as "the
-     previous year's road trip", and read as a year too early. The writer may also answer
+     was said, and to keep each date with its own event. Without the dates, a relative time
+     in one fact can be read against the other fact's day. The writer may also answer
      that the new fact is about another event or thing of the same kind (another trip,
      another game, another deal): then nothing is merged and the fact is added as NEW. The
      decision provider's MORE on such a pair is often as confident as on a real added
@@ -655,8 +645,8 @@ RAM." Status is visible on MCP memory rows and in aggregate statistics.
    (`STANDING_BAR`), with P(it no longer holds) at 0.8 or more (`no_longer_holds`: CHANGED
    and WRONG of the action question together; `supersede.state_confidence`), the change
    replaces the memory without asking, as an update kept as history even where the judge
-   said WRONG. The top answer alone was too low a bar: on a real queue Jev answered CHANGED
-   at 0.35-0.65 to a listing deleted and a task stopped, with most of the rest on WRONG; read as still true, both stay in use and
+   said WRONG. The top answer alone was too low a bar: measured, Jev answered a listing deleted and a
+   task stopped with a low CHANGED and most of the rest on WRONG; read as still true, both stay in use and
    nobody is asked; a lasting fact, a standing rule, an unsure reading and the text model's
    answers (no probabilities) wait under Upkeep as before. A partial change ("the task
    stopped", of a memory that also listed its criteria) replaces the whole memory: what
@@ -816,9 +806,9 @@ entity or date filter, whether its question names anything, and with `relational
    phrase that is only an alias through the same table, so neither lookup reads every name
    the store has, nor another account's. Only hubs are kept: a stray phrase stored as an
    entity does not decide what a search is about. The longest-name rule then runs among
-   the hubs: "bildy v4" and not also "bildy", since a search from bildy reaches every
+   the hubs: "zobly v4" and not also "zobly", since a search from zobly reaches every
    version below it. Because the hubs are kept first, a stray entity whose name holds a
-   hub's ("bildy sync", one memory, no type) does not hide the hub. A question naming no
+   hub's ("zobly sync", one memory, no type) does not hide the hub. A question naming no
    hub that speaks in the first person ("Where do I live?") is about the store's owner,
    when the owner is a hub.
 2. **Candidates**, as deep for every search (eight per result asked for, at least 40 and
@@ -908,11 +898,8 @@ entity or date filter, whether its question names anything, and with `relational
    asks for one property), so on "Show everything about it" aboutness alone orders the
    list. A tie keeps the order judged, whose ties go by memory id; the
    memories not judged follow in their order. A search not judged keeps its order. A
-   question naming no hub was once ordered by a blend of the judged score and the text
-   ranking's position, because the judgement alone measured worse in the wording the
-   re-rank then asked in; measured again on `distractors_v1` in the one wording every
-   search now asks in, the judgement alone put an answer first on every question, as well
-   as any blend did, and the blend was removed (R-117). A memory kept as history then
+   question naming no hub is ordered by the judgement alone too, with no blend of the
+   judged score and the text ranking's position. A memory kept as history then
    comes right after the memory in use that replaced it (below), and the results are cut
    to the limit.
 
@@ -1021,7 +1008,7 @@ just before it, so for one question the current value comes first and a question
 past keeps its answer where it ranked. It is rendered with the date it was said and
 "[until <date>]" (context reconstruction, above), its source turns are shown as its
 evidence under the same rules as any memory's (stage 7), and MCP rows carry its
-`invalid_at`. Hiding them lost LoCoMo questions about the past. Deleting one forgets it as
+`invalid_at`. Hiding them would lose the answers to questions about the past. Deleting one forgets it as
 deleting a memory in use does: it no longer records what replaced it, search reads it no
 more, and it is listed as forgotten, where it can be brought back or purged. A memory
 superseded otherwise (a contradiction, a consolidation, a distillation) or deleted is
