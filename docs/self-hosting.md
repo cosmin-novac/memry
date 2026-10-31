@@ -378,11 +378,10 @@ only way to know whether these hold for your store.
 
 **The merge bars** (`JevDecider.pair_merge_by_step`) depend on how many memories the
 smaller side has: 0.97 at one, 0.96 at three, 0.85 at ten and 0.80 at fifty. Each bar is
-the lowest P(same) that kept wrong merges at 2% of merges or fewer, in the stricter of two
-sets of synthetic stores with exact labels (18,885 comparisons). The stats panel still
-shows one gate of 0.70 (`Decider.auto_confirm_confidence`, set with
-`MEMRY_DECISION_MERGE_CONFIDENCE`), an older measurement on 56 labelled cases. No merge
-reads it.
+the lowest P(same) that kept wrong merges at 2% of merges or fewer, on synthetic stores
+with exact labels. The stats panel still shows one gate of 0.70
+(`Decider.auto_confirm_confidence`, set with `MEMRY_DECISION_MERGE_CONFIDENCE`), an older
+value. No merge reads it.
 
 **A text model does not decide identity.** A text model can put a wrong "same" above any
 threshold: a number a model reports about itself says too little to merge on, and a

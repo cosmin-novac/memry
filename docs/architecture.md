@@ -926,13 +926,12 @@ entity or date filter, whether its question names anything, and with `relational
    candidates are the passages of the source episodes, each taken by its own vector and
    full-text match, and one a memory says whole is left out. A passage of a longer message
    reads "<said date>: <speaker> (part 2 of 5): <text>". The reason: a turn is shown whole
-   or not at all, and the shares are a few hundred tokens. On BEAM's 100K chats the
-   assistant's replies have a median of 950 tokens, and 11.5% fit within 600; on
-   LongMemEval 78.6% of them are over 150 words. Search scores long documents by passages
+   or not at all, the shares are a few hundred tokens, and an assistant's reply in a long
+   chat is often longer than a share. Search scores long documents by passages
    of about 150 words for the same reason (Dai and Callan 2019). 150 is fixed from there:
    about 200 tokens, below the smallest share (a quarter of the default 1,200 tokens), so
-   any passage fits any share on its own. LoCoMo's longest message has 87 words, so its
-   chats read as before. A store saved before passages gets them when it opens, with no
+   any passage fits any share on its own. A chat of short messages reads as before. A
+   store saved before passages gets them when it opens, with no
    call; `memry backfill-passages` (or `reindex`) embeds the parts of its long messages.
 
    Turn search (`retrieval.turn_search`, on by default) is a second search over the
@@ -1040,8 +1039,7 @@ Traffic keys (`retrieval.traffic_keys`) are off by default. With them on, Memry 
 query of a recent search as a question key (source "traffic") of a memory saved after it,
 when that memory is in the first 20 of the search ordered again. Traffic keys need
 `retrieval.question_keys`. With question keys off, Memry logs one warning when the store
-opens and leaves traffic keys off. With traffic keys alone, two question families scored
-lower (PhD notes, traffic-keys).
+opens and leaves traffic keys off.
 
 ## 6. Product surfaces and security
 

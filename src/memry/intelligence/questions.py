@@ -3,12 +3,9 @@ and kept beside it as extra search keys (``retrieval.question_keys``).
 
 A memory is a fact in the third person ("Ada moved to Amsterdam in March
 2024"); a question asked later shares few words with it ("what city is Ada
-based in?"). On LoCoMo, three questions written per record and indexed
-beside its text raised the share of questions whose answer reaches the top
-8 by 11 to 15 points for every writing model, and by 7 to 17 as extra
-vectors next to the record's own (PhD notes, dreaming-questions, E196 to
-E198). Appended, never in place of the text: questions alone pay only with
-the strongest writer.
+based in?"). The questions the memory answers are kept beside its text, as
+more words and vectors a later question can match. They are added to the
+text, never in place of it.
 
 Here: the rule the extractor is given, the shape of the answer, and the
 cleaning every source of questions goes through (extraction, the backfill,
@@ -30,8 +27,8 @@ QUESTIONS_PER_MEMORY = 3
 QUESTIONS_LIMIT = 9
 
 #: What the extractor is asked, placed among its rules. One question in
-#: other words than the fact is where the gain is: the questions sharing
-#: few words with the record gained most (C3 in the PhD notes).
+#: other words than the fact is where the gain is: a question in the fact's
+#: own words adds little to what the fact's text already matches.
 QUESTIONS_RULE = """- questions: 2 or 3 questions this fact answers, as the person would ask them
   later in another conversation. Each stands on its own: it names the thing
   or person it asks about (never "it", "he" or "they" alone) and asks for one

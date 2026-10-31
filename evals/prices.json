@@ -4,8 +4,7 @@
   "sources": {
     "openai": "https://developers.openai.com/api/docs/pricing (Standard tier; gpt-6-luna short context)",
     "openai_gpt-4.1-mini": "https://developers.openai.com/api/docs/models/gpt-4.1-mini (Standard tier)",
-    "typesafe": "https://docs.typesafe.ai/models (Jev 1.13, jev-1.13.0: $42 per billion tokens, $0.042 per million)",
-    "copied_from": "phd papers/memry-field-studies/data/locomo/prices.json and data/longmemeval/prices.json; gpt-4.1-mini from data/locomo/third_run/prices.json"
+    "typesafe": "https://docs.typesafe.ai/models (Jev 1.13, jev-1.13.0: $42 per billion tokens, $0.042 per million)"
   },
   "models": {
     "gpt-6-luna": {"input": 0.10, "cached_input": 0.01, "output": 0.50, "retrieved": "2026-09-29", "source": "openai"},

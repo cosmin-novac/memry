@@ -394,12 +394,12 @@ def test_the_selected_questions_are_written_as_the_file_has_them(monkeypatch, tm
 
 FAMILY = [{
     "question_id": "fam-1", "question_type": "single-session-user",
-    "question": "Where does my sister work?", "answer": "Kestrel Labs",
+    "question": "Where does my sister work?", "answer": "Lumen Labs",
     "question_date": "2023/06/01 (Thu) 10:00",
     "haystack_session_ids": ["s-job", "s-hike"],
     "haystack_dates": ["2023/05/01 (Mon) 09:00", "2023/05/07 (Sun) 18:00"],
     "haystack_sessions": [
-        [{"role": "user", "content": "My sister Mira started at Kestrel Labs.",
+        [{"role": "user", "content": "My sister Mira started at Lumen Labs.",
           "has_answer": True},
          {"role": "assistant", "content": "Congratulations to her."}],
         [{"role": "user", "content": "Mira and I went hiking today."},

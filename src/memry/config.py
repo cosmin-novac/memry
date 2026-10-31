@@ -181,9 +181,8 @@ class RetrievalConfig(BaseModel):
     #: it answers, kept beside the memory as search keys (``memory_questions``),
     #: and every search matches the words and the meaning of the question
     #: against them too, as two more candidate lists fused with the memory
-    #: text's (``retrieval.hybrid_search``). On LoCoMo turns three generated
-    #: questions per record raised top-8 success by 11 to 15 points for every
-    #: writing model (PhD notes, dreaming-questions). On by default since
+    #: text's (``retrieval.hybrid_search``), since a question asked later
+    #: often shares few words with the fact itself. On by default since
     #: 2026-10-09 (``MEMRY_QUESTION_KEYS=0`` turns it off); ``memry
     #: backfill-questions`` writes them for a store saved before.
     question_keys: bool = True
@@ -194,7 +193,7 @@ class RetrievalConfig(BaseModel):
     #: when its best cosine similarity with that entity's questions is at
     #: least ``entity_question_bar``; otherwise it is about the owner, as
     #: before. On by default since 2026-10-09 (``MEMRY_ENTITY_QUESTIONS=0``
-    #: turns it off; PhD notes, entity-questions).
+    #: turns it off).
     entity_questions: bool = True
     entity_question_bar: float = 0.5
     #: The search log (``search_log``): one row per search, with its time,
@@ -209,9 +208,9 @@ class RetrievalConfig(BaseModel):
     #: save puts one of the saved memories in its first 20, gives that memory
     #: the query as a question key (source "traffic"). Needs ``search_log``
     #: and ``question_keys``: with ``question_keys`` off the store warns once
-    #: when it opens and keeps this off (alone, the keys from traffic made two
-    #: question families worse; PhD notes, traffic-keys). Off by default: it
-    #: was measured only in simulation.
+    #: when it opens and keeps this off (with keys from traffic alone, some
+    #: kinds of question did worse). Off by default: it was measured only in
+    #: simulation.
     traffic_keys: bool = False
     #: A question that needs several memories (a list, a total, a comparison)
     #: has at most this many more judged in one further call, after the first
@@ -232,9 +231,8 @@ class RetrievalConfig(BaseModel):
     #: judges these excerpts in one call; and the excerpts judged at least
     #: ``turn_search_keep`` are shown after the facts and their evidence, as
     #: dated quotes, within ``turn_search_tokens``. A search no decision
-    #: provider judged never searches the turns. On LoCoMo at bar 0.8 it raised
-    #: J at k 20 by 1.2 points (PhD findings, turn-search). On by default
-    #: since 2026-10-10 (``MEMRY_TURN_SEARCH=0`` turns it off).
+    #: provider judged never searches the turns. On by default since
+    #: 2026-10-10 (``MEMRY_TURN_SEARCH=0`` turns it off).
     turn_search: bool = True
     turn_search_bar: float = 0.8
     turn_search_keep: float = 0.5
@@ -249,11 +247,8 @@ class RetrievalConfig(BaseModel):
     #: facts judged, read together, contain everything the question asks for,
     #: about the person or thing it asks about (the "complete" signal), and
     #: turn search also runs when that is under this. None: not asked.
-    #: With both at these values, on LoCoMo J at k 20 was 1.58 points above no
-    #: turn search, against 1.21 with the relevance bar alone (PhD findings,
-    #: completeness-trigger). On by default since 2026-10-10
-    #: (``MEMRY_TURN_SEARCH_SEVERAL`` and ``MEMRY_TURN_SEARCH_COMPLETE``: a
-    #: number, or 0 or off for None).
+    #: On by default since 2026-10-10 (``MEMRY_TURN_SEARCH_SEVERAL`` and
+    #: ``MEMRY_TURN_SEARCH_COMPLETE``: a number, or 0 or off for None).
     turn_search_several: float | None = 0.5
     turn_search_complete: float | None = 0.7
 

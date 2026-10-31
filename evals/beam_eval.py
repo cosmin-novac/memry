@@ -213,8 +213,7 @@ answer_messages.context_of = context_of  # type: ignore[attr-defined]
 #: resolution, event ordering, information extraction, instruction following,
 #: knowledge update, multi-session reasoning, preference following,
 #: summarization, temporal reasoning). Written from that list after the first
-#: trial, when a few of BEAM's questions and rubrics had been seen
-#: (findings/beam-100k-prompts-and-models.md in the PhD repository). The text
+#: trial, when a few of BEAM's questions and rubrics had been seen. The text
 #: a model reads never names BEAM.
 ABILITIES_SYSTEM = """You are a personal assistant with a long-term memory of your \
 past conversations with this user. Below the user's message is what your memory \

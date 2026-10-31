@@ -218,23 +218,23 @@ def test_a_missing_prices_file_stops_the_run_before_any_call(tmp_path, monkeypat
     assert stub_models == [] and not (tmp_path / "r.json").exists()
 
 
-def test_the_repository_prices_give_the_first_locomo_run_its_published_cost():
-    """phd data/locomo/usage.json, the first full LoCoMo run (2026-09-29): the
-    tokens per model, and $3.12 in all. Jev is priced on input tokens only,
-    a cached token at the cached price."""
+def test_the_repository_prices_price_each_model_of_a_run():
+    """A run's tokens per model, priced with the repository's prices: $2.86
+    in all. Jev is priced on input tokens only, a cached token at the cached
+    price."""
     prices = xb.load_prices(xb.PRICES)
-    tokens = {"gpt-4o-mini": (11_723_500, 453_632, 115_505, 1.79381),
-              "gpt-6-luna": (1_097_084, 131_563, 823_029, 0.50938),
-              "text-embedding-3-small": (147_811, 0, 0, 0.00296),
-              "jev-latest": (19_368_946, 0, 2_025_554, 0.81350)}
+    tokens = {"gpt-4o-mini": (10_000_000, 400_000, 100_000, 1.53),
+              "gpt-6-luna": (1_000_000, 100_000, 800_000, 0.491),
+              "text-embedding-3-small": (150_000, 0, 0, 0.003),
+              "jev-latest": (20_000_000, 0, 2_000_000, 0.84)}
     total = 0.0
-    for model, (tokens_in, cached, tokens_out, published) in tokens.items():
+    for model, (tokens_in, cached, tokens_out, expected) in tokens.items():
         name, price = xb.price_of(model, prices)
         assert price is not None, model
         cost = xb.dollars(price, tokens_in, cached, tokens_out)
-        assert cost == pytest.approx(published, abs=6e-6), model
+        assert cost == pytest.approx(expected, abs=6e-6), model
         total += cost
-    assert total == pytest.approx(3.1196, abs=1e-4) and round(total, 2) == 3.12
+    assert total == pytest.approx(2.864, abs=1e-4) and round(total, 2) == 2.86
     assert xb.price_of("jev-latest", prices)[0] == "jev"
     assert xb.price_of("gpt-4o-2024-08-06", prices)[0] == "gpt-4o"
     assert all(entry.get("retrieved") for entry in prices["models"].values())

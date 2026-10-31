@@ -405,9 +405,8 @@ SEARCH_LOG_DAYS = 90
 #: and those found by their vectors, this many of each, fused by rank; the
 #: first ``TURN_HITS`` of them, each read with ``TURN_BEFORE`` turns said
 #: before it and ``TURN_AFTER`` said after it (MemMachine's window on
-#: LoCoMo), are the excerpts judged. On LoCoMo's second run, 16 excerpts of
-#: 30 candidates reached a gold turn the facts' evidence did not show for 229
-#: of 405 questions, against 172 with 8 (PhD data, turn-search/candidates).
+#: LoCoMo), are the excerpts judged. 16 of 30 contain more of the turns the
+#: facts' evidence leaves out than 8 do, and are still judged in one call.
 TURN_CANDIDATES = 30
 TURN_HITS = 16
 TURN_BEFORE = 1
@@ -876,8 +875,8 @@ class MemoryStore:
         self.backend.names_changed = self._names_changed
         retrieval = self.config.retrieval
         if retrieval.traffic_keys and not retrieval.question_keys:
-            # keys from traffic alone made two question families worse
-            # (PhD notes, traffic-keys); they are read as question keys
+            # with keys from traffic alone some kinds of question did worse;
+            # they are read as question keys
             log.warning("retrieval.traffic_keys is on without retrieval.question_keys: "
                         "keys from traffic stay off")
         try:

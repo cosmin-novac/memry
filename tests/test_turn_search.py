@@ -438,7 +438,7 @@ def test_a_turn_no_memory_rests_on_that_looks_like_a_secret_is_never_shown():
         store.close()
 
 
-# -- the two triggers beside the relevance bar (PhD notes, completeness-trigger-plan) --
+# -- the two triggers beside the relevance bar --
 
 
 def test_the_several_answer_runs_turn_search_at_its_bar_with_no_more_calls():

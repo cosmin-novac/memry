@@ -73,7 +73,7 @@ def _store(flag: bool = True) -> tuple[MemoryStore, dict[str, str], dict[str, st
         "owner_work": ("Ilva Marsh works at Nordlicht GmbH.", ["owner"]),
         "owner_city": ("Ilva Marsh lives in Lisbon.", ["owner"]),
         "sister_is": ("Mira Lund is Ilva Marsh's sister.", ["owner", "sister"]),
-        "sister_work": ("Mira Lund works at Kestrel Labs.", ["sister"]),
+        "sister_work": ("Mira Lund works at Lumen Labs.", ["sister"]),
         "sister_dog": ("Mira Lund has a dog called Rufus.", ["sister"]),
         "brother_is": ("Kai Berg is Ilva Marsh's brother.", ["owner", "brother"]),
         "brother_work": ("Kai Berg works at Torvik Energy.", ["brother"]),
@@ -261,11 +261,11 @@ def test_the_writer_reads_the_answer_and_drops_names_and_questions_without_a_rol
                                "What car is it?", "Where does my sister work?"]},
         {"n": 7, "questions": ["Who is my cousin?"]}]})])
     got = write_entity_questions(llm, "Ilva Marsh", [
-        {"name": "Mira Lund", "description": "Ilva's sister, works at Kestrel Labs.",
+        {"name": "Mira Lund", "description": "Ilva's sister, works at Lumen Labs.",
          "relations": ["Ilva Marsh has_sister Mira Lund"]}])
     assert got == [["Who is my sister?", "Where does my sister work?"]]
     system, user = llm.calls[0]
-    assert "Ilva Marsh" in system and "has_sister" in user and "Kestrel Labs" in user
+    assert "Ilva Marsh" in system and "has_sister" in user and "Lumen Labs" in user
 
 
 def test_write_entity_questions_asks_about_described_relations_of_the_owner_once():
