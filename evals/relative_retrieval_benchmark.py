@@ -49,9 +49,20 @@ stores none, so it reads the ordinary vectors, names as written: why property
 vectors exist. ``--property-dimensions N`` keeps the first N numbers of every
 vector it compares: at what size.
 
+Question keys (``retrieval.question_keys``, ``intelligence.questions``): with
+``--questions FILE`` every memory of the world is stored with the questions it
+answers, as a backfill stores them, and every mode is scored twice, with the
+search reading the questions and without (the row labelled "(no
+questions)"). ``--write-questions FILE`` asks the configured text model to
+write them (2 or 3 a memory, 25 memories a call) and keeps them in FILE for
+the next run. The questions belong to the world, not to a store: one file
+serves every store built from the same world, keyed by size.
+
 Run:
     OPENAI_API_KEY=... python evals/relative_retrieval_benchmark.py      # real embeddings
     python evals/relative_retrieval_benchmark.py --sizes 1500             # hash, offline
+    python evals/relative_retrieval_benchmark.py --world dense --sizes 2000 \
+        --write-questions questions_dense.json     # questions by the text model, then scored
 """
 
 from __future__ import annotations
@@ -73,9 +84,12 @@ sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE))
 
 from memry.config import Config, EmbeddingConfig  # noqa: E402
-from memry.models import Entity, EntityMention, Memory, MergeProposal, Relation  # noqa: E402
+from memry.models import Entity, EntityMention, Memory, MergeProposal, Relation, Scope  # noqa: E402
 from memry.providers.embeddings import Embedder, HashEmbedder, OpenAIEmbedder  # noqa: E402
-from memry.providers.llm import NoneLLM  # noqa: E402
+from memry.intelligence.questions import QUESTIONS_PER_MEMORY, clean_questions  # noqa: E402
+from memry.providers.llm import LLM, NoneLLM, build_llm  # noqa: E402
+from memry.intelligence.entity_questions import mask_role, role_words  # noqa: E402
+from memry.intelligence.graph_retrieval import mask_first_person  # noqa: E402
 from memry.store import MemoryStore, _cut, _text_hash  # noqa: E402
 
 USER = "bench"
@@ -928,12 +942,131 @@ def add_owner_sets(add, queries, types, rnd: random.Random) -> None:
         queries["set_single"].append((f"Did {o} like {r}?", [k], []))
 
 
-def build_world_dense(size: int, seed: int = 11, owner: bool = False) -> dict:
+#: People related to the owner by one role each (``--roles``): the role as
+#: the owner says it, and the facts each one has. A fact the owner's own
+#: memories already state of that role is left out ("Ilva Marsh's sister
+#: lives in Graz" is a near miss of the owner's home), so no question has
+#: two right answers.
+ROLES = [("sister", ["work", "car", "birthday", "dog", "sport"]),
+         ("brother", ["work", "live", "car", "birthday", "dog"]),
+         ("partner", ["work", "live", "dog", "sport"]),
+         ("mother", ["work", "live", "car", "dog", "sport"]),
+         ("father", ["work", "live", "car", "birthday", "sport"]),
+         ("manager", ["work", "live", "car", "birthday", "dog", "sport"]),
+         ("landlord", ["work", "live", "car", "birthday", "dog", "sport"]),
+         ("neighbour", ["work", "live", "car", "birthday", "sport"]),
+         ("flatmate", ["work", "live", "car", "birthday", "dog", "sport"]),
+         ("cousin", ["work", "live", "car", "birthday", "dog", "sport"]),
+         ("accountant", ["work", "live", "car", "birthday", "dog", "sport"]),
+         ("mentor", ["work", "live", "car", "birthday", "dog", "sport"])]
+#: field: (the fact, the family's question, the entity question about it,
+#: the start of the owner's own fact of that field, if the owner has one).
+#: The entity question is worded unlike the family's question.
+ROLE_FACTS = {
+    "work": ("{p} works at {v}.", "Where does my {r} work?", "Which company employs my {r}?",
+             "{o} works at"),
+    "live": ("{p} lives in {v}.", "Where does my {r} live?", "Which city is my {r} based in?",
+             "{o} lives in"),
+    "car": ("{p} drives a {v}.", "What car does my {r} drive?", "Which car does my {r} own?",
+            "{o} drives a"),
+    "birthday": ("{p}'s birthday is in {v}.", "When is my {r}'s birthday?",
+                 "In which month was my {r} born?", "{o}'s birthday is on"),
+    "dog": ("{p} has a dog called {v}.", "What is my {r}'s dog called?",
+            "What is the name of my {r}'s dog?", None),
+    "sport": ("{p} plays {v} at the weekend.", "Which sport does my {r} play?",
+              "What does my {r} do at the weekend?", None),
+}
+ROLE_VALUES = {
+    "work": ["Halden Logistics", "Brightwater Clinic", "Pinecrest School", "Marlow & Finch",
+             "Torvik Energy", "Sundial Press", "Corvid Analytics", "Fjord Insurance",
+             "Calder Architects", "Westbrook Hospital", "Nimbus Games", "Elm Street Pharmacy"],
+    "live": CITIES,
+    "car": ["Volvo V60", "Mini Cooper", "Tesla Model 3", "Subaru Outback", "Smart ForFour",
+            "Land Rover Defender", "Suzuki Swift", "Polestar 2", "Jeep Renegade",
+            "Alfa Romeo Giulia", "Lexus UX", "MG4"],
+    "birthday": MONTHS,
+    "dog": ["Rufus", "Biscuit", "Juno", "Pepper", "Otto", "Luna", "Bruno", "Nala", "Ziggy",
+            "Maple", "Scout", "Hazel"],
+    "sport": ["tennis", "volleyball", "badminton", "handball", "golf", "squash", "water polo",
+              "table tennis", "rugby", "climbing", "rowing", "fencing"],
+}
+ROLE_EVERYDAY = [
+    "{p} called {o} about the {topic} plans.", "{p} is reading {book}.",
+    "{p} recommended {film} to {o}.", "{p} is planning a trip to {country}.",
+    "{p} sent {o} photos from the weekend.", "{p} is learning to {skill}.",
+    "{p} had a cold last week.", "{p} lent {o} a {item}.",
+]
+
+
+def add_roles(add, relations, queries, types, memories, rnd: random.Random) -> dict:
+    """The owner's sister, manager, landlord and the rest (``ROLES``): one person
+    each, linked to the owner by a stored relation ("has_sister") and a memory
+    saying so, with their facts (``ROLE_FACTS``) and a few everyday memories.
+    The family ``role`` has two questions for each role, by the role alone
+    ("Where does my sister work?"). Its near misses are that fact of the
+    other role people and the owner's own. Returns the entity questions the
+    owner would ask about each (name: questions), as a writer working from
+    the relation and the facts would write them: "Who is my sister?" and two
+    of the person's facts, drawn apart from the family's questions and
+    worded unlike them."""
+    o = OWNER
+    values = {field: rnd.sample(pool, len(ROLES)) for field, pool in ROLE_VALUES.items()}
+    owner_fact = {}
+    for field, (_, _, _, start) in ROLE_FACTS.items():
+        if start:
+            prefix = start.format(o=o)
+            owner_fact[field] = next(k for k, m in enumerate(memories)
+                                     if m["text"].startswith(prefix) and m["entities"] == [o])
+    fact_mem: dict[str, dict[str, int]] = {}
+    asked: list[tuple[str, str, str]] = []
+    entity_questions: dict[str, list[str]] = {}
+    for n, (role, fields) in enumerate(ROLES):
+        while True:
+            who = person(rnd)
+            if who not in types:
+                break
+        types[who] = "person"
+        add(f"{who} is {o}'s {role}.", o, who)
+        relations.append((o, f"has_{role}", who))
+        fact_mem[role] = {}
+        for field in fields:
+            fact_mem[role][field] = add(
+                ROLE_FACTS[field][0].format(p=who, v=values[field][n]), who)
+        for template in rnd.sample(ROLE_EVERYDAY, 4):
+            text = template.format(
+                p=who, o=o, topic=rnd.choice(TOPICWORDS), film=rnd.choice(["Past Lives", "Aftersun"]),
+                book=rnd.choice(["Dune", "Middlemarch", "Stoner"]),
+                country=rnd.choice(["Portugal", "Norway", "Japan"]),
+                skill=rnd.choice(["sail", "knit", "play the cello"]),
+                item=rnd.choice(["tent", "drill", "ladder"]))
+            add(text, *([who, o] if o in text else [who]))
+        for field in rnd.sample(fields, 2):
+            asked.append((role, field, who))
+        entity_questions[who] = [f"Who is my {role}?"] + [
+            ROLE_FACTS[field][2].format(r=role) for field in rnd.sample(fields, 2)]
+    for role, field, who in asked:
+        wrong = [fact_mem[other][field] for other, _ in ROLES
+                 if other != role and field in fact_mem[other]]
+        if field in owner_fact:
+            wrong.append(owner_fact[field])
+        queries["role"].append((ROLE_FACTS[field][1].format(r=role),
+                                [fact_mem[role][field]], wrong))
+    return entity_questions
+
+
+def build_world_dense(size: int, seed: int = 11, owner: bool = False,
+                      roles: bool = False) -> dict:
     """Like ``build_world``, with entities of realistic size: a product has
     35 to 50 memories, each version 10 to 15, its sync service 11 to 15, an event
     series 19 to 23, each occurrence 10 to 14, a person 14 to 20, a project 15
     to 22 plus its members' "works on". ``owner`` adds the store's owner, an
-    entity of about 300 memories (``add_owner``), in place of as many notes."""
+    entity of about 300 memories (``add_owner``), in place of as many notes.
+    ``roles`` (with ``owner``) adds the owner's sister, manager and the rest
+    (``add_roles``), the family ``role``, and the entity questions under
+    "entity_questions" (name: the questions the owner would ask about it)."""
+    if roles and not owner:
+        raise ValueError("roles are the owner's: they need owner=True")
+    entity_questions: dict[str, list[str]] = {}
     rnd = random.Random(seed)
     n_products, n_events = max(6, size // 250), max(4, size // 400)
     n_people, n_projects = max(12, size // 100), max(6, size // 250)
@@ -1109,6 +1242,9 @@ def build_world_dense(size: int, seed: int = 11, owner: bool = False) -> dict:
                          if m["text"].startswith(f"{OWNER}'s favourite restaurant is"))
         queries["set"] = [(q, gold + [favourite] if "restaurants did" in q else gold, bad)
                           for q, gold, bad in queries["set"]]
+        if roles:  # its own draws too: without roles the world is as it was
+            entity_questions = add_roles(add, relations, queries, types, memories,
+                                         random.Random(seed + 7))
     for pr in projects:
         gold = [k for k, m in enumerate(memories) if pr in m["entities"]]
         queries["by_entity"].append((f"Show everything about {pr}.", gold, []))
@@ -1116,8 +1252,11 @@ def build_world_dense(size: int, seed: int = 11, owner: bool = False) -> dict:
     while len(memories) < size:
         tw = rnd.choice(TOPICWORDS)
         add(f"Note on {tw}: the {tw} for {rnd.choice(CITIES)} needs attention next sprint.")
-    return {"memories": memories, "relations": relations, "pairs": pairs,
-            "queries": dict(queries), "types": types}
+    world = {"memories": memories, "relations": relations, "pairs": pairs,
+             "queries": dict(queries), "types": types}
+    if roles:
+        world["entity_questions"] = entity_questions
+    return world
 
 
 # Tags as an agent writes them when it saves (1 to 3 a memory, the most
@@ -1218,7 +1357,9 @@ def tag_world(world: dict, seed: int = 21) -> None:
 
 def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed: int = 3,
                 decider=None, property_dimensions: int | None = None,
-                says: dict[str, str] | None = None, vectors: str = "property"):
+                says: dict[str, str] | None = None, vectors: str = "property",
+                questions: dict[str, list[str]] | None = None,
+                entity_questions: dict[str, list[str]] | None = None):
     """The world in a fresh store, with compared pairs as ``links`` says.
     ``decider`` is the decision provider searches ask when given (Jev in
     production).
@@ -1229,7 +1370,12 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
     with each memory's ordinary vector, names as written (as it does for a
     memory saved before property vectors existed). ``property_dimensions``
     is ``retrieval.property_dimensions``: the leading numbers the comparison
-    keeps of every vector it reads."""
+    keeps of every vector it reads. ``questions`` (memory index as a string:
+    the questions that memory answers) are stored as each memory's question
+    keys, as a backfill stores them, and turn ``retrieval.question_keys``
+    on. ``entity_questions`` (entity name: the questions the owner would ask
+    about it by its role) are stored as ``MemoryStore.write_entity_questions``
+    stores a writer's, and turn ``retrieval.entity_questions`` on."""
     if vectors not in ("property", "ordinary"):
         raise ValueError(f"vectors must be 'property' or 'ordinary', not {vectors!r}")
     if vectors == "ordinary" and says is not None:
@@ -1281,6 +1427,14 @@ def build_store(world: dict, embedder: Embedder, links: str, answers: dict, seed
             id=f"p{n:05d}", entity_a=ids[child], entity_b=ids[parent], user_id=USER,
             confidence=same, different=different, belongs=belongs, compared_step=1,
             created_at=stamp))
+    if questions is not None:
+        store_questions(store, memory_ids, questions)
+    if entity_questions is not None:
+        if hasattr(embedder, "warm"):  # one batch: the cache writes its file per batch
+            embedder.warm([q for items in entity_questions.values() for q in items])
+        for name, items in entity_questions.items():
+            store._write_entity_questions(ids[name], items, "model")
+        store.config.retrieval.entity_questions = True
     if says is not None:
         store_says(store, memory_ids, [m["text"] for m in world["memories"]], says)
     elif vectors == "property":
@@ -1310,6 +1464,124 @@ def store_says(store: MemoryStore, memory_ids: list[str], texts: list[str],
             rows, model, {mid: _text_hash(text) for mid, text in batch if mid in rows})
         embedded += len(rows)
     return embedded
+
+
+def store_questions(store: MemoryStore, memory_ids: list[str],
+                    questions: dict[str, list[str]]) -> int:
+    """Each memory's ``questions`` as its question keys, written as
+    ``MemoryStore`` writes a backfill's (``_write_questions``, source
+    "backfill"), cleaned as every source of questions is; turns
+    ``retrieval.question_keys`` on. Returns how many memories got questions."""
+    cleaned = {k: clean_questions(items) for k, items in questions.items()}
+    if hasattr(store.embedder, "warm"):
+        # the vectors are of the questions with names masked, which the
+        # cache has not seen: all in one batch, since the cache writes its
+        # file on every new text
+        store.embedder.warm([text for k, items in cleaned.items() if items
+                             for text in store._masked_question_texts(memory_ids[int(k)], items)])
+    written = 0
+    for k, items in sorted(cleaned.items(), key=lambda kv: int(kv[0])):
+        if items:
+            store._write_questions(memory_ids[int(k)], items, "backfill")
+            written += 1
+    store.config.retrieval.question_keys = True
+    return written
+
+
+#: What the text model is asked for a batch of memories (``--write-questions``):
+#: the rule the extractor follows (``intelligence.questions.QUESTIONS_RULE``),
+#: for memories already written.
+QUESTIONS_SYSTEM = """You write the questions that stored memories answer.
+For each numbered memory, write 2 or 3 questions a person would ask later, in \
+another conversation, that this memory answers. Each question names the thing \
+or person it asks about (never "it", "he" or "they" alone) and asks for one thing \
+the memory says. At least one question uses other words than the memory does.
+Answer with JSON only, one item for each memory:
+{"items": [{"n": <the memory's number>, "questions": ["...", "..."]}]}"""
+QUESTIONS_SCHEMA: dict = {
+    "type": "object",
+    "properties": {"items": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"n": {"type": "integer"},
+                       "questions": {"type": "array", "items": {"type": "string"}}},
+        "required": ["n", "questions"], "additionalProperties": False}}},
+    "required": ["items"], "additionalProperties": False,
+}
+#: Memories a call.
+QUESTIONS_BATCH = 25
+
+
+def ask_questions(llm: LLM, texts: list[str]) -> list[list[str]]:
+    """The questions the text model writes for each of ``texts`` in one call,
+    in their order, each list cleaned (``clean_questions``) and at most
+    ``QUESTIONS_PER_MEMORY`` long. A memory the answer skips, or an answer that
+    cannot be read, gives an empty list."""
+    user = "\n".join(f"{n}. {text}" for n, text in enumerate(texts, start=1))
+    raw = llm.complete(QUESTIONS_SYSTEM, user, json_schema=QUESTIONS_SCHEMA)
+    out: list[list[str]] = [[] for _ in texts]
+    try:
+        items = json.loads(raw[raw.index("{"):raw.rindex("}") + 1]).get("items")
+    except (ValueError, AttributeError):
+        return out
+    for item in items if isinstance(items, list) else []:
+        n = item.get("n") if isinstance(item, dict) else None
+        if isinstance(n, int) and 1 <= n <= len(texts):
+            out[n - 1] = clean_questions(item.get("questions"), limit=QUESTIONS_PER_MEMORY)
+    return out
+
+
+def write_world_questions(llm: LLM, texts: list[str], known: dict[str, list[str]], save,
+                          batch: int = QUESTIONS_BATCH, workers: int = 4
+                          ) -> dict[str, list[str]]:
+    """``known`` (memory index as a string: its questions) completed with the
+    questions of every memory of ``texts`` it lacks, ``batch`` memories a call
+    and ``workers`` calls at a time. ``save`` is called with the questions so
+    far after every call, so an interrupted run keeps what it paid for. A
+    memory the answer skipped is asked once more in a later batch; skipped
+    again, it keeps an empty list. A call that fails writes nothing: the next
+    run asks for those memories again."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    questions = dict(known)
+    due = [k for k in range(len(texts)) if str(k) not in questions]
+    for last in (False, True):
+        again: list[int] = []
+        chunks = [due[i:i + batch] for i in range(0, len(due), batch)]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            asked = {pool.submit(ask_questions, llm, [texts[k] for k in chunk]): chunk
+                     for chunk in chunks}
+            for future in as_completed(asked):
+                chunk = asked[future]
+                try:
+                    got = future.result()
+                except Exception as exc:  # noqa: BLE001  one failed call stops nothing
+                    print(f"  no questions for {len(chunk)} memories: {exc}", flush=True)
+                    continue
+                for k, items in zip(chunk, got):
+                    if items or last:
+                        questions[str(k)] = items
+                    else:
+                        again.append(k)
+                save(questions)
+                print(f"  questions for {len(questions)}/{len(texts)} memories", flush=True)
+        due = sorted(again)
+        if not due:
+            break
+    return questions
+
+
+def keyed_by_size(data: dict) -> bool:
+    """Whether a questions file holds its questions under world sizes
+    ({"2000": {"0": [...]}}), every value an object, rather than the
+    questions of one world by memory index."""
+    return bool(data) and all(isinstance(v, dict) for v in data.values())
+
+
+def questions_for_size(data: dict, size: int) -> dict[str, list[str]] | None:
+    """The questions of a questions file for the world of ``size``: under the
+    key ``str(size)`` in a file keyed by size, else the whole file (a file for
+    one world). None when a file keyed by size has no entry for it."""
+    return data.get(str(size)) if keyed_by_size(data) else data
 
 
 MODES = [
@@ -1356,7 +1628,8 @@ def _asks_decider(store: MemoryStore) -> bool:
     return bool(getattr(store.decider, "available", False)) and store.relevance_mode() == "jev"
 
 
-def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dict:
+def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode,
+          question_keys: bool | None = None, entity_questions: bool | None = None) -> dict:
     """Per family, over the top 10 of the limit-10 search: ``mrr``, ``recall``
     and ``wrong_first``. Over the full ranking (below):
 
@@ -1374,7 +1647,14 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
     (``MemoryStore._final_order``) on a second search at limit 100 (its text
     ranking 500 deep). A search that asks the decision provider is not run a
     second time (it would be judged again): its ranking is the limit-10
-    search's own."""
+    search's own.
+
+    ``question_keys`` True or False runs every search with
+    ``retrieval.question_keys`` so, and sets it back as it was after; None
+    leaves it as the store has it. ``entity_questions`` does the same for
+    ``retrieval.entity_questions``. ``seeds`` lists the names of the entities
+    each search starts from, in the family's order, and ``rr`` the reciprocal
+    rank of each question's first answer."""
     _, relational, depth = mode[:3]
     cfg = store.config.retrieval
     cfg.relational_depth = depth
@@ -1382,23 +1662,31 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
         cfg.relational_sharpness = mode[3]
     cfg.relational_relevance = mode[4] if len(mode) > 4 else "vector"
     index = {mid: k for k, mid in enumerate(memory_ids)}
+    names = {e.id: e.name for e in store.backend.list_entities(Scope(user_id=USER), limit=100_000)}
     seen: dict[str, list] = {}
     inner = store._final_order
 
-    def capture(*args, **kwargs):
-        seen["ranked"] = inner(*args, **kwargs)
+    def capture(ranked, plan, *args, **kwargs):
+        seen["seeds"] = list(plan.seeds)
+        seen["ranked"] = inner(ranked, plan, *args, **kwargs)
         return seen["ranked"]
 
     store._final_order = capture
+    keys_before, entities_before = cfg.question_keys, cfg.entity_questions
+    if question_keys is not None:
+        cfg.question_keys = question_keys
+    if entity_questions is not None:
+        cfg.entity_questions = entity_questions
     out: dict[str, dict[str, float]] = {}
     try:
         for family, items in queries.items():
             mrr, recall, wrong_first, ms = [], [], [], []
-            r20, linked, sets, precision = [], [], [], []
+            r20, linked, sets, precision, seeds = [], [], [], [], []
             for query, gold, wrong in items:
                 seen.clear()
                 started = time.perf_counter()
                 results = store.search(query, user_id=USER, limit=10, relational=relational)
+                seeds.append(sorted(names[e] for e in seen.get("seeds", [])))
                 got = [r.memory.id for r in results]
                 ms.append((time.perf_counter() - started) * 1000)
                 gold_ids = {memory_ids[k] for k in gold}
@@ -1428,7 +1716,8 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
                            "wrong_first": statistics.mean(wrong_first) if wrong_first else None,
                            "ms": statistics.median(ms), "n": len(items),
                            "r20": statistics.mean(r20),
-                           "linked": statistics.mean(map(float, linked))}
+                           "linked": statistics.mean(map(float, linked)),
+                           "seeds": seeds, "rr": mrr}
             if sets:
                 out[family].update({
                     "set_n": len(sets),
@@ -1437,6 +1726,7 @@ def score(store: MemoryStore, memory_ids: list[str], queries: dict, mode) -> dic
                     "precision": statistics.mean(precision) if precision else None})
     finally:
         del store._final_order  # the method again
+        cfg.question_keys, cfg.entity_questions = keys_before, entities_before
     return out
 
 
@@ -1469,6 +1759,9 @@ def main() -> None:
     parser.add_argument("--sizes", type=int, nargs="*", default=None)
     parser.add_argument("--owner", action="store_true",
                         help="dense world with the store's owner (about 300 memories)")
+    parser.add_argument("--roles", action="store_true",
+                        help="with --owner: the owner's sister, manager and the rest, and the "
+                             "family role (\"Where does my sister work?\")")
     parser.add_argument("--world", choices=["simple", "dense"], default="simple",
                         help="dense: entities of 15 to 50 memories with near misses")
     parser.add_argument("--out", default=None)
@@ -1484,6 +1777,25 @@ def main() -> None:
     parser.add_argument("--says", default=None,
                         help="JSON object memory index -> says (the statement with its "
                              "subject taken out): property vectors from it, not the masked text")
+    asked = parser.add_mutually_exclusive_group()
+    asked.add_argument("--questions", default=None, metavar="PATH",
+                       help="JSON file of question keys: memory index (a string) to the "
+                            "questions that memory answers, keyed by world size at the top "
+                            "({\"2000\": {\"0\": [...]}}; a file for one size may leave the "
+                            "size out). One file serves every store of the same world "
+                            "(--world, --owner) and size. Every mode is scored twice, with "
+                            "retrieval.question_keys on and off (\"(no questions)\")")
+    asked.add_argument("--write-questions", default=None, metavar="PATH",
+                       help="ask the configured text model (memry config) for the questions "
+                            "of every memory of each size's world that PATH lacks, save them "
+                            "to PATH keyed by size as --questions reads it, and run with them")
+    parser.add_argument("--entity-questions", action="store_true",
+                        help="with --roles: store the questions the owner would ask about "
+                             "each role person (written from the world's templates, no model) "
+                             "and score every mode with retrieval.entity_questions on and off "
+                             "(\"(no entity questions)\")")
+    parser.add_argument("--entity-question-bar", type=float, default=None,
+                        help="retrieval.entity_question_bar (Memry's default without it)")
     parser.add_argument("--tags", action="store_true",
                         help="tag every memory as an agent does when it saves (tag_world); "
                              "the store keeps the tags as the memories' categories")
@@ -1498,6 +1810,10 @@ def main() -> None:
                         help="keep this many leading numbers of every vector the linked "
                              "search compares (retrieval.property_dimensions; all by default)")
     args = parser.parse_args()
+    if args.roles and not (args.owner and args.world == "dense"):
+        parser.error("--roles are the owner's: they need --world dense --owner")
+    if args.entity_questions and not args.roles:
+        parser.error("--entity-questions are about the role people: they need --roles")
     if args.says and args.vectors == "ordinary":
         parser.error("--says gives property vectors: it cannot go with --vectors ordinary")
     decider = None
@@ -1540,13 +1856,57 @@ def main() -> None:
     embedder = CachedEmbedder(base, cache)
     answers = json.loads((HERE / "datasets" / "belongs_answers.json").read_text())["answers"]
     says = json.loads(pathlib.Path(args.says).read_text()) if args.says else None
+    questions_path = args.questions or args.write_questions
+    questions_file: dict = {}
+    if args.questions:
+        questions_file = json.loads(pathlib.Path(args.questions).read_text())
+    elif args.write_questions and pathlib.Path(args.write_questions).exists():
+        questions_file = json.loads(pathlib.Path(args.write_questions).read_text())
+        if questions_file and not keyed_by_size(questions_file):
+            parser.error("--write-questions keeps the questions keyed by size "
+                         f"({{\"2000\": {{...}}}}); {args.write_questions} is not")
+    if args.questions and len(sizes) > 1 and not keyed_by_size(questions_file):
+        parser.error("--questions without sizes as keys holds one world: run one size")
+    question_llm: LLM | None = None
     results = {}
     for size in sizes:
-        world = (build_world_dense(size, owner=args.owner) if args.world == "dense"
+        world = (build_world_dense(size, owner=args.owner, roles=args.roles)
+                 if args.world == "dense"
                  else build_world(size))
         if args.tags:
             tag_world(world)
         texts = [m["text"] for m in world["memories"]]
+        questions: dict[str, list[str]] | None = None
+        if args.write_questions:
+            known = questions_file.get(str(size), {})
+            if any(str(k) not in known for k in range(len(texts))):
+                if question_llm is None:
+                    question_llm = build_llm(Config.load().llm)
+                    if not question_llm.available:
+                        parser.error("--write-questions needs a text model (memry config: "
+                                     "MEMRY_LLM_PROVIDER, ANTHROPIC_API_KEY or OPENAI_API_KEY)")
+
+                def save(so_far: dict, size: int = size) -> None:
+                    questions_file[str(size)] = so_far
+                    path = pathlib.Path(args.write_questions)
+                    part = path.with_name(path.name + ".part")
+                    part.write_text(json.dumps(questions_file))
+                    part.replace(path)
+
+                print(f"  writing questions for {len(texts)} memories", flush=True)
+                known = write_world_questions(question_llm, texts, known, save)
+            questions = known
+        elif args.questions:
+            questions = questions_for_size(questions_file, size)
+            if questions is None:
+                parser.error(f"{args.questions} has no questions for size {size}; it has "
+                             f"{', '.join(questions_file) or 'none'}")
+        if questions is not None:
+            beyond = [k for k in questions if not 0 <= int(k) < len(texts)]
+            if beyond:
+                parser.error(f"{questions_path} has questions for memory {beyond[0]}, past "
+                             f"the {len(texts)} memories of this world: it is another world's")
+            texts += [q for items in questions.values() for q in clean_questions(items)]
         if says is not None:
             missing = sum(str(k) not in says for k in range(len(texts)))
             if missing:
@@ -1554,6 +1914,15 @@ def main() -> None:
                       flush=True)
             texts += [text for k, text in says.items() if text != texts[int(k)]]
         texts += [q for items in world["queries"].values() for q, _, _ in items]
+        if args.roles:
+            # what a question by role is read as, with and without entity
+            # questions ("Where does it work?", "Where does its sister work?")
+            asked = [q for q, _, _ in world["queries"]["role"]]
+            texts += [mask_first_person(q) for q in asked]
+            if args.entity_questions:
+                texts += [q for items in world["entity_questions"].values() for q in items]
+                texts += [mask_role(q, w) for items in world["queries"].values()
+                          for q, _, _ in items for w in role_words(q)]
         embedder.warm(texts)
         if args.jev:  # a Jev call a question
             world["queries"] = {f: q[:args.per_family] for f, q in world["queries"].items()}
@@ -1564,23 +1933,43 @@ def main() -> None:
                              f"the families are {', '.join(world['queries'])}")
             world["queries"] = {f: q for f, q in world["queries"].items() if f in args.families}
         print(f"\n===== {len(world['memories'])} memories, embedder {embedder.model_id}, "
-              f"{args.vectors} vectors, dimensions {args.property_dimensions or 'all'} =====",
-              flush=True)
+              f"{args.vectors} vectors, dimensions {args.property_dimensions or 'all'}"
+              + ("" if questions is None else
+                 f", questions for {sum(bool(v) for v in questions.values())} memories")
+              + " =====", flush=True)
         for links in args.links:
             if args.jev:
                 decider = jev_judge()
-            store, memory_ids = build_store(world, embedder, links, answers, decider=decider,
-                                            says=says, vectors=args.vectors,
-                                            property_dimensions=args.property_dimensions)
-            for mode in modes:
+            store, memory_ids = build_store(
+                world, embedder, links, answers, decider=decider, says=says,
+                vectors=args.vectors, property_dimensions=args.property_dimensions,
+                questions=questions,
+                entity_questions=world["entity_questions"] if args.entity_questions else None)
+            if args.entity_question_bar is not None:
+                store.config.retrieval.entity_question_bar = args.entity_question_bar
+            # with question keys or entity questions, each mode with them and without
+            arms = [None] if questions is None else [True, False]
+            entity_arms = [None] if not args.entity_questions else [True, False]
+            for mode, keys, ents in [(mode, keys, ents) for mode in modes for keys in arms
+                                     for ents in entity_arms]:
                 if (links == "none") != (mode[0] == "hybrid"):
                     continue  # hybrid reads no links; the linked modes need compared pairs
+                label = mode[0] + (" (no questions)" if keys is False else "") + (
+                    " (no entity questions)" if ents is False else "")
                 calls_before = getattr(decider, "calls", 0)
-                res = score(store, memory_ids, world["queries"], mode)
+                # without either, called as before (tests stand in for score)
+                res = (score(store, memory_ids, world["queries"], mode)
+                       if keys is None and ents is None
+                       else score(store, memory_ids, world["queries"], mode, question_keys=keys,
+                                  entity_questions=ents))
                 asked = sum(v["n"] for v in res.values())
                 res["_jev_calls_per_search"] = (getattr(decider, "calls", 0) - calls_before) / asked
-                results[f"{size}|{links}|{mode[0]}"] = res
-                print(f"{links:9} {mode[0]:24} " + "  ".join(
+                if keys is not None:
+                    res["_question_keys"] = keys
+                if ents is not None:
+                    res["_entity_questions"] = ents
+                results[f"{size}|{links}|{label}"] = res
+                print(f"{links:9} {label:24} " + "  ".join(
                     f"{f[:12]} {v[RECALL.get(f, 'mrr')]:.2f}"
                     + (f"/{v['wrong_first']:.2f}" if v["wrong_first"] is not None else "")
                     for f, v in res.items() if not f.startswith("_"))

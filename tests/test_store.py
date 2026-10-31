@@ -862,3 +862,17 @@ def test_a_description_writer_reads_each_memorys_own_text(store, fake_llm):
     evidence = prompt.split("Active evidence:\n", 1)[1].splitlines()
     assert evidence == [f"- {plain.content}", f"- {dated.content}"]
     assert "[happened" not in prompt and "(said" not in prompt
+
+
+def test_the_coverage_audit_can_be_turned_off(store, fake_llm, monkeypatch):
+    store.config.llm.coverage_audit = False
+    fake_llm.queue(facts_response(fact("The skill fills timesheets")))
+    result = store.add("The skill fills timesheets and must edit XML directly.", user_id="u")
+    assert result.summary() == {"ADD": 1}
+    assert not result.warnings
+    assert len(fake_llm.calls) == 1  # extraction only, no second pass
+    monkeypatch.setenv("MEMRY_COVERAGE_AUDIT", "0")
+    from memry.config import Config
+    assert Config.load().llm.coverage_audit is False
+    monkeypatch.delenv("MEMRY_COVERAGE_AUDIT")
+    assert Config().llm.coverage_audit is True

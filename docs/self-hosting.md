@@ -376,12 +376,12 @@ Two numbers are not obvious, so both were measured rather than guessed. The data
 harnesses are in `evals/` if you want to re-run them against your own data, which is the
 only way to know whether these hold for your store.
 
-**The automatic-merge gate** (`Decider.auto_confirm_confidence`) is 0.70 with Jev, and
-would be 0.95 for gpt-5-mini as the text model. It is a property of the model because
-the number only means something relative to how that model's confidence is spread: a model
-reporting a number about itself scores its wrong answers about as high as its right ones,
-so the gate has to sit high and little gets automated. Override with
-`MEMRY_DECISION_MERGE_CONFIDENCE`.
+**The merge bars** (`JevDecider.pair_merge_by_step`) depend on how many memories the
+smaller side has: 0.97 at one, 0.96 at three, 0.85 at ten and 0.80 at fifty. Each bar is
+the lowest P(same) that kept wrong merges at 2% of merges or fewer, on synthetic stores
+with exact labels. The stats panel still shows one gate of 0.70
+(`Decider.auto_confirm_confidence`, set with `MEMRY_DECISION_MERGE_CONFIDENCE`), an older
+value. No merge reads it.
 
 **A text model does not decide identity.** A text model can put a wrong "same" above any
 threshold: a number a model reports about itself says too little to merge on, and a
@@ -478,7 +478,7 @@ For local single-machine use, prefer stdio (`memry mcp`) - no port, no auth surf
 
 | Goal | Setting |
 |---|---|
-| Default Anthropic extraction | `ANTHROPIC_API_KEY` + `pip install "memry[anthropic]"` (defaults to the fast, lower-cost `claude-haiku-4-5`) |
+| Default Anthropic extraction | `ANTHROPIC_API_KEY` + `pip install "memry[anthropic]"` (defaults to the fast, lower-cost `claude-haiku-5-5`) |
 | Larger Anthropic model | `MEMRY_LLM_MODEL=claude-opus-4-8` (explicitly trades more latency and cost for extraction quality) |
 | OpenAI end-to-end | `OPENAI_API_KEY` (LLM `gpt-6-luna`, embeddings `text-embedding-3-small`) |
 | Previous OpenAI default | `MEMRY_LLM_MODEL=gpt-5.6-luna` (measured for re-ranking, with gpt-5-mini) |
@@ -725,6 +725,83 @@ MCP `save_memories` takes the same `said_at`.
 When a fact changes or someone corrects it, save the new statement and leave the
 old memory as it is. Memry keeps the old value as dated history, or retires it
 when it was wrong.
+
+## Question keys (on by default)
+
+With each fact it extracts, Memry writes two or three questions the fact answers. Memry
+keeps them beside the memory, and every search matches the question against them as well
+as against the memory's text. They cost no extra call: the extraction call writes them,
+with about 40 more output tokens a fact. Memry embeds them with the memory.
+`MEMRY_QUESTION_KEYS=0` (or `retrieval.question_keys` set to false in
+`~/.memry/config.json`) turns them off. For memories saved before, `memry
+backfill-questions` writes them.
+
+## Entity questions (on by default)
+
+Someone may ask "Where does my sister work?" without the sister's name. With
+`retrieval.entity_questions` on, Memry starts that
+search from the sister. Each person related to the owner has two or three stored questions,
+written by a text model from the person's description and relations. Memry picks the person
+whose stored questions alone contain the word after "my". The best match must reach
+`retrieval.entity_question_bar` (0.5). Otherwise Memry starts from the owner, as with the
+flag off. `MEMRY_ENTITY_QUESTIONS=0` (or `retrieval.entity_questions` set to false in
+`~/.memry/config.json`) turns the flag off.
+
+With the flag on, Memry writes the questions during upkeep. In each upkeep tick, Memry asks
+the text model about the described people and things related to the owner that have no
+questions yet. Memry asks again about one whose description or relations changed since.
+Memry makes at most three calls of ten entities each in one tick and leaves the rest for the
+next tick. To write them for a whole store at once, run `memry write-entity-questions`. With
+`--dry-run`, Memry asks the model nothing and prints the number of entities, calls and
+estimated tokens. Backups and exports contain the question texts, and Memry embeds them
+again after a restore.
+
+## The search log (on by default)
+
+With `retrieval.search_log` on, Memry keeps one row per search. `MEMRY_SEARCH_LOG=0`
+turns the log off, and Memry then keeps no new search. A row
+contains the time, the namespace, agent and run, the query, the seeds (the entities Memry
+recognised in the question), the result count and the time taken. Memry deletes rows older
+than 90 days during upkeep. A namespace's rows are deleted with its memories.
+
+The log contains what people asked, so it is left out of copies by default. `memry export`
+includes it only with `--with-search-log`. The nightly snapshot copy is emptied of it unless
+`snapshot.include_search_log` is true.
+
+With `memry search-stats --days 30`, an operator gets the counts per namespace: searches,
+those with seeds, those without and their share, and the ten most common searches without
+seeds.
+
+With `MEMRY_TRAFFIC_KEYS=1` (`retrieval.traffic_keys`), Memry stores a search's query as a
+question key of a memory saved after it. The save must come within the same run in the hour
+after the search, or within ten minutes in the same namespace. Ordered again after the save,
+the search must have that memory in its first 20. Traffic keys are off by default
+and need the log and question keys. With question keys off, Memry logs one warning at
+startup and leaves traffic keys off.
+
+## Turn search (on by default)
+
+Memry keeps every saved turn. With `retrieval.turn_search` on, Memry searches those turns
+a second time when the judge rates no memory found at `retrieval.turn_search_bar` (0.8) or
+above. Memry reads each turn found with the turn before it and the two after it. The
+decision provider judges these excerpts in one more call. The context then has the excerpts
+judged at `retrieval.turn_search_keep` (0.5) or above, after the memories, as dated quotes,
+within `retrieval.turn_search_tokens` (400). Without a decision provider nothing is judged,
+and Memry runs no turn search. A turn of a deleted or forgotten memory never comes back.
+Neither does a turn of a save of which extraction kept nothing, nor a loose turn of a save
+a delete touched, nor a loose turn that looks like a password or a key. A loose turn is
+one no memory rests on. `get_memory_context` shows the excerpts after the memories, and
+`search_memories` returns them as "excerpts" on its first row. Memry runs no turn search
+for a call with filters. `MEMRY_TURN_SEARCH=0`
+(or `retrieval.turn_search` set to false in `~/.memry/config.json`) turns it off.
+Memry also runs turn search in two more cases, each with its own setting:
+
+- the judge's probability that the question needs several memories is
+  `retrieval.turn_search_several` (0.5, `MEMRY_TURN_SEARCH_SEVERAL`) or more;
+- the judge's probability that the memories found, read together, contain everything asked
+  is under `retrieval.turn_search_complete` (0.7, `MEMRY_TURN_SEARCH_COMPLETE`).
+
+Set either to 0 or `off` to turn that case off.
 
 ## Search filters
 

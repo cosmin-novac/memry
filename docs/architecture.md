@@ -917,12 +917,59 @@ entity or date filter, whether its question names anything, and with `relational
    is taken while it fits `retrieval.evidence_tokens` (600 by default; 0 shows none), and
    they are returned in the order they were said. A result carries the turns credited to
    it (`SearchResult.evidence`).
+
+   The unit shown is a passage (`intelligence.passages`, `models.Passage`). A message of
+   more than 150 words is stored with its passages of at most 150 words: whole paragraphs
+   packed while they fit, a longer paragraph split at sentence ends, a single sentence (or
+   code) at line breaks, and anything still longer every 150 words. A message of 150 words
+   or fewer is one passage of its whole text and has the message's vector. The evidence
+   candidates are the passages of the source episodes, each taken by its own vector and
+   full-text match, and one a memory says whole is left out. A passage of a longer message
+   reads "<said date>: <speaker> (part 2 of 5): <text>". The reason: a turn is shown whole
+   or not at all, the shares are a few hundred tokens, and an assistant's reply in a long
+   chat is often longer than a share. Search scores long documents by passages
+   of about 150 words for the same reason (Dai and Callan 2019). 150 is fixed from there:
+   about 200 tokens, below the smallest share (a quarter of the default 1,200 tokens), so
+   any passage fits any share on its own. A chat of short messages reads as before. A
+   store saved before passages gets them when it opens, with no
+   call; `memry backfill-passages` (or `reindex`) embeds the parts of its long messages.
+
+   Turn search (`retrieval.turn_search`, on by default) is a second search over the
+   turns, run when the judge gave no fact shown a relevance at
+   `retrieval.turn_search_bar` (0.8); a search nobody judged never runs it
+   (`MemoryStore.turn_search`). It reads the turns of the scope searched by their words
+   (BM25) and by their vectors (the query's own vector), 30 of each, fused by rank. A turn
+   already shown, one whose words a result already says whole, one withheld, one under a
+   removed memory and one whose every memory is out of use and not history are left out
+   (`MemoryBackend.turn_search_episodes`). A loose turn (no memory rests on it) is left out
+   too when extraction kept nothing of its save, when a delete touched its save (a turn
+   withheld, or under a removed memory; a save is its scope and its time), and when it
+   looks like a secret (`extraction.looks_secret`), since it may be what extraction
+   refused. It searches passages: the first 16 are each read with the passage before
+   them and then the two after them, of the same run and day, each added while the excerpt
+   fits the budget on its own, so the decision provider judges what would be shown. It
+   judges these excerpts in one call, and those judged at `retrieval.turn_search_keep`
+   (0.5) are taken, the best first, within `retrieval.turn_search_tokens` (400).
+   `reconstruct_context` shows their turns after the evidence under a heading of their
+   own, dated as the evidence is, and holds their share of the budget as a ceiling; a
+   filtered context runs none. The MCP `search_memories`
+   rows carry them as "excerpts" on the first row, written as the evidence is
+   (`search_filtered` with `excerpts`), except for a filtered search.
+   Memry also runs it in two more cases, both read from the judge's first call
+   (`MemoryStore.turn_search_reasons`):
+
+   - P(the question needs several memories) is `retrieval.turn_search_several` (0.5) or more;
+   - P(the facts judged, read together, contain everything asked) is under
+     `retrieval.turn_search_complete` (0.7), a question added to that call.
+
 Context reconstruction (`reconstruct_context`) runs a search and puts first the
 descriptions of the entities the query names (`described_entities`: the first three it
 names, each description refreshed where stale, as many as fit a quarter of the budget,
 from 80 to 300 tokens). It then packs exact memories into the remaining token
 budget, leaving a share for their evidence (`retrieval.evidence_tokens`, at most half of
-what is left). The evidence of the memories that fit fills that share. One function
+what is left). The evidence of the memories that fit fills that share. The shares are
+ceilings: once the turns are chosen, the memories are packed again into what the turns
+leave, so a context whose turns take less than their share shows more memories. One function
 renders a context for a model (`intelligence.context.context_lines`), used by
 `reconstruct_context` and the benchmark runner alike. An entity reads "Caroline
 (person): <description>". A memory reads "[happened
@@ -934,12 +981,16 @@ hold (`valid_from`, since taking it out of use moved its `updated_at`), and held
 day the memory that replaced it was said, written as that memory's "said" date is. The
 memories are followed by their evidence turns in the order they were said, each "<said
 date>: <speaker>: <text>", the speaker being the message's `name` when it gave one, else
-its role (an episode saved before names were kept shows its role). The role still decides
+its role (an episode saved before names were kept shows its role). Turn search's turns
+come last, written the same way. The role still decides
 what a role decides, such as whether "the user" is the owner. The MCP `search_memories` rows carry the same as data: `said`,
-`happened`, `invalid_at` for a memory out of use, and `evidence` (said, speaker, text). The
-benchmark runner passes these lines, the descriptions first, as Mem0's memory list
-(`evals/mem0_judge.py` renders nothing of its own); `--no-descriptions` leaves the
-descriptions out, for an ablation.
+`happened`, `invalid_at` for a memory out of use, and `evidence` (said, speaker, text);
+the first row also has `excerpts` when turn search ran. The benchmark runner answers each
+question from the context an agent gets: `MemoryStore.context_from`, the steps of
+`reconstruct_context` after its search, applied to the runner's one search at its k and
+token budget. It passes that context's lines, the descriptions first, as the memory list
+of its answer prompt (`evals/mem0_judge.py` renders nothing of its own);
+`--no-descriptions` leaves the descriptions out, for an ablation.
 
 Every ranked read breaks a tie by memory id (`ORDER BY updated_at DESC, id` and the like),
 so memories of one time (a bulk import, a restore) rank alike in every build of a store.
@@ -962,6 +1013,33 @@ more, and it is listed as forgotten, where it can be brought back or purged. A m
 superseded otherwise (a contradiction, a consolidation, a distillation) or deleted is
 excluded unless a caller explicitly requests every memory (`include_invalid`). Reconcile's
 candidates are memories in use only.
+
+Entity questions (`retrieval.entity_questions`, on by default) are for a question by role.
+Someone asks "Where does my sister work?" without her name. With the flag off, Memry starts
+that search from the owner. Each person related to the owner can have two or three stored
+questions (table `entity_questions`), written by a text model from the person's description
+and relations (`MemoryStore.write_entity_questions`). With the flag on, the upkeep pass
+writes them for a new or changed person, at most 3 calls a tick, and
+`memry write-entity-questions` writes them for a whole store at once. A question that
+contains no hub's name and contains a role word after "my" is about the one entity whose
+stored questions alone contain that word. Its best cosine similarity with them must be at
+least `retrieval.entity_question_bar` (0.5). Memry then starts the search from that entity
+and reads the question with "my sister" as "it". When two entities' questions contain the
+word, Memry starts from the owner. The questions of a merged entity stay with its tombstone
+and are not read until the merge is undone. A backup and the trash contain their texts.
+Memry embeds them again after a restore (`MemoryStore.refresh_entity_question_vectors`).
+
+The search log (`retrieval.search_log`, on by default) is the table `search_log`, with one
+row per search: the time, the namespace, agent and run, the query, the seeds, the mode, the
+result count and the latency. Memry deletes rows older than 90 days during upkeep. A
+namespace's rows are deleted with it. An export contains the log only with
+`--with-search-log`, and a snapshot copy only with `snapshot.include_search_log`. With
+`memry search-stats`, an operator gets the searches with and without seeds per namespace.
+Traffic keys (`retrieval.traffic_keys`) are off by default. With them on, Memry stores the
+query of a recent search as a question key (source "traffic") of a memory saved after it,
+when that memory is in the first 20 of the search ordered again. Traffic keys need
+`retrieval.question_keys`. With question keys off, Memry logs one warning when the store
+opens and leaves traffic keys off.
 
 ## 6. Product surfaces and security
 
@@ -1143,7 +1221,7 @@ up as a red run within a week instead of in a user's terminal.
 | The UI says tags; the public backend field remains `categories`; a tag is a topic entity, listed, combined and drawn with people and things in one Entities view filtered by type, and picked in one About filter that sends it to `categories`; `topics`/`memory_topics` remain the filter index | Users get one familiar word without a breaking API/schema rename, and tags merge by the same machinery as names, so one view holds every entity that machinery merges. The tag filter still reaches the tags under a broader one, which the entity filter does not. | Yes |
 | MCP saves persist raw text before acknowledgement and enrich it in one managed worker | Agent calls return after a cheap SQLite commit instead of waiting on several provider calls, while the active pending row prevents data loss and enables restart recovery without another queue system. | Yes |
 | Background work uses bounded database batches but separate prompts per memory | Bounded draining improves throughput; separate prompts preserve each user scope, provenance, retry, and failure boundary. | Yes |
-| Anthropic defaults to claude-haiku-4-5 | Memory extraction is frequent background work, so the lower-cost, lower-latency model is the useful default; operators can explicitly select a larger model when quality justifies the extra cost. | Yes |
+| Anthropic defaults to claude-haiku-5-5 | Memory extraction is frequent background work, so the lower-cost, lower-latency model is the useful default; operators can explicitly select a larger model when quality justifies the extra cost. | Yes |
 | Provider HTTP clients are reused for the store lifetime | Reusing connections removes repeated connection setup from enrichment latency without adding a service or a second execution path. | Yes |
 | Reconcile answers NEW, SAME, MORE, CHANGED or WRONG and acts alike in every run; a changed value stays searchable as history; a restatement is recorded as evidence on the memory it restates | Acting only on a memory of the save's own run left every changed value live and every restatement duplicated when each session was its own run. Keeping the older value dated answers questions about the past, and the save's episodes already say which run said it, so no new record is needed. | Yes |
 | A memory holds one fact: a merge adds a detail to the same claim, event or attribute, another claim about the same subject is its own memory, and the merge writer writes every merged text | One vector per memory matches one fact well. Merges that folded each new claim about a subject into one memory left memories that no search for any one of their claims found well. | Yes |

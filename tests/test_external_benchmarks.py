@@ -161,7 +161,8 @@ def test_longmemeval_loader_rejects_and_reports(tmp_path):
     path.write_text(json.dumps([dict(item, answer_session_ids=["s-dog", "s-gone"],
                                      question_id="x_abs")]))
     (conv,) = xb.load_longmemeval(path)
-    assert conv.questions[0].evidence == ["s-dog"] and conv.questions[0].abstain
+    assert conv.questions[0].evidence == [] and conv.questions[0].abstain
+    assert conv.questions[0].extra["answer_session_ids"] == ["s-dog"]
     assert "s-gone" in conv.warnings[0]
 
 
@@ -501,6 +502,50 @@ def test_extract_mode_traces_memories_to_their_session_and_dates_extraction():
     assert any("session-level" in note for note in result["notes"])
 
 
+class QuestionRuleLLM(RuleLLM):
+    """``RuleLLM`` that also answers the question keys rule when asked: each
+    fact gets one question made of its own line number, which no turn's
+    words hold."""
+
+    def complete(self, system: str, user: str, *, json_schema=None) -> str:
+        raw = super().complete(system, user, json_schema=json_schema)
+        if system.startswith("You are the long-term memory extraction system") \
+                and "- questions:" in system:
+            data = json.loads(raw)
+            for item in data["facts"]:
+                item["questions"] = [f"Which turn is number {item['sources'][0]}?"]
+            return json.dumps(data)
+        return raw
+
+
+def test_question_keys_both_asks_each_pass_twice_from_one_store():
+    """--question-keys both: the store writes question keys at ingest (the
+    extractor is asked for them) and every pass is asked once reading them
+    and once without, from the same memories."""
+    conv = xb.load_locomo(LOCOMO)[0]
+    llms: list[QuestionRuleLLM] = []
+
+    def factory():
+        llms.append(QuestionRuleLLM())
+        return MemoryStore(Config(db_path=":memory:"), llm=llms[-1], embedder=HashEmbedder(128))
+
+    result = xb.run_benchmark([conv], dataset="locomo", mode="extract", questions=2,
+                              store_factory=factory, log=lambda _: None, question_keys="both")
+    assert [p["search_decider"] for p in result["passes"]] == ["store", "store:text-only"]
+    assert result["config"]["question_keys"] == "both"
+    (entry,) = result["stores"]
+    assert entry["question_keys"] is True and entry["memories_with_questions"] == 8
+    by_pass = {}
+    for row in result["rows"]:
+        by_pass.setdefault(row["search_decider"], []).append(row)
+    assert set(by_pass) == {"store", "store:text-only"} and len(by_pass["store"]) == 2
+    # the text-only pass read no question key
+    assert all("question_keyword" not in r.get("signals", {}) for r in by_pass["store:text-only"])
+    with pytest.raises(ValueError, match="config, on or both"):
+        xb.run_benchmark([conv], dataset="locomo", store_factory=verbatim_store,
+                         log=lambda _: None, question_keys="maybe")
+
+
 def test_extract_mode_refuses_to_run_without_an_llm():
     conv = xb.load_locomo(LOCOMO)[0]
     with pytest.raises(SystemExit, match="needs a configured LLM"):
@@ -565,8 +610,10 @@ def test_cli_writes_default_results_file_and_limits(monkeypatch, tmp_path, no_mo
     shutil.copy(LONGMEMEVAL, tmp_path / "longmemeval_s.json")
     monkeypatch.setenv(xb.DATA_ENV, str(tmp_path))
     assert xb.main(["--dataset", "longmemeval", "--limit", "2", "--seed", "3"]) == 0
-    (written,) = (tmp_path / "results").glob("longmemeval_*.json")
+    (written,) = [p for p in (tmp_path / "results").glob("longmemeval_*.json")
+                  if not p.name.endswith(".meta.json")]
     result = json.loads(written.read_text())
+    assert xb.meta_path(written).exists() and result["meta_file"] == str(xb.meta_path(written))
     assert len(result["rows"]) == 2 and result["config"]["limit"] == 2
     assert result["config"]["variant"] == "s"
     assert all(r["level"] == "session" for r in result["rows"])
@@ -1573,3 +1620,317 @@ def test_ledgers_opened_at_the_same_moment_all_open(tmp_path):
             assert meter._db.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
             meter.close()
     assert failures == []
+
+
+# --------------------------------------------------------------------------
+# kept stores, asked again, and every member of a set
+
+
+def test_a_results_dir_keeps_the_stores_and_reuse_asks_again_without_loading(
+        monkeypatch, tmp_path, no_models):
+    monkeypatch.setenv(xb.DATA_ENV, str(FIXTURES))
+    base = ["--dataset", "locomo", "--file", "locomo_mini.json"]
+    out = tmp_path / "all.json"
+    assert xb.main([*base, "--results-dir", str(tmp_path / "parts"), "--out", str(out)]) == 0
+    first = json.loads(out.read_text())
+    stores = tmp_path / "parts" / "stores"
+    kept = {p.name for p in stores.iterdir() if not p.name.endswith(("-wal", "-shm"))}
+    assert kept == {"conv-mini-1.sqlite", "conv-mini-1.trace.json",
+                    "conv-mini-2.sqlite", "conv-mini-2.trace.json"}
+    trace = json.loads((stores / "conv-mini-1.trace.json").read_text())
+    assert trace["conversation"] == "conv-mini-1"
+    assert trace["embedder"] == first["config"]["embedder"]
+    assert trace["turns_of_memory"] and trace["turn_of_episode"]
+    assert all("reused" not in s for s in first["stores"])
+    code = first["config"]["code"]
+    assert code is None or (len(code["commit"]) == 40 and isinstance(code["dirty"], bool))
+    # asked again on the kept stores: the same memories traced to the same turns, no load
+    again_out = tmp_path / "again.json"
+    assert xb.main([*base, "--results-dir", str(tmp_path / "parts2"), "--out", str(again_out),
+                    "--store-dir", str(stores), "--reuse-stores"]) == 0
+    again = json.loads(again_out.read_text())
+    assert [s["reused"] for s in again["stores"]] == [True, True]
+    assert again["config"]["reuse_stores"] is True
+    assert [r["retrieved"] for r in again["rows"]] == [r["retrieved"] for r in first["rows"]]
+    assert [r["recall@5"] for r in again["rows"]] == [r["recall@5"] for r in first["rows"]]
+    assert [s["memories"] for s in again["stores"]] == [s["memories"] for s in first["stores"]]
+    # a store without a trace beside it is neither opened nor replaced
+    (stores / "conv-mini-2.trace.json").unlink()
+    with pytest.raises(SystemExit, match="no trace"):
+        xb.main([*base, "--results-dir", str(tmp_path / "parts4"),
+                 "--out", str(tmp_path / "y.json"), "--store-dir", str(stores),
+                 "--reuse-stores", "--conversation", "conv-mini-2"])
+    assert (stores / "conv-mini-2.sqlite").exists()
+    # a store loaded with another embedder is refused
+    other = dict(trace, embedder="other-model")
+    (stores / "conv-mini-1.trace.json").write_text(json.dumps(other))
+    with pytest.raises(SystemExit, match="embedder"):
+        xb.main([*base, "--results-dir", str(tmp_path / "parts3"),
+                 "--out", str(tmp_path / "x.json"), "--store-dir", str(stores),
+                 "--reuse-stores", "--conversation", "conv-mini-1"])
+
+
+def test_all_members_answers_from_every_member_the_search_found(monkeypatch):
+    conv = xb.load_locomo(LOCOMO)[0]
+    original = xb.MemoryStore.search
+
+    def every_result_is_a_member(self, query, **kwargs):
+        results = original(self, query, **{**kwargs, "limit": 100})
+        for result in results:
+            result.signals = {**(result.signals or {}), "member": True}
+        return results
+
+    monkeypatch.setattr(xb.MemoryStore, "search", every_result_is_a_member)
+    monkeypatch.setattr(xb, "DEPTH", 3)
+    llm = ScriptedLLM(dict.fromkeys((q.question for q in conv.questions), "x"))
+
+    def run(**options):
+        return xb.run_benchmark([conv], dataset="locomo", answer_llm=llm, k=3, questions=1,
+                                embedder=HashEmbedder(128), log=lambda _: None, **options)
+
+    top = run(all_members=False)["rows"][0]
+    assert top["answer_k"] == 3 and len(top["memories"]) == 3
+    every = run()["rows"][0]
+    members = every["set_members"]
+    assert top["set_members"] == members  # the members found, whatever the answer read
+    assert members > 3 and every["answer_k"] == members
+    assert len(every["memories"]) == 3 and every["recall@5"] == top["recall@5"]
+    assert llm.prompts[-1].count(" (said ") == members
+
+
+def test_a_benchmark_run_skips_the_coverage_audit_unless_asked(monkeypatch):
+    from evals import external_benchmarks as eb
+    monkeypatch.delenv("MEMRY_COVERAGE_AUDIT", raising=False)
+    args = eb.parse_args(["--dataset", "locomo"])
+    assert args.coverage_audit is False
+    assert "coverage_audit" not in eb.run_options(args)  # a resumed run reuses its parts
+    assert eb.parse_args(["--dataset", "locomo", "--coverage-audit"]).coverage_audit is True
+
+
+# --------------------------------------------------------------------------
+# the context a question is answered from is the product's (turn search included)
+
+
+from test_turn_search import _ASKED, _EXCERPT, _TALK, ScriptedJudge, WordEmbedder  # noqa: E402
+
+from memry.intelligence.context import estimate_tokens  # noqa: E402
+from memry.models import SearchResult  # noqa: E402
+
+
+class TalkLLM(LLM):
+    """Extraction keeps three facts of the talk in ``test_turn_search``. Two
+    of them name Ada. None comes from the turn with the answer. Ada's
+    description is one sentence."""
+
+    name = "talk"
+    available = True
+
+    def complete(self, system: str, user: str, *, json_schema=None) -> str:
+        if system.startswith("You are the long-term memory extraction system"):
+            def fact(content, sources, named):
+                return {"content": content, "type": "episodic", "importance": 0.6,
+                        "categories": [], "relations": [], "when": None, "sources": sources,
+                        "entities": [{"name": "Ada", "type": "person"}] if named else []}
+            return json.dumps({"facts": [
+                fact("Ada went to Tokyo in March for her sister's wedding", [1, 5], True),
+                fact("Ada saw the wedding in a small temple in Tokyo", [5], True),
+                fact("Bea is repainting her kitchen pale green", [6, 7], False)]})
+        if system == DESCRIPTION_SYSTEM:
+            return json.dumps({"description": "Ada went to Tokyo for her sister's wedding."})
+        if "decide one action" in system:
+            return json.dumps({"action": "ADD", "target": None, "content": None, "reason": "new"})
+        if system.startswith("You audit"):
+            return json.dumps({"missing": []})
+        return "{}"
+
+
+class StagedJudge(ScriptedJudge):
+    """``ScriptedJudge`` that keeps the stage each excerpt call is counted under."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.excerpt_stages: list[str | None] = []
+
+    def decide(self, state, questions):
+        first = next(iter(questions.values())).instructions
+        if first.startswith(_EXCERPT):
+            self.excerpt_stages.append(api_usage.current_stage())
+        return super().decide(state, questions)
+
+
+def _talk_run(judge: ScriptedJudge, k: int = 3):
+    """The talk as a LoCoMo conversation, saved by the runner into a store
+    with the default settings, and its question asked through the runner
+    (Mem0's answer prompt) and through ``reconstruct_context`` (MCP
+    get_memory_context) at the runner's k and token budget."""
+    turns = [xb.Turn(key=f"D1:{i + 1}", role=who, raw=text, text=f"{who}: {text}")
+             for i, (who, text) in enumerate(_TALK)]
+    session = xb.Session("session_1", xb.parse_bench_date("2 May 2026"), "2 May 2026", turns)
+    question = xb.Question("talk/q0", _ASKED, "Tokyo's Times Square", 4, "single-hop",
+                           ["D1:3"], "turn")
+    conv = xb.Conversation("talk", "conversation", [session], [question])
+    store = MemoryStore(Config(db_path=":memory:"), llm=TalkLLM(), embedder=WordEmbedder(),
+                        decider=judge)
+    chat = ScriptedChat("Tokyo's Times Square")
+    try:
+        assert store.config.retrieval.model_dump() == Config().retrieval.model_dump()
+        ingested = xb.ingest(store, conv, mode="extract", unit="session", dataset="locomo")
+        row = xb.ask(ingested, question, k=k, answer_llm=chat,
+                     answer_prompt=mem0_judge.answer_messages)
+        agent = store.reconstruct_context(_ASKED, user_id=xb.BENCH_USER, limit=k,
+                                          token_budget=xb.CONTEXT_TOKENS)
+        found = store.search(_ASKED, user_id=xb.BENCH_USER, limit=k, evidence=False)
+        evidence = store.evidence(_ASKED, found, user_id=xb.BENCH_USER)
+    finally:
+        store.close()
+    ((messages, _),) = chat.sent
+    return row, messages, agent, ingested, found, evidence
+
+
+def test_with_default_settings_the_runner_answers_from_the_products_context():
+    """A benchmark measures the product as it ships. With the default
+    settings the memory list a question is answered from is the context an
+    agent gets from get_memory_context (``reconstruct_context``) for the
+    same question at the runner's k and token budget: its lines in its
+    order without its headings (the description of Ada, the memories, their
+    evidence turns, then turn search's turns), the same memories and the
+    same turns."""
+    defaults = Config().retrieval
+    assert defaults.turn_search and defaults.question_keys and defaults.entity_questions
+    assert (defaults.turn_search_bar, defaults.turn_search_several,
+            defaults.turn_search_complete) == (0.8, 0.5, 0.7)
+    row, messages, agent, ingested, _, _ = _talk_run(ScriptedJudge(facts=0.2))
+    lines = [line[2:] for line in agent.text.splitlines() if line.startswith("- ")]
+    assert messages == mem0_judge.answer_messages(_ASKED, lines)
+    # the context has every part, turn search's turns last
+    assert lines[0] == "Ada (person): Ada went to Tokyo for her sister's wedding."
+    assert "More of what was said that matches the question" in agent.text
+    assert lines[-2] == f"2 May 2026: Ada: {_TALK[2][1]}"
+    answer = row["answers"]["3"]
+    assert answer["excerpt_turns"] == ["D1:2", "D1:3", "D1:4"]
+    assert [ingested.turn_of_episode[e] for e in agent.episode_ids] == (
+        answer["evidence"] + answer["excerpt_turns"])
+    assert answer["k"] == 3 and row["described"] == ["Ada"]
+
+
+def test_each_answer_records_what_turn_search_did():
+    """Each answer, and the row for the headline k, has turn search's
+    record: whether it ran, why, the excerpts judged and shown, the turns
+    shown and their tokens in the memory list. Its judge call is counted
+    with the search. With no trigger met, turn search does not run. The list
+    is then the memories and their turns, as before."""
+    judge = StagedJudge(facts=0.2)
+    row, messages, _, ingested, found, evidence = _talk_run(judge)
+    record = row["turn_search"]
+    assert record == row["answers"]["3"]["turn_search"]
+    assert (record["ran"], record["why"], record["best"]) == (True, ["relevance"], 0.2)
+    assert (record["excerpts"], record["turns"]) == (1, 3) and record["judged"] >= 1
+    shown = [f"2 May 2026: {who}: {text}" for who, text in _TALK[1:4]]
+    assert record["budget_tokens"] == sum(estimate_tokens(line) + 1 for line in shown)
+    listed = json.loads(messages[0]["content"].split("Memories:\n\n    ", 1)[1]
+                        .split("\n\n    Question:", 1)[0])
+    assert listed[-3:] == shown
+    with_turns = xb.count_tokens(mem0_judge.memories_json(listed))
+    if with_turns is not None:
+        assert record["tokens"] == with_turns - xb.count_tokens(
+            mem0_judge.memories_json(listed[:-3]))
+    # the runner's call, then the one of the agent's context made after it, in no stage
+    assert judge.excerpt_stages == ["search", ""]
+
+    quiet = StagedJudge(facts=0.9)
+    row, messages, _, _, found, evidence = _talk_run(quiet)
+    assert row["turn_search"] == {"ran": False, "why": [], "best": 0.9, "judged": 0,
+                                  "excerpts": 0, "turns": 0, "tokens": 0, "budget_tokens": 0}
+    assert quiet.excerpt_calls() == [] and row["answers"]["3"]["excerpt_turns"] == []
+    described = [line for line in json.loads(messages[0]["content"].split(
+        "Memories:\n\n    ", 1)[1].split("\n\n    Question:", 1)[0]) if "(person)" in line]
+    assert messages == mem0_judge.answer_messages(_ASKED, described + memory_lines(
+        [r.memory for r in found], evidence))
+
+
+def test_a_context_at_k_holds_every_set_member_as_a_search_of_limit_k_does():
+    results = [SearchResult(memory=Memory(content=f"m{i}"), score=1.0,
+                            signals={"member": 1.0} if i < 4 else {}) for i in range(8)]
+    assert [r.memory.content for r in xb.at_k(results, 2)] == ["m0", "m1", "m2", "m3"]
+    assert [r.memory.content for r in xb.at_k(results, 6)] == [f"m{i}" for i in range(6)]
+    assert len(xb.at_k(results[4:], 2)) == 2
+
+
+def test_kept_context_has_the_lines_without_turn_search_and_at_other_evidence_budgets(
+        monkeypatch):
+    """With --keep-context, an answer whose context has turn search's turns
+    also keeps its lines without them (``context_lines_bare``): the same
+    memories and evidence. With --keep-evidence-tokens it also keeps its
+    lines with the evidence chosen within each other budget, for the same
+    memories and without turn search's turns. With --contexts-only no
+    answering call is made, and the BEAM answer command reads each variant."""
+    from evals import beam_eval
+
+    monkeypatch.setattr(xb, "KEEP_CONTEXT", True)
+    monkeypatch.setattr(xb, "KEEP_EVIDENCE_TOKENS", (0, 2000))
+    row, _, _, _, _, _ = _talk_run(ScriptedJudge(facts=0.2))
+    answer = row["answers"]["3"]
+    full, bare = answer["context_lines"], answer["context_lines_bare"]
+    quoted = [f"2 May 2026: {who}: {text}" for who, text in _TALK[1:4]]
+    assert full[-3:] == quoted and bare == full[:-3]
+    none, wide = answer["context_lines_evidence"]["0"], answer["context_lines_evidence"]["2000"]
+    memories = [line for line in bare if " (said " in line]
+    assert [line for line in none if " (said " in line] == memories
+    assert [line for line in wide if " (said " in line] == memories
+    assert not set(quoted[1:2]) & set(wide)  # no turn search's turns in an evidence variant
+    assert len(none) < len(bare) <= len(wide)
+    row["answer_k"] = answer["k"]
+    assert beam_eval.context_lines_of(row) == full
+    assert beam_eval.context_lines_of(row, "bare") == bare
+    assert beam_eval.context_lines_of(row, "evidence:2000") == wide
+    # a context turn search added nothing to: "bare" is what was shown
+    quiet, _, _, _, _, _ = _talk_run(ScriptedJudge(facts=0.9))
+    quiet["answer_k"] = 3
+    assert "context_lines_bare" not in quiet["answers"]["3"]
+    assert beam_eval.context_lines_of(quiet, "bare") == beam_eval.context_lines_of(quiet)
+    # contexts only: the same context kept, no answering call
+    monkeypatch.setattr(xb, "CONTEXTS_ONLY", True)
+    turns = [xb.Turn(key=f"D1:{i + 1}", role=who, raw=text, text=f"{who}: {text}")
+             for i, (who, text) in enumerate(_TALK)]
+    session = xb.Session("session_1", xb.parse_bench_date("2 May 2026"), "2 May 2026", turns)
+    question = xb.Question("talk/q0", _ASKED, "Tokyo's Times Square", 4, "single-hop",
+                           ["D1:3"], "turn")
+    conv = xb.Conversation("talk", "conversation", [session], [question])
+    store = MemoryStore(Config(db_path=":memory:"), llm=TalkLLM(), embedder=WordEmbedder(),
+                        decider=ScriptedJudge(facts=0.2))
+    try:
+        ingested = xb.ingest(store, conv, mode="extract", unit="session", dataset="locomo")
+        only = xb.ask(ingested, question, k=3, answer_llm=xb.NoAnswer(),
+                      answer_prompt=mem0_judge.answer_messages)
+    finally:
+        store.close()
+    kept = only["answers"]["3"]
+    assert kept["prediction"] == "" and kept["context_only"] is True
+    # another store: two memories judged alike may come in either order
+    assert sorted(kept["context_lines"]) == sorted(full) and "judge" not in kept
+
+
+def test_the_cli_takes_the_new_options():
+    args = xb.parse_args(["--dataset", "beam", "--contexts-only", "--no-all-members",
+                          "--keep-evidence-tokens", "1200", "2400"])
+    assert args.contexts_only and args.all_members is False
+    assert args.keep_evidence_tokens == [1200, 2400]
+    assert xb.parse_args(["--dataset", "beam"]).all_members is True
+
+
+def test_kept_excerpts_rebuild_the_turns_shown_at_any_budget(monkeypatch):
+    """Every excerpt turn search judged is kept with its score, its tokens and
+    its lines. Rebuilt at the store's own budget (``beam_eval`` context
+    "turns:N"), the lines are those the answer was shown; a budget too small
+    for any excerpt shows the bare lines."""
+    from evals import beam_eval
+
+    monkeypatch.setattr(xb, "KEEP_CONTEXT", True)
+    row, _, _, _, _, _ = _talk_run(ScriptedJudge(facts=0.2))
+    answer = row["answers"]["3"]
+    row["answer_k"] = answer["k"]
+    kept = answer["turn_search_excerpts"]
+    assert kept and all({"score", "tokens", "turns"} <= set(item) for item in kept)
+    budget = Config().retrieval.turn_search_tokens
+    assert beam_eval.context_lines_of(row, f"turns:{budget}") == answer["context_lines"]
+    assert beam_eval.context_lines_of(row, "turns:1") == answer["context_lines_bare"]

@@ -22,6 +22,7 @@ from ..models import (
     Memory,
     MemoryEvent,
     MergeProposal,
+    Passage,
     Relation,
     Scope,
     TOPIC_TYPE,
@@ -75,6 +76,87 @@ class MemoryBackend(ABC):
         resting on them in use or kept as history (``history_ids``) and none
         removed (out of use with nothing in its place: forgotten). A backend
         that cannot tell shows none."""
+        return []
+
+    # Turn search (``MemoryStore.turn_search``): the turns of a scope searched
+    # by their words and their vectors, when the facts found do not answer.
+    def turn_search_episodes(self, episode_ids: list[str]) -> list[Episode]:
+        """The episodes among these that turn search may show, in the order
+        they were said: not withheld, none resting under a removed memory, and
+        either resting under a memory in use or kept as history, or under no
+        memory at all (a turn extraction kept nothing of). A turn whose every
+        memory is out of use (replaced, not kept as history) is not shown. A
+        turn under no memory is shown only when its save kept something (a
+        memory in use or kept as history rests on one of its turns), when no
+        delete touched its save (no turn withheld, none under a removed
+        memory), and when it has nothing that looks like a secret
+        (``extraction.looks_secret``): it may be what extraction refused. A
+        backend that cannot tell shows none."""
+        return []
+
+    def episode_keyword_search(
+        self, query: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        """(episode id, BM25 score, higher is better) of the ``limit`` episodes
+        of ``scope`` that best match ``query`` by their words, none withheld."""
+        return []
+
+    def episode_vector_search(
+        self, vector: list[float], embedding_model: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        """(episode id, cosine) of the ``limit`` episodes of ``scope`` nearest
+        ``vector`` among those embedded by ``embedding_model``, none withheld."""
+        return []
+
+    def episode_neighbours(self, episode_id: str, before: int, after: int) -> list[Episode]:
+        """The episode with up to ``before`` episodes said just before it and
+        ``after`` said just after it, in the order said: of the same user,
+        agent and run, said the same day. Empty for an unknown episode."""
+        return []
+
+    # Passages (``models.Passage``): an episode in parts of at most 150 words,
+    # which evidence and turn search use in place of whole episodes. A backend
+    # that keeps none has evidence and turn search read whole episodes.
+    def passages_of(self, episode_ids: list[str]) -> dict[str, list[Passage]]:
+        """Each of these episodes' passages, in order. An episode with none
+        stored is left out."""
+        return {}
+
+    def set_passage_vectors(self, vectors: dict[str, list[float]], embedding_model: str) -> None:
+        """Store these passages' vectors (passage id -> vector)."""
+
+    def passage_vectors_of(
+        self, passage_ids: list[str], embedding_model: str
+    ) -> dict[str, np.ndarray]:
+        """The stored vector of each of these passages embedded by
+        ``embedding_model``."""
+        return {}
+
+    def passages_to_embed(self, embedding_model: str, *, limit: int = 1000) -> list[Passage]:
+        """Passages of a longer episode with no vector of ``embedding_model``
+        yet, oldest first. An episode's only passage takes the episode's vector
+        and is never listed."""
+        return []
+
+    def passage_keyword_scores(self, query: str, passage_ids: list[str]) -> dict[str, float]:
+        """The full-text (BM25) score of each of these passages that matches
+        ``query``, higher is better; a passage that does not match is left out."""
+        return {}
+
+    def passage_keyword_search(
+        self, query: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        """(passage id, BM25 score, higher is better) of the ``limit`` passages
+        of ``scope`` that best match ``query`` by their words, none of a
+        withheld episode."""
+        return []
+
+    def passage_vector_search(
+        self, vector: list[float], embedding_model: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        """(passage id, cosine) of the ``limit`` passages of ``scope`` nearest
+        ``vector`` among those embedded by ``embedding_model``, none of a
+        withheld episode."""
         return []
 
     def history_ids(self, memory_ids: list[str]) -> set[str]:
@@ -706,6 +788,131 @@ class MemoryBackend(ABC):
         """Drop these memories' property vectors."""
         return None
 
+    # Question keys (``intelligence.questions``): the questions a memory
+    # answers, kept as search keys. A backend without them keeps none and
+    # finds none, and the search runs on the memory text alone.
+
+    def set_questions(
+        self, memory_id: str, questions: list[tuple[str, str]],
+        vectors: list[list[float] | None] | None = None, embedding_model: str | None = None,
+    ) -> None:
+        """Replace a memory's question keys ((text, source) each) and their
+        vectors where given."""
+        return None
+
+    def add_question(
+        self, memory_id: str, text: str, source: str, vector: list[float] | None = None,
+        embedding_model: str | None = None, *, limit: int,
+    ) -> bool:
+        """Add one question key after a memory's others; whether it was."""
+        return False
+
+    def set_question_vectors(
+        self, vectors: dict[tuple[str, int], list[float]], embedding_model: str,
+    ) -> None:
+        """The vectors of these question rows ((memory_id, n) each)."""
+        return None
+
+    def questions_of(self, memory_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Each memory's question keys in order (``n``, ``text``, ``source``,
+        ``embedding_model``)."""
+        return {}
+
+    def questions_without_vectors(
+        self, scope: Scope, embedding_model: str, limit: int = 100_000,
+    ) -> list[tuple[str, int, str]]:
+        """Question keys of valid memories without a vector from this model."""
+        return []
+
+    def memories_without_questions(self, scope: Scope, limit: int = 100_000) -> list[Memory]:
+        """Valid memories with no question key at all, oldest first."""
+        return []
+
+    # Entity questions (``intelligence.entity_questions``): the questions the
+    # owner would ask about an entity by its role. A backend without them
+    # keeps none, and a question by role is about the owner.
+
+    def set_entity_questions(
+        self, entity_id: str, questions: list[tuple[str, str]],
+        vectors: list[list[float] | None] | None = None, embedding_model: str | None = None,
+    ) -> None:
+        """Replace an entity's questions ((text, source) each) and their vectors."""
+        return None
+
+    def entity_questions_of(self, entity_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Each entity's questions in order (``n``, ``text``, ``source``,
+        ``embedding_model``)."""
+        return {}
+
+    def entity_questions_without_vectors(
+        self, scope: Scope, embedding_model: str, limit: int = 100_000,
+    ) -> list[tuple[str, int, str]]:
+        """Questions of unmerged entities without a vector from this model."""
+        return []
+
+    def set_entity_question_vectors(
+        self, vectors: dict[tuple[str, int], list[float]], embedding_model: str,
+    ) -> None:
+        """The vectors of these entity question rows ((entity_id, n) each)."""
+        return None
+
+    def entity_question_rows(self, scope: Scope, embedding_model: str) -> list[tuple[str, str, Any]]:
+        """(entity id, text, vector or None) of the questions of the entities in scope."""
+        return []
+
+    def question_keyword_search(
+        self, query: str, scope: Scope, limit: int = 20, include_invalid: bool = False,
+        categories: list[str] | None = None, entity_id: str | None = None,
+        history: bool = False, among: Any = None,
+    ) -> list[tuple[Memory, float]]:
+        """BM25 over the question keys; a memory scores as its best question."""
+        return []
+
+    def question_vector_search(
+        self, embedding: list[float], embedding_model: str, scope: Scope, limit: int = 20,
+        include_invalid: bool = False, categories: list[str] | None = None,
+        entity_id: str | None = None, history: bool = False, among: Any = None,
+    ) -> list[tuple[Memory, float]]:
+        """Cosine over the question keys' vectors; a memory scores as its best."""
+        return []
+
+    # The search log (``retrieval.search_log``). A backend without it keeps
+    # no search and counts none.
+
+    def log_search(self, row: dict[str, Any]) -> int:
+        """Keep one search; its id (0: not kept)."""
+        return 0
+
+    def search_log_rows(
+        self, *, user_id: str | None = None, since: str | None = None,
+        until: str | None = None, run_id: str | None = None,
+        owner_prefix: str | None = None, newest_first: bool = False,
+        limit: int = 1_000_000,
+    ) -> list[dict[str, Any]]:
+        """The kept searches, oldest first."""
+        return []
+
+    def mark_search_keyed(self, log_ids: dict[int, int]) -> None:
+        """Count the memories that took each kept search's query as a key."""
+        return None
+
+    def prune_search_log(
+        self, before: str, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> int:
+        """Delete the kept searches older than ``before``."""
+        return 0
+
+    def delete_search_log(self, *, user_id: str | None) -> int:
+        """Delete every kept search of a namespace."""
+        return 0
+
+    def restore_search_log(
+        self, rows: list[dict[str, Any]], *, owner_prefix: str | None = None,
+        check_only: bool = False,
+    ) -> int:
+        """Add kept searches from an export that asked for them."""
+        return 0
+
     def session_memories(
         self, memory: Memory, *, hours: float = 3.0, limit: int = 50
     ) -> list[Memory]:
@@ -784,7 +991,7 @@ class MemoryBackend(ABC):
     def history(self, memory_id: str) -> list[MemoryEvent]: ...
 
     # -- lossless backup / restore ---------------------------------------
-    def export_backup(self, scope: Scope) -> dict[str, Any]:
+    def export_backup(self, scope: Scope, *, search_log: bool = False) -> dict[str, Any]:
         raise NotImplementedError("this backend cannot create lossless Memry backups")
 
     def import_backup(

@@ -310,6 +310,9 @@ class CandidateFact(BaseModel):
     #: the memory to the episodes of those lines; with none, or a number no
     #: line has, to every episode of the save.
     sources: list[int] = Field(default_factory=list)
+    #: The questions the fact answers, as the extractor wrote them when asked
+    #: (``retrieval.question_keys``); kept as search keys beside the memory.
+    questions: list[str] = Field(default_factory=list)
 
 
 class AddAction(BaseModel):
@@ -338,11 +341,31 @@ class AddResult(BaseModel):
         return counts
 
 
+class Passage(BaseModel):
+    """A part of an episode of at most ``intelligence.passages.PASSAGE_WORDS``
+    words (``intelligence.passages.split_passages``). Evidence and turn
+    search find, judge and show passages in place of whole episodes. An
+    episode of that many words or fewer is one passage of its whole text."""
+
+    id: str
+    episode_id: str
+    #: Its place in the episode, from 0, of ``count``.
+    position: int = 0
+    count: int = 1
+    content: str
+
+
 class EvidenceTurn(BaseModel):
     """A source episode of memories found, shown as their evidence: what was
-    said, by whom and when (``MemoryStore.evidence``)."""
+    said, by whom and when (``MemoryStore.evidence``). For a long episode it
+    is one of its passages (``Passage``): ``part`` of ``parts``."""
 
     episode_id: str
+    #: The passage shown (``Passage.id``); None for a turn built from a
+    #: whole episode by a backend that keeps no passages.
+    passage_id: str | None = None
+    part: int = 1
+    parts: int = 1
     content: str
     #: Who said it (``Episode.speaker``): the name the message gave, else its
     #: role (a speaker's name, or a chat role such as "user").

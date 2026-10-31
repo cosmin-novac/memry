@@ -13,9 +13,34 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from .questions import QUESTIONS_FIELD, QUESTIONS_RULE, clean_questions
 from ..models import MEMORY_TYPES, NAMED_ENTITY_TYPES, CandidateFact, clean_tags
 from ..providers.llm import LLM
 from .when import WHEN_FACT_SCHEMA, parse_when
+
+#: What a secret or a credential looks like in a turn: the words that name
+#: one, a private key's header, and the shapes of common keys and tokens (a
+#: run of 32 or more letters and digits mixed). Extraction is told never to
+#: store these; turn search never shows a turn no memory rests on that has
+#: one (``looks_secret``), since that turn may be one extraction refused.
+_SECRET_RE = re.compile(
+    r"\b(?:passwords?|passwd|passcodes?|passphrases?|pin\s+(?:code|number)|"
+    r"api[\s_-]?keys?|secret[\s_-]?keys?|access[\s_-]?tokens?|auth[\s_-]?tokens?|"
+    r"bearer\s+tokens?|private[\s_-]?keys?|ssh[\s_-]?keys?|credentials?|"
+    r"security\s+codes?|social\s+security\s+numbers?|iban|cvv|"
+    r"credit\s+card\s+numbers?)\b"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}"
+    r"|\bgh[pousr]_[A-Za-z0-9]{20,}"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b",
+    re.IGNORECASE,
+)
+
+
+def looks_secret(text: str) -> bool:
+    """Whether a text names or contains a secret or a credential (``_SECRET_RE``)."""
+    return bool(_SECRET_RE.search(text or ""))
 
 #: The types extraction assigns: the named kinds, defined once in ``models``
 #: (``models.ENTITY_TYPES`` adds the tag type, which extraction never offers).
@@ -209,32 +234,54 @@ USER_NAME_RULE = """- user_name: the user's own name, only when the conversation
   give the name of someone the user only talks about. null otherwise.
 """
 _SHAPE_END = '"sources": [int]}}]}}.\nReturn {{"facts": []}} if'
+#: Where the questions rule and field go when asked for (``extraction_system``).
+_SOURCES_RULE = "- sources: the numbers of the conversation lines"
+_SHAPE_SOURCES = '"sources": [int]}}]}}.'
+_SHAPE_QUESTIONS = '"questions": [str],\n'
 _SHAPE_END_WITH_USER_NAME = (
     '"sources": [int]}}], "user_name": str|null}}.\n'
     'Return {{"facts": [], "user_name": null}} if')
 
 
-def extraction_system(*, ask_user_name: bool = False) -> str:
+def extraction_system(*, ask_user_name: bool = False, ask_questions: bool = False) -> str:
     """The extraction instructions, unformatted (``{today}`` still in them):
     ``EXTRACTION_SYSTEM`` as it is, or with the ``user_name`` rule placed
-    after the last rule and the field added to the answer's shape."""
-    if not ask_user_name:
-        return EXTRACTION_SYSTEM
-    rules_end = "\n\nRespond with JSON only:"
-    return (EXTRACTION_SYSTEM.replace(rules_end, "\n" + USER_NAME_RULE.rstrip("\n")
-                                      + rules_end, 1)
-            .replace(_SHAPE_END, _SHAPE_END_WITH_USER_NAME, 1))
+    after the last rule and the field added to the answer's shape, or with
+    the ``questions`` rule (``questions.QUESTIONS_RULE``) placed before the
+    ``sources`` rule and the field in the shape. Each is a setting of the
+    store, not of a save, so the prompt stays the same from one save to the
+    next and the provider's prompt cache holds."""
+    text = EXTRACTION_SYSTEM
+    if ask_questions:
+        text = (text.replace(_SOURCES_RULE, QUESTIONS_RULE + _SOURCES_RULE, 1)
+                .replace(_SHAPE_SOURCES, _SHAPE_QUESTIONS + _SHAPE_SOURCES, 1))
+    if ask_user_name:
+        rules_end = "\n\nRespond with JSON only:"
+        text = (text.replace(rules_end, "\n" + USER_NAME_RULE.rstrip("\n") + rules_end, 1)
+                .replace(_SHAPE_END, _SHAPE_END_WITH_USER_NAME, 1))
+    return text
 
 
-def extraction_schema(*, ask_user_name: bool = False) -> dict[str, Any]:
+def extraction_schema(*, ask_user_name: bool = False,
+                      ask_questions: bool = False) -> dict[str, Any]:
     """``EXTRACTION_SCHEMA`` as it is, or with a required, nullable
-    ``user_name`` beside ``facts``."""
-    if not ask_user_name:
-        return EXTRACTION_SCHEMA
-    return {**EXTRACTION_SCHEMA,
-            "properties": {**EXTRACTION_SCHEMA["properties"],
-                           "user_name": {"type": ["string", "null"]}},
-            "required": [*EXTRACTION_SCHEMA["required"], "user_name"]}
+    ``user_name`` beside ``facts``, or with a required ``questions`` list on
+    each fact."""
+    schema = EXTRACTION_SCHEMA
+    if ask_questions:
+        items = schema["properties"]["facts"]["items"]
+        items = {**items,
+                 "properties": {**items["properties"], "questions": QUESTIONS_FIELD},
+                 "required": [*items["required"], "questions"]}
+        schema = {**schema, "properties": {**schema["properties"],
+                                           "facts": {**schema["properties"]["facts"],
+                                                     "items": items}}}
+    if ask_user_name:
+        schema = {**schema,
+                  "properties": {**schema["properties"],
+                                 "user_name": {"type": ["string", "null"]}},
+                  "required": [*schema["required"], "user_name"]}
+    return schema
 
 
 VOCABULARY_LIMIT = 120  # bounded so a large store cannot inflate every call
@@ -331,8 +378,13 @@ def extract_facts(
     owner: str | None = None,
     entity_names: list[tuple[str, str | None]] | None = None,
     identity: list[str] | None = None,
+    questions: bool = False,
 ) -> list[CandidateFact]:
     """LLM extraction (phase 1). Raises if the LLM is unavailable.
+
+    ``questions`` asks for the questions each fact answers as well
+    (``questions.QUESTIONS_RULE``), kept on ``CandidateFact.questions``; the
+    store asks when ``retrieval.question_keys`` is on.
 
     ``identity``, when given, asks for the user's name as well and receives
     it when the conversation states it (``stated_user_name``): the user
@@ -438,11 +490,12 @@ def extract_facts(
     )
     ask_user_name = identity is not None
     raw = llm.complete(
-        extraction_system(ask_user_name=ask_user_name).format(today=now.date().isoformat()),
+        extraction_system(ask_user_name=ask_user_name, ask_questions=questions)
+        .format(today=now.date().isoformat()),
         f"Conversation:\n{transcript}{speaker_offer}{context_offer}{owner_offer}{entity_offer}"
         f"{offer}{hint_offer}"
         "\n\nExtract the facts as JSON.",
-        json_schema=extraction_schema(ask_user_name=ask_user_name),
+        json_schema=extraction_schema(ask_user_name=ask_user_name, ask_questions=questions),
     )
     data = parse_lenient_json(raw)
     if identity is not None and stated_user_name(data):
@@ -550,6 +603,7 @@ def _facts_from(data: Any) -> list[CandidateFact]:
                 relations=_parse_relations(item.get("relations", [])),
                 metadata={"when": when} if when else {},
                 sources=_parse_sources(item.get("sources")),
+                questions=clean_questions(item.get("questions")),
             )
         )
     return facts

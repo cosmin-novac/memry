@@ -62,7 +62,10 @@ In what comes back:
 - "[until <date>]" (search rows: "invalid_at") marks a value that stopped
   holding that day; the current value is in another memory;
 - "What was said" (search rows: "evidence") lists the saved turns the memories
-  rest on, with date and speaker. They keep details a memory leaves out.
+  rest on, with date and speaker. They keep details a memory leaves out;
+- "More of what was said" (search rows: "excerpts", on the first row) lists
+  more saved turns close to the query. Memry adds them when the memories may
+  not contain the whole answer.
 
 SAVE - call save_memories:
 - whenever the user states a fact, preference, decision, correction, or plan,
@@ -129,6 +132,7 @@ class MemoryRowOutput(BaseModel):
     invalid_at: str | None = None
     score: float | None = None
     evidence: list[EvidenceTurnOutput] | None = None
+    excerpts: list[EvidenceTurnOutput] | None = None
 
 
 class SaveActionOutput(BaseModel):
@@ -291,9 +295,14 @@ def _memory_row(
     if score is not None:
         row["score"] = round(score, 4)
     if evidence:
-        row["evidence"] = [{"said": t.said_at[:10], "speaker": t.speaker, "text": t.content}
-                           for t in evidence]
+        row["evidence"] = [_turn_row(t) for t in evidence]
     return row
+
+
+def _turn_row(turn: Any) -> dict[str, str]:
+    """A saved turn as the tools return it: the day it was said, its
+    speaker and its text."""
+    return {"said": turn.said_at[:10], "speaker": turn.speaker, "text": turn.content}
 
 
 def _filtered_payload(found: FilteredSearch, rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -544,7 +553,9 @@ def create_server(
         "invalid_at" on a value kept as history (it held until then; the
         current value is another memory), and "evidence": the saved turns it
         rests on (said, speaker, text), which keep details the memory leaves
-        out.
+        out. When the memories may not contain the whole answer, the first
+        row also has "excerpts": more saved turns close to the query, in the
+        order said, as get_memory_context adds them.
 
         PASS about WHENEVER YOU KNOW THE SUBJECT, even when the user's words
         do not say it: scoping to the right topic measurably beats an
@@ -564,10 +575,13 @@ def create_server(
             run_id=run_id or None,
             limit=limit,
             owner_prefix=_principal().prefix,
+            excerpts=True,
         )
         asked = _asked(found.filters)
         memory_rows = [_memory_row(r.memory, r.score, r.evidence, asked)
                        for r in found.results]
+        if found.excerpts and memory_rows:
+            memory_rows[0]["excerpts"] = [_turn_row(t) for t in found.excerpts]
         if not _named(filters):
             return _tool_result(memory_rows, SearchMemoriesOutput(memories=memory_rows))
         payload = _filtered_payload(found, memory_rows)
@@ -597,7 +611,9 @@ def create_server(
         A memory reads "[happened <date>] <text> (said <date>)": when the
         thing happens, where known, and the day it was said. "[until <date>]"
         marks a value that stopped holding that day. Under "What was said" are
-        the saved turns the memories rest on, with date and speaker.
+        the saved turns the memories rest on, with date and speaker. Under
+        "More of what was said" are more saved turns close to the query,
+        added when the memories may not contain the whole answer.
 
         when and about filter before ranking, as in search_memories, and a
         phrase in double quotes in the query must appear exactly:

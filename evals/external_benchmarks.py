@@ -1,10 +1,17 @@
-"""Memry on published long-term-memory benchmarks: LoCoMo and LongMemEval.
+"""Memry on published long-term-memory benchmarks: LoCoMo, LongMemEval and BEAM.
 
 LoCoMo (Maharana et al. 2024, ``locomo10.json``): long conversations between
 two people over many dated sessions, each with a few hundred questions whose
 evidence is named by turn ("D3:7"). LongMemEval (Wu et al. 2024,
 ``longmemeval_s.json``, ``_m``, ``_oracle``): questions that each come with
 their own haystack of dated chat sessions; the evidence is named by session.
+BEAM (Tavakoli et al. 2026, ``beam_100K.json``, ``_500K``, ``_1M``, written
+by ``python -m evals.beam_eval fetch``): long chats between a user and an
+assistant in dated batches, 20 questions a chat over ten abilities, each
+graded against its rubric by ``evals.beam_eval`` (see there); the evidence
+is named by message. A batch is cut into sessions of whole exchanges (a
+user's question with the replies up to the next one) of at most
+``BEAM_SESSION_CHARS`` characters, all dated the batch's time anchor.
 
 Each conversation (a LoCoMo sample; a LongMemEval question with its haystack)
 goes into a fresh in-memory store through ``MemoryStore.add``:
@@ -39,22 +46,32 @@ Every question is asked through ``MemoryStore.search`` (user "bench", the top
             0 when none of the top 20 does
   search ms median time of one search
 
-With --answer the configured LLM answers each question from the top --k
-memories (--context: from ``MemoryStore.reconstruct_context``) and the
-answer is scored against the gold one. The model is shown what Memry's
-context builder gives an agent for the question (``intelligence.context.
-context_lines``): the descriptions of the entities the question names
-(``MemoryStore.described_entities``, built by the store's text model where
-stale and counted under the stage "describe"; --no-descriptions leaves them
-out), then the memories, each with the date its event happened, where known,
-and the date it was said, then their source turns that best match the
-question (``MemoryStore.evidence``, within the store's
-``retrieval.evidence_tokens``; --evidence-tokens sets it, 0 shows none).
+With --answer the configured LLM answers each question at --k and the
+answer is scored against the gold one. The model is shown the context the
+product gives an agent for the question (``MemoryStore.context_from``, the
+code of ``reconstruct_context`` and MCP get_memory_context after their
+search), built from the one search's results that a search of limit k
+returns (``at_k``: the first k, or every member of a set found), within
+``CONTEXT_TOKENS``, and written as the lines of that context without its
+headings (``context_list``; --context: the context's text as an agent
+reads it, with the harness's own prompt). The lines are the descriptions of
+the entities the question names (``MemoryStore.described_entities``, built
+by the store's text model where stale and counted under the stage
+"describe"; --no-descriptions leaves them out), then the memories that fit,
+each with the date its event happened, where known, and the date it was
+said, then their source turns that best match the question
+(``MemoryStore.evidence``, within the store's ``retrieval.evidence_tokens``;
+--evidence-tokens sets it, 0 shows none), then turn search's turns when it
+is due (``MemoryStore.turn_search``, on by default; its judge calls are
+counted with the search). Each answer has turn search's record
+(``turn_search_record``: whether it ran, its triggers, its excerpts and
+their tokens) and its turns ("excerpt_turns").
 --compare-evidence-tokens N answers
-each question a second time from the same search, its turns chosen within N
-tokens (0: the memories alone), with no further search: those answers are
-scored and judged as the others, kept under the row's "answers_compared" and
-counted under the stages "answer:compared" and "judge:compared".
+each question a second time from the same search, its context's evidence
+within N tokens (0: the memories alone), with no further search: those
+answers are scored and judged as the others, kept under the row's
+"answers_compared" and counted under the stages "answer:compared" and
+"judge:compared".
 --compare-answer-model MODEL has MODEL write that second answer, from the
 same memory list (the turns within N tokens where both are given), the way
 published LoCoMo rows compare answer models over one memory:
@@ -95,7 +112,14 @@ on the questions it leaves alone. --full-context answers from the whole
 conversation, with no store and no search (Mem0's full-context baseline with
 evals.mem0_judge:full_context_messages). --decider jev makes Jev the store's
 decision provider at the save and at the question (TYPESAFE_API_KEY);
---store-dir keeps each store in a file. --workers N makes a question's answer
+--store-dir keeps each store in a file, with a trace of which turns each
+memory came from (<conversation>.trace.json); with --results-dir and no
+--store-dir, the stores are kept in <results dir>/stores. --reuse-stores
+asks the questions again on stores kept that way, without loading: a
+conversation whose store and trace are there is opened as it is, and one
+without them is loaded and kept. --all-members answers a question that
+needs several memories from every member the search found, past the top k,
+as an agent's search returns them. --workers N makes a question's answer
 and judge calls N at a time. --export-mem0 writes the headline answers as
 Mem0's per-question results file.
 
@@ -123,9 +147,56 @@ again, so an interrupted run resumes where it stopped.
 ledger the processes share (``evals/api_usage.py``): the tokens each
 response reports, per stage (extraction, reconcile, audit, search, answer,
 judge, ...) and conversation. --max-calls GROUP=N stops the run before a
-call that would pass N calls of that group (chat, embeddings, jev). The
-harness tries a failed call again (a timeout, a rate limit, a server
-error), up to four calls in all; every try is counted.
+call that would pass N calls of that group (chat, embeddings, jev).
+With --max-usd X the run stops in the same way before a call when the
+ledger's spend is X dollars or more. The spend is priced as the dollars of
+<out>.meta.json are (``price_of``, ``dollars``, at the prices of --prices).
+It is the whole ledger's spend, so a resumed run's earlier segments are in
+it. A call still in flight has no tokens in the ledger yet, so the spend can
+end above X by the calls in flight. The harness tries a failed call again (a
+timeout, a rate limit, a server error), up to four calls in all; every try
+is counted.
+
+Every run writes beside its results file (x.json) a metadata file
+(x.meta.json, ``run_meta``) and prints the same as the first lines of its
+tables (``meta_lines``): the data file and its sha256, the questions asked
+and how they were chosen, the memry commit and the tracked files that differ
+from it, the settings (ingest, text model, embedder, decider, k, evidence
+tokens, answer models and prompt, judge, question keys, entity questions),
+the start, end and wall seconds, and the headline numbers: J of each answer
+model at the headline k, recall@5, 10 and 20, the median and 95th
+percentile of a search's time, and the mean context tokens. With
+--usage-db it adds the ledger's calls and tokens per stage and model, the
+model each reply named (a snapshot, or the version behind "jev-latest"),
+and the dollars per model and provider at the prices of --prices (default
+``evals/prices.json``, USD per million tokens with the day each was read).
+The ledger is the whole ledger, so a resumed run counts every segment.
+
+LongMemEval: each question is a conversation of its own, so each question has
+its own store, its haystack saved session by session in time order, each
+session dated with its time (``load_longmemeval``). ``evals/longmemeval_judge.py``
+contains the official reading prompt and judge (one prompt per question type
+and one for the abstention questions). --sample N: N questions drawn in
+proportion to the question types (``stratified_sample``, seeded with --seed).
+--export-longmemeval PATH: the answers in the jsonl form of the official
+evaluate_qa.py. The tables have a row for the abstention questions and the
+task-averaged judge score, as in print_qa_metrics.py. The store's owner is
+"the user": Memry's own rule for a conversation between the user and an
+assistant (``MemoryStore.owner_name``), so no name is set. With
+``retrieval.entity_questions`` on, the store first describes each hub related
+to the owner that has no description yet, at most 20 a question
+(``describe_related_hubs_step``, counted under the stage "entity_descriptions"),
+and then writes its entity questions once the haystack is loaded and before
+the question is asked (``write_entity_questions_step``, counted under the stage
+"entity_questions"). Both are capped with the chat calls. Each row has the store's memories with
+question keys, its entities with entity questions, and where the search
+started (``search_start``):
+
+    ... --dataset longmemeval --file longmemeval_s_cleaned.json --sample 100 --seed 1 \
+        --ingest extract --embedder openai --decider jev --k 20 \
+        --answer-model gpt-4o-mini --compare-answer-model gpt-6-luna \
+        --answer-prompt evals.longmemeval_judge:answer_messages \
+        --judge evals.longmemeval_judge:judge
 
 Run (the data directory holds locomo10.json and longmemeval_s.json):
 
@@ -174,9 +245,18 @@ sys.path.insert(0, str(HERE.parent))
 
 from evals import api_usage  # noqa: E402
 from memry.config import Config, DecisionConfig, EmbeddingConfig  # noqa: E402
-from memry.intelligence.context import context_lines  # noqa: E402
-from memry.intelligence.graph_retrieval import detect_query_entities  # noqa: E402
-from memry.models import Memory, Scope  # noqa: E402
+from memry.intelligence.context import (  # noqa: E402
+    context_lines,
+    description_budget,
+    estimate_tokens,
+    turn_line,
+)
+from memry.intelligence.entities import DESCRIPTION_MIN_MEMORIES  # noqa: E402
+from memry.intelligence.graph_retrieval import (  # noqa: E402
+    SET_RESULT_CAP,
+    detect_query_entities,
+)
+from memry.models import EvidenceTurn, Memory, Scope  # noqa: E402
 from memry.providers.decisions import (  # noqa: E402
     Decider,
     JevDecider,
@@ -185,14 +265,18 @@ from memry.providers.decisions import (  # noqa: E402
 )
 from memry.providers.embeddings import Embedder, HashEmbedder, OpenAIEmbedder  # noqa: E402
 from memry.providers.llm import LLM, NoneLLM, build_llm  # noqa: E402
-from memry.store import MemoryStore  # noqa: E402
+from memry.store import AgentContext, MemoryStore  # noqa: E402
 
 DATA_ENV = "MEMRY_BENCH_DATA"
-DATASETS = ("locomo", "longmemeval")
+DATASETS = ("locomo", "longmemeval", "beam")
 BENCH_USER = "bench"
 KS = (5, 10, 20)
 DEPTH = max(KS)
-#: Token budget of the context block with --context.
+#: The token budget of the context each question is answered from
+#: (``MemoryStore.context_from``), the memory list and --context alike. At
+#: it the descriptions (300) and the evidence (``retrieval.evidence_tokens``,
+#: 600) have the budgets the runner gave them before the context was the
+#: product's, and 20 memories fit beside them and turn search's 400.
 CONTEXT_TOKENS = 4000
 
 #: LoCoMo's "category" number -> name. The paper names five kinds of question
@@ -297,6 +381,8 @@ _LOCOMO_DATE = re.compile(
 _DAY_MONTH_YEAR = re.compile(r"^(\d{1,2})\s+([A-Za-z]+)\.?,?\s+(\d{4})$")
 # "May 8, 2023"
 _MONTH_DAY_YEAR = re.compile(r"^([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})$")
+# "March-15-2024" (BEAM's time anchors)
+_MONTH_DAY_YEAR_DASHED = re.compile(r"^([A-Za-z]+)-(\d{1,2})-(\d{4})$")
 # "2023/05/20 (Sat) 02:21" (LongMemEval)
 _SLASH_DATE = re.compile(
     r"^(\d{4})/(\d{1,2})/(\d{1,2})(?:\s*\([A-Za-z]+\))?(?:\s+(\d{1,2}):(\d{2}))?$")
@@ -320,7 +406,7 @@ def parse_bench_date(text: Any) -> datetime | None:
         if m := _DAY_MONTH_YEAR.match(text):
             day, month, year = m.groups()
             return datetime(int(year), _MONTHS[month.lower()], int(day), tzinfo=timezone.utc)
-        if m := _MONTH_DAY_YEAR.match(text):
+        if m := _MONTH_DAY_YEAR.match(text) or _MONTH_DAY_YEAR_DASHED.match(text):
             month, day, year = m.groups()
             return datetime(int(year), _MONTHS[month.lower()], int(day), tzinfo=timezone.utc)
         parsed = datetime.fromisoformat(text)
@@ -468,8 +554,18 @@ def _locomo_sample(sample: Any, index: int) -> Conversation:
 
 def load_longmemeval(path: str | os.PathLike[str]) -> list[Conversation]:
     """LongMemEval questions, each with its haystack as a conversation of its
-    own; the evidence is the answer sessions. Raises FormatError on a shape it
-    cannot read; smaller faults go to each conversation's warnings."""
+    own; the evidence is the answer sessions. The sessions are in time order
+    (the file's order where two have the same time): the authors write in the
+    README that the files are sorted, but the haystacks of the
+    temporal-reasoning and knowledge-update questions are not. A session id
+    that comes again (the same filler session at another date) is kept as
+    "<id>~2", "<id>~3", ... An abstention question (its id ends in "_abs")
+    has no evidence, because the authors leave those questions out of the
+    retrieval scores; its answer sessions are kept under
+    ``extra["answer_session_ids"]``. ``extra["question_date"]``
+    is the question's date as the file writes it. Raises FormatError on a
+    shape it cannot read; smaller faults go to each conversation's
+    warnings."""
     return [_longmemeval_item(item, i)
             for i, item in enumerate(_items(_read_json(path), "haystack_sessions"))]
 
@@ -492,10 +588,14 @@ def _longmemeval_item(item: Any, index: int) -> Conversation:
     warnings: list[str] = []
     sessions: list[Session] = []
     seen: set[str] = set()
+    again: Counter = Counter()
     for sid, date_text, raw_turns in zip(ids, dates, raw_sessions):
         sid = str(sid)
         if sid in seen:
-            raise FormatError(f"{qid}: session id {sid} appears twice")
+            again[sid] += 1
+            kept = f"{sid}~{again[sid] + 1}"
+            warnings.append(f"{qid}: session id {sid} comes again, kept as {kept}")
+            sid = kept
         seen.add(sid)
         date = parse_bench_date(date_text)
         if date is None:
@@ -515,6 +615,12 @@ def _longmemeval_item(item: Any, index: int) -> Conversation:
                               text=content if role == "user" else f"{role}: {content}",
                               has_answer=bool(raw.get("has_answer"))))
         sessions.append(Session(sid, date, str(date_text or ""), turns))
+    in_time = sorted(sessions, key=lambda s: s.date or datetime.max.replace(tzinfo=timezone.utc))
+    moved = sum(a is not b for a, b in zip(sessions, in_time))
+    if moved:
+        warnings.append(f"{qid}: sessions saved in time order, {moved} of {n} "
+                        "not where the file has them")
+    sessions = in_time
     evidence, unknown = [], []
     for sid in item.get("answer_session_ids") or []:
         (evidence if str(sid) in seen else unknown).append(str(sid))
@@ -522,11 +628,15 @@ def _longmemeval_item(item: Any, index: int) -> Conversation:
         warnings.append(f"{qid}: answer sessions {unknown} are not in the haystack, left out")
     qtype = str(item.get("question_type") or "unknown")
     asked_on = parse_bench_date(item.get("question_date"))
+    abstain = qid.endswith("_abs")
+    extra: dict[str, Any] = {"question_date": str(item.get("question_date") or "")}
+    if abstain:
+        extra["answer_session_ids"] = list(dict.fromkeys(evidence))
+        evidence = []
     question = Question(
         qid=qid, question=_text(item["question"]), answer=_text(item["answer"]),
         category=qtype, category_name=qtype, evidence=list(dict.fromkeys(evidence)),
-        level="session", question_date=asked_on,
-        abstain=qid.endswith("_abs"),
+        level="session", question_date=asked_on, abstain=abstain, extra=extra,
         reference_date=asked_on.isoformat() if asked_on else None)
     if not question.question:
         raise FormatError(f"{qid}: empty question")
@@ -534,8 +644,144 @@ def _longmemeval_item(item: Any, index: int) -> Conversation:
                         warnings)
 
 
+#: Most characters of one BEAM session (about 2,500 tokens): a batch runs to
+#: 40,000 tokens and more, so it is cut, at the start of an exchange, into
+#: sessions near the size of LongMemEval's, which one extraction reads whole.
+BEAM_SESSION_CHARS = 10_000
+#: A run of this many blanks in a BEAM message is read as one space: one
+#: assistant message of the 100K chats is 348,853 characters, 322,493 of them
+#: in such runs, a broken generation in the data rather than anything said.
+_BEAM_PADDING = re.compile(r"[ \t]{200,}")
+#: The abilities BEAM asks about, in the order of its results tables.
+BEAM_ABILITIES = ("abstention", "contradiction_resolution", "event_ordering",
+                  "information_extraction", "instruction_following", "knowledge_update",
+                  "multi_session_reasoning", "preference_following", "summarization",
+                  "temporal_reasoning")
+#: Where each ability keeps its reference answer, which f1 and "contains" read.
+_BEAM_GOLD = ("answer", "ideal_answer", "ideal_response", "ideal_summary",
+              "expected_compliance")
+
+
+def load_beam(path: str | os.PathLike[str]) -> list[Conversation]:
+    """BEAM chats, each a conversation with its 20 questions: the file
+    ``evals.beam_eval fetch`` writes (a list of rows), or a page of the
+    Hugging Face datasets server (``{"rows": [{"row": ...}]}``). Raises
+    FormatError on a shape it cannot read."""
+    data = _read_json(path)
+    if isinstance(data, dict) and isinstance(data.get("rows"), list):
+        data = [r.get("row") if isinstance(r, dict) else r for r in data["rows"]]
+    if not isinstance(data, list):
+        raise FormatError(f"{path}: expected a list of BEAM chats")
+    return [_beam_chat(row, i) for i, row in enumerate(data)]
+
+
+def _beam_exchanges(batch: list[Any], where: str) -> list[list[dict[str, Any]]]:
+    """A batch's messages in exchanges: each user question that BEAM marks
+    "main_question", with every message after it up to the next one."""
+    exchanges: list[list[dict[str, Any]]] = []
+    for t, message in enumerate(batch):
+        if not isinstance(message, dict):
+            raise FormatError(f"{where} message {t}: not an object")
+        if message.get("question_type") == "main_question" or not exchanges:
+            exchanges.append([])
+        exchanges[-1].append(message)
+    return exchanges
+
+
+def _beam_chat(row: Any, index: int) -> Conversation:
+    if not isinstance(row, dict):
+        raise FormatError(f"chat {index}: not an object")
+    conv_id = f"beam-{row.get('conversation_id') or index}"
+    batches = row.get("chat")
+    if not isinstance(batches, list) or not all(isinstance(b, list) for b in batches):
+        raise FormatError(f"{conv_id}: 'chat' is not a list of batches")
+    warnings: list[str] = []
+    sessions: list[Session] = []
+    keys: set[str] = set()
+    for b, batch in enumerate(batches, start=1):
+        anchor = next((m.get("time_anchor") for m in batch
+                       if isinstance(m, dict) and m.get("time_anchor")), "")
+        date = parse_bench_date(anchor)
+        if date is None:
+            warnings.append(f"{conv_id} batch {b}: no readable time anchor ({anchor!r})")
+        parts: list[list[Turn]] = [[]]
+        size = 0
+        for exchange in _beam_exchanges(batch, f"{conv_id} batch {b}"):
+            turns = []
+            for message in exchange:
+                role = str(message.get("role") or "user").strip().lower()
+                content = _BEAM_PADDING.sub(" ", str(message.get("content") or "")).strip()
+                if not content:
+                    continue
+                if role not in ("user", "assistant"):
+                    warnings.append(f"{conv_id} message {message.get('id')}: role {role!r} "
+                                    "read as user")
+                    role = "user"
+                key = f"{conv_id}#{message.get('id')}"
+                if key in keys:
+                    raise FormatError(f"{conv_id}: message id {message.get('id')} appears twice")
+                keys.add(key)
+                turns.append(Turn(key=key, role=role, raw=content,
+                                  text=content if role == "user" else f"{role}: {content}"))
+            if parts[-1] and size + sum(len(t.raw) for t in turns) > BEAM_SESSION_CHARS:
+                parts.append([])
+                size = 0
+            for turn in turns:
+                # an exchange longer than a session is cut between its messages
+                if parts[-1] and size + len(turn.raw) > BEAM_SESSION_CHARS:
+                    parts.append([])
+                    size = 0
+                parts[-1].append(turn)
+                size += len(turn.raw)
+        for p, turns in enumerate(p for p in parts if p):
+            sessions.append(Session(f"b{b}s{p + 1}", date, str(anchor or ""), turns))
+    last = next((s.date for s in reversed(sessions) if s.date), None)
+    questions = _beam_questions(row.get("probing_questions"), conv_id, keys, last, warnings)
+    return Conversation(conv_id, "chat between the user and an assistant", sessions, questions,
+                        warnings)
+
+
+def _beam_questions(raw: Any, conv_id: str, keys: set[str], asked_on: datetime | None,
+                    warnings: list[str]) -> list[Question]:
+    if isinstance(raw, str):
+        import ast
+
+        try:
+            raw = ast.literal_eval(raw)
+        except (SyntaxError, ValueError) as exc:
+            raise FormatError(f"{conv_id}: probing_questions unreadable ({exc})") from exc
+    if not isinstance(raw, dict):
+        raise FormatError(f"{conv_id}: probing_questions is not a mapping of abilities")
+    questions = []
+    for ability in [a for a in BEAM_ABILITIES if a in raw] + \
+            sorted(a for a in raw if a not in BEAM_ABILITIES):
+        for i, item in enumerate(raw[ability] or []):
+            qid = f"{conv_id}/{ability}/{i}"
+            if not isinstance(item, dict) or not str(item.get("question") or "").strip():
+                raise FormatError(f"{qid}: no question")
+            rubric = item.get("rubric")
+            if not isinstance(rubric, list) or not rubric:
+                raise FormatError(f"{qid}: no rubric")
+            ids = re.findall(r"\d+", json.dumps(item.get("source_chat_ids") or []))
+            evidence, unknown = [], []
+            for x in ids:
+                (evidence if f"{conv_id}#{x}" in keys else unknown).append(f"{conv_id}#{x}")
+            if unknown:
+                warnings.append(f"{qid}: evidence messages {unknown} are not in the chat")
+            gold = next((item[f] for f in _BEAM_GOLD if item.get(f)), "")
+            questions.append(Question(
+                qid=qid, question=_text(item["question"]), answer=_text(gold),
+                category=ability, category_name=ability,
+                evidence=list(dict.fromkeys(evidence)), level="turn",
+                question_date=asked_on, abstain=ability == "abstention",
+                extra={"rubric": [str(r) for r in rubric], "beam_ability": ability,
+                       "beam_index": i, "difficulty": item.get("difficulty")},
+                reference_date=asked_on.isoformat() if asked_on else None))
+    return questions
+
+
 LOADERS: dict[str, Callable[[Any], list[Conversation]]] = {
-    "locomo": load_locomo, "longmemeval": load_longmemeval,
+    "locomo": load_locomo, "longmemeval": load_longmemeval, "beam": load_beam,
 }
 
 
@@ -544,6 +790,9 @@ def dataset_files(dataset: str, variant: str = "s") -> list[str]:
     if dataset == "locomo":
         names = ["locomo10.json"]
         dirs = ["", "locomo/", "locomo/data/", "data/"]
+    elif dataset == "beam":
+        names = [f"beam_{variant}.json"]
+        dirs = ["", "beam/", "BEAM/", "data/"]
     else:
         names = [f"longmemeval_{variant}.json", f"longmemeval_{variant}_cleaned.json",
                  f"longmemeval_{variant}"]
@@ -565,6 +814,46 @@ def find_dataset(dataset: str, data_dir: str | os.PathLike[str] | None, *, varia
         return None
     return next((root / name for name in dataset_files(dataset, variant)
                  if (root / name).is_file()), None)
+
+
+def stratum(conversation: Conversation) -> str:
+    """The stratum ``stratified_sample`` draws a one-question conversation
+    from: its question's category, with "/abstention" for a question whose
+    right answer is that the conversation does not say."""
+    if len(conversation.questions) != 1:
+        raise ValueError(f"{conversation.conv_id}: {len(conversation.questions)} questions; "
+                         "a stratified sample draws conversations of one question "
+                         "(LongMemEval)")
+    question = conversation.questions[0]
+    return question.category_name + ("/abstention" if question.abstain else "")
+
+
+def stratified_sample(conversations: list[Conversation], n: int, seed: int = 0
+                      ) -> list[Conversation]:
+    """``n`` of the one-question ``conversations``, each stratum (``stratum``)
+    given its share of ``n`` (largest remainder; ties to the larger stratum,
+    then by name), drawn with ``random.Random(seed)`` from each stratum's
+    conversations sorted by id, the strata in order of name. The sample is
+    the same whatever order the conversations come in; it keeps theirs."""
+    if n < 1:
+        raise ValueError("a sample of at least 1")
+    groups: dict[str, list[Conversation]] = {}
+    for conv in conversations:
+        groups.setdefault(stratum(conv), []).append(conv)
+    total = len(conversations)
+    if n >= total:
+        return list(conversations)
+    shares = {name: n * len(group) / total for name, group in groups.items()}
+    quota = {name: int(share) for name, share in shares.items()}
+    for name in sorted(groups, key=lambda g: (-(shares[g] - quota[g]), -len(groups[g]), g)
+                       )[:n - sum(quota.values())]:
+        quota[name] += 1
+    rng = random.Random(seed)
+    chosen: set[str] = set()
+    for name in sorted(groups):
+        ids = sorted(c.conv_id for c in groups[name])
+        chosen.update(rng.sample(ids, quota[name]))
+    return [c for c in conversations if c.conv_id in chosen]
 
 
 # --------------------------------------------------------------------------
@@ -595,6 +884,44 @@ class Ingested:
     def units_of(self, memory: Memory, level: str) -> set[str]:
         turns = self.turns_of(memory)
         return turns if level == "turn" else {self.session_of_turn[t] for t in turns}
+
+
+def write_trace(path: pathlib.Path, ingested: Ingested, embedder: Embedder) -> None:
+    """The trace of a load, kept beside its store: which turns each memory
+    came from, so the questions can be asked again on the store without
+    loading it again (``read_trace``), and the embedder's model, so a run
+    with another embedder is refused."""
+    _write_json(path, {
+        "conversation": ingested.conversation.conv_id,
+        "embedder": embedder.model_id,
+        "turn_of_episode": ingested.turn_of_episode,
+        "turns_of_memory": {mid: sorted(turns) for mid, turns in ingested.turns_of_memory.items()},
+        "actions": dict(ingested.actions),
+        "warnings": ingested.warnings,
+        "seconds": ingested.seconds,
+    })
+
+
+def read_trace(path: pathlib.Path, store: MemoryStore, conversation: Conversation,
+               embedder: Embedder) -> Ingested:
+    """The load a trace records (``write_trace``), on the store kept with it."""
+    data = _read_json_file(path) or {}
+    if data.get("conversation") != conversation.conv_id:
+        raise SystemExit(f"{path}: a trace of {data.get('conversation')!r}; this "
+                         f"conversation is {conversation.conv_id!r}")
+    if data.get("embedder") != embedder.model_id:
+        raise SystemExit(f"{path}: the store was loaded with the embedder "
+                         f"{data.get('embedder')!r}; this run has {embedder.model_id!r}")
+    return Ingested(
+        store, conversation,
+        session_of_turn={t.key: s.session_id for s in conversation.sessions for t in s.turns},
+        turn_of_episode=dict(data.get("turn_of_episode") or {}),
+        turns_of_memory={mid: set(turns)
+                         for mid, turns in (data.get("turns_of_memory") or {}).items()},
+        seconds=float(data.get("seconds") or 0.0),
+        warnings=list(data.get("warnings") or []),
+        actions=Counter(data.get("actions") or {}),
+    )
 
 
 def transient(exc: BaseException) -> bool:
@@ -929,13 +1256,24 @@ def judged_gold(question: Question, judge: Judge) -> str:
     return question.answer
 
 
-def verdicts(judge: Judge, question: str, gold: str, prediction: str, runs: int = 1,
+def call_judge(judge: Judge, question: Question, gold: str, prediction: str) -> bool:
+    """One verdict of ``judge`` on ``prediction``: ``judge(question text,
+    gold, prediction)``, and ``asked=question`` as well for a judge with a
+    true ``reads_question`` attribute (LongMemEval's judge prompt depends on
+    the question's type and on whether it is an abstention question)."""
+    if getattr(judge, "reads_question", False):
+        return bool(judge(question.question, gold, prediction, asked=question))
+    return bool(judge(question.question, gold, prediction))
+
+
+def verdicts(judge: Judge, question: Question, gold: str, prediction: str, runs: int = 1,
              pool: Any = None) -> tuple[list[bool | None], str | None]:
-    """``runs`` verdicts of ``judge`` on one answer (in ``pool``, a thread
-    pool, when given) and the first error: a failed run is None."""
+    """``runs`` verdicts of ``judge`` on one answer to ``question`` (in
+    ``pool``, a thread pool, when given) and the first error: a failed run
+    is None."""
     def once() -> tuple[bool | None, str | None]:
         try:
-            return bool(judge(question, gold, prediction)), None
+            return call_judge(judge, question, gold, prediction), None
         except Exception as exc:  # one failed judgement must not end a long run
             return None, str(exc)[:300]
 
@@ -969,7 +1307,7 @@ def score_answer(prediction: str, question: Question, judge: Judge = containment
     judge reads ``judged_gold``. A judge that fails leaves its verdict None
     ("judge_error" says why), which the means leave out."""
     scores = lexical_scores(prediction, question)
-    scores.update(judge_fields(*verdicts(judge, question.question, judged_gold(question, judge),
+    scores.update(judge_fields(*verdicts(judge, question, judged_gold(question, judge),
                                          prediction, runs, pool)))
     return scores
 
@@ -1003,7 +1341,9 @@ def answer_question(llm: LLM, question: Question, context: str) -> str:
 #: --answer-prompt: (question, the memory list) -> the answering call's
 #: messages ([{"role", "content"}, ...]). The memory list is Memry's lines as
 #: its context builder renders them (``answer_with``); answering from the whole
-#: conversation, the turns (``full_context_memories``).
+#: conversation, the turns (``full_context_memories``). A function with a true
+#: ``reads_question`` attribute is also given ``asked=`` the ``Question`` (its
+#: date: LongMemEval's prompt contains the day the question is asked).
 AnswerPrompt = Callable[[str, list[Any]], list[dict[str, str]]]
 
 
@@ -1030,7 +1370,31 @@ def search_signals(store: MemoryStore, question: str, results: list[Any]) -> dic
     return {"named": sorted(names), "named_entities": len(ids),
             "linked": any("about" in s for s in signals),
             "judge_calls": max((int(s.get("calls") or 0) for s in signals), default=0),
-            "set_members": sum(1 for s in signals if s.get("member"))}
+            "set_members": sum(1 for s in signals if s.get("member")),
+            **search_start(store, question)}
+
+
+def search_start(store: MemoryStore, question: str) -> dict[str, Any]:
+    """The entities the search of ``question`` starts from (stage 1 of
+    ``MemoryStore.search``, its seeds): their names (``start``), whether the
+    start is the owner for a question in the first person
+    (``start_first_person``), whether it is an entity whose entity questions
+    match the question by its role (``start_by_role``), and whether it
+    contains an entity other than the owner (``start_other_than_owner``).
+    The plan is made again as the search made it; the question's vector
+    comes from the embedder's cache in a benchmark run."""
+    from memry.store import _Reads
+
+    scope = Scope(user_id=BENCH_USER)
+    plan = store._plan(question, _Reads(scope), True)
+    named, _ = store._seeds(question, scope)
+    owner = store.owner_entity(BENCH_USER)
+    names = [entity.name for entity in map(store.backend.get_entity, plan.seeds)
+             if entity is not None]
+    return {"start": names, "start_first_person": plan.first_person,
+            "start_by_role": bool(plan.seeds) and plan.seeds != named,
+            "start_other_than_owner": any(owner is None or seed != owner.id
+                                          for seed in plan.seeds)}
 
 
 _ENCODING: list[Any] = []
@@ -1065,17 +1429,133 @@ def memory_record(result: Any, ingested: Ingested) -> dict[str, Any]:
             "turns": sorted(ingested.turns_of(memory))}
 
 
-def answer_with(answer_llm: LLM, question: Question, memories: list[Memory],
-                answer_prompt: AnswerPrompt | None, evidence: list[Any] = (),
-                entities: list[Any] = ()) -> dict[str, Any]:
-    """One answering call from what Memry gives a model for the question:
-    the descriptions of the ``entities`` it names, then ``memories`` and
-    their ``evidence`` turns, as its context builder renders them
-    (``context_lines``). That list is the memory list of the answer prompt
-    (``answer_from``); ``k`` counts the memories."""
-    record = answer_from(answer_llm, question, context_lines(entities, memories, evidence),
-                         answer_prompt)
-    record["k"] = len(memories)
+#: --keep-context: every answer keeps the lines it was shown ("context_lines"),
+#: so it can be answered again later, by another prompt or model, from exactly
+#: what Memry gave (``evals.beam_eval answer``) without loading the store again.
+#: An answer whose context has turn search's turns also keeps its lines without
+#: them ("context_lines_bare"): the same memories and evidence, so the turns'
+#: own effect can be measured from one search.
+KEEP_CONTEXT = False
+
+#: --keep-evidence-tokens N ...: each answer also keeps, under
+#: "context_lines_evidence" (str(N) -> lines), the lines of its context with
+#: the evidence turns chosen within N tokens instead, for the same memories and
+#: without turn search's turns. No model call: the turns are chosen by their
+#: similarity to the question (``MemoryStore.evidence``).
+KEEP_EVIDENCE_TOKENS: tuple[int, ...] = ()
+
+#: --contexts-only: build every answer's context, with turn search's turns and
+#: its judge calls, and keep it (--keep-context), but make no answering call and
+#: no judging call. For contexts to be answered later by a model outside the
+#: harness (``evals.beam_eval answer``, or a model with no API key).
+CONTEXTS_ONLY = False
+
+
+class NoAnswer:
+    """The answering model of --contexts-only: never called."""
+
+    name = "none"
+    model = "none"
+    available = True
+
+    def chat(self, messages: Any, **_: Any) -> str:
+        raise AssertionError("--contexts-only makes no answering call")
+
+    def complete(self, system: str, user: str, **_: Any) -> str:
+        raise AssertionError("--contexts-only makes no answering call")
+
+    def close(self) -> None:
+        pass
+
+
+def context_list(context: AgentContext, *, excerpts: bool = True) -> list[str]:
+    """An agent's context as the answer prompt's memory list: the lines of
+    the text an agent reads (``context.context.text``), in its order,
+    without its headings (``context_lines``): the descriptions, the
+    memories, their evidence turns, then turn search's turns (none with
+    ``excerpts`` false)."""
+    return context_lines(context.entities, [r.memory for r in context.results],
+                         context.evidence, excerpts=context.excerpts if excerpts else ())
+
+
+def at_k(results: list[Any], k: int, *, every: bool = True) -> list[Any]:
+    """The results a search of limit ``k`` returns of these (a search's,
+    best first): the first ``k``, or every member of a set found when there
+    are more, up to ``SET_RESULT_CAP`` (``MemoryStore.search``). With
+    ``every`` false, the first ``k`` only (--no-all-members)."""
+    if not every:
+        return results[:k]
+    members = sum(1 for r in results if (r.signals or {}).get("member"))
+    return results[:max(k, min(members, SET_RESULT_CAP))]
+
+
+def turn_search_record(context: AgentContext,
+                       answer_prompt: AnswerPrompt | None = None) -> dict[str, Any]:
+    """Turn search's record for one context: whether it ran (``ran``: the
+    turns were searched), its triggers (``why``: "relevance", "several",
+    "incomplete"; none when it was not due), the judge's best relevance
+    over the memories (``best``; None for a search not judged), how many
+    excerpts were judged (``judged``) and shown (``excerpts``), how many
+    turns were shown (``turns``), and their tokens: those they add to the
+    memory list as ``answer_prompt`` writes it (``tokens``, cl100k_base;
+    None without tiktoken; the harness's own list for None) and those the
+    store's budget counts (``budget_tokens``)."""
+    note = context.turn_search
+    tokens: int | None = 0
+    if context.excerpts:
+        full = count_tokens(context_text(answer_prompt, context_list(context)))
+        bare = count_tokens(context_text(answer_prompt, context_list(context, excerpts=False)))
+        tokens = full - bare if full is not None and bare is not None else None
+    best = note.get("best")
+    return {"ran": "candidates" in note, "why": list(note.get("why") or []),
+            "best": round(best, 4) if best is not None else None,
+            "judged": len(note.get("excerpts") or []),
+            "excerpts": len(note.get("chosen") or []) if context.excerpts else 0,
+            "turns": len(context.excerpts), "tokens": tokens,
+            "budget_tokens": sum(estimate_tokens(turn_line(t)) + 1 for t in context.excerpts)}
+
+
+def kept_excerpts(store: MemoryStore, note: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every excerpt turn search judged for a context (``note``: the context's
+    ``turn_search``), whether shown or not: its judged ``score``, its
+    ``tokens`` as the budget counts them, and the lines of its turns not already
+    shown, each with its place in the order said (``turns``: [place, line]).
+    With these, the turns shown at any other budget or keep can be rebuilt
+    without asking the judge again (``evals.beam_eval``, context "turns:N")."""
+    excerpts = note.get("excerpts") or []
+    ids = list(dict.fromkeys(e for item in excerpts for e in item.get("new_ids") or []))
+    turns = store._passage_turns(store.backend.turn_search_episodes(ids))
+    place: dict[str, int] = {}
+    line: dict[str, str] = {}
+    for i, turn in enumerate(turns):
+        for key in {turn.passage_id or turn.episode_id, turn.episode_id} if turn.parts == 1 \
+                else {turn.passage_id or turn.episode_id}:
+            place[key], line[key] = i, turn_line(turn)
+    return [{"score": item.get("score"), "tokens": item.get("tokens"),
+             "turns": [[place[k], line[k]]
+                       for k in item.get("new_passage_ids", item.get("new_ids")) or []
+                       if k in line]}
+            for item in excerpts]
+
+
+def answer_with(answer_llm: LLM, question: Question, context: AgentContext,
+                answer_prompt: AnswerPrompt | None) -> dict[str, Any]:
+    """One answering call from what Memry gives an agent for the question
+    (``MemoryStore.context_from``): the descriptions of the entities it
+    names, the memories, their evidence turns and turn search's turns, as
+    its context builder renders them (``context_list``). That
+    list is the memory list of the answer prompt (``answer_from``); ``k``
+    counts the memories. With ``KEEP_CONTEXT`` the record keeps the lines
+    (and, when turn search added turns, the lines without them)."""
+    lines = context_list(context)
+    record = answer_from(answer_llm, question, lines, answer_prompt)
+    record["k"] = len(context.results)
+    if KEEP_CONTEXT:
+        record["context_lines"] = [line if isinstance(line, str) else str(line) for line in lines]
+        if context.excerpts:
+            record["context_lines_bare"] = [
+                line if isinstance(line, str) else str(line)
+                for line in context_list(context, excerpts=False)]
     return record
 
 
@@ -1087,11 +1567,17 @@ def answer_from(answer_llm: LLM, question: Question, items: list[Any],
     With ``answer_prompt`` the prediction is kept as the model wrote it, as
     Mem0's evaluation keeps it."""
     record: dict[str, Any] = {"k": len(items)}
+    if CONTEXTS_ONLY:
+        record.update(prediction="", answer_seconds=0.0, context_only=True,
+                      context_tokens=count_tokens(context_text(answer_prompt, items)))
+        return record
     started = time.perf_counter()
     try:
         if answer_prompt is not None:
-            prediction = str(chat(answer_llm, answer_prompt(question.question, items))
-                             or "").strip()
+            messages = answer_prompt(question.question, items, asked=question) \
+                if getattr(answer_prompt, "reads_question", False) \
+                else answer_prompt(question.question, items)
+            prediction = str(chat(answer_llm, messages) or "").strip()
         else:
             prediction = answer_question(answer_llm, question, memories_text(items))
     except Exception as exc:  # one failed call must not end a long run
@@ -1108,7 +1594,8 @@ def answer_from(answer_llm: LLM, question: Question, items: list[Any],
 #: The fields of the headline answer a row carries at its top level.
 ANSWER_FIELDS = ("prediction", "answer_error", "answer_seconds", "context_tokens",
                  "input_tokens", "f1", "em", "contains", "f1_mem0", "bleu1", "judge", "judges",
-                 "judge_error", "judge_corrected", "judges_corrected", "judge_clean")
+                 "judge_error", "judge_corrected", "judges_corrected", "judge_clean",
+                 "turn_search")
 
 
 def judge_answers(answers: dict[Any, dict[str, Any]], question: Question, judge: Judge,
@@ -1130,8 +1617,8 @@ def judge_answers(answers: dict[Any, dict[str, Any]], question: Question, judge:
         try:
             if stage:
                 with api_usage.stage(stage):
-                    return bool(judge(question.question, truth, prediction)), None
-            return bool(judge(question.question, truth, prediction)), None
+                    return call_judge(judge, question, truth, prediction), None
+            return call_judge(judge, question, truth, prediction), None
         except Exception as exc:  # one failed judgement must not end a long run
             return None, str(exc)[:300]
 
@@ -1167,32 +1654,43 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
         correction: dict[str, Any] | None = None,
         compare_evidence_tokens: int | None = None,
         compare_answer_llm: LLM | None = None,
-        descriptions: bool = True) -> dict[str, Any]:
+        descriptions: bool = True, all_members: bool = True) -> dict[str, Any]:
     """Search for one question once, score what came back, and answer when
-    asked: from the top k of that search for each k of ``ks`` (default
-    ``[k]``), after the descriptions of the entities the question names
+    asked: for each k of ``ks`` (default ``[k]``), from the context the
+    product gives an agent (``MemoryStore.context_from``, the steps of
+    ``reconstruct_context`` after its search) from the results a search of
+    limit k returns of that one search (``at_k``), within ``CONTEXT_TOKENS``:
+    the descriptions of the entities the question names
     (``MemoryStore.described_entities``, built where stale under the stage
-    "describe"; none with ``descriptions`` false), each answer judged
-    ``judge_runs`` times (``judge_answers``).
+    "describe"; none with ``descriptions`` false), the memories that fit,
+    their evidence turns and turn search's turns when it is due. Each
+    answer is judged ``judge_runs`` times (``judge_answers``) and has turn
+    search's record (``turn_search_record``).
     The row carries the answer at ``k`` at its top level and every answer
-    under "answers". The model calls are counted under ``search_stage``,
-    "answer" and "judge"; with ``pool`` (a thread pool) a question's answer
-    calls, and then its judge calls, run at once. With
-    ``compare_evidence_tokens`` each k is answered a second time from the
-    same memories, their turns chosen within that many tokens (0: none),
-    kept under "answers_compared" and counted under "answer:compared" and
-    "judge:compared"; ``compare_answer_llm`` writes that second answer (the
-    turns within the store's own budget unless ``compare_evidence_tokens``
-    is given too)."""
+    under "answers". The model calls are counted under ``search_stage``
+    (turn search's judge calls too), "answer" and "judge"; with ``pool`` (a
+    thread pool) a question's answer calls, and then its judge calls, run
+    at once. With ``compare_evidence_tokens`` each k is answered a second
+    time from the same search, its context's evidence within that many
+    tokens (0: none), kept under "answers_compared" and counted under
+    "answer:compared" and "judge:compared"; ``compare_answer_llm`` writes
+    that second answer (the store's own evidence budget unless
+    ``compare_evidence_tokens`` is given too). ``use_context`` answers at
+    ``k`` only, from the context's text as an agent reads it, with the
+    harness's own prompt. With ``all_members`` (the default) a question that
+    needs several memories is answered from every member the search found,
+    past ``k``, as an agent's search returns them; without it, from the first
+    ``k``. The recall figures and the row's ``memories`` keep to the depth
+    either way."""
     ks = sorted(set(ks or [k]) | {k})
     depth = max(DEPTH, *ks)
     store = ingested.store
     started = time.perf_counter()
     with api_usage.stage(search_stage):
-        results = store.search(question.question, user_id=BENCH_USER, limit=depth,
-                               evidence=False)
+        found = store.search(question.question, user_id=BENCH_USER, limit=depth,
+                             evidence=False)
     ms = (time.perf_counter() - started) * 1000
-    results = results[:depth]
+    results = found[:depth]
     units = [ingested.units_of(r.memory, question.level) for r in results]
     row: dict[str, Any] = {
         "conversation": ingested.conversation.conv_id, "qid": question.qid,
@@ -1210,18 +1708,39 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
     for at in KS:
         row[f"recall@{at}"] = evidence_recall(units, question.evidence, at)
     row["mrr"] = reciprocal_rank(units, question.evidence)
-    row.update(search_signals(store, question.question, results))
+    row.update(search_signals(store, question.question, found))
     if answer_llm is None:
         return row
     if correction is not None:
         row["audit"] = {key: correction.get(key) for key in ("error_type", "correct_answer")}
-    answers: dict[int, dict[str, Any]] = {}
-    compared: dict[int, dict[str, Any]] = {}
+    # the entities the question names, described as an agent's context describes them
+    described: list[Any] = []
+    if descriptions:
+        with api_usage.stage("describe"):
+            described = store.described_entities(
+                question.question, user_id=BENCH_USER,
+                token_budget=description_budget(CONTEXT_TOKENS))
+    row["described"] = [entity.name for entity in described]
+    # each variant's evidence budget (None: the store's own), as its answer stage names it
+    budgets = {"answer": None}
+    if not use_context and (compare_evidence_tokens is not None
+                            or compare_answer_llm is not None):
+        budgets["answer:compared"] = compare_evidence_tokens
+    # each variant's model: the compared answer's own where one is given
+    writers = {"answer": answer_llm, "answer:compared": compare_answer_llm or answer_llm}
+    # an agent's context at each k, as the product builds it from a search of that
+    # limit, once for each budget; turn search's judge calls count with the search
+    wanted = [k] if use_context else ks
+    with api_usage.stage(search_stage):
+        built = {(budget, at): store.context_from(
+                     question.question, at_k(found, at, every=all_members), user_id=BENCH_USER,
+                     token_budget=CONTEXT_TOKENS, entities=described, evidence_tokens=budget)
+                 for budget in dict.fromkeys(budgets.values()) for at in wanted}
+    contexts = {(name, at): built[(budget, at)] for name, budget in budgets.items()
+                for at in wanted}
     if use_context:
-        with api_usage.stage(search_stage):
-            context = store.reconstruct_context(question.question, user_id=BENCH_USER, limit=k,
-                                                token_budget=CONTEXT_TOKENS)
-        in_context = [store.get(mid) for mid in context.memory_ids]
+        context = contexts[("answer", k)]
+        in_context = [store.get(mid) for mid in context.context.memory_ids]
         row["context_recall"] = evidence_recall(
             [ingested.units_of(m, question.level) for m in in_context if m],
             question.evidence, len(in_context))
@@ -1230,54 +1749,48 @@ def ask(ingested: Ingested, question: Question, *, k: int = 10, answer_llm: LLM 
             record: dict[str, Any] = {"k": k}
             try:
                 record["prediction"] = answer_question(
-                    answer_llm, question, context.text or "Memories: (none found)")
+                    answer_llm, question, context.context.text or "Memories: (none found)")
             except Exception as exc:  # one failed call must not end a long run
                 record["prediction"], record["answer_error"] = "", str(exc)[:300]
             record["answer_seconds"] = round(time.perf_counter() - started, 3)
-            answers[k] = record
+            done = {("answer", k): record}
+    elif pool is not None and len(contexts) > 1:
+        futures = {key: pool.submit(contextvars.copy_context().run, staged, key[0],
+                                    answer_with, writers[key[0]], question, context,
+                                    answer_prompt)
+                   for key, context in contexts.items()}
+        done = {key: future.result() for key, future in futures.items()}
     else:
-        top = [r.memory for r in results]
-        # the entities the question names, described as an agent's context describes them
-        described: list[Any] = []
-        if descriptions:
-            with api_usage.stage("describe"):
-                described = store.described_entities(question.question, user_id=BENCH_USER)
-        row["described"] = [entity.name for entity in described]
-        # each variant's evidence budget (None: the store's own), as its answer stage names it
-        budgets = {"answer": None}
-        if compare_evidence_tokens is not None or compare_answer_llm is not None:
-            budgets["answer:compared"] = compare_evidence_tokens
-        # each variant's model: the compared answer's own where one is given
-        writers = {"answer": answer_llm, "answer:compared": compare_answer_llm or answer_llm}
-        # the source turns of each k's memories, as a search of that depth chooses them,
-        # chosen once for each budget
-        with api_usage.stage(search_stage):
-            chosen = {(budget, at): store.evidence(question.question, results[:at],
-                                                   user_id=BENCH_USER, token_budget=budget)
-                      for budget in dict.fromkeys(budgets.values()) for at in ks}
-        turns = {(name, at): chosen[(budget, at)] for name, budget in budgets.items()
-                 for at in ks}
-        if pool is not None and len(turns) > 1:
-            futures = {key: pool.submit(contextvars.copy_context().run, staged, key[0],
-                                        answer_with, writers[key[0]], question, top[:key[1]],
-                                        answer_prompt, shown, described)
-                       for key, shown in turns.items()}
-            done = {key: future.result() for key, future in futures.items()}
-        else:
-            done = {key: staged(key[0], answer_with, writers[key[0]], question, top[:key[1]],
-                                answer_prompt, shown, described)
-                    for key, shown in turns.items()}
-        for key, record in done.items():
-            record["evidence"] = [ingested.turn_of_episode.get(t.episode_id, t.episode_id)
-                                  for t in turns[key]]
-        answers = {at: done[("answer", at)] for at in ks}
-        compared = {at: done[("answer:compared", at)] for at in ks
-                    if ("answer:compared", at) in done}
+        done = {key: staged(key[0], answer_with, writers[key[0]], question, context,
+                            answer_prompt)
+                for key, context in contexts.items()}
+    for key, record in done.items():
+        context = contexts[key]
+        record["evidence"] = [ingested.turn_of_episode.get(t.episode_id, t.episode_id)
+                              for t in context.evidence]
+        record["excerpt_turns"] = [ingested.turn_of_episode.get(t.episode_id, t.episode_id)
+                                   for t in context.excerpts]
+        record["turn_search"] = turn_search_record(
+            context, None if use_context else answer_prompt)
+        if KEEP_CONTEXT and (context.turn_search.get("excerpts") or []):
+            record["turn_search_excerpts"] = kept_excerpts(store, context.turn_search)
+        if KEEP_CONTEXT and KEEP_EVIDENCE_TOKENS:
+            shown = [r.memory for r in context.results]
+            record["context_lines_evidence"] = {
+                str(budget): [str(line) for line in context_lines(
+                    context.entities, shown,
+                    store.evidence(question.question, context.results, user_id=BENCH_USER,
+                                   token_budget=budget))]
+                for budget in KEEP_EVIDENCE_TOKENS}
+    answers: dict[int, dict[str, Any]] = {at: done[("answer", at)] for at in wanted}
+    compared: dict[int, dict[str, Any]] = {at: done[("answer:compared", at)] for at in wanted
+                                           if ("answer:compared", at) in done}
     everything: dict[Any, dict[str, Any]] = {**answers}
     everything.update({("compared", at): record for at, record in compared.items()})
-    with api_usage.stage("judge"):
-        judge_answers(everything, question, judge, judge_runs, pool, correction,
-                      stages={("compared", at): "judge:compared" for at in compared})
+    if not CONTEXTS_ONLY:
+        with api_usage.stage("judge"):
+            judge_answers(everything, question, judge, judge_runs, pool, correction,
+                          stages={("compared", at): "judge:compared" for at in compared})
     row["answer_k"] = answers[k]["k"]
     row.update({key: answers[k][key] for key in ANSWER_FIELDS if key in answers[k]})
     row["answers"] = {str(at): answer for at, answer in answers.items()}
@@ -1341,14 +1854,30 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     category 5, ``ABSTAIN_CATEGORIES``), as the published LoCoMo results do.
     With several judge runs a row's ``judge`` is its mean verdict, and
     ``judge_runs`` holds each run's share right with ``judge_std`` their
-    sample standard deviation."""
+    sample standard deviation.
+
+    For LongMemEval's rows (level "session") the tables also have the two
+    other numbers of the official print_qa_metrics.py: a last row
+    "abstention" for the questions whose right answer is that the haystack
+    does not contain it (these questions are also in their types' rows and
+    in the overall), and the overall's ``judge_task_averaged``, the mean of
+    the types' judge scores."""
     groups: dict[tuple[Any, str], list[dict[str, Any]]] = {}
     for row in rows:
         groups.setdefault((row["category"], row["category_name"]), []).append(row)
     order = sorted(groups, key=lambda key: (not isinstance(key[0], int), str(key[0]).zfill(6)))
     scored = [r for r in rows if r.get("category_name") not in ABSTAIN_CATEGORIES]
-    return {"by_category": [_summary(c, n, groups[(c, n)]) for c, n in order],
-            "overall": _summary("all", "overall", scored)}
+    tables = {"by_category": [_summary(c, n, groups[(c, n)]) for c, n in order],
+              "overall": _summary("all", "overall", scored)}
+    if any(r.get("level") == "session" for r in rows):
+        types = [entry["judge"] for entry in tables["by_category"]
+                 if entry.get("judge") is not None]
+        if types:
+            tables["overall"]["judge_task_averaged"] = round(statistics.mean(types), 4)
+        abstained = [r for r in rows if r.get("abstain")]
+        if abstained:
+            tables["by_category"].append(_summary("abstention", "abstention", abstained))
+    return tables
 
 
 def markdown_table(tables: dict[str, Any]) -> str:
@@ -1362,6 +1891,8 @@ def markdown_table(tables: dict[str, Any]) -> str:
                   else f"{row[m]:.3f}" for m in metrics]
         cells.append("-" if row.get("search_ms") is None else f"{row['search_ms']:.1f}")
         lines.append("| " + " | ".join(cells) + " |")
+    if tables["overall"].get("judge_task_averaged") is not None:
+        lines.append(f"\njudge, task-averaged: {tables['overall']['judge_task_averaged']:.3f}")
     return "\n".join(lines)
 
 
@@ -1512,10 +2043,108 @@ def store_stats(store: MemoryStore, conversation: Conversation) -> dict[str, Any
     speakers = {speaker: sorted((store.backend.count_entity_memories(e.id) for e in entities
                                  if name_of(e) == speaker.strip().lower()), reverse=True)
                 for speaker in conversation.speakers}
+    memories = store.get_all(user_id=BENCH_USER, limit=1_000_000)
+    with_questions = sum(1 for mid, rows in store.backend.questions_of(
+        [m.id for m in memories]).items() if rows)
+    entities_asked = sum(1 for rows in store.backend.entity_questions_of(
+        [e.id for e in entities]).values() if rows)
+    owner = store.owner_entity(BENCH_USER)
     return {"entities": len(entities), "same_name_entities": sum(shared.values()),
             "same_name_groups": len(shared),
             "open_proposals": len(store.backend.list_proposals(scope, limit=1_000_000)),
-            "speaker_entities": speakers}
+            "speaker_entities": speakers,
+            "owner": owner.name if owner is not None else None,
+            "memories_with_questions": with_questions,
+            "entities_with_questions": entities_asked}
+
+
+#: The stage the entity question writer's calls are counted under.
+ENTITY_QUESTIONS_STAGE = "entity_questions"
+
+#: The stage the description writer's calls for the entity questions are counted under.
+ENTITY_DESCRIPTIONS_STAGE = "entity_descriptions"
+
+#: Hubs related to the owner described at most for one question's store.
+DESCRIBE_CAP = 20
+
+#: Store counts copied into each of its questions' rows.
+ROW_STORE_FIELDS = ("owner", "memories_with_questions", "entities_with_questions",
+                    "entities_described")
+
+
+def describe_related_hubs_step(store: MemoryStore, *, cap: int | None = None,
+                               log: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """With ``retrieval.entity_questions`` on, a description for each hub
+    related to the owner that has none yet, so the entity question writer
+    has something to ask from. Memry's own description writer writes it
+    (``MemoryStore._refresh_entity_description``, the one an opened entity
+    and a question about it use). A hub with fewer than
+    ``DESCRIPTION_MIN_MEMORIES`` memories gets no description, so it is not
+    taken. The most remembered hubs go first, at most ``cap``; the rest are
+    counted in "skipped_by_cap" and logged. One call a hub, counted under
+    ``ENTITY_DESCRIPTIONS_STAGE``; a call refused at a cap ends the run.
+    Off, no call and {"skipped": ...}. ``cap`` defaults to ``DESCRIBE_CAP``."""
+    if not store.config.retrieval.entity_questions:
+        return {"skipped": "retrieval.entity_questions is off"}
+    cap = DESCRIBE_CAP if cap is None else cap
+    owner = store.owner_entity(BENCH_USER)
+    if owner is None:
+        return {"skipped": "no owner"}
+    related = {relation.object if relation.subject == owner.id else relation.subject
+               for relation in store.backend.relations_of([owner.id])} - {owner.id}
+    due: list[tuple[int, str]] = []
+    for entity_id in sorted(related):
+        entity = store.backend.get_entity(entity_id)
+        if (entity is None or entity.merged_into or entity.description
+                or not store._is_hub(entity_id)):
+            continue
+        memories = store.backend.count_entity_memories(entity_id)
+        if memories >= DESCRIPTION_MIN_MEMORIES:
+            due.append((memories, entity_id))
+    due.sort(key=lambda item: (-item[0], item[1]))
+    taken = due[: max(int(cap), 0)]
+    skipped = len(due) - len(taken)
+    if skipped and log:
+        log(f"  entity descriptions: {skipped} of {len(due)} hubs skipped by the cap of {cap}")
+    described = 0
+    with api_usage.stage(ENTITY_DESCRIPTIONS_STAGE):
+        for _, entity_id in taken:
+            entity = store._refresh_entity_description(entity_id)
+            if entity is not None and entity.description:
+                described += 1
+    return {"due": len(due), "calls": len(taken) if store.llm.available else 0,
+            "described": described, "skipped_by_cap": skipped}
+
+
+def write_entity_questions_step(store: MemoryStore) -> dict[str, Any]:
+    """With ``retrieval.entity_questions`` on, the store's entity questions,
+    written once for the loaded haystack (``MemoryStore.write_entity_questions``),
+    its calls counted under ``ENTITY_QUESTIONS_STAGE``. A call refused at a
+    cap (``api_usage.CapReached``) ends the run as any other. Off, no call
+    and {"skipped": ...}. The writer asks only about described entities
+    related to the owner; a store loaded just now has no description yet,
+    so the runner describes them first (``describe_related_hubs_step``)."""
+    if not store.config.retrieval.entity_questions:
+        return {"skipped": "retrieval.entity_questions is off"}
+    with api_usage.stage(ENTITY_QUESTIONS_STAGE):
+        return store.write_entity_questions(user_id=BENCH_USER)
+
+
+def code_version() -> dict[str, Any] | None:
+    """The commit and branch of the code this runs from, and whether its
+    tracked files have uncommitted changes, so a results file says what
+    ran; None where git cannot say."""
+    def git(*args: str) -> str | None:
+        try:
+            return subprocess.run(["git", *args], cwd=str(HERE.parent), capture_output=True,
+                                  text=True, timeout=10, check=True).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+    commit = git("rev-parse", "HEAD")
+    if not commit:
+        return None
+    return {"commit": commit, "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+            "dirty": bool(git("status", "--porcelain", "--untracked-files=no"))}
 
 
 def _qualname(function: Any) -> str | None:
@@ -1599,7 +2228,9 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                   evidence_tokens: int | None = None,
                   compare_evidence_tokens: int | None = None,
                   compare_answer_llm: LLM | None = None,
-                  descriptions: bool = True) -> dict[str, Any]:
+                  descriptions: bool = True, reuse_stores: bool = False,
+                  all_members: bool = True,
+                  question_keys: str = "config") -> dict[str, Any]:
     """Ingest each conversation into a fresh store and ask its questions once
     per pass of ``search_deciders`` (name -> the decision provider the store
     asks with, given it once the conversation is loaded; default: the store's
@@ -1618,8 +2249,17 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
     with the turns chosen within that many tokens, and ``compare_answer_llm``
     with that model (``ask``); ``descriptions``
     false leaves out the descriptions of the entities a question names, for
-    an ablation. Returns {config, stores, passes, tables (the first
-    pass's), rows, warnings, notes, complete}. A call refused at a cap
+    an ablation. ``reuse_stores`` opens a conversation's store and trace
+    that an earlier load kept in ``store_dir`` instead of loading
+    (``read_trace``); one not kept is loaded and kept. ``all_members``
+    answers a question needing several memories from every member the
+    search found (``ask``). ``question_keys`` "on" or "both" has the store
+    write question keys at ingest (``retrieval.question_keys``; "config"
+    keeps the store's setting); "both" then asks every pass twice, once with
+    the keys read and once without ("<pass>:text-only"), from the one store,
+    so the keys' gain is measured on the same memories. Returns {config,
+    stores, passes, tables (the first pass's), rows, warnings, notes,
+    complete}. A call refused at a cap
     (``api_usage.CapReached``) ends the run where it is: what was done is
     kept, "complete" is false and "stopped" says where."""
     embedder = embedder or HashEmbedder(256)
@@ -1627,6 +2267,16 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
     passes = search_deciders or {"store": search_decider("store")}
     if full_context:
         passes = {"full-context": search_decider("store")}
+    if question_keys not in ("config", "on", "both"):
+        raise ValueError(f"question_keys {question_keys!r}: config, on or both")
+    # which passes read the question keys; "both" adds a text-only twin of each
+    reads_keys: dict[str, bool | None] = {name: None for name in passes}
+    if question_keys == "both" and not full_context:
+        reads_keys = {}
+        for name, factory in list(passes.items()):
+            reads_keys[name] = True
+            passes[f"{name}:text-only"] = factory
+            reads_keys[f"{name}:text-only"] = False
     ks = sorted(set(ks or [k]) | {k})
     corrections = corrections or {}
     pool = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
@@ -1664,49 +2314,84 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
             continue
         if mode == "verbatim" and hasattr(embedder, "warm"):
             embedder.warm([t.text for t in conv.turns] + [q.question for q in asked])
+        kept = pathlib.Path(store_dir) / f"{conv.conv_id}.sqlite" if store_dir else None
+        trace = kept.parent / f"{conv.conv_id}.trace.json" if kept else None
+        reused = bool(reuse_stores and not store_factory and kept and kept.exists()
+                      and trace.exists())
+        if reuse_stores and not store_factory and kept and kept.exists() and not reused:
+            # a store kept by a load before traces existed is not replaced by accident
+            raise SystemExit(f"{kept}: a store with no trace beside it; --reuse-stores "
+                             f"cannot open it and does not replace it. Load into another "
+                             f"--store-dir, or keep a trace with the load.")
         if store_factory:
             store = store_factory()
         else:
-            db_path = fresh_db(pathlib.Path(store_dir) / f"{conv.conv_id}.sqlite") \
-                if store_dir else ":memory:"
+            db_path = str(kept) if reused else fresh_db(kept) if kept else ":memory:"
             store = make_store(mode, embedder, decider=decider, db_path=db_path)
         if evidence_tokens is not None:
             store.config.retrieval.evidence_tokens = evidence_tokens
+        if question_keys in ("on", "both"):
+            store.config.retrieval.question_keys = True
+        entry["question_keys"] = store.config.retrieval.question_keys
+        entry["coverage_audit"] = store.config.llm.coverage_audit
         entry["decider"] = store.decider.name
+        entry["decider_model"] = getattr(store.decider, "model", None)
+        entry["text_model"] = getattr(store.llm, "model", None) if store.llm.available else None
+        entry["text_effort"] = getattr(store.llm, "effort", None) if store.llm.available else None
         entry["evidence_tokens"] = store.config.retrieval.evidence_tokens
+        entry["turn_search"] = turn_search_settings(store)
         try:
             with api_usage.labelled(conv.conv_id):
                 if mode == "extract" and not store.llm.available:
                     raise SystemExit("--ingest extract needs a configured LLM "
                                      "(OPENAI_API_KEY, ANTHROPIC_API_KEY or MEMRY_LLM_PROVIDER)")
-                with api_usage.stage("ingest"):
-                    ingested = ingest(store, conv, mode=mode, unit=unit, when=when,
-                                      dataset=dataset)
+                if reused:
+                    ingested = read_trace(trace, store, conv, embedder)
+                    entry["reused"] = True
+                else:
+                    if trace is not None and trace.exists():
+                        trace.unlink()  # a trace stands for a whole load only
+                    with api_usage.stage("ingest"):
+                        ingested = ingest(store, conv, mode=mode, unit=unit, when=when,
+                                          dataset=dataset)
+                    if trace is not None:
+                        write_trace(trace, ingested, embedder)
+                entry["entity_questions"] = store.config.retrieval.entity_questions
+                entry["entities_described"] = 0
+                if dataset == "longmemeval" and not reused:
+                    entry["entity_descriptions"] = describe_related_hubs_step(store, log=log)
+                    entry["entities_described"] = entry["entity_descriptions"].get("described", 0)
+                    entry["entity_question_writer"] = write_entity_questions_step(store)
                 entry.update(memories=len(store.get_all(user_id=BENCH_USER, limit=1_000_000)),
                              ingest_seconds=round(ingested.seconds, 2),
                              actions=dict(ingested.actions), **store_stats(store, conv))
+                counts = {key: entry[key] for key in ROW_STORE_FIELDS}
                 warnings.extend(ingested.warnings)
                 for name, factory in passes.items():
-                    decider, kept = factory(), store.decider
-                    if decider is not None:
-                        store.decider = decider
+                    asked_with, kept = factory(), store.decider
+                    if asked_with is not None:
+                        store.decider = asked_with
+                    kept_keys = store.config.retrieval.question_keys
+                    if reads_keys.get(name) is not None:
+                        store.config.retrieval.question_keys = bool(reads_keys[name])
                     started = time.perf_counter()
                     try:
                         for question in asked:
-                            rows.append({"search_decider": name, **ask(
+                            rows.append({"search_decider": name, **counts, **ask(
                                 ingested, question, k=k, answer_llm=answer_llm, judge=judge,
                                 use_context=use_context, answer_prompt=answer_prompt,
                                 search_stage=f"search:{name}", ks=ks, judge_runs=judge_runs,
                                 pool=pool, correction=corrections.get(question.qid),
                                 compare_evidence_tokens=compare_evidence_tokens,
                                 compare_answer_llm=compare_answer_llm,
-                                descriptions=descriptions)})
+                                descriptions=descriptions, all_members=all_members)})
                     finally:
                         entry[f"seconds_{name}"] = round(time.perf_counter() - started, 2)
-                        if decider is not None:
+                        store.config.retrieval.question_keys = kept_keys
+                        if asked_with is not None:
                             store.decider = kept
-                            entry[f"decider_failures_{name}"] = getattr(decider, "failures", 0)
-                            decider.close()
+                            entry[f"decider_failures_{name}"] = getattr(asked_with, "failures", 0)
+                            asked_with.close()
         except api_usage.CapReached as exc:
             stopped = f"{conv.conv_id}: {exc}"
             entry["stopped"] = str(exc)
@@ -1736,6 +2421,7 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                    "categories": sorted(categories) if categories else None,
                    "decider": decider, "full_context": full_context,
                    "audited_questions": len(corrections),
+                   "reuse_stores": reuse_stores, "all_members": all_members,
                    "conversations": len(conversations), "questions_per_conversation": questions,
                    "answer_llm": getattr(answer_llm, "name", None) if answer_llm else None,
                    "answer_model": getattr(answer_llm, "model", None) if answer_llm else None,
@@ -1743,11 +2429,13 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
                    "judge": getattr(judge, "__qualname__", repr(judge)),
                    "judge_function": _qualname(judge),
                    "search_deciders": names,
-                   "context": use_context, "when": when, "evidence_tokens": evidence_tokens,
+                   "context": use_context, "context_tokens": CONTEXT_TOKENS,
+                   "when": when, "evidence_tokens": evidence_tokens,
                    "compare_evidence_tokens": compare_evidence_tokens,
                    "compare_answer_model": (getattr(compare_answer_llm, "model", None)
                                             if compare_answer_llm else None),
                    "descriptions": descriptions,
+                   "question_keys": question_keys,
                    "locomo_categories": LOCOMO_CATEGORIES if dataset == "locomo" else None},
         "stores": stores,
         "passes": tables,
@@ -1758,6 +2446,29 @@ def run_benchmark(conversations: list[Conversation], *, dataset: str, mode: str 
         "complete": stopped is None,
         "stopped": stopped,
     }
+
+
+def turn_search_settings(store: MemoryStore) -> dict[str, Any]:
+    """The store's turn search settings, as a results file keeps them: on
+    or off, its three triggers' bars, the keep bar and its tokens."""
+    cfg = store.config.retrieval
+    return {"on": cfg.turn_search, "bar": cfg.turn_search_bar,
+            "several": cfg.turn_search_several, "complete": cfg.turn_search_complete,
+            "keep": cfg.turn_search_keep, "tokens": cfg.turn_search_tokens}
+
+
+def turn_search_text(settings: Any) -> str:
+    """Turn search settings as a line of the printed metadata reads them:
+    "on (bar 0.8, several 0.5, complete 0.7)", "off", or each store's when
+    they differ."""
+    if isinstance(settings, list):
+        return "; ".join(turn_search_text(each) for each in settings)
+    if not isinstance(settings, dict):
+        return str(settings)
+    if not settings.get("on"):
+        return "off"
+    return (f"on (bar {settings.get('bar')}, several {settings.get('several')}, "
+            f"complete {settings.get('complete')})")
 
 
 def merge_results(parts: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1812,6 +2523,363 @@ def load_corrections(path: str | os.PathLike[str],
     return out
 
 
+# --------------------------------------------------------------------------
+# what a run was: <out>.meta.json
+
+
+#: The prices read by default (--prices): USD per million tokens per model.
+PRICES = HERE / "prices.json"
+#: The provider a call is paid to, by the host it went to.
+PROVIDERS = {"api.openai.com": "openai", "api.typesafe.ai": "jev"}
+
+
+def meta_path(out: str | os.PathLike[str]) -> pathlib.Path:
+    """Where a results file's metadata goes: beside it, ``x.json`` ->
+    ``x.meta.json`` (another name gets ``.meta.json`` added)."""
+    out = pathlib.Path(out)
+    stem = out.name[:-len(".json")] if out.name.endswith(".json") else out.name
+    return out.with_name(f"{stem}.meta.json")
+
+
+def file_sha256(path: str | os.PathLike[str] | None) -> str | None:
+    if not path:
+        return None
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def memry_commit(root: str | os.PathLike[str] = HERE.parent) -> dict[str, Any]:
+    """The commit the code runs from, its branch, and the tracked files that
+    differ from it (``changed``); None each where git cannot say."""
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                              timeout=30, check=True).stdout.strip()
+
+    try:
+        commit, branch = git("rev-parse", "HEAD"), git("rev-parse", "--abbrev-ref", "HEAD")
+        changed = [line[3:] for line in git("status", "--porcelain",
+                                            "--untracked-files=no").splitlines()]
+    except (OSError, subprocess.SubprocessError):
+        return {"commit": None, "branch": None, "changed": None}
+    return {"commit": commit, "branch": branch, "changed": changed}
+
+
+def load_prices(path: str | os.PathLike[str]) -> dict[str, Any]:
+    """A prices file: {"models": {name: {"input", "cached_input", "output",
+    "retrieved", ...}}, "aliases": {name asked for: name priced}}, in USD per
+    million tokens."""
+    data = _read_json(path)
+    if not isinstance(data, dict) or not isinstance(data.get("models"), dict):
+        raise FormatError(f"{path}: expected {{\"models\": {{name: prices}}}}")
+    return data
+
+
+def price_of(model: str | None, prices: dict[str, Any]) -> tuple[str | None, dict | None]:
+    """The name a model is priced under and its prices: the model itself,
+    else its alias; (None, None) when the file has neither."""
+    models = prices.get("models") or {}
+    name = model if model in models else (prices.get("aliases") or {}).get(model or "")
+    return (name, models[name]) if name in models else (None, None)
+
+
+def dollars(price: dict[str, Any] | None, input_tokens: int | None, cached_tokens: int | None,
+            output_tokens: int | None) -> float | None:
+    """USD for these tokens: input tokens less the cached ones at "input",
+    cached ones at "cached_input" ("input" where none is given), output
+    tokens at "output" (none given: not priced, as Jev's single price is
+    applied to input tokens only). Reasoning tokens are part of the output
+    tokens. None without a price."""
+    if price is None:
+        return None
+    total_in = input_tokens or 0
+    cached = min(cached_tokens or 0, total_in)
+    rate_in = float(price.get("input") or 0.0)
+    rate_cached = float(price.get("cached_input", rate_in))
+    rate_out = float(price.get("output") or 0.0)
+    return ((total_in - cached) * rate_in + cached * rate_cached
+            + (output_tokens or 0) * rate_out) / 1_000_000
+
+
+def _iso(seconds: float | None) -> str | None:
+    if seconds is None:
+        return None
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="seconds")
+
+
+def ledger_usage(path: str | os.PathLike[str], prices: dict[str, Any]) -> dict[str, Any]:
+    """Calls, tokens and dollars of a whole ledger (``api_usage``): per stage,
+    per model and per provider, the models the replies named
+    (``served_models``), and the first and last call. A resumed run's ledger
+    holds every segment of it, so this is the run's whole spend."""
+    db = sqlite3.connect(str(path), timeout=120)
+    try:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(calls)")}
+        served = "served_model" if "served_model" in columns else "NULL"
+        grouped = db.execute(
+            "SELECT grp, host, model, stage, count(*), sum(ok = 0), sum(input_tokens), "
+            "sum(output_tokens), sum(cached_tokens), sum(reasoning_tokens), sum(seconds) "
+            "FROM calls GROUP BY grp, host, model, stage ORDER BY grp, model, stage").fetchall()
+        named = db.execute(f"SELECT model, {served}, count(*) FROM calls GROUP BY 1, 2 "
+                           "ORDER BY 1, 2").fetchall()
+        first, last = db.execute("SELECT min(started), max(started + seconds) FROM calls"
+                                 ).fetchone()
+    finally:
+        db.close()
+    by_stage: list[dict[str, Any]] = []
+    by_model: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for grp, host, model, stage, calls, failed, tin, tout, tcached, treason, secs in grouped:
+        priced_as, price = price_of(model, prices)
+        row = {"grp": grp, "provider": PROVIDERS.get(host or "", "jev" if grp == "jev" else host),
+               "model": model, "stage": stage, "calls": calls, "failed": failed or 0,
+               "input_tokens": tin or 0, "output_tokens": tout or 0, "cached_tokens": tcached or 0,
+               "reasoning_tokens": treason or 0, "seconds": round(secs or 0.0, 3)}
+        cost = dollars(price, tin, tcached, tout)
+        by_stage.append({**row, "usd": None if cost is None else round(cost, 6)})
+        total = by_model.setdefault((grp, row["provider"], model), {
+            "grp": grp, "provider": row["provider"], "model": model, "priced_as": priced_as,
+            "price": price, "calls": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0,
+            "cached_tokens": 0, "reasoning_tokens": 0, "usd": None if price is None else 0.0})
+        for key in ("calls", "failed", "input_tokens", "output_tokens", "cached_tokens",
+                    "reasoning_tokens"):
+            total[key] += row[key]
+        if cost is not None:
+            total["usd"] += cost
+    models = list(by_model.values())
+    providers: dict[str, float] = {}
+    for entry in models:
+        if entry["usd"] is not None:
+            entry["usd"] = round(entry["usd"], 6)
+            providers[entry["provider"]] = providers.get(entry["provider"], 0.0) + entry["usd"]
+    calls: dict[str, int] = {}
+    for entry in models:
+        calls[entry["grp"]] = calls.get(entry["grp"], 0) + entry["calls"]
+    served_models = [{"model": model, "served_model": name, "calls": count}
+                     for model, name, count in named]
+    return {
+        "ledger": str(path),
+        "calls": {**calls, "all": sum(calls.values())},
+        "first_call": _iso(first), "last_call": _iso(last),
+        "span_seconds": round(last - first, 1) if first is not None and last is not None else None,
+        "usd": {**{name: round(value, 6) for name, value in sorted(providers.items())},
+                "total": round(sum(providers.values()), 6)},
+        "unpriced": [{"model": e["model"], "calls": e["calls"]} for e in models
+                     if e["usd"] is None],
+        "by_model": models,
+        "by_stage": by_stage,
+        "served_models": served_models,
+    }
+
+
+def _percentile(values: list[float], at: float) -> float | None:
+    return round(float(np.percentile(values, at)), 3) if values else None
+
+
+def _answer_accuracy(table: dict[str, Any], **about: Any) -> dict[str, Any]:
+    keep = ("n", "judge", "judge_std", "judge_runs", "judge_corrected", "judge_clean",
+            "judge_task_averaged", "f1", "context_tokens")
+    return {**about, **{key: table[key] for key in keep if key in table}}
+
+
+def run_headline(result: dict[str, Any]) -> dict[str, Any]:
+    """The numbers a run is cited by, from its first question pass: J (the
+    judge's share right) of each answer model at the headline k, recall@5,
+    10 and 20, MRR, the median and 95th percentile of a search's
+    milliseconds, and the mean context tokens of an answer. The questions
+    scored are those of the tables' overall row."""
+    config = result["config"]
+    part = (result.get("passes") or [{"search_decider": None, "tables": result["tables"]}])[0]
+    overall = part["tables"]["overall"]
+    name = part.get("search_decider")
+    rows = [r for r in result["rows"] if r.get("search_decider", name) == name]
+    scored = [r for r in rows if r.get("category_name") not in ABSTAIN_CATEGORIES]
+    k = config.get("k")
+    evidence = sorted({s.get("evidence_tokens") for s in result.get("stores") or []
+                       if s.get("evidence_tokens") is not None})
+    store_budget = config.get("evidence_tokens")
+    if store_budget is None and len(evidence) == 1:
+        store_budget = evidence[0]
+    answers = []
+    if any("prediction" in r for r in rows):
+        model = config.get("answer_model") or config.get("answer_llm")
+        answers.append(_answer_accuracy(overall, answers="answer", model=model, k=k,
+                                        evidence_tokens=store_budget))
+        compared = (part.get("compared_by_k") or {}).get(str(k))
+        if compared:
+            budget = config.get("compare_evidence_tokens")
+            answers.append(_answer_accuracy(
+                compared["overall"], answers="answer:compared",
+                model=config.get("compare_answer_model") or model, k=k,
+                evidence_tokens=store_budget if budget is None else budget))
+    times = [r["search_ms"] for r in scored if r.get("search_ms") is not None]
+    return {
+        "pass": name,
+        "answers": answers,
+        "recall@5": overall.get("recall@5"), "recall@10": overall.get("recall@10"),
+        "recall@20": overall.get("recall@20"), "mrr": overall.get("mrr"),
+        "search_ms_p50": _percentile(times, 50), "search_ms_p95": _percentile(times, 95),
+        "context_tokens_mean": overall.get("context_tokens"),
+    }
+
+
+def _seen(stores: list[dict[str, Any]], key: str) -> Any:
+    """A store setting as the stores had it: one value when all agree, the
+    list of values when they differ, None without stores."""
+    values: list[Any] = []
+    for store in stores:
+        if store.get(key) not in values:
+            values.append(store.get(key))
+    return values[0] if len(values) == 1 else (values or None)
+
+
+def run_meta(result: dict[str, Any], args: argparse.Namespace, *, argv: list[str],
+             dataset_path: str | os.PathLike[str], out: str | os.PathLike[str],
+             started: float, finished: float, prices: dict[str, Any],
+             prices_path: str | os.PathLike[str]) -> dict[str, Any]:
+    """What a run was and what it gave, for ``<out>.meta.json``: the data
+    and its sha256, the questions and how they were chosen, the memry commit,
+    the settings, the times, the ledger's calls, tokens and dollars at
+    ``prices``, and the headline numbers (``run_headline``)."""
+    config, stores = result["config"], result.get("stores") or []
+    headline = run_headline(result)
+    part = (result.get("passes") or [{}])[0]
+    asked = sum(1 for r in result["rows"]
+                if r.get("search_decider", part.get("search_decider")) == part.get("search_decider"))
+    answer_models = [m for m in (config.get("answer_model") or config.get("answer_llm"),
+                                 config.get("compare_answer_model")) if m]
+    meta: dict[str, Any] = {
+        "dataset": result.get("dataset"),
+        "file": str(dataset_path),
+        "file_sha256": file_sha256(dataset_path),
+        "questions": {
+            "asked": asked,
+            "scored": (part.get("tables") or result["tables"])["overall"]["n"],
+            "conversations": len(stores),
+            "selection": {
+                "limit": args.limit, "sample": args.sample, "seed": args.seed,
+                "categories": sorted(args.category_set) if args.category_set else None,
+                "questions_per_conversation": args.questions,
+                "conversation": args.conversation,
+                "variant": args.variant if args.dataset == "longmemeval" else None,
+                "conversation_ids": [s.get("conversation") for s in stores],
+            },
+        },
+        "memry": memry_commit(),
+        "config": {
+            "ingest": config.get("ingest"), "extract_unit": config.get("extract_unit"),
+            "embedder": config.get("embedder"),
+            "text_model": _seen(stores, "text_model"), "text_effort": _seen(stores, "text_effort"),
+            "decider": args.decider, "decider_in_stores": _seen(stores, "decider"),
+            "decider_model": _seen(stores, "decider_model"),
+            "search_deciders": config.get("search_deciders"),
+            "k": config.get("k"), "ks": config.get("ks"), "depth": config.get("depth"),
+            "evidence_tokens": config.get("evidence_tokens"),
+            "evidence_tokens_in_stores": _seen(stores, "evidence_tokens"),
+            "compare_evidence_tokens": config.get("compare_evidence_tokens"),
+            "answer_models": answer_models,
+            "answer_prompt": config.get("answer_prompt"),
+            "judge": config.get("judge_function") or config.get("judge"),
+            "judge_runs": config.get("judge_runs"),
+            "audit": ({"file": args.audit, "sha256": file_sha256(args.audit),
+                       "questions": config.get("audited_questions")} if args.audit else None),
+            "full_context": config.get("full_context"), "context": config.get("context"),
+            "context_tokens": config.get("context_tokens"),
+            "when": config.get("when"), "descriptions": config.get("descriptions"),
+            "question_keys": args.question_keys,
+            "question_keys_in_stores": _seen(stores, "question_keys"),
+            "entity_questions_in_stores": _seen(stores, "entity_questions"),
+            "turn_search_in_stores": _seen(stores, "turn_search"),
+            "workers": args.workers, "jobs": args.jobs, "max_calls": args.caps or None,
+            "max_usd": args.max_usd,
+            "coverage_audit": args.coverage_audit,
+        },
+        "command": ["python", "-m", "evals.external_benchmarks", *argv],
+        "time": {"started": _iso(started), "finished": _iso(finished),
+                 "wall_seconds": round(finished - started, 1)},
+        "prices": {"file": str(prices_path), "sha256": file_sha256(prices_path),
+                   "retrieved": {name: entry.get("retrieved")
+                                 for name, entry in (prices.get("models") or {}).items()}},
+        "usage": (ledger_usage(args.usage_db, prices)
+                  if args.usage_db and pathlib.Path(args.usage_db).exists() else None),
+        "results": {**headline, "complete": result.get("complete"),
+                    "stopped": result.get("stopped")},
+        "out": str(out),
+    }
+    return meta
+
+
+def _number(value: Any, digits: int = 3) -> str:
+    return "-" if value is None else f"{value:.{digits}f}"
+
+
+def _listed(value: Any) -> str:
+    return ",".join(str(v) for v in value) if isinstance(value, list) else str(value)
+
+
+def meta_lines(meta: dict[str, Any]) -> list[str]:
+    """The metadata as the first lines of the printed results."""
+    config, results, usage = meta["config"], meta["results"], meta.get("usage")
+    memry = meta["memry"]
+    commit = (memry.get("commit") or "unknown")[:12]
+    if memry.get("changed"):
+        commit += f" with {len(memry['changed'])} changed files"
+    selection = meta["questions"]["selection"]
+    chosen = ", ".join(f"{key} {_listed(value)}" for key, value in selection.items()
+                       if value is not None and key != "conversation_ids") or "all"
+    lines = [
+        f"## run: {meta['dataset']}, {meta['questions']['scored']} questions scored of "
+        f"{meta['questions']['asked']} asked, {meta['questions']['conversations']} conversations"
+        f" ({chosen})",
+        f"data: {meta['file']} (sha256 {meta['file_sha256']})",
+        f"memry: {commit} on {memry.get('branch')}",
+        f"time: {meta['time']['started']} to {meta['time']['finished']}, "
+        f"{meta['time']['wall_seconds']:.0f} s",
+        f"config: ingest {config['ingest']}, text model {config['text_model']}, embedder "
+        f"{config['embedder']}, decider {_listed(config['decider_in_stores'] or config['decider'])}"
+        + (f" {_listed(config['decider_model'])}" if config["decider_model"] else "")
+        + f", k {config['k']} (ks {_listed(config['ks'])}), evidence tokens "
+        f"{_listed(config['evidence_tokens_in_stores'])}, question keys "
+        f"{config['question_keys_in_stores']}, entity questions "
+        f"{config['entity_questions_in_stores']}, descriptions {config['descriptions']}, "
+        f"turn search {turn_search_text(config.get('turn_search_in_stores'))}, context tokens "
+        f"{config.get('context_tokens')}",
+        f"answers: {', '.join(config['answer_models']) or 'none'}, prompt "
+        f"{config['answer_prompt']}; judge {config['judge']} x{config['judge_runs']}",
+    ]
+    for entry in results["answers"]:
+        lines.append(f"  J {_number(entry.get('judge'))} at k {entry['k']}: {entry['model']} "
+                     f"({entry['answers']}, evidence tokens {entry['evidence_tokens']}, "
+                     f"n {entry.get('n')}, context tokens {_number(entry.get('context_tokens'), 0)})")
+    lines.append(f"search: recall@5 {_number(results['recall@5'])}, recall@10 "
+                 f"{_number(results['recall@10'])}, recall@20 {_number(results['recall@20'])}, "
+                 f"p50 {_number(results['search_ms_p50'], 0)} ms, p95 "
+                 f"{_number(results['search_ms_p95'], 0)} ms, context tokens "
+                 f"{_number(results['context_tokens_mean'], 0)}")
+    if usage is None:
+        lines.append("usage: no ledger (--usage-db)")
+    else:
+        groups = ", ".join(f"{grp} {n}" for grp, n in usage["calls"].items() if grp != "all")
+        spend = ", ".join(f"{name} ${value:.4f}" for name, value in usage["usd"].items())
+        lines.append(f"usage: {usage['calls']['all']} calls ({groups or 'none'}), {spend}; "
+                     f"ledger {usage['ledger']}")
+        for entry in usage["by_model"]:
+            served = ", ".join(row["served_model"] for row in usage["served_models"]
+                               if row["model"] == entry["model"] and row["served_model"])
+            lines.append(f"  {entry['model']}: {entry['calls']} calls, {entry['input_tokens']} in "
+                         f"({entry['cached_tokens']} cached), {entry['output_tokens']} out, "
+                         + ("no price" if entry["usd"] is None else f"${entry['usd']:.4f}")
+                         + (f", served {served}" if served else ""))
+    lines.append(f"prices: {meta['prices']['file']}; meta: {meta_path(meta['out'])}")
+    if not results.get("complete", True):
+        lines.append(f"stopped: {results.get('stopped')}")
+    return lines
+
+
 def load(dataset: str, path: str | os.PathLike[str]) -> list[Conversation]:
     if dataset not in LOADERS:
         raise ValueError(f"dataset {dataset!r}: one of {', '.join(DATASETS)}")
@@ -1826,8 +2894,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--file", default=None,
                         help=f"the dataset file (relative paths start at ${DATA_ENV}); "
                              "default: the usual file name there")
-    parser.add_argument("--variant", default="s", choices=["s", "m", "oracle"],
-                        help="LongMemEval file: longmemeval_<variant>.json (default s)")
+    parser.add_argument("--variant", default=None,
+                        choices=["s", "m", "oracle", "100K", "500K", "1M"],
+                        help="LongMemEval file: longmemeval_<variant>.json (default s); "
+                             "BEAM size: beam_<variant>.json (default 100K)")
     parser.add_argument("--ingest", choices=INGEST_MODES, default="verbatim")
     parser.add_argument("--extract-unit", choices=EXTRACT_UNITS, default="session",
                         help="with --ingest extract: one save a session (default) or a turn")
@@ -1848,7 +2918,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "the configured one (default), none, or Jev (TYPESAFE_API_KEY)")
     parser.add_argument("--store-dir", default=None,
                         help="keep each conversation's store in <dir>/<conversation>.sqlite "
-                             "(default: in memory)")
+                             "with its trace (default: in memory, or <results dir>/stores "
+                             "with --results-dir)")
     parser.add_argument("--full-context", action="store_true",
                         help="answer from the whole conversation: no store, no search")
     parser.add_argument("--audit", default=None, metavar="ERRORS_JSON",
@@ -1859,15 +2930,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--export-mem0", default=None, metavar="PATH",
                         help="also write the headline answers as Mem0's per-question "
                              "results file (evals/mem0_judge.export_results)")
+    parser.add_argument("--write-selected", default=None, metavar="PATH",
+                        help="write the file's items of the questions selected (--sample, "
+                             "--seed, --limit, --conversation) to PATH as they are, and stop "
+                             "(LongMemEval): a small file for a run in several processes")
+    parser.add_argument("--export-longmemeval", default=None, metavar="PATH",
+                        help="also write the headline answers as the jsonl LongMemEval's "
+                             "evaluate_qa.py reads (and the compared answers to "
+                             "PATH.compared.jsonl, if any)")
     parser.add_argument("--limit", type=int, default=None,
-                        help="first N conversations (LoCoMo samples, LongMemEval questions)")
+                        help="first N conversations (LoCoMo samples, LongMemEval questions, "
+                             "BEAM chats)")
     parser.add_argument("--conversation", action="append", default=None, metavar="ID",
                         help="only this conversation (a LoCoMo sample_id, a LongMemEval "
                              "question_id); may be given several times")
     parser.add_argument("--questions", type=int, default=None,
                         help="first N questions of each conversation")
     parser.add_argument("--seed", type=int, default=None,
-                        help="shuffle the conversations with this seed before --limit")
+                        help="shuffle the conversations with this seed before --limit; "
+                             "with --sample, also the seed of the draw (default 0)")
+    parser.add_argument("--sample", type=int, default=None, metavar="N",
+                        help="N conversations of one question (LongMemEval) drawn in "
+                             "proportion to the question types, abstention questions apart "
+                             "(stratified_sample), before --seed's shuffle and --limit")
     parser.add_argument("--answer", action="store_true",
                         help="answer with the configured LLM and score F1, EM, contains, judge")
     parser.add_argument("--answer-model", default=None, metavar="MODEL",
@@ -1890,6 +2975,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="answer each question again from the same memory list with "
                              "this OpenAI chat model, kept under the row's answers_compared; "
                              "no further search")
+    parser.add_argument("--keep-context", action="store_true",
+                        help="keep the lines each answer was shown in its row "
+                             "(context_lines), to answer again from them later")
+    parser.add_argument("--reuse-stores", action="store_true",
+                        help="ask the questions again on the stores and traces kept in "
+                             "--store-dir, without loading; a conversation without them is "
+                             "loaded and kept")
+    parser.add_argument("--all-members", action=argparse.BooleanOptionalAction, default=True,
+                        help="answer a question that needs several memories from every "
+                             "member the search found, past the top k, as an agent's "
+                             "search returns them (default); --no-all-members answers "
+                             "from the top k only")
+    parser.add_argument("--keep-evidence-tokens", type=int, nargs="+", default=None,
+                        metavar="N",
+                        help="with --keep-context, also keep each answer's lines with the "
+                             "source turns chosen within N tokens instead, for the same "
+                             "memories and without turn search's turns "
+                             "(context_lines_evidence); no model call")
+    parser.add_argument("--context-tokens", type=int, default=None, metavar="N",
+                        help=f"the budget of each answer's context (default {CONTEXT_TOKENS}); "
+                             "1200 is what an agent gets through MCP by default")
+    parser.add_argument("--contexts-only", action="store_true",
+                        help="build and keep every answer's context (implies --keep-context), "
+                             "with turn search, but make no answering or judging call")
     parser.add_argument("--no-descriptions", action="store_true",
                         help="leave out the descriptions of the entities a question names "
                              "from the memory list (an ablation; default: shown, as an "
@@ -1902,6 +3011,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="what decides at question time: the store's provider (store, "
                              "the default), none, or Jev (TYPESAFE_API_KEY); given several "
                              "times, every question is asked once per value")
+    parser.add_argument("--coverage-audit", action="store_true",
+                        help="run the second pass after each save (llm.coverage_audit). It only writes a warning for the saving agent and changes no answer, so a benchmark skips it unless this is given")
+    parser.add_argument("--question-keys", choices=["config", "on", "both"], default="config",
+                        help="question keys (retrieval.question_keys): on writes them at "
+                             "ingest and reads them; both also asks every pass a second "
+                             "time without reading them (<pass>:text-only), from the same "
+                             "store; config keeps the store's setting (the default)")
     parser.add_argument("--when", choices=WHEN_POLICIES, default="never",
                         help="write metadata['when'] = session date on every new memory "
                              "without one of its own (always), or not (never, the default)")
@@ -1916,14 +3032,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-calls", action="append", default=None, metavar="GROUP=N",
                         help="stop before the call that would pass N calls of GROUP "
                              "(chat, embeddings, jev, other) in the ledger; needs --usage-db")
+    parser.add_argument("--max-usd", type=float, default=None, metavar="X",
+                        help="stop before a call when the whole ledger's spend at the prices "
+                             "of --prices is X dollars or more (with the earlier segments of "
+                             "a resumed run); needs --usage-db")
+    parser.add_argument("--prices", default=str(PRICES), metavar="PATH",
+                        help="USD per million tokens per model, for the dollars in "
+                             "<out>.meta.json (default: evals/prices.json)")
     parser.add_argument("--worker", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--out", default=None,
                         help=f"results file (default ${DATA_ENV}/results/<dataset>_<time>.json)")
     args = parser.parse_args(argv)
+    beam_sizes = ("100K", "500K", "1M")
+    if args.variant is None:
+        args.variant = "100K" if args.dataset == "beam" else "s"
+    elif (args.dataset == "beam") != (args.variant in beam_sizes):
+        parser.error(f"--variant {args.variant} does not go with --dataset {args.dataset}")
     if args.jobs > 1 and not args.results_dir:
         parser.error("--jobs needs --results-dir")
     if args.max_calls and not args.usage_db:
         parser.error("--max-calls needs --usage-db")
+    if args.max_usd is not None and not args.usage_db:
+        parser.error("--max-usd needs --usage-db")
+    if args.max_usd is not None and not args.max_usd >= 0:
+        parser.error("--max-usd: a number of dollars from 0")
     try:
         args.caps = parse_caps(args.max_calls)
         args.k_list = sorted({int(x) for x in args.ks.split(",") if x.strip()} | {args.k}) \
@@ -2048,9 +3180,10 @@ def _write_json(path: pathlib.Path, data: Any) -> None:
 
 #: Options that do not change a conversation's results: a per-conversation
 #: file written under other values of these is still reused.
-_RUN_ONLY = ("jobs", "results_dir", "out", "worker", "usage_db", "max_calls", "caps",
-             "conversation", "limit", "seed", "workers", "store_dir", "export_mem0",
-             "k_list", "category_set")
+_RUN_ONLY = ("jobs", "results_dir", "out", "worker", "usage_db", "max_calls", "caps", "max_usd",
+             "coverage_audit",
+             "prices", "conversation", "limit", "seed", "sample", "workers", "store_dir",
+             "export_mem0", "export_longmemeval", "k_list", "category_set", "reuse_stores")
 
 
 def run_options(args: argparse.Namespace) -> dict[str, Any]:
@@ -2094,9 +3227,45 @@ def run_workers(argv: list[str], conversation_ids: list[str], results_dir: pathl
                 queue.clear()
 
 
+def write_selected(dataset: str, path: pathlib.Path, conversations: list[Conversation],
+                   target: str | os.PathLike[str]) -> int:
+    """Write the items of ``path`` whose question is one of ``conversations``,
+    unchanged and in the file's order, to ``target`` (LongMemEval). Each
+    process of a run loads its whole data file, and the 500 questions of
+    longmemeval_s take about 2.4 GB in memory; a file of the questions to run
+    keeps ten processes in a few GB."""
+    if dataset != "longmemeval":
+        print("--write-selected: LongMemEval only", file=sys.stderr)
+        return 2
+    keep = {c.conv_id for c in conversations}
+    items = [item for i, item in enumerate(_items(_read_json(path), "haystack_sessions"))
+             if str(item.get("question_id") or f"question-{i}") in keep]
+    out = pathlib.Path(target)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    digest = hashlib.sha256(out.read_bytes()).hexdigest()
+    print(f"{len(items)} questions of {path} written to {out} (sha256 {digest})")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
+    global KEEP_CONTEXT, KEEP_EVIDENCE_TOKENS, CONTEXTS_ONLY, CONTEXT_TOKENS
+    CONTEXTS_ONLY = args.contexts_only
+    if args.context_tokens:
+        CONTEXT_TOKENS = args.context_tokens
+    KEEP_CONTEXT = args.keep_context or args.contexts_only
+    KEEP_EVIDENCE_TOKENS = tuple(args.keep_evidence_tokens or ())
+    if not args.coverage_audit:
+        # no agent reads the second pass's warning here; worker processes inherit this
+        os.environ["MEMRY_COVERAGE_AUDIT"] = "0"
+    started = time.time()
+    try:
+        prices = load_prices(args.prices)
+    except (OSError, FormatError) as exc:
+        print(f"--prices: {exc}", file=sys.stderr)
+        return 2
     data_dir = os.environ.get(DATA_ENV, "").strip() or None
     path = find_dataset(args.dataset, data_dir, variant=args.variant, file=args.file)
     if path is None:
@@ -2108,6 +3277,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.worker:
         conversations = [c for c in conversations if c.conv_id == args.worker]
     else:
+        if args.sample:
+            try:
+                conversations = stratified_sample(conversations, args.sample, args.seed or 0)
+            except ValueError as exc:
+                print(f"--sample: {exc}", file=sys.stderr)
+                return 2
         if args.seed is not None:
             random.Random(args.seed).shuffle(conversations)
         if args.limit:
@@ -2119,6 +3294,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"--conversation: no {', '.join(unknown)} in {path}", file=sys.stderr)
                 return 2
             conversations = [c for c in conversations if c.conv_id in set(args.conversation)]
+        if args.write_selected:
+            return write_selected(args.dataset, path, conversations, args.write_selected)
     judge = load_judge(args.judge)
     answer_prompt = load_function(args.answer_prompt, "--answer-prompt") \
         if args.answer_prompt else None
@@ -2131,6 +3308,8 @@ def main(argv: list[str] | None = None) -> int:
         print(text, file=sys.stderr, flush=True)
 
     results_dir = pathlib.Path(args.results_dir) if args.results_dir else None
+    if results_dir is not None and args.store_dir is None and not args.full_context:
+        args.store_dir = str(results_dir / "stores")  # a load is kept unless said otherwise
     notes: list[str] = []
     if results_dir is not None:
         results_dir.mkdir(parents=True, exist_ok=True)
@@ -2143,12 +3322,17 @@ def main(argv: list[str] | None = None) -> int:
             todo = []
     else:
         todo = conversations
-    meter = api_usage.UsageMeter(args.usage_db, label=args.worker or "", caps=args.caps,
-                                 refine=memry_stage).install() if args.usage_db and todo else None
+    meter = api_usage.UsageMeter(
+        args.usage_db, label=args.worker or "", caps=args.caps, refine=memry_stage,
+        max_usd=args.max_usd,
+        price=lambda model, *tokens: dollars(price_of(model, prices)[1], *tokens),
+    ).install() if args.usage_db and todo else None
     answer_llm = compare_answer_llm = embedder = None
     try:
         if todo:
-            if args.answer or args.answer_model:
+            if args.contexts_only:
+                answer_llm = NoAnswer()
+            elif args.answer or args.answer_model:
                 if args.answer_model:
                     from evals.mem0_judge import OpenAIChat
 
@@ -2182,15 +3366,18 @@ def main(argv: list[str] | None = None) -> int:
                         categories=set(args.category_set) if args.category_set else None,
                         workers=args.workers, corrections=corrections, decider=args.decider,
                         store_dir=args.store_dir, full_context=args.full_context,
+                        reuse_stores=args.reuse_stores, all_members=args.all_members,
                         evidence_tokens=args.evidence_tokens,
                         compare_evidence_tokens=args.compare_evidence_tokens,
                         compare_answer_llm=compare_answer_llm,
-                        descriptions=not args.no_descriptions)
+                        descriptions=not args.no_descriptions,
+                        question_keys=args.question_keys)
 
         def finish(part: dict[str, Any]) -> dict[str, Any]:
             part["file"] = str(path)
             part["config"].update(limit=args.limit, seed=args.seed, options=options,
-                                  variant=args.variant if args.dataset == "longmemeval" else None)
+                                  variant=args.variant if args.dataset != "locomo" else None,
+                                  code=code_version())
             part["notes"] = notes + part["notes"]
             return part
 
@@ -2232,12 +3419,28 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     base = pathlib.Path(data_dir) if data_dir else path.parent
     out = pathlib.Path(args.out) if args.out else base / "results" / f"{args.dataset}_{stamp}.json"
+    meta = run_meta(result, args, argv=argv, dataset_path=path, out=out, started=started,
+                    finished=time.time(), prices=prices, prices_path=args.prices)
+    result["meta_file"] = str(meta_path(out))
+    _write_json(meta_path(out), meta)
     _write_json(out, result)
+    print("\n".join(meta_lines(meta)))
     if args.export_mem0:
         from evals.mem0_judge import export_results
 
         _write_json(pathlib.Path(args.export_mem0), export_results(result, path))
         print(f"Mem0's results file: {args.export_mem0}")
+    if args.export_longmemeval:
+        from evals.longmemeval_judge import export_hypotheses
+
+        target = pathlib.Path(args.export_longmemeval)
+        for compared, where in ((False, target), (True, target.with_suffix(".compared.jsonl"))):
+            lines = export_hypotheses(result, compared=compared)
+            if lines or not compared:
+                where.parent.mkdir(parents=True, exist_ok=True)
+                where.write_text("".join(json.dumps(line) + "\n" for line in lines),
+                                 encoding="utf-8")
+                print(f"LongMemEval's hypothesis file: {where}")
     print(f"\n## {args.dataset}: {len(result['rows'])} rows, "
           f"{sum(s.get('memories', 0) for s in result['stores'])} memories")
     for part in result["passes"]:

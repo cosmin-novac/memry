@@ -40,14 +40,19 @@ you delete it or a later one replaces it, and either can be undone.
 
 **Nothing is a black box.** Raw episodes are stored immutably before anything is derived
 from them, every memory links back to its source episodes, every mutation is an
-inspectable event, and every search hit carries its score signals (BM25, vector,
-recency, importance). When a memory looks wrong, you can trace where it came from, or
+inspectable event, and every search hit carries its score signals: the decision model's
+probability that it answers the question, and the text ranking's BM25, vector, recency
+and importance. When a memory looks wrong, you can trace where it came from, or
 re-run a better extraction pipeline over the original episodes.
 
-**Entities are disambiguated by evidence.** Mentions become first-class entities. An exact
-first-and-last name with overlapping context merges automatically; a shared short name or
-full name without supporting context stays separate with a reviewable merge proposal.
-Prior merges are followed, so an older proposal cannot leave a broken merge target.
+**Entities are disambiguated by evidence.** Mentions become first-class entities. When a
+new name may be a known one, the decision model reads both sides with their memories and
+gives a probability that they are one person or thing. Memry merges at 0.97 when the
+smaller side has one memory. With more memories the bar is lower, down to 0.80 at fifty.
+Below the bar the pair waits, and Memry compares it again when the smaller side has more
+memories. Without the decision model, a known name joins its entity by rule, and the
+other pairs wait for you. Prior merges are followed, so an older proposal cannot leave a
+broken merge target.
 
 **Topics organize themselves.** Extraction tags each memory at the level a later
 conversation would ask about (`liver health`, `weekly gym`, `2026 taxes`), reusing the
@@ -325,7 +330,7 @@ Override via env vars, `~/.memry/config.json`, or `Config(...)`:
 | `MEMRY_AUTH_DB_PATH` | next to `MEMRY_DB_PATH` as `auth.db` | accounts and OAuth; include it in every complete server backup |
 | `MEMRY_DEFAULT_USER` | `default` | user scope when the agent doesn't pass one |
 | `MEMRY_LLM_PROVIDER` | auto | `anthropic` \| `openai` \| `ollama` \| `none` - auto-detected from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. With both keys set, OpenAI wins so the LLM and the embeddings stay on one provider (Anthropic has no embeddings API); pin this to override |
-| `MEMRY_LLM_MODEL` | per provider | `claude-haiku-4-5` / `gpt-6-luna` / `llama3.1`; Haiku is the Anthropic default for lower save cost and enrichment latency |
+| `MEMRY_LLM_MODEL` | per provider | `claude-haiku-5-5` / `gpt-6-luna` / `llama3.1`; Haiku is the Anthropic default for lower save cost and enrichment latency |
 | `MEMRY_EMBEDDING_PROVIDER` | auto | `openai` \| `ollama` \| `voyage` \| `hash` \| `none` |
 | `MEMRY_API_KEY` | - | bearer token for the REST/MCP HTTP server |
 | `MEMRY_DECISION_PROVIDER` | required | `jev`, or on purpose `llm`: Memry then sends the decision questions to the text model, merges entities only by fixed rules, and you confirm the other merges yourself |
@@ -346,8 +351,10 @@ export MEMRY_DECISION_PROVIDER=jev
 export MEMRY_DECISION_API_KEY=...   # TypeSafe API key
 ```
 
-With Jev, Memry merges duplicate entities on its own above 0.70 confidence, a threshold
-measured on the labelled identity set in `evals/`. Jev also judges the first 20 results
+With Jev, Memry merges duplicate entities on its own. The bar depends on the evidence:
+0.97 when the smaller side has one memory, 0.96 at three, 0.85 at ten and 0.80 at fifty.
+Each bar is the lowest probability that kept wrong merges at 2% of merges or fewer, on
+synthetic stores with exact labels. Jev also judges the first 20 results
 of a search, and for a question whose answer is a set (a list, a total, a comparison) one
 more batch of memories. Scoring how long each memory stays relevant is off unless
 `MEMRY_DURABILITY=1`. You still need a text model for extraction. If you set

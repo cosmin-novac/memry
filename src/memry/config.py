@@ -44,7 +44,7 @@ DecisionProvider = Literal["none", "llm", "jev"]
 #: model's confidence, so Memry never merges entities on it alone (see
 #: providers/decisions.py); it sends those questions to the decision model.
 DEFAULT_LLM_MODELS: dict[str, str] = {
-    "anthropic": "claude-haiku-4-5",
+    "anthropic": "claude-haiku-5-5",
     "openai": "gpt-6-luna",
     "ollama": "llama3.1",
 }
@@ -64,6 +64,12 @@ class LLMConfig(BaseModel):
     base_url: str | None = None
     max_tokens: int = 2000
     effort: str = "low"  # Anthropic effort level for extraction calls
+    #: The second pass after a save (``MemoryStore._coverage_gaps``): one text-model
+    #: call that compares what was said with the facts written and returns the
+    #: details no fact contains, as a warning for the saving agent. It writes
+    #: nothing into the store. ``MEMRY_COVERAGE_AUDIT=0`` turns it off; the
+    #: benchmark runner turns it off, since no agent reads the warning there.
+    coverage_audit: bool = True
     timeout: float = 120.0
 
     def resolved_model(self) -> str:
@@ -171,6 +177,41 @@ class RetrievalConfig(BaseModel):
     #: comparison keeps (None: all). The v3 OpenAI models are trained so a
     #: vector cut short still works; property vectors are stored this short.
     property_dimensions: int | None = None
+    #: Question keys: with every fact the extractor writes 2 or 3 questions
+    #: it answers, kept beside the memory as search keys (``memory_questions``),
+    #: and every search matches the words and the meaning of the question
+    #: against them too, as two more candidate lists fused with the memory
+    #: text's (``retrieval.hybrid_search``), since a question asked later
+    #: often shares few words with the fact itself. On by default since
+    #: 2026-10-09 (``MEMRY_QUESTION_KEYS=0`` turns it off); ``memry
+    #: backfill-questions`` writes them for a store saved before.
+    question_keys: bool = True
+    #: Entity questions (``intelligence.entity_questions``): the questions the
+    #: owner would ask about an entity related to them, by its role ("Where
+    #: does my sister work?"). A question that contains no hub's name is then
+    #: about the entity whose questions alone contain its role word after "my",
+    #: when its best cosine similarity with that entity's questions is at
+    #: least ``entity_question_bar``; otherwise it is about the owner, as
+    #: before. On by default since 2026-10-09 (``MEMRY_ENTITY_QUESTIONS=0``
+    #: turns it off).
+    entity_questions: bool = True
+    entity_question_bar: float = 0.5
+    #: The search log (``search_log``): one row per search, with its time,
+    #: namespace, run, the query's text, whether it was about a known entity
+    #: (how many seeds), how it was ordered, how many results and how long it
+    #: took. Kept ``SEARCH_LOG_DAYS`` days, deleted by upkeep, never in an
+    #: export or a snapshot unless asked. ``memry search-stats`` counts it.
+    #: On by default since 2026-10-09 (``MEMRY_SEARCH_LOG=0`` turns it off).
+    #: It keeps what people ask, so copies leave it out unless asked.
+    search_log: bool = True
+    #: Keys from traffic: a search followed by a save, whose order after the
+    #: save puts one of the saved memories in its first 20, gives that memory
+    #: the query as a question key (source "traffic"). Needs ``search_log``
+    #: and ``question_keys``: with ``question_keys`` off the store warns once
+    #: when it opens and keeps this off (with keys from traffic alone, some
+    #: kinds of question did worse). Off by default: it was measured only in
+    #: simulation.
+    traffic_keys: bool = False
     #: A question that needs several memories (a list, a total, a comparison)
     #: has at most this many more judged in one further call, after the first
     #: ``decision.rerank_pool``: the memories filed under the topics the first
@@ -182,6 +223,34 @@ class RetrievalConfig(BaseModel):
     #: (``MemoryStore.evidence``); 0 shows none. A memory is a summary, and the
     #: turn it came from keeps what the summary left out.
     evidence_tokens: int = 600
+    #: Turn search (``MemoryStore.turn_search``). When the judge's best
+    #: relevance over the facts shown is under ``turn_search_bar`` (no fact
+    #: clearly answers), the turns said in the scope searched are searched
+    #: too, by their words and their vectors; each turn found is read with the
+    #: turn said before it and the two said after it; the decision provider
+    #: judges these excerpts in one call; and the excerpts judged at least
+    #: ``turn_search_keep`` are shown after the facts and their evidence, as
+    #: dated quotes, within ``turn_search_tokens``. A search no decision
+    #: provider judged never searches the turns. On by default since
+    #: 2026-10-10 (``MEMRY_TURN_SEARCH=0`` turns it off).
+    turn_search: bool = True
+    turn_search_bar: float = 0.8
+    turn_search_keep: float = 0.5
+    turn_search_tokens: int = 400
+    #: Two more reasons for turn search, read only with ``turn_search`` on. A
+    #: relevance is that of one fact, so it stays high when the facts shown
+    #: have only part of a list or are about another person.
+    #: ``turn_search_several``: turn search also runs when the judge's answer
+    #: to "the question needs several memories" (asked in every judged
+    #: search, the "several" signal) is at least this. None: not read.
+    #: ``turn_search_complete``: the judge's first call also asks whether the
+    #: facts judged, read together, contain everything the question asks for,
+    #: about the person or thing it asks about (the "complete" signal), and
+    #: turn search also runs when that is under this. None: not asked.
+    #: On by default since 2026-10-10 (``MEMRY_TURN_SEARCH_SEVERAL`` and
+    #: ``MEMRY_TURN_SEARCH_COMPLETE``: a number, or 0 or off for None).
+    turn_search_several: float | None = 0.5
+    turn_search_complete: float | None = 0.7
 
     @field_validator("relational_mode", "relational_fusion", mode="before")
     @classmethod
@@ -286,6 +355,10 @@ class SnapshotConfig(BaseModel):
     offsite_secret: str | None = None
     offsite_region: str = "auto"
     offsite_prefix: str = "memry/"
+    #: Whether the copy keeps the search log (``retrieval.search_log``): the
+    #: queries people asked. Off: the copy's log is emptied before it is
+    #: checked, so neither the copy nor the offsite copy contains it.
+    include_search_log: bool = False
 
 
 class TenantConfig(BaseModel):
@@ -441,6 +514,18 @@ def _from_env() -> dict[str, Any]:
         except ValueError:
             return None
 
+    def put_bar(section: str, key: str, value: str | None) -> None:
+        # a number sets the bar; 0, off, false, no or none turn it off (None)
+        if not value or not value.strip():
+            return
+        text = value.strip().lower()
+        if text in ("off", "false", "no", "none"):
+            data.setdefault(section, {})[key] = None
+            return
+        number = _float(text)
+        if number is not None:
+            data.setdefault(section, {})[key] = number if number > 0 else None
+
     put(None, "db_path", e("MEMRY_DB_PATH"))
     put(None, "default_user_id", e("MEMRY_DEFAULT_USER"))
     put(None, "api_key", e("MEMRY_API_KEY"))
@@ -469,6 +554,7 @@ def _from_env() -> dict[str, Any]:
     put("llm", "api_key", e("MEMRY_LLM_API_KEY"))
     put("llm", "base_url", e("MEMRY_LLM_BASE_URL"))
     put("llm", "effort", e("MEMRY_LLM_EFFORT"))
+    put("llm", "coverage_audit", _bool(e("MEMRY_COVERAGE_AUDIT")))
 
     put("decision", "provider", e("MEMRY_DECISION_PROVIDER"))
     put("decision", "model", e("MEMRY_DECISION_MODEL"))
@@ -482,6 +568,14 @@ def _from_env() -> dict[str, Any]:
     put("supersede", "protect_sources", _int(e("MEMRY_SUPERSEDE_PROTECT_SOURCES")))
     put("supersede", "state_confidence", _float(e("MEMRY_SUPERSEDE_STATE_CONFIDENCE")))
     put("supersede", "confidence", _float(e("MEMRY_SUPERSEDE_CONFIDENCE")))
+
+    put("retrieval", "question_keys", _bool(e("MEMRY_QUESTION_KEYS")))
+    put("retrieval", "search_log", _bool(e("MEMRY_SEARCH_LOG")))
+    put("retrieval", "traffic_keys", _bool(e("MEMRY_TRAFFIC_KEYS")))
+    put("retrieval", "entity_questions", _bool(e("MEMRY_ENTITY_QUESTIONS")))
+    put("retrieval", "turn_search", _bool(e("MEMRY_TURN_SEARCH")))
+    put_bar("retrieval", "turn_search_several", e("MEMRY_TURN_SEARCH_SEVERAL"))
+    put_bar("retrieval", "turn_search_complete", e("MEMRY_TURN_SEARCH_COMPLETE"))
 
     put("embedding", "provider", e("MEMRY_EMBEDDING_PROVIDER"))
     put("embedding", "model", e("MEMRY_EMBEDDING_MODEL"))

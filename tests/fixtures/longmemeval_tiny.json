@@ -1,0 +1,358 @@
+[
+ {
+  "question_id": "tiny-ssu",
+  "question_type": "single-session-user",
+  "question": "What breed is my dog?",
+  "answer": "a golden retriever",
+  "question_date": "2023/05/30 (Tue) 23:40",
+  "haystack_session_ids": [
+   "f-bread",
+   "s-dog",
+   "f-trip"
+  ],
+  "haystack_dates": [
+   "2023/05/22 (Mon) 10:05",
+   "2023/05/20 (Sat) 02:21",
+   "2023/05/31 (Wed) 08:00"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "How long should sourdough proof in the fridge?"
+    },
+    {
+     "role": "assistant",
+     "content": "Twelve to sixteen hours in the fridge gives a good sour flavour."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "My golden retriever Biscuit pulls on the leash, any tips?",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "Keep sessions short and reward Biscuit when the leash is loose."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Can you suggest a packing list for a weekend in Lisbon?"
+    },
+    {
+     "role": "assistant",
+     "content": "Bring light layers, comfortable shoes for the hills, and a small umbrella."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s-dog"
+  ]
+ },
+ {
+  "question_id": "tiny-ku",
+  "question_type": "knowledge-update",
+  "question": "On which day do I go to the gym now?",
+  "answer": "Thursdays",
+  "question_date": "2023/07/01 (Sat) 09:00",
+  "haystack_session_ids": [
+   "s-gym-new",
+   "f-bread",
+   "s-gym-old",
+   "f-bread"
+  ],
+  "haystack_dates": [
+   "2023/06/15 (Thu) 07:45",
+   "2023/04/01 (Sat) 12:00",
+   "2023/03/02 (Thu) 18:10",
+   "2023/06/20 (Tue) 12:00"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "I moved my gym day from Monday to Thursday because of work.",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "Thursday sessions can work well; keep the same routine."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "How long should sourdough proof in the fridge?"
+    },
+    {
+     "role": "assistant",
+     "content": "Twelve to sixteen hours in the fridge gives a good sour flavour."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "I go to the gym every Monday after work.",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "A fixed weekly day helps build the habit."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "How long should sourdough proof in the fridge?"
+    },
+    {
+     "role": "assistant",
+     "content": "Twelve to sixteen hours in the fridge gives a good sour flavour."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s-gym-new",
+   "s-gym-old"
+  ]
+ },
+ {
+  "question_id": "tiny-tr",
+  "question_type": "temporal-reasoning",
+  "question": "How many days after buying the guitar did I go to the concert?",
+  "answer": "10 days. 11 days (including the last day) is also acceptable.",
+  "question_date": "2023/08/30 (Wed) 18:00",
+  "haystack_session_ids": [
+   "s-concert",
+   "s-guitar"
+  ],
+  "haystack_dates": [
+   "2023/08/20 (Sun) 21:00",
+   "2023/08/10 (Thu) 17:30"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "I just got back from the Arctic Monkeys concert tonight!",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "That sounds like a great night."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "I bought a Fender Stratocaster today.",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "Congratulations on the new guitar."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s-guitar",
+   "s-concert"
+  ]
+ },
+ {
+  "question_id": "tiny-ms",
+  "question_type": "multi-session",
+  "question": "How many books did I finish in March and April together?",
+  "answer": "5",
+  "question_date": "2023/05/02 (Tue) 12:00",
+  "haystack_session_ids": [
+   "s-books-march",
+   "s-books-april"
+  ],
+  "haystack_dates": [
+   "2023/03/31 (Fri) 21:00",
+   "2023/04/30 (Sun) 20:30"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "I finished three novels in March.",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "Nice reading pace."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "In April I finished two more books.",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "Well done."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s-books-march",
+   "s-books-april"
+  ]
+ },
+ {
+  "question_id": "tiny-ssa",
+  "question_type": "single-session-assistant",
+  "question": "Which proofing time did you suggest for my sourdough?",
+  "answer": "twelve to sixteen hours in the fridge",
+  "question_date": "2023/05/02 (Tue) 12:00",
+  "haystack_session_ids": [
+   "f-bread",
+   "f-trip"
+  ],
+  "haystack_dates": [
+   "2023/04/01 (Sat) 12:00",
+   "2023/04/03 (Mon) 12:00"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "How long should sourdough proof in the fridge?"
+    },
+    {
+     "role": "assistant",
+     "content": "Twelve to sixteen hours in the fridge gives a good sour flavour.",
+     "has_answer": true
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Can you suggest a packing list for a weekend in Lisbon?"
+    },
+    {
+     "role": "assistant",
+     "content": "Bring light layers, comfortable shoes for the hills, and a small umbrella."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "f-bread"
+  ]
+ },
+ {
+  "question_id": "tiny-pref",
+  "question_type": "single-session-preference",
+  "question": "Can you suggest a dinner for tonight?",
+  "answer": "The user would prefer vegetarian dishes, since they said they stopped eating meat.",
+  "question_date": "2023/05/02 (Tue) 12:00",
+  "haystack_session_ids": [
+   "s-veg",
+   "f-trip"
+  ],
+  "haystack_dates": [
+   "2023/04/11 (Tue) 19:00",
+   "2023/04/03 (Mon) 12:00"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "I stopped eating meat last year.",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "Noted."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Can you suggest a packing list for a weekend in Lisbon?"
+    },
+    {
+     "role": "assistant",
+     "content": "Bring light layers, comfortable shoes for the hills, and a small umbrella."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s-veg"
+  ]
+ },
+ {
+  "question_id": "tiny-ssu_abs",
+  "question_type": "single-session-user",
+  "question": "What breed is my cat?",
+  "answer": "The user never mentioned a cat; they mentioned a golden retriever.",
+  "question_date": "2023/05/30 (Tue) 23:40",
+  "haystack_session_ids": [
+   "s-dog",
+   "f-trip"
+  ],
+  "haystack_dates": [
+   "2023/05/20 (Sat) 02:21",
+   "2023/05/24 (Wed) 08:00"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "My golden retriever Biscuit pulls on the leash, any tips?"
+    },
+    {
+     "role": "assistant",
+     "content": "Keep sessions short."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Can you suggest a packing list for a weekend in Lisbon?"
+    },
+    {
+     "role": "assistant",
+     "content": "Bring light layers, comfortable shoes for the hills, and a small umbrella."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s-dog"
+  ]
+ },
+ {
+  "question_id": "tiny-ms_abs",
+  "question_type": "multi-session",
+  "question": "How many films did I watch in March and April together?",
+  "answer": "The user did not mention films.",
+  "question_date": "2023/05/02 (Tue) 12:00",
+  "haystack_session_ids": [
+   "s-books-march"
+  ],
+  "haystack_dates": [
+   "2023/03/31 (Fri) 21:00"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "I finished three novels in March."
+    },
+    {
+     "role": "assistant",
+     "content": "Nice."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s-books-march"
+  ]
+ }
+]

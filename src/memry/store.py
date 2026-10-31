@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 import difflib
 import hashlib
+import itertools
 import json
 import logging
 import re
@@ -47,6 +48,7 @@ from .intelligence.context import (
     estimate_tokens,
     fitting,
     memory_line,
+    packed,
     said_at,
     turn_line,
 )
@@ -68,6 +70,15 @@ from .intelligence.entities import (
     resolve_mentions,
     resolve_open_proposals,
     synthesize_entity_description,
+)
+from .intelligence.entity_questions import (
+    ENTITY_QUESTIONS_CHECKED_KEY,
+    distinct_holders,
+    entity_questions_input,
+    estimate_call_tokens,
+    mask_role,
+    role_words,
+    write_entity_questions,
 )
 from .intelligence.graph_retrieval import (
     FAMILY_SCAN,
@@ -121,6 +132,13 @@ from .intelligence.extraction import (
     speaks_with_the_user,
     verbatim_candidates,
     verify_coverage,
+)
+from .intelligence.questions import (
+    QUESTIONS_CHECKED_KEY,
+    QUESTIONS_LIMIT,
+    clean_questions,
+    merge_questions,
+    write_questions,
 )
 from .intelligence.reconcile import (
     CONFLICT_KEY,
@@ -380,6 +398,38 @@ def _consolidation_run_key(user_id: str | None) -> str:
     return f"consolidation:last_run:{user_id or ''}"
 
 
+#: The search log (``retrieval.search_log``) keeps a search this many days;
+#: upkeep deletes older ones (``run_upkeep_cycle``).
+SEARCH_LOG_DAYS = 90
+#: Turn search (``MemoryStore.turn_search``): the turns found by their words
+#: and those found by their vectors, this many of each, fused by rank; the
+#: first ``TURN_HITS`` of them, each read with ``TURN_BEFORE`` turns said
+#: before it and ``TURN_AFTER`` said after it (MemMachine's window on
+#: LoCoMo), are the excerpts judged. 16 of 30 contain more of the turns the
+#: facts' evidence leaves out than 8 do, and are still judged in one call.
+TURN_CANDIDATES = 30
+TURN_HITS = 16
+TURN_BEFORE = 1
+TURN_AFTER = 2
+#: The completeness question of turn search's third trigger
+#: (``retrieval.turn_search_complete``), a Noul asked in the judge's first
+#: call: the question as asked, with its names (the call's state reads one
+#: seed's names as "it"), and the facts judged as a model reads them.
+COMPLETE_QUESTION = ("These facts, read together, contain everything the question asks "
+                     "for, about the person or thing it asks about. The question as asked: "
+                     "{question}\nFacts:\n{facts}")
+#: Keys from traffic (``MemoryStore._traffic_keys``): a save may answer the
+#: searches of its run this long before it, and those of its namespace this
+#: long before it; at most this many searches are read a save, each ordered
+#: again to its first ``TRAFFIC_TOP``, and a search's query keys at most
+#: ``TRAFFIC_KEYS_PER_QUERY`` memories of the save.
+TRAFFIC_RUN_WINDOW = timedelta(hours=1)
+TRAFFIC_WINDOW = timedelta(minutes=10)
+TRAFFIC_QUERIES = 20
+TRAFFIC_TOP = 20
+TRAFFIC_KEYS_PER_QUERY = 1
+
+
 def _upkeep_key(name: str, user_id: str | None) -> str:
     return f"upkeep:{name}:{user_id or ''}"
 
@@ -586,6 +636,11 @@ class FilteredSearch:
     results: list[SearchResult]
     filters: Filters
     nearest: list[tuple[Memory, int, str]] = field(default_factory=list)
+    #: Turn search's turns for a search without filters (``search_filtered``
+    #: with ``excerpts``), in the order said, and its note
+    #: (``MemoryStore.turn_search``).
+    excerpts: list[EvidenceTurn] = field(default_factory=list)
+    turn_search: dict[str, Any] = field(default_factory=dict)
 
     @property
     def note(self) -> str:
@@ -599,6 +654,28 @@ class FilteredSearch:
                 parts.append("The memories nearest that time are listed as nearest, "
                              "with how many days before or after it; none is inside it.")
         return " ".join(parts)
+
+
+@dataclass
+class AgentContext:
+    """An agent's context for a question (``MemoryStore.context_from``):
+    what it shows, part by part, as ``build_context`` packs it, and the text
+    an agent reads (``context``, what ``reconstruct_context`` returns)."""
+
+    #: The entities the question names, with their descriptions, shown first.
+    entities: list[Entity]
+    #: The memories shown, best first.
+    results: list[SearchResult]
+    #: The source turns shown as the memories' evidence, in the order said.
+    evidence: list[EvidenceTurn]
+    #: Turn search's turns, in the order said.
+    excerpts: list[EvidenceTurn]
+    #: Turn search's note (``MemoryStore.turn_search``): "why" (its
+    #: triggers, none when it was not due), "due" and "best" always;
+    #: "candidates", "excerpts" (each judged) and "chosen" when the turns
+    #: were searched.
+    turn_search: dict[str, Any]
+    context: ContextResult
 
 
 @dataclass(frozen=True)
@@ -663,6 +740,8 @@ class _SearchPlan:
     seeds: list[str] = field(default_factory=list)
     first_person: bool = False
     question: str = ""
+    #: the question as asked, with its names (the completeness question reads it)
+    query: str = ""
     #: whether the decision provider judges the search (stages 4 to 6)
     judges: bool = False
     #: stages 2 and 3 with seeds: how strongly the links reach each entity,
@@ -675,6 +754,32 @@ class _SearchPlan:
     #: stages 5 and 6: each memory judged (member of the set, score), in the
     #: order judged
     judged: dict[str, tuple[bool, float]] = field(default_factory=dict)
+    #: the judge's highest relevance in the first call (None: not judged)
+    best_judged: float | None = None
+
+
+def judged_best(results: list[SearchResult]) -> float | None:
+    """The decision provider's highest relevance (P(the memory answers the
+    question), its "relevance" signal) among ``results``; None when it judged
+    none of them."""
+    scores = [r.signals["relevance"] for r in results if "relevance" in r.signals]
+    return max(scores) if scores else None
+
+
+def fill_excerpts(excerpts: list[dict[str, Any]], budget: int, keep: float) -> list[int]:
+    """The excerpts turn search shows (``MemoryStore.turn_search``), as
+    indexes into ``excerpts`` (each with its "score" and its "tokens"): those
+    judged at least ``keep``, the best judged first (a tie in the order found),
+    each while it fits ``budget``."""
+    used = 0
+    chosen: list[int] = []
+    for i in sorted(range(len(excerpts)), key=lambda i: (-excerpts[i]["score"], i)):
+        item = excerpts[i]
+        if item["score"] < keep or not item["tokens"] or used + item["tokens"] > budget:
+            continue
+        chosen.append(i)
+        used += item["tokens"]
+    return chosen
 
 
 def _cut(vector: list[float], keep: int | None) -> list[float]:
@@ -683,6 +788,12 @@ def _cut(vector: list[float], keep: int | None) -> list[float]:
         return vector
     short = np.asarray(vector[:keep], dtype=np.float32)
     return (short / (float(np.linalg.norm(short)) or 1.0)).tolist()
+
+
+def _turn_key(turn: EvidenceTurn) -> str:
+    """A turn's identity: its passage, or its episode for a turn of a whole
+    episode."""
+    return turn.passage_id or turn.episode_id
 
 
 def _similarity(asked: np.ndarray, vector: np.ndarray | None) -> float:
@@ -762,6 +873,12 @@ class MemoryStore:
         self._pass_locks: dict[tuple[str, str | None], threading.RLock] = {}
         self._pass_locks_guard = threading.Lock()
         self.backend.names_changed = self._names_changed
+        retrieval = self.config.retrieval
+        if retrieval.traffic_keys and not retrieval.question_keys:
+            # with keys from traffic alone some kinds of question did worse;
+            # they are read as question keys
+            log.warning("retrieval.traffic_keys is on without retrieval.question_keys: "
+                        "keys from traffic stay off")
         try:
             self._settle_owner_pairs()
         except Exception as exc:  # an upgrade step must never stop a store opening
@@ -880,8 +997,9 @@ class MemoryStore:
         dropped constraint is invisible in a "success" response. One cheap LLM
         pass compares the input against what landed and names the gap. Run
         after a direct save and after distillation (the deferred save), with a
-        text model and something written; best-effort, it never fails a save."""
-        if not (self.llm.available and actions):
+        text model and something written; best-effort, it never fails a save.
+        ``llm.coverage_audit`` off skips it."""
+        if not (self.config.llm.coverage_audit and self.llm.available and actions):
             return []
         stored = [a.content for a in actions if a.content]
         try:
@@ -922,6 +1040,7 @@ class MemoryStore:
             entity_names=self._entity_vocabulary(scope, said),
             identity=stated if stated is not None and self._owner_unnamed(scope.user_id)
             else None,
+            questions=self.config.retrieval.question_keys,
         )
         self._confirm_candidate_whens(candidates, now=now)
         return candidates
@@ -1203,9 +1322,279 @@ class MemoryStore:
                 self._recheck_proposals(
                     scope, open_before, {entity.id for entity in resolved.values()}
                 )
-        self._property_vectors_after_save(
-            [a.memory_id for a in actions if a.event != "NONE" and a.memory_id])
+        written = [a.memory_id for a in actions if a.event != "NONE" and a.memory_id]
+        self._property_vectors_after_save(written)
+        self._questions_after_save(candidates, actions)
+        self._traffic_keys(scope, written)
         return actions
+
+    def _questions_after_save(
+        self, candidates: list[CandidateFact], actions: list[AddAction],
+    ) -> None:
+        """The question keys of the memories just saved (``retrieval.
+        question_keys``): a new memory's are its candidate's; a merged text's
+        (an UPDATE) are its candidate's and those of the memory it replaced,
+        since it answers what both answered. A restatement (NONE) adds none.
+        A failure never fails the save: the backfill writes what is missing."""
+        if not self.config.retrieval.question_keys:
+            return
+        for candidate, action in zip(candidates, actions):
+            if action.event == "NONE" or not action.memory_id:
+                continue
+            questions = candidate.questions
+            if action.event == "UPDATE":
+                replaced = [q["text"] for old in self.backend.replaced_by(action.memory_id)
+                            for q in self.backend.questions_of([old.id]).get(old.id, [])]
+                questions = merge_questions(candidate.questions, replaced)
+            if not questions:
+                continue
+            try:
+                self._write_questions(action.memory_id, questions, "save")
+            except Exception as exc:
+                log.warning("question keys not written on save: %s", exc)
+
+    def _traffic_keys(
+        self, scope: Scope, memory_ids: list[str], *, at: datetime | None = None,
+    ) -> dict[str, int]:
+        """Keys from traffic (``retrieval.traffic_keys``): the searches kept
+        in the search log that a save may answer take their query as a
+        question key (source "traffic") of the memory it saved that ranks
+        first among them.
+
+        The searches are the namespace's, of the save's run in the
+        ``TRAFFIC_RUN_WINDOW`` before ``at`` (the clock), or of any run in
+        the ``TRAFFIC_WINDOW`` before it, newest first, each query once, at
+        most ``TRAFFIC_QUERIES``, none whose query is a key already. Each is
+        ordered again over its own scope as a search would order it, without
+        the judge (``_unjudged_order``). When one of ``memory_ids`` is in its
+        first ``TRAFFIC_TOP``, the first ``TRAFFIC_KEYS_PER_QUERY`` of them
+        take the query as a key, embedded as every key is (names read "it",
+        ``_masked_question_texts``), all in one call; a failed call keeps the
+        words without vectors, and upkeep embeds them
+        (``refresh_question_vectors``). A memory with ``QUESTIONS_LIMIT``
+        keys, or with this one, takes none. A failure never fails the save.
+        Off without ``retrieval.question_keys`` (the store warns once when it
+        opens). Returns how many searches were read and how many keys were
+        added."""
+        cfg = self.config.retrieval
+        if not (cfg.traffic_keys and cfg.question_keys and cfg.search_log and memory_ids):
+            return {"searches": 0, "keys": 0}
+        try:
+            return self._add_traffic_keys(scope, memory_ids, at or datetime.now(timezone.utc))
+        except Exception as exc:
+            log.warning("keys from traffic not written on save: %s", exc)
+            return {"searches": 0, "keys": 0}
+
+    def _traffic_searches(self, scope: Scope, at: datetime) -> list[dict[str, Any]]:
+        """The kept searches a save at ``at`` in ``scope`` may answer
+        (``_traffic_keys``), newest first."""
+        stamp = lambda moment: moment.isoformat(timespec="seconds")  # noqa: E731
+        recent = stamp(at - TRAFFIC_WINDOW)
+        due: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in self.backend.search_log_rows(
+                user_id=scope.user_id, since=stamp(at - TRAFFIC_RUN_WINDOW),
+                until=stamp(at), newest_first=True, limit=1000):
+            if row["mode"] == "browse" or row["keyed"] or not row["query"]:
+                continue
+            in_run = scope.run_id is not None and row["run_id"] == scope.run_id
+            if not (in_run or row["at"] >= recent):
+                continue
+            asked = row["query"].casefold()
+            if asked in seen:
+                continue
+            seen.add(asked)
+            due.append(row)
+            if len(due) >= TRAFFIC_QUERIES:
+                break
+        return due
+
+    def _add_traffic_keys(
+        self, scope: Scope, memory_ids: list[str], at: datetime,
+    ) -> dict[str, int]:
+        searches = self._traffic_searches(scope, at)
+        saved = set(memory_ids)
+        planned: list[tuple[int, str, str]] = []  # (log id, memory id, query)
+        for row in searches:
+            text = clean_questions([row["query"]], limit=1)
+            if not text:
+                continue
+            order = self._unjudged_order(
+                row["query"], Scope(user_id=row["user_id"], agent_id=row["agent_id"],
+                                    run_id=row["run_id"]), TRAFFIC_TOP)
+            for memory_id in [mid for mid in order if mid in saved][:TRAFFIC_KEYS_PER_QUERY]:
+                planned.append((row["id"], memory_id, text[0]))
+        if not planned:
+            return {"searches": len(searches), "keys": 0}
+        vectors: list[list[float] | None] = [None] * len(planned)
+        if self.embedder.dimensions:
+            masked = [self._masked_question_texts(mid, [text])[0] for _, mid, text in planned]
+            keep = self.config.retrieval.property_dimensions
+            try:
+                vectors = [_cut(v, keep) if v else None for v in self.embedder.embed(masked)]
+            except Exception as exc:
+                log.warning("keys from traffic kept without vectors: %s", exc)
+        keyed: dict[int, int] = {}
+        added = 0
+        for (log_id, memory_id, text), vector in zip(planned, vectors):
+            if self.backend.add_question(
+                    memory_id, text, "traffic", vector,
+                    self.embedder.model_id if vector else None, limit=QUESTIONS_LIMIT):
+                keyed[log_id] = keyed.get(log_id, 0) + 1
+                added += 1
+        if keyed:
+            self.backend.mark_search_keyed(keyed)
+        return {"searches": len(searches), "keys": added}
+
+    def _unjudged_order(self, query: str, scope: Scope, top: int) -> list[str]:
+        """The first ``top`` memory ids of ``query``'s order in ``scope`` as a
+        search orders it (seeds, text ranking, linked order, the final order),
+        without the judge and without the search log."""
+        reads = _Reads(scope)
+        plan = self._plan(query, reads, True)
+        plan.judges = False
+        results = self._text_ranking(query, reads, top)
+        ranked = self._search_linked(query, scope, results, False, plan=plan)
+        return [r.memory.id for r in self._final_order(ranked, plan)[:top]]
+
+    def _write_questions(self, memory_id: str, questions: list[str], source: str) -> None:
+        """Keep ``questions`` as the memory's question keys, each embedded
+        (cut to ``retrieval.property_dimensions``, as a property vector is)
+        in one call; without an embedder, by their words alone. The vector
+        is of the question with the memory's entity names read as "it"
+        (``_masked_question_texts``), as a property vector is of the text:
+        compared with a question about one thing, a sibling's key ("How much
+        does Bildy v3 cost?") would otherwise match as well as the thing's
+        own, and the inherited answer lose its place. The words stay as
+        written for the keyword index."""
+        vectors: list[list[float] | None] | None = None
+        if questions and self.embedder.dimensions:
+            keep = self.config.retrieval.property_dimensions
+            masked = self._masked_question_texts(memory_id, questions)
+            vectors = [_cut(v, keep) if v else None for v in self.embedder.embed(masked)]
+        self.backend.set_questions(
+            memory_id, [(q, source) for q in questions], vectors,
+            self.embedder.model_id if vectors else None)
+
+    def _masked_question_texts(self, memory_id: str, questions: list[str]) -> list[str]:
+        """``questions`` with the names of the memory's named entities, and of
+        what those belong to, read as "it" (``_masked_texts``)."""
+        named = [e.id for e in self.backend.entities_of_memory(memory_id, kind="named")]
+        if not named:
+            return list(questions)
+        keys = [f"{memory_id}#{n}" for n in range(len(questions))]
+        masked = self._masked_texts(dict(zip(keys, questions)), {k: named for k in keys})
+        return [masked.get(k, q) for k, q in zip(keys, questions)]
+
+    def refresh_question_vectors(
+        self, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> int:
+        """Embed the question keys of valid memories that have no vector from
+        the configured embedder (restored from a backup, which carries the
+        texts only; written without an embedder; or embedded by another
+        model), in batches of 64. Returns how many it embedded."""
+        if not self.embedder.dimensions:
+            return 0
+        scope = Scope(user_id=user_id, exact_user=exact_user)
+        due = self.backend.questions_without_vectors(scope, self.embedder.model_id)
+        keep = self.config.retrieval.property_dimensions
+        embedded = 0
+        for start in range(0, len(due), 64):
+            batch = due[start:start + 64]
+            texts: list[str] = []
+            for mid, group in itertools.groupby(batch, key=lambda row: row[0]):
+                rows_of = list(group)
+                texts += self._masked_question_texts(mid, [text for _, _, text in rows_of])
+            vectors = self.embedder.embed(texts)
+            rows = {(mid, n): _cut(v, keep) for (mid, n, _), v in zip(batch, vectors) if v}
+            if rows:
+                self.backend.set_question_vectors(rows, self.embedder.model_id)
+                embedded += len(rows)
+        return embedded
+
+    def refresh_entity_question_vectors(
+        self, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> int:
+        """Embed the entity questions that have no vector from the configured
+        embedder (restored from a backup or from the trash, which carry the
+        texts only; or embedded by another model), as written, in batches of
+        64. Returns how many it embedded."""
+        if not self.embedder.dimensions:
+            return 0
+        scope = Scope(user_id=user_id, exact_user=exact_user)
+        due = self.backend.entity_questions_without_vectors(scope, self.embedder.model_id)
+        keep = self.config.retrieval.property_dimensions
+        embedded = 0
+        for start in range(0, len(due), 64):
+            batch = due[start:start + 64]
+            vectors = self.embedder.embed([text for _, _, text in batch])
+            rows = {(eid, n): _cut(v, keep) for (eid, n, _), v in zip(batch, vectors) if v}
+            if rows:
+                self.backend.set_entity_question_vectors(rows, self.embedder.model_id)
+                embedded += len(rows)
+        return embedded
+
+    def backfill_questions(
+        self,
+        *,
+        user_id: str | None = None,
+        exact_user: bool = False,
+        batch: int = 20,
+        limit: int | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Write the question keys of memories saved before there were any.
+
+        Only valid memories with no question key at all are asked about, so a
+        second run over the same store asks only for what the first left
+        without questions. A batch whose call fails is logged and skipped,
+        never fatal: its memories stay due for the next run. It runs whether
+        ``retrieval.question_keys`` is on or not, since an operator fills the
+        keys before turning the search on. ``dry_run`` asks the model but
+        writes nothing and hands back what it would have written.
+        """
+        if not self.llm.available:
+            return {"skipped": "no LLM configured"}
+        pending = self.backend.memories_without_questions(
+            Scope(user_id=user_id, exact_user=exact_user))
+        if limit is not None:
+            pending = pending[: max(int(limit), 0)]
+        size = max(int(batch), 1)
+        summary: dict[str, Any] = {"checked": 0, "written": 0}
+        proposals: list[dict[str, Any]] = []
+        failed = 0
+        for index in range(0, len(pending), size):
+            group = pending[index : index + size]
+            try:
+                found = write_questions(self.llm, [m.content for m in group])
+            except Exception as exc:
+                failed += 1
+                log.warning("question backfill: a batch of %d not asked: %s", len(group), exc)
+                continue
+            for memory, questions in zip(group, found):
+                summary["checked"] += 1
+                if not questions:
+                    if not dry_run:
+                        # marked, so a later run does not ask about it again
+                        self.backend.update_memory(
+                            memory.id, metadata={**(memory.metadata or {}),
+                                                 QUESTIONS_CHECKED_KEY: True}, touch=False)
+                    continue
+                if dry_run:
+                    proposals.append(
+                        {"id": memory.id, "content": memory.content, "questions": questions})
+                    continue
+                try:
+                    self._write_questions(memory.id, questions, "backfill")
+                except Exception as exc:
+                    log.warning("question backfill: %s not written: %s", memory.id, exc)
+                    continue
+                summary["written"] += 1
+        if failed:
+            summary["failed_batches"] = failed
+        if dry_run:
+            summary["proposals"] = proposals
+        return summary
 
     def _property_vectors_after_save(self, memory_ids: list[str]) -> None:
         """Property vectors of memories just saved or edited, once their
@@ -1552,11 +1941,14 @@ class MemoryStore:
         user_id: str | None = None,
         agent_id: str | None = None,
         run_id: str | None = None,
+        search_log: bool = False,
     ) -> dict[str, Any]:
-        """Export exact knowledge records for this scope as one versioned bundle."""
-        return self.backend.export_backup(
-            Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
-        )
+        """Export exact knowledge records for this scope as one versioned
+        bundle. The search log goes with them only when ``search_log``."""
+        scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
+        if search_log:
+            return self.backend.export_backup(scope, search_log=True)
+        return self.backend.export_backup(scope)
 
     def import_backup(
         self, backup: dict[str, Any], *, owner_prefix: str | None = None
@@ -1579,7 +1971,30 @@ class MemoryStore:
                         and not row.get("user_id") else row
                         for row in rows]
             backup = {**backup, "tables": tables}
-        return self.backend.import_backup(backup, owner_prefix=owner_prefix)
+        searches = backup.get("search_log") if isinstance(backup, dict) else None
+        if searches is not None:
+            # an export that asked for the search log carries it (``export_backup``)
+            searches = [{**row, "user_id": self._namespace(row.get("user_id"))}
+                        if isinstance(row, dict) and not row.get("user_id") else row
+                        for row in searches] if isinstance(searches, list) else searches
+            self.backend.restore_search_log(searches, owner_prefix=owner_prefix,
+                                            check_only=True)
+        result = self.backend.import_backup(backup, owner_prefix=owner_prefix)
+        if searches:
+            result["search_log"] = self.backend.restore_search_log(
+                searches, owner_prefix=owner_prefix)
+        if self.config.retrieval.question_keys:
+            # a backup carries the question keys' texts, not their vectors
+            try:
+                self.refresh_question_vectors()
+            except Exception as exc:
+                log.warning("question vectors not computed after a restore: %s", exc)
+        if self.config.retrieval.entity_questions:
+            try:
+                self.refresh_entity_question_vectors()
+            except Exception as exc:
+                log.warning("entity question vectors not computed after a restore: %s", exc)
+        return result
 
     def _namespace(self, user_id: str | None) -> str:
         """The namespace a write goes to: ``user_id``, else the default one
@@ -1957,6 +2372,120 @@ class MemoryStore:
         evidence: bool = True,
         filters: Filters | None = None,
     ) -> list[SearchResult]:
+        """The memories that best answer ``query``, best first (``_search``
+        has the stages). With ``retrieval.search_log`` on, each search is
+        kept as one row of the search log (``_log_search``)."""
+        note: dict[str, Any] = {}
+        started = time.perf_counter()
+        found = self._search(
+            query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit,
+            include_invalid=include_invalid, categories=categories, entity_id=entity_id,
+            since=since, until=until, when_since=when_since, when_until=when_until,
+            relational=relational, evidence=evidence, filters=filters, note=note)
+        if self.config.retrieval.search_log:
+            filtered = bool(categories or entity_id or since or until or when_since
+                            or when_until or (filters is not None and filters.active))
+            self._log_search(query, user_id=user_id, agent_id=agent_id, run_id=run_id,
+                             note=note, filtered=filtered, results=len(found),
+                             latency_ms=(time.perf_counter() - started) * 1000)
+        return found
+
+    def search_stats(
+        self, *, days: int = 30, user_id: str | None = None, now: datetime | None = None,
+        top: int = 10,
+    ) -> dict[str, Any]:
+        """Counts of the search log over the last ``days`` days, of one
+        namespace (``user_id``) or all: per namespace and in all, the
+        searches with query text, those with seeds (a question about a known
+        entity, the owner of one in the first person included), those
+        without, the share without, those with filters, those with no
+        result and those the judge judged (and of them, those where nothing
+        judged reached 0.5); the browses (no query text) apart; and the
+        ``top`` most common queries without seeds, compared ignoring case
+        and spacing."""
+        now = now or datetime.now(timezone.utc)
+        since = (now - timedelta(days=days)).isoformat(timespec="seconds")
+        rows = self.backend.search_log_rows(user_id=user_id, since=since)
+
+        def counts(group: list[dict[str, Any]]) -> dict[str, Any]:
+            ranked = [r for r in group if r["mode"] != "browse"]
+            seeded = sum(1 for r in ranked if r["seeds"] > 0)
+            judged = [r for r in ranked if r["judged"] and r["best_judged"] is not None]
+            return {
+                "searches": len(ranked),
+                "with_seeds": seeded,
+                "without_seeds": len(ranked) - seeded,
+                "share_without_seeds": round((len(ranked) - seeded) / len(ranked), 4)
+                if ranked else None,
+                "filtered": sum(1 for r in ranked if r["filtered"]),
+                "no_results": sum(1 for r in ranked if not r["results"]),
+                "judged": len(judged),
+                "judged_none_answering": sum(1 for r in judged if r["best_judged"] < 0.5),
+                "browses": len(group) - len(ranked),
+                "median_latency_ms": round(float(np.median([r["latency_ms"] for r in ranked])), 1)
+                if ranked else None,
+            }
+
+        by_namespace: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            by_namespace[row["user_id"] or ""].append(row)
+        asked: Counter[str] = Counter()
+        first: dict[str, str] = {}
+        for row in rows:
+            if row["mode"] == "browse" or row["seeds"] > 0:
+                continue
+            key = " ".join(row["query"].casefold().split())
+            asked[key] += 1
+            first.setdefault(key, row["query"])
+        return {
+            "days": days, "since": since,
+            "total": counts(rows),
+            "namespaces": {ns: counts(group) for ns, group in sorted(by_namespace.items())},
+            "top_without_seeds": [{"query": first[key], "count": n}
+                                  for key, n in asked.most_common(top)],
+        }
+
+    def _log_search(
+        self, query: str, *, user_id: str | None, agent_id: str | None,
+        run_id: str | None, note: dict[str, Any], filtered: bool, results: int,
+        latency_ms: float,
+    ) -> None:
+        """Keep one search in the search log. A failure is logged and never
+        fails the search."""
+        try:
+            self.backend.log_search({
+                "at": utcnow(), "user_id": self._namespace(user_id),
+                "agent_id": agent_id, "run_id": run_id,
+                "query": " ".join((query or "").split()),
+                "mode": note.get("mode", "text"), "seeds": note.get("seeds", 0),
+                "first_person": int(bool(note.get("first_person"))),
+                "filtered": int(filtered), "judged": int(bool(note.get("judged"))),
+                "best_judged": note.get("best_judged"), "results": results,
+                "latency_ms": round(latency_ms, 1),
+            })
+        except Exception as exc:
+            log.warning("search not kept in the search log: %s", exc)
+
+    def _search(
+        self,
+        query: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 10,
+        include_invalid: bool = False,
+        categories: list[str] | None = None,
+        entity_id: str | list[str] | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        when_since: str | None = None,
+        when_until: str | None = None,
+        relational: bool = True,
+        evidence: bool = True,
+        filters: Filters | None = None,
+        note: dict[str, Any] | None = None,
+    ) -> list[SearchResult]:
         """The memories that best answer ``query``, best first.
 
         Every search runs one pipeline, its stages in this order, each rule
@@ -1992,7 +2521,13 @@ class MemoryStore:
         others: those read in SQL join ``categories`` and ``entity_id``, and
         the rest are read once over the scope (``_admitted``) into the set
         of memories every stage keeps to (``_Reads.among``), so a memory
-        they drop is never a candidate, however well it matches."""
+        they drop is never a candidate, however well it matches.
+
+        ``note`` receives what the search log keeps of it: "mode" ("linked"
+        with seeds, "text" without, "browse" for no query text), "seeds",
+        "first_person", "judged" and "best_judged" (the judge's highest
+        relevance in the judged pool)."""
+        note = {} if note is None else note
         scope = Scope(user_id=user_id, agent_id=agent_id, run_id=run_id)
         if filters is not None:
             filters = self.resolve_filters(filters, user_id=user_id, agent_id=agent_id)
@@ -2006,6 +2541,7 @@ class MemoryStore:
                 return []
         # No query text = browse by tag/date rather than rank by relevance.
         if not (query or "").strip():
+            note["mode"] = "browse"
             memories = self.get_all(
                 user_id=user_id, agent_id=agent_id, run_id=run_id,
                 include_invalid=include_invalid, limit=limit,
@@ -2027,6 +2563,8 @@ class MemoryStore:
                        when_since, when_until, among)
         # 1. the seeds, the question as it is read, and whether it is judged
         plan = self._plan(query, reads, relational)
+        note.update(mode="linked" if plan.seeds else "text", seeds=len(plan.seeds),
+                    first_person=plan.first_person, judged=plan.judges)
         # 2. the candidates: the text ranking, as deep for every search
         query_vector = self._query_vector(query)  # the ranking and the evidence read it
         results = self._text_ranking(query, reads, limit, query_vector)
@@ -2035,6 +2573,7 @@ class MemoryStore:
         # 5 and 6. the judge and the set call
         if plan.judges:
             ranked = self._judge_ranking(plan.question, ranked, scope, include_invalid, plan)
+            note["best_judged"] = plan.best_judged
         # 7. the final order and the limit, then the evidence
         ranked = self._final_order(ranked, plan)
         members = sum(1 for r in ranked if r.signals.get("member"))
@@ -2084,6 +2623,146 @@ class MemoryStore:
             return [owner.id], True
         return [], False
 
+    def _role_seed(self, query: str, scope: Scope) -> tuple[str, str, float] | None:
+        """The entity a question by role is about (``retrieval.entity_questions``),
+        the question as the order reads it, and the best similarity: "Where
+        does my sister work?" is about the sister and is read "Where does it
+        work?". The question contains a role word after "my" that only that
+        entity's questions contain, and its best cosine similarity with them
+        is at least ``retrieval.entity_question_bar``. None when no entity
+        has questions, when the role words belong to no entity or to
+        several, below the bar, or without an embedder."""
+        cfg = self.config.retrieval
+        if not self.embedder.dimensions:
+            return None
+        rows = self.backend.entity_question_rows(scope, self.embedder.model_id)
+        if not rows:
+            return None
+        holders = distinct_holders([(entity_id, text) for entity_id, text, _ in rows])
+        hits = {w: holders[w] for w in role_words(query) if w in holders}
+        if len(set(hits.values())) != 1:
+            return None
+        word, entity_id = next(iter(hits.items()))
+        rows = [row for row in rows if row[0] == entity_id]
+        rows = [row for row in rows if row[2] is not None]
+        if not rows:
+            return None
+        asked = self._asked_vector(query)
+        best = max(rows, key=lambda row: _similarity(asked, row[2]))
+        similarity = _similarity(asked, best[2])
+        if similarity < cfg.entity_question_bar:
+            return None
+        return best[0], mask_role(query, word), similarity
+
+    def _write_entity_questions(self, entity_id: str, questions: list[str], source: str) -> None:
+        """Keep ``questions`` as the entity's questions, each embedded as
+        written (cut to ``retrieval.property_dimensions``) in one call."""
+        vectors: list[list[float] | None] | None = None
+        if questions and self.embedder.dimensions:
+            keep = self.config.retrieval.property_dimensions
+            vectors = [_cut(v, keep) if v else None for v in self.embedder.embed(questions)]
+        self.backend.set_entity_questions(
+            entity_id, [(q, source) for q in questions], vectors,
+            self.embedder.model_id if vectors else None)
+
+    #: Entities a call of the entity question writer is about.
+    ENTITY_QUESTION_BATCH = 10
+    #: Calls of the entity question writer one upkeep tick makes at most;
+    #: what is left waits for the next tick.
+    UPKEEP_ENTITY_QUESTION_CALLS = 3
+
+    def write_entity_questions(
+        self, *, user_id: str | None = None, batch: int = ENTITY_QUESTION_BATCH,
+        limit: int | None = None, dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Write the entity questions of every hub related to the owner that
+        has a description: 2 or 3 questions the owner would ask about it by
+        its role, from its description and its relations to the owner,
+        ``batch`` entities a call.
+
+        An entity is due when it has no questions yet, or when its
+        description or relations changed since it was last asked about.
+        Each asked entity keeps a hash of what the model was given
+        (``ENTITY_QUESTIONS_CHECKED_KEY``), also when the answer has no
+        questions, so an unchanged entity is never asked about twice. An
+        entity with questions and no hash (written by hand, or before the
+        hash existed) is left as it is. A batch whose call fails is logged
+        and stays due. ``limit`` caps the due entities taken, so a run makes
+        at most ``ceil(limit / batch)`` calls. ``dry_run`` asks nothing and
+        writes nothing: it counts the due entities, the calls and the
+        estimated tokens. Runs whether ``retrieval.entity_questions`` is on
+        or not, so the questions exist before the search reads them."""
+        if not dry_run and not self.llm.available:
+            return {"skipped": "no LLM configured"}
+        owner = self.owner_entity(user_id)
+        if owner is None:
+            return {"skipped": "no owner"}
+        names: dict[str, str] = {}
+
+        def name(entity_id: str) -> str:
+            if entity_id not in names:
+                entity = self.backend.get_entity(entity_id)
+                names[entity_id] = entity.name if entity is not None else entity_id
+            return names[entity_id]
+
+        related: dict[str, list[str]] = {}
+        for relation in self.backend.relations_of([owner.id]):
+            other = relation.object if relation.subject == owner.id else relation.subject
+            if other != owner.id:
+                related.setdefault(other, []).append(
+                    f"{name(relation.subject)} {relation.predicate} {name(relation.object)}")
+        held = self.backend.entity_questions_of(sorted(related))
+        due: list[tuple[Entity, dict[str, Any], str]] = []
+        for entity_id in sorted(related):
+            entity = self.backend.get_entity(entity_id)
+            if (entity is None or entity.merged_into or not entity.description
+                    or not self._is_hub(entity_id)):
+                continue
+            given = {"name": entity.name, "description": entity.description,
+                     "relations": sorted(related[entity_id])}
+            digest = entity_questions_input(owner.name, given)
+            checked = (entity.metadata or {}).get(ENTITY_QUESTIONS_CHECKED_KEY)
+            if checked == digest or (entity_id in held and checked is None):
+                continue
+            due.append((entity, given, digest))
+        if limit is not None:
+            due = due[: max(int(limit), 0)]
+        size = max(int(batch), 1)
+        groups = [due[start:start + size] for start in range(0, len(due), size)]
+        tokens = {"input": 0, "output": 0}
+        for group in groups:
+            for key, n in estimate_call_tokens(owner.name, [g for _, g, _ in group]).items():
+                tokens[key] += n
+        summary: dict[str, Any] = {"entities": len(due), "calls": len(groups),
+                                   "estimated_tokens": tokens}
+        if dry_run:
+            summary["dry_run"] = True
+            summary["names"] = [entity.name for entity, _, _ in due]
+            return summary
+        summary.update({"checked": 0, "written": 0})
+        for group in groups:
+            try:
+                found = write_entity_questions(self.llm, owner.name, [g for _, g, _ in group])
+            except Exception as exc:
+                log.warning("entity questions: a batch of %d not asked: %s", len(group), exc)
+                summary["failed_batches"] = summary.get("failed_batches", 0) + 1
+                continue
+            for (entity, _, digest), questions in zip(group, found):
+                summary["checked"] += 1
+                try:
+                    # an answer without questions replaces stale ones too
+                    self._write_entity_questions(entity.id, questions, "model")
+                    current = self.backend.get_entity(entity.id)
+                    metadata = dict((current or entity).metadata or {})
+                    metadata[ENTITY_QUESTIONS_CHECKED_KEY] = digest
+                    self.backend.set_entity_metadata(entity.id, metadata)
+                except Exception as exc:
+                    log.warning("entity questions: %s not written: %s", entity.id, exc)
+                    continue
+                if questions:
+                    summary["written"] += 1
+        return summary
+
     def _plan(self, query: str, reads: _Reads, relational: bool) -> _SearchPlan:
         """A search's seeds (stage 1, none with ``relational=False``), the
         question as the linked order and the judge read it, and whether the
@@ -2099,13 +2778,21 @@ class MemoryStore:
         ``decision.rerank``); with "vector" no search is judged."""
         seeds, first_person = self._seeds(query, reads.scope) if relational else ([], False)
         question = query
-        if len(seeds) == 1:
+        role = None
+        if (relational and self.config.retrieval.entity_questions
+                and (not seeds or first_person)):
+            # no hub in the question: an entity whose questions match it by
+            # its role is what it is about, before the owner
+            role = self._role_seed(query, reads.scope)
+        if role is not None:
+            seeds, first_person, question = [role[0]], False, role[1]
+        elif len(seeds) == 1:
             question = mask_names(query, self.backend.entity_aliases(seeds[0]))
             if first_person:
                 question = mask_first_person(question)
         judges = bool(self.decider.available) and self.relevance_mode() == "jev"
         return _SearchPlan(reads=reads, seeds=seeds, first_person=first_person,
-                           question=question, judges=judges)
+                           question=question, judges=judges, query=query)
 
     def _current_first(self, results: list[SearchResult]) -> list[SearchResult]:
         """A memory kept as history (``models.HISTORY_KINDS``) comes right
@@ -2164,6 +2851,18 @@ class MemoryStore:
             return
         self.backend.set_episode_vectors(
             {e.id: v for e, v in zip(episodes, vectors) if v}, self.embedder.model_id)
+        # an episode's only passage took its vector; the parts of a longer one
+        # are embedded on their own, in one call
+        parts = [p for found in self.backend.passages_of([e.id for e in episodes]).values()
+                 for p in found if p.count > 1]
+        if not parts:
+            return
+        try:
+            vectors = self.embedder.embed([p.content for p in parts])
+        except Exception:
+            return
+        self.backend.set_passage_vectors(
+            {p.id: v for p, v in zip(parts, vectors) if v}, self.embedder.model_id)
 
     def evidence(
         self,
@@ -2213,38 +2912,264 @@ class MemoryStore:
             e for e in self.backend.evidence_episodes(list(resting))
             if all(getattr(scope, f) is None or getattr(scope, f) == getattr(e, f)
                    for f in ("user_id", "agent_id", "run_id"))
-            and not any(" ".join(e.content.casefold().split()) in texts[mid]
-                        for mid in resting[e.id])
         ]
-        if not episodes:
+        turns = [
+            turn for turn in self._passage_turns(episodes, resting)
+            if not any(" ".join(turn.content.casefold().split()) in texts[mid]
+                       for mid in resting[turn.episode_id])
+        ]
+        if not turns:
             return []
         if query_vector is None:
             query_vector = self._query_vector(query)
         asked = np.asarray(query_vector, dtype=np.float32) if query_vector else None
-        vectors = (self.backend.episode_vectors_of([e.id for e in episodes],
-                                                   self.embedder.model_id)
-                   if asked is not None else {})
         if asked is not None:
             asked /= float(np.linalg.norm(asked)) or 1.0
-        words = self.backend.episode_keyword_scores(query, [e.id for e in episodes])
-        turns = [
-            EvidenceTurn(episode_id=e.id, content=e.content, speaker=e.speaker,
-                         said_at=e.created_at, memory_ids=resting[e.id],
-                         score=round(_similarity(asked, vectors.get(e.id))
-                                     if asked is not None else 0.0, 6))
-            for e in episodes
-        ]
-        order = {turn.episode_id: i for i, turn in enumerate(turns)}  # as said
+        vectors = self._turn_vectors(turns) if asked is not None else {}
+        words = self._turn_words(query, turns)
+        turns = [turn.model_copy(update={"score": round(
+                     _similarity(asked, vectors.get(_turn_key(turn)))
+                     if asked is not None else 0.0, 6)}) for turn in turns]
+        order = {_turn_key(turn): i for i, turn in enumerate(turns)}  # as said
         chosen: set[str] = set()
         used = 0
-        for turn in sorted(turns, key=lambda t: (-t.score, -words.get(t.episode_id, 0.0),
-                                                 order[t.episode_id])):
+        for turn in sorted(turns, key=lambda t: (-t.score, -words.get(_turn_key(t), 0.0),
+                                                 order[_turn_key(t)])):
             cost = estimate_tokens(turn_line(turn)) + 1
             if used + cost > budget:
                 continue
-            chosen.add(turn.episode_id)
+            chosen.add(_turn_key(turn))
             used += cost
-        return [turn for turn in turns if turn.episode_id in chosen]
+        return [turn for turn in turns if _turn_key(turn) in chosen]
+
+    def _passage_turns(
+        self, episodes: list[Episode], resting: dict[str, list[str]] | None = None
+    ) -> list[EvidenceTurn]:
+        """These episodes as turns, in their order: each episode's passages
+        (``models.Passage``) in order, or the whole episode where the backend
+        keeps none. ``resting`` gives each episode's memories."""
+        passages = self.backend.passages_of([e.id for e in episodes])
+        turns: list[EvidenceTurn] = []
+        for e in episodes:
+            common = {"episode_id": e.id, "speaker": e.speaker, "said_at": e.created_at,
+                      "memory_ids": list((resting or {}).get(e.id, []))}
+            parts = passages.get(e.id)
+            if not parts:
+                turns.append(EvidenceTurn(content=e.content, **common))
+                continue
+            turns.extend(EvidenceTurn(passage_id=p.id, part=p.position + 1, parts=p.count,
+                                      content=p.content, **common) for p in parts)
+        return turns
+
+    def _turn_vectors(self, turns: list[EvidenceTurn]) -> dict[str, np.ndarray]:
+        """Each turn's vector by ``_turn_key``: its passage's, or its episode's
+        for a turn of a whole episode."""
+        model = self.embedder.model_id
+        vectors = dict(self.backend.passage_vectors_of(
+            [t.passage_id for t in turns if t.passage_id], model))
+        vectors.update(self.backend.episode_vectors_of(
+            [t.episode_id for t in turns if not t.passage_id], model))
+        return vectors
+
+    def _turn_words(self, query: str, turns: list[EvidenceTurn]) -> dict[str, float]:
+        """Each turn's full-text score for ``query`` by ``_turn_key``."""
+        scores = dict(self.backend.passage_keyword_scores(
+            query, [t.passage_id for t in turns if t.passage_id]))
+        scores.update(self.backend.episode_keyword_scores(
+            query, [t.episode_id for t in turns if not t.passage_id]))
+        return scores
+
+    def turn_search_due(self, results: list[SearchResult]) -> bool:
+        """Whether turn search runs for these results (``turn_search``):
+        ``retrieval.turn_search`` is on, the decision provider judged at least
+        one of them, and one of ``turn_search_reasons`` holds."""
+        return bool(self.turn_search_reasons(results))
+
+    def turn_search_reasons(self, results: list[SearchResult]) -> list[str]:
+        """Why turn search runs for these results, none when it does not:
+        "relevance" when the best relevance the decision provider gave is
+        under ``retrieval.turn_search_bar``; "several" when its P(the
+        question needs several memories) is at least
+        ``retrieval.turn_search_several``; "incomplete" when its P(the facts
+        judged, read together, contain everything asked) is under
+        ``retrieval.turn_search_complete``. Nothing when turn search is off
+        or the provider judged none of them."""
+        cfg = self.config.retrieval
+        if not cfg.turn_search:
+            return []
+        best = judged_best(results)
+        if best is None:
+            return []
+        judged = [r.signals for r in results if "relevance" in r.signals]
+        several = max((s["several"] for s in judged if "several" in s), default=None)
+        complete = min((s["complete"] for s in judged if "complete" in s), default=None)
+        reasons = []
+        if best < cfg.turn_search_bar:
+            reasons.append("relevance")
+        if (cfg.turn_search_several is not None and several is not None
+                and several >= cfg.turn_search_several):
+            reasons.append("several")
+        if (cfg.turn_search_complete is not None and complete is not None
+                and complete < cfg.turn_search_complete):
+            reasons.append("incomplete")
+        return reasons
+
+    def turn_search(
+        self,
+        query: str,
+        results: list[SearchResult],
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        shown: list[EvidenceTurn] | tuple[EvidenceTurn, ...] = (),
+        query_vector: list[float] | None = None,
+        token_budget: int | None = None,
+        note: dict[str, Any] | None = None,
+    ) -> list[EvidenceTurn]:
+        """Turns of the conversation that may answer ``query`` when the facts
+        found (``results``) do not: a second search, over the turns said in
+        the scope searched, run only when ``turn_search_due``.
+
+        The turns are found by their words (BM25) and by their vectors (the
+        query's own vector, so no other embedding), ``TURN_CANDIDATES`` of
+        each, fused by rank. Of those, a turn is left out when it is already
+        shown (``shown``, the evidence of the facts), when turn search may not
+        show it (``MemoryBackend.turn_search_episodes``: withheld, resting
+        under a removed memory, or only under memories out of use), or when a
+        result already says its words whole. The first ``TURN_HITS`` are each
+        read with the turn said before them and the two said after them, of
+        the same run and day, a turn in one excerpt only. The decision
+        provider judges every excerpt in one call, and those judged at least
+        ``retrieval.turn_search_keep`` are taken, the best first, while they
+        fit ``token_budget`` (default ``retrieval.turn_search_tokens``). The
+        turns taken are returned in the order they were said, as dated
+        quotes (``EvidenceTurn``, resting on no result: ``memory_ids`` is
+        empty, ``score`` is the judged relevance of its excerpt). A turn
+        already shown is read in its excerpt but not returned again.
+
+        ``note`` receives what was searched and judged: "best" (the judge's
+        best relevance over the results), "due", "candidates", "excerpts"
+        (each with its "hit", "episode_ids", "new_ids", "score" and "tokens")
+        and "chosen" (their indexes)."""
+        note = {} if note is None else note
+        note["best"] = judged_best(results)
+        note["why"] = self.turn_search_reasons(results)
+        note["due"] = bool(note["why"])
+        if not note["due"]:
+            return []
+        return self._turn_excerpts(query, results, scope=Scope(
+            user_id=user_id, agent_id=agent_id, run_id=run_id), shown=shown,
+            query_vector=query_vector, token_budget=token_budget, note=note)
+
+    def _turn_excerpts(
+        self, query: str, results: list[SearchResult], *, scope: Scope,
+        shown: list[EvidenceTurn] | tuple[EvidenceTurn, ...],
+        query_vector: list[float] | None, token_budget: int | None, note: dict[str, Any],
+    ) -> list[EvidenceTurn]:
+        """The search, the excerpts and their judgement of ``turn_search``."""
+        cfg = self.config.retrieval
+        budget = cfg.turn_search_tokens if token_budget is None else token_budget
+        if budget <= 0 or not (query or "").strip() or not self.decider.available:
+            return []
+        if query_vector is None:
+            query_vector = self._query_vector(query)
+        fused: dict[str, float] = defaultdict(float)
+        lists = [self.backend.passage_keyword_search(query, scope, TURN_CANDIDATES)]
+        if query_vector:
+            lists.append(self.backend.passage_vector_search(
+                query_vector, self.embedder.model_id, scope, TURN_CANDIDATES))
+        for found in lists:
+            for rank, (passage_id, _) in enumerate(found, start=1):
+                fused[passage_id] += 1.0 / (cfg.rrf_k + rank)
+        order = sorted(fused, key=lambda p: -fused[p])  # a tie: words first, as found
+        note["candidates"] = len(order)
+        said = [" ".join(r.memory.content.casefold().split()) for r in results]
+
+        def says_whole(turn: EvidenceTurn) -> bool:
+            words = " ".join(turn.content.casefold().split())
+            return any(words in text for text in said)
+
+        def episode_of(passage_id: str) -> str:
+            return passage_id.rpartition(":")[0]
+
+        seen = {_turn_key(t) for t in shown}
+        allowed = {e.id: e for e in self.backend.turn_search_episodes(
+            list(dict.fromkeys(episode_of(p) for p in order)))}
+        found = {_turn_key(turn): turn for turn in self._passage_turns(list(allowed.values()))}
+        hits = [p for p in order
+                if p in found and p not in seen and not says_whole(found[p])][:TURN_HITS]
+        taken: set[str] = set()
+        excerpts: list[dict[str, Any]] = []
+        for hit in hits:
+            if hit in taken:
+                continue
+            window = self.backend.episode_neighbours(episode_of(hit), TURN_BEFORE, TURN_AFTER)
+            fine = {e.id for e in self.backend.turn_search_episodes([e.id for e in window])}
+            around = self._passage_turns(window)
+            place = next((i for i, turn in enumerate(around) if _turn_key(turn) == hit), None)
+            if place is None or episode_of(hit) not in fine:
+                continue
+
+            def usable(i: int) -> bool:
+                if not 0 <= i < len(around):
+                    return False
+                turn = around[i]
+                return (turn.episode_id in fine and _turn_key(turn) not in taken
+                        and not says_whole(turn))
+
+            def cost(i: int) -> int:
+                turn = around[i]
+                return 0 if _turn_key(turn) in seen else estimate_tokens(turn_line(turn)) + 1
+
+            # the match, then the turns before it, then those after it, each
+            # while the excerpt fits the budget on its own
+            if cost(place) > budget:
+                continue
+            read, used = [place], cost(place)
+            for side in (range(place - 1, place - TURN_BEFORE - 1, -1),
+                         range(place + 1, place + TURN_AFTER + 1)):
+                for i in side:
+                    if not usable(i):
+                        continue
+                    if used + cost(i) > budget:
+                        break
+                    read.append(i)
+                    used += cost(i)
+            turns = [around[i] for i in sorted(read)]
+            taken.update(_turn_key(turn) for turn in turns)
+            new = [turn for turn in turns if _turn_key(turn) not in seen]
+            excerpts.append({"hit": hit, "turns": turns,
+                             "tokens": sum(estimate_tokens(turn_line(turn)) + 1 for turn in new),
+                             "new": new})
+        if not excerpts:
+            note["excerpts"], note["chosen"] = [], []
+            return []
+        questions = {
+            f"x{i}": Noul(instructions="Someone who reads only this part of a conversation "
+                                       "can answer the question. Conversation:\n"
+                          + "\n".join(turn_line(t) for t in item["turns"]))
+            for i, item in enumerate(excerpts)}
+        answers = self.decider.decide(f"QUESTION: {query}", questions)
+        for i, item in enumerate(excerpts):
+            answer = answers[f"x{i}"]
+            item["score"] = float(answer.value) if answer.available else 0.0
+        chosen = fill_excerpts(excerpts, budget, cfg.turn_search_keep)
+        note["excerpts"] = [{"hit": item["hit"], "score": round(item["score"], 4),
+                             "tokens": item["tokens"],
+                             "episode_ids": [t.episode_id for t in item["turns"]],
+                             "new_ids": [t.episode_id for t in item["new"]],
+                             "passage_ids": [_turn_key(t) for t in item["turns"]],
+                             "new_passage_ids": [_turn_key(t) for t in item["new"]]}
+                            for item in excerpts]
+        note["chosen"] = chosen
+        picked = {_turn_key(t): t.model_copy(update={"score": round(excerpts[i]["score"], 6)})
+                  for i in chosen for t in excerpts[i]["new"]}
+        # in the order said: time, then the order saved, then the part
+        said_order = {e.id: n for n, e in enumerate(self.backend.turn_search_episodes(
+            list(dict.fromkeys(t.episode_id for t in picked.values()))))}
+        return sorted((t for t in picked.values() if t.episode_id in said_order),
+                      key=lambda t: (said_order[t.episode_id], t.part))
 
     def _reranks(self) -> bool:
         """Whether the decision provider re-ranks. The setting decides where it
@@ -2459,19 +3384,31 @@ class MemoryStore:
                 result.memory.content, [n for entity_id in it for n in aliases[entity_id]],
                 keep=[e.name for e in ents(result.memory.id) if e.id not in it])
 
-        def judge(batch: list[SearchResult], meta: bool):
+        def judge(batch: list[SearchResult], meta: bool, complete: dict | None = None):
             if seeds:
                 unread = [r.memory.id for r in batch if r.memory.id not in entities]
                 if unread:  # read at once, not one memory at a time
                     entities.update(self.backend.entities_of_memories(unread))
                 new = {subject(r.memory.id) for r in batch} - homes.keys() - {None}
                 homes.update(homes_of(self.backend, sorted(new)))
-            return self._judged_relevance(
-                question, [(r.memory.id, text_of(r)) for r in batch], meta=meta)
+            pairs = [(r.memory.id, text_of(r)) for r in batch]
+            if complete is None:
+                return self._judged_relevance(question, pairs, meta=meta)
+            return self._judged_relevance(question, pairs, meta=meta, complete=complete)
 
-        judged, specific, several = judge(ranked[:size], True)
+        # With turn search's completeness trigger, the first call also asks
+        # whether the facts it judges, read together, have everything asked:
+        # the question as asked, its names kept, and each fact as a model
+        # reads it, since a fact about someone else reads "it" here too.
+        cfg = self.config.retrieval
+        complete = ({"question": plan.query or question,
+                     "facts": [memory_line(r.memory) for r in ranked[:size]]}
+                    if cfg.turn_search and cfg.turn_search_complete is not None else None)
+        judged, specific, several = judge(ranked[:size], True, complete)
         if not judged:
             return ranked
+        whole = complete.get("value") if complete else None
+        plan.best_judged = round(max(judged.values()), 4)
         found: dict[str, SearchResult] = {r.memory.id: r for r in ranked}
         extra: list[SearchResult] = []
         calls, pooled = 1, 0
@@ -2532,7 +3469,9 @@ class MemoryStore:
                 about = result.signals.get("about") or aboutness([act.get(e.id) for e in ents(mid)])
                 result.signals = {**result.signals, "about": round(about, 3)}
             result.signals = {**result.signals, "judged": round(value ** specific * held, 4),
+                              "relevance": round(value, 4),
                               "specific": round(specific, 4), "several": round(several, 4),
+                              **({"complete": round(whole, 4)} if whole is not None else {}),
                               "calls": calls, "pool": pooled,
                               **({"member": True} if mid in members else {})}
             # The override comes after aboutness's floor, so what it leaves is
@@ -2705,6 +3644,7 @@ class MemoryStore:
 
     def _judged_relevance(
         self, asked: str, memories: list[tuple[str, str]], meta: bool = True,
+        complete: dict[str, Any] | None = None,
     ) -> tuple[dict[str, float], float, float]:
         """P(the memory answers the question) from the decision provider, for
         (memory id, text) pairs, in one call. With ``meta``, also what kind of
@@ -2712,7 +3652,13 @@ class MemoryStore:
         everything about its entity) and P(it needs several memories: a
         comparison, a list or a total). A memory the provider did not answer
         for is left out; an unanswered meta question counts as a property
-        question with one answer."""
+        question with one answer.
+
+        With ``complete`` ({"question": the question as asked, "facts": the
+        facts as a model reads them}), the same call also asks P(the facts,
+        read together, contain everything the question asks for, about the
+        person or thing it asks about) (``COMPLETE_QUESTION``), and writes it
+        to ``complete["value"]`` (None when unanswered)."""
         if not self.decider.available or not memories:
             return {}, 1.0, 0.0
         questions: dict[str, Noul] = {
@@ -2726,7 +3672,14 @@ class MemoryStore:
             questions["several"] = Noul(instructions="The question needs several memories to "
                                                      "be answered, such as a comparison, a "
                                                      "list or a total.")
+        if complete is not None:
+            questions["complete"] = Noul(instructions=COMPLETE_QUESTION.format(
+                question=complete["question"],
+                facts="\n".join(f"- {line}" for line in complete["facts"])))
         answers = self.decider.decide(f"QUESTION: {asked}", questions)
+        if complete is not None:
+            whole = answers["complete"]
+            complete["value"] = float(whole.value) if whole.available else None
         judged = {mid: float(answers[f"m{i}"].value) for i, (mid, _) in enumerate(memories)
                   if answers[f"m{i}"].available}
         if not meta:
@@ -2853,7 +3806,9 @@ class MemoryStore:
         ``context.description_budget``). The memories that fit take the budget
         but a share for their evidence (``retrieval.evidence_tokens``, at most
         half of what is left), and their source turns that best match the
-        query fill that share (``evidence``).
+        query fill that share (``evidence``). When turn search is due, its
+        turns take a share of their own (``_context``). The steps after the
+        search are ``context_from``'s, which the benchmark runner calls.
 
         With ``filters`` only memories they admit are shown, so no entity
         description (written from all of an entity's memories) is: the
@@ -2880,29 +3835,100 @@ class MemoryStore:
                 query, user_id=user_id, agent_id=agent_id, run_id=run_id, limit=limit,
                 evidence=False,
             )
-        entities = [] if header else self.described_entities(
-            query, user_id=user_id, agent_id=agent_id, run_id=run_id,
-            token_budget=description_budget(token_budget),
-        )
+        return self._context(query, results, user_id=user_id, agent_id=agent_id,
+                             run_id=run_id, token_budget=token_budget, header=header,
+                             period=period).context
+
+    def context_from(
+        self,
+        query: str,
+        results: list[SearchResult],
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        token_budget: int = CONTEXT_TOKENS,
+        entities: list[Entity] | None = None,
+        evidence_tokens: int | None = None,
+    ) -> AgentContext:
+        """The context ``reconstruct_context`` gives an agent for ``query``
+        without filters, from the results of a search already made
+        (``search`` with ``evidence=False``, best first), in its parts. The
+        benchmark runner reads each question's context here, from the one
+        search it makes of the question. ``entities`` are the described
+        entities shown first, when the caller has them
+        (``described_entities`` within ``description_budget(token_budget)``;
+        [] shows none). ``evidence_tokens`` is the evidence's budget in place
+        of ``retrieval.evidence_tokens``."""
+        return self._context(query, results, user_id=user_id, agent_id=agent_id,
+                             run_id=run_id, token_budget=token_budget, entities=entities,
+                             evidence_tokens=evidence_tokens)
+
+    def _context(
+        self,
+        query: str,
+        results: list[SearchResult],
+        *,
+        user_id: str | None,
+        agent_id: str | None,
+        run_id: str | None,
+        token_budget: int,
+        entities: list[Entity] | None = None,
+        evidence_tokens: int | None = None,
+        header: str = "",
+        period: Any = None,
+    ) -> AgentContext:
+        """``reconstruct_context`` after its search. The descriptions come
+        first, or the filters' ``header`` in their place. The memories that
+        fit take what is left but a share for their evidence (at most half)
+        and, when turn search is due (``turn_search_reasons``), a share for
+        its excerpts (at most a quarter). Their source turns that best match
+        the query fill the first share (``evidence``), turn search's turns
+        the second (``turn_search``). The shares are ceilings: the memories
+        are packed last, into what the turns leave. With filters no turns
+        are searched: the turns would not be held to the filters."""
+        cfg = self.config.retrieval
+        if header:
+            entities = []
+        elif entities is None:
+            entities = self.described_entities(
+                query, user_id=user_id, agent_id=agent_id, run_id=run_id,
+                token_budget=description_budget(token_budget))
         entity_text = header or entities_text(entities)
         entity_memory_ids = [memory.id for entity in entities
                              for memory in self.backend.entity_memories(entity.id, limit=20)]
         remaining = max(0, token_budget - estimate_tokens(entity_text))
-        share = min(max(self.config.retrieval.evidence_tokens, 0), remaining // 2)
-        shown = fitting(results, remaining - share, self._asked_bounds(period))
+        budget = cfg.evidence_tokens if evidence_tokens is None else evidence_tokens
+        share = min(max(budget, 0), remaining // 2)
+        # turn search, when due, takes its share before the memories are packed
+        note: dict[str, Any] = {"best": judged_best(results),
+                                "why": [] if header else self.turn_search_reasons(results)}
+        note["due"] = bool(note["why"])
+        quoted = min(max(cfg.turn_search_tokens, 0), remaining // 4) if note["due"] else 0
+        asked = self._asked_bounds(period)
+        shown = fitting(results, remaining - share - quoted, asked)
         turns = self.evidence(query, shown, user_id=user_id, agent_id=agent_id,
                               run_id=run_id, token_budget=share)
-        memory_context = build_context(shown, token_budget=remaining, evidence=turns,
-                                       asked=self._asked_bounds(period))
+        excerpts = self.turn_search(query, shown, user_id=user_id, agent_id=agent_id,
+                                    run_id=run_id, shown=turns, token_budget=quoted,
+                                    note=note) if quoted else []
+        # the shares are ceilings: what the turns leave goes to the memories
+        memory_context = build_context(results, token_budget=remaining, evidence=turns,
+                                       excerpts=excerpts, asked=asked)
+        shown, turns, excerpts = packed(results, token_budget=remaining, evidence=turns,
+                                        excerpts=excerpts, asked=asked)
         parts = [part for part in (entity_text, memory_context.text) if part]
         combined = "\n\n".join(parts)
         memory_ids = list(dict.fromkeys([*entity_memory_ids, *memory_context.memory_ids]))
-        return ContextResult(
-            text=combined,
-            memory_ids=memory_ids,
-            token_estimate=estimate_tokens(combined) if combined else 0,
-            episode_ids=memory_context.episode_ids,
-        )
+        return AgentContext(
+            entities=list(entities), results=shown, evidence=turns, excerpts=excerpts,
+            turn_search=note,
+            context=ContextResult(
+                text=combined,
+                memory_ids=memory_ids,
+                token_estimate=estimate_tokens(combined) if combined else 0,
+                episode_ids=memory_context.episode_ids,
+            ))
 
     @staticmethod
     def _asked_bounds(period: Any) -> tuple[date | None, date | None] | None:
@@ -3081,14 +4107,21 @@ class MemoryStore:
         self, query: str, filters: Filters, *, user_id: str | None = None,
         agent_id: str | None = None, run_id: str | None = None, limit: int = 10,
         include_invalid: bool = False, owner_prefix: str | None = None,
-        evidence: bool = True, legacy: dict[str, Any] | None = None,
+        evidence: bool = True, excerpts: bool = False,
+        legacy: dict[str, Any] | None = None,
     ) -> FilteredSearch:
         """``search`` with ``filters``, as the tools and endpoints answer it
         (``FilteredSearch``): the results, the notes of the filters, and for
         a time asked about that matched nothing, the nearest dated memories
         (``nearest_dated``). An empty query browses what the filters admit.
         ``legacy`` are ``search``'s own filter arguments (``categories``,
-        ``entity_id``, ``since``, ...), checked by the caller."""
+        ``entity_id``, ``since``, ...), checked by the caller.
+
+        With ``excerpts`` and ``evidence``, a search without filters also
+        gets turn search's turns when it is due (``turn_search``, within
+        ``retrieval.turn_search_tokens``), as ``reconstruct_context`` shows
+        them; a turn already shown as evidence is not repeated. With filters
+        no turns are searched, as for a context with filters."""
         filters = self.resolve_filters(filters, user_id=user_id, agent_id=agent_id,
                                        owner_prefix=owner_prefix)
         results = self.search(query, user_id=user_id, agent_id=agent_id, run_id=run_id,
@@ -3096,7 +4129,12 @@ class MemoryStore:
                               filters=filters, evidence=evidence, **(legacy or {}))
         nearest = (self.nearest_dated(filters, user_id=user_id, agent_id=agent_id)
                    if not results and filters.period is not None else [])
-        return FilteredSearch(results=results, filters=filters, nearest=nearest)
+        found = FilteredSearch(results=results, filters=filters, nearest=nearest)
+        if excerpts and evidence and not filters.active and not any((legacy or {}).values()):
+            found.excerpts = self.turn_search(
+                query, results, user_id=user_id, agent_id=agent_id, run_id=run_id,
+                shown=[turn for r in results for turn in r.evidence], note=found.turn_search)
+        return found
 
     def get(self, memory_id: str, *, owner_prefix: str | None = None) -> Memory | None:
         memory = self.backend.get_memory(memory_id)
@@ -3844,6 +4882,9 @@ class MemoryStore:
         memories = self.backend.list_memories(scope, limit=1_000_000)
         for memory in memories:
             self.delete(memory.id, hard=hard)
+        if user_id is not None and agent_id is None and run_id is None:
+            # what the namespace asked goes with what it keeps
+            self.backend.delete_search_log(user_id=user_id)
         return len(memories)
 
     # ------------------------------------------------------------------
@@ -4813,6 +5854,12 @@ class MemoryStore:
             if self.backend.restore_entity(entity_id):
                 restored += 1
                 self._meet_namesakes(entity_id)
+        if restored and self.config.retrieval.entity_questions:
+            # the trash keeps the entity questions' texts, not their vectors
+            try:
+                self.refresh_entity_question_vectors()
+            except Exception as exc:
+                log.warning("entity question vectors not computed after a restore: %s", exc)
         return restored
 
     def _meet_namesakes(self, entity_id: str) -> None:
@@ -6289,6 +7336,16 @@ class MemoryStore:
         """
         now = now or datetime.now(timezone.utc)
         ran: dict[str, Any] = {}
+        # The search log's retention holds whatever else is paused or off,
+        # for every namespace (one without memories has no tick of its own).
+        try:
+            pruned = self.backend.prune_search_log(
+                (now - timedelta(days=SEARCH_LOG_DAYS)).isoformat(timespec="seconds"))
+        except Exception as exc:
+            log.warning("search log not pruned: %s", exc)
+            pruned = 0
+        if pruned:
+            ran["search_log"] = {"deleted": pruned}
         if self.upkeep_paused():
             return ran
         if (self._upkeep_get("owner_learned", user_id, None) is None
@@ -6324,6 +7381,18 @@ class MemoryStore:
                 self._upkeep_set("last:durability", user_id,
                                  {"at": now.isoformat(timespec="seconds"), "result": result})
                 ran["durability"] = result
+        if self.config.retrieval.entity_questions and self.llm.available:
+            # Cheap when no described hub related to the owner is new or
+            # changed, so it runs every tick, a few calls at most.
+            try:
+                result = self.write_entity_questions(
+                    user_id=user_id, batch=self.ENTITY_QUESTION_BATCH,
+                    limit=self.ENTITY_QUESTION_BATCH * self.UPKEEP_ENTITY_QUESTION_CALLS)
+            except Exception as exc:
+                log.warning("entity questions not written: %s", exc)
+                result = {}
+            if result.get("calls"):
+                ran["entity_questions"] = result
         if dedup_due:
             # After this week's merges and new homes: re-embed the memories
             # whose masked names changed. Nothing to embed is no run.
@@ -6335,6 +7404,24 @@ class MemoryStore:
                 embedded = 0
             if embedded:
                 ran["property_vectors"] = {"embedded": embedded}
+            if self.config.retrieval.question_keys:
+                try:
+                    embedded = self.refresh_question_vectors(user_id=user_id,
+                                                             exact_user=exact_user)
+                except Exception as exc:
+                    log.warning("question vector refresh failed: %s", exc)
+                    embedded = 0
+                if embedded:
+                    ran["question_vectors"] = {"embedded": embedded}
+            if self.config.retrieval.entity_questions:
+                try:
+                    embedded = self.refresh_entity_question_vectors(
+                        user_id=user_id, exact_user=exact_user)
+                except Exception as exc:
+                    log.warning("entity question vector refresh failed: %s", exc)
+                    embedded = 0
+                if embedded:
+                    ran["entity_question_vectors"] = {"embedded": embedded}
         return ran
 
     def run_consolidation_pass(
@@ -6620,7 +7707,31 @@ class MemoryStore:
                 {e.id: v for e, v in zip(episodes, vectors)}, self.embedder.model_id)
             if not all(vectors):
                 break  # an episode the embedder gives no vector would come back forever
+        self.embed_passages(batch_size=batch_size)
         return count
+
+    def embed_passages(self, *, batch_size: int = 100, dry_run: bool = False) -> dict[str, int]:
+        """Embed the passages of longer episodes that have no vector of the
+        embedder's model yet (``models.Passage``): those of a store saved
+        before passages were kept. An episode's only passage has its vector
+        already. With ``dry_run``, count them and their words, with no call.
+        Returns {"passages", "words", "embedded"}."""
+        model = self.embedder.model_id
+        if dry_run or not self.embedder.dimensions:
+            waiting = self.backend.passages_to_embed(model, limit=10**9)
+            return {"passages": len(waiting),
+                    "words": sum(len(p.content.split()) for p in waiting), "embedded": 0}
+        done = {"passages": 0, "words": 0, "embedded": 0}
+        while parts := self.backend.passages_to_embed(model, limit=batch_size):
+            vectors = self.embedder.embed([p.content for p in parts])
+            self.backend.set_passage_vectors(
+                {p.id: v for p, v in zip(parts, vectors)}, model)
+            done["passages"] += len(parts)
+            done["words"] += sum(len(p.content.split()) for p in parts)
+            done["embedded"] += sum(1 for v in vectors if v)
+            if not all(vectors):
+                break  # a passage the embedder gives no vector would come back forever
+        return done
 
     def stats(self) -> dict[str, Any]:
         data = self.backend.stats()

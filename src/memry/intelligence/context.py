@@ -7,9 +7,11 @@ the descriptions of the entities the question names, then each fact with the
 date its event happens, when known, and the date it was said, both labelled,
 and for a memory kept as history the day it held until, then the source turns
 shown as their evidence (``MemoryStore.evidence``), each with the date it was
-said and its speaker. ``reconstruct_context`` writes these lines under its
-headings for an agent; the benchmark runner passes the same lines as the
-memory list of Mem0's answer prompt.
+said and its speaker, then turn search's turns
+(``MemoryStore.turn_search``), written as the evidence is.
+``reconstruct_context`` writes these lines under its headings for an agent;
+the benchmark runner passes the same lines as the memory list of its answer
+prompt.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ CONTEXT_TOKENS = 1200
 _ENTITY_HEADER = "## Known entities (memry)\n"
 _HEADER = "## Relevant long-term memories (memry)\n"
 _EVIDENCE_HEADER = "\n\nWhat was said, in the order it was said:\n"
+_EXCERPT_HEADER = "\n\nMore of what was said that matches the question, in the order it was said:\n"
 _FOOTER = "\n(Use these silently as background knowledge; they may be incomplete.)"
 
 
@@ -81,8 +84,10 @@ def memory_line(memory: Memory, now: Any = None, asked: Any = None) -> str:
 
 
 def turn_line(turn: EvidenceTurn) -> str:
-    """One source turn as a model reads it: "8 May 2023: Ada: <text>"."""
-    return f"{said_date(turn.said_at)}: {turn.speaker}: {turn.content}"
+    """One source turn as a model reads it: "8 May 2023: Ada: <text>", and
+    for a passage of a longer turn "8 May 2023: Ada (part 2 of 5): <text>"."""
+    part = f" (part {turn.part} of {turn.parts})" if turn.parts > 1 else ""
+    return f"{said_date(turn.said_at)}: {turn.speaker}{part}: {turn.content}"
 
 
 def memory_lines(
@@ -102,13 +107,16 @@ def entity_line(entity: Entity) -> str:
 
 def context_lines(
     entities: Iterable[Entity], memories: Iterable[Memory],
-    evidence: Iterable[EvidenceTurn] = (), now: Any = None,
+    evidence: Iterable[EvidenceTurn] = (), now: Any = None, *,
+    excerpts: Iterable[EvidenceTurn] = (),
 ) -> list[str]:
     """What Memry gives a model for a question, one line each: the
     descriptions of the entities it names (``entity_line``), then the
-    memories and the turns shown as their evidence (``memory_lines``)."""
+    memories and the turns shown as their evidence (``memory_lines``), then
+    turn search's turns (``excerpts``). These are the lines of
+    ``build_context``'s text, in its order, without its headings."""
     return [*(entity_line(e) for e in entities if e.description),
-            *memory_lines(memories, evidence, now)]
+            *memory_lines(memories, evidence, now), *(turn_line(t) for t in excerpts)]
 
 
 def description_budget(token_budget: int) -> int:
@@ -158,28 +166,52 @@ def fitting(
     return kept
 
 
+def packed(
+    results: Sequence[SearchResult],
+    *,
+    token_budget: int = CONTEXT_TOKENS,
+    evidence: Sequence[EvidenceTurn] = (),
+    excerpts: Sequence[EvidenceTurn] = (),
+    asked: Any = None,
+) -> tuple[list[SearchResult], list[EvidenceTurn], list[EvidenceTurn]]:
+    """What ``build_context`` shows of these: the results that fit beside
+    all of ``evidence`` and ``excerpts``, the turns of ``evidence`` that rest
+    on a result shown, and ``excerpts``. Nothing at all when no result fits."""
+    turns_cost = (estimate_tokens(_EVIDENCE_HEADER)
+                  + sum(estimate_tokens(turn_line(t)) + 1 for t in evidence)) if evidence else 0
+    quoted_cost = (estimate_tokens(_EXCERPT_HEADER)
+                   + sum(estimate_tokens(turn_line(t)) + 1 for t in excerpts)) if excerpts else 0
+    shown = fitting(results, token_budget - turns_cost - quoted_cost, asked)
+    if not shown:
+        return [], [], []
+    kept = {r.memory.id for r in shown}
+    return shown, [t for t in evidence if kept.intersection(t.memory_ids)], list(excerpts)
+
+
 def build_context(
     results: list[SearchResult],
     *,
     token_budget: int = CONTEXT_TOKENS,
     evidence: Sequence[EvidenceTurn] = (),
+    excerpts: Sequence[EvidenceTurn] = (),
     asked: Any = None,
 ) -> ContextResult:
     """The memories that fit, then ``evidence``, the turns already chosen for
-    them within their own budget (``MemoryStore.evidence``). ``asked`` as
-    for ``memory_line``."""
-    turns_cost = (estimate_tokens(_EVIDENCE_HEADER)
-                  + sum(estimate_tokens(turn_line(t)) + 1 for t in evidence)) if evidence else 0
-    shown = fitting(results, token_budget - turns_cost, asked)
+    them within their own budget (``MemoryStore.evidence``), then
+    ``excerpts``, the turns turn search chose (``MemoryStore.turn_search``),
+    under a heading of their own (``packed``). ``asked`` as for
+    ``memory_line``."""
+    shown, turns, excerpts = packed(results, token_budget=token_budget, evidence=evidence,
+                                    excerpts=excerpts, asked=asked)
     if not shown:
         return ContextResult(text="", memory_ids=[], token_estimate=0)
-    kept = {r.memory.id for r in shown}
-    turns = [t for t in evidence if kept.intersection(t.memory_ids)]
     lines = [memory_line(r.memory, asked=asked) for r in shown]
     text = _HEADER + "\n".join(f"- {line}" for line in lines)
     if turns:
         text += _EVIDENCE_HEADER + "\n".join(f"- {turn_line(t)}" for t in turns)
+    if excerpts:
+        text += _EXCERPT_HEADER + "\n".join(f"- {turn_line(t)}" for t in excerpts)
     text += _FOOTER
     return ContextResult(text=text, memory_ids=[r.memory.id for r in shown],
                          token_estimate=estimate_tokens(text),
-                         episode_ids=[t.episode_id for t in turns])
+                         episode_ids=[t.episode_id for t in [*turns, *excerpts]])

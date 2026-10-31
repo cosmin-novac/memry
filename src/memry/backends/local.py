@@ -32,6 +32,7 @@ from ..models import (
     Memory,
     MemoryEvent,
     MergeProposal,
+    Passage,
     Relation,
     ENTITY_TYPES,
     HISTORY_KINDS,
@@ -43,6 +44,8 @@ from ..models import (
     new_id,
     utcnow,
 )
+from ..intelligence.extraction import looks_secret
+from ..intelligence.passages import passages_of as split_episode
 from .ann import HAS_USEARCH, HnswSidecar
 from .base import MemoryBackend
 
@@ -78,6 +81,34 @@ CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
     VALUES ('delete', old.rowid, old.content);
 END;
 
+-- passages: an episode in parts of at most 150 words (``models.Passage``),
+-- which evidence and turn search use in place of whole episodes. An episode's
+-- only passage carries the episode's vector; the parts of a longer one are
+-- embedded on their own. They go with their episode.
+CREATE TABLE IF NOT EXISTS passages (
+    id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    count INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    embedding BLOB DEFAULT NULL,
+    embedding_model TEXT DEFAULT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_passages_episode ON passages(episode_id, position);
+CREATE VIRTUAL TABLE IF NOT EXISTS passages_fts USING fts5(
+    content, content='passages', content_rowid='rowid'
+);
+CREATE TRIGGER IF NOT EXISTS passages_ai AFTER INSERT ON passages BEGIN
+    INSERT INTO passages_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS passages_ad AFTER DELETE ON passages BEGIN
+    INSERT INTO passages_fts(passages_fts, rowid, content)
+    VALUES ('delete', old.rowid, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS episodes_passages_ad AFTER DELETE ON episodes BEGIN
+    DELETE FROM passages WHERE episode_id = old.id;
+END;
+
 CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
     content TEXT NOT NULL,
@@ -110,6 +141,79 @@ CREATE TABLE IF NOT EXISTS memory_property_vectors (
     embedding_model TEXT,
     masked_hash TEXT
 );
+-- The questions a memory answers (``intelligence.questions``), kept as
+-- search keys beside it: one row per question, with its vector in float16,
+-- cut to ``retrieval.property_dimensions``. The texts are in a backup (they
+-- cost model calls); the vectors are derived and filled in again after a
+-- restore (``MemoryStore.refresh_question_vectors``). source: "save" (the
+-- extractor), "backfill", "agent" (sent with the save) or "night".
+CREATE TABLE IF NOT EXISTS memory_questions (
+    memory_id TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'save',
+    embedding BLOB DEFAULT NULL,
+    embedding_model TEXT DEFAULT NULL,
+    PRIMARY KEY (memory_id, n)
+);
+-- The questions the owner would ask about an entity by its role ("Where does
+-- my sister work?", ``intelligence.entity_questions``), one row per question,
+-- with its vector in float16 cut to ``retrieval.property_dimensions``. The
+-- texts are in a backup and in a retired entity's snapshot; the vectors are
+-- filled in again after a restore
+-- (``MemoryStore.refresh_entity_question_vectors``). A merged entity keeps
+-- its questions with its tombstone, unread until the merge is undone.
+-- source: "model" (the writer) or "agent".
+CREATE TABLE IF NOT EXISTS entity_questions (
+    entity_id TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'model',
+    embedding BLOB DEFAULT NULL,
+    embedding_model TEXT DEFAULT NULL,
+    PRIMARY KEY (entity_id, n)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_questions_fts USING fts5(
+    text, content='memory_questions', content_rowid='rowid'
+);
+CREATE TRIGGER IF NOT EXISTS memory_questions_ai AFTER INSERT ON memory_questions BEGIN
+    INSERT INTO memory_questions_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS memory_questions_ad AFTER DELETE ON memory_questions BEGIN
+    INSERT INTO memory_questions_fts(memory_questions_fts, rowid, text)
+    VALUES ('delete', old.rowid, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS memory_questions_au AFTER UPDATE OF text ON memory_questions BEGIN
+    INSERT INTO memory_questions_fts(memory_questions_fts, rowid, text)
+    VALUES ('delete', old.rowid, old.text);
+    INSERT INTO memory_questions_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+-- The search log (``retrieval.search_log``): one row per search, kept
+-- ``SEARCH_LOG_DAYS`` days. mode: "linked" (the question was about a known
+-- entity: seeds > 0), "text" (about none) or "browse" (no query text).
+-- best_judged: the judge's highest relevance of the judged pool (NULL when
+-- the search was not judged). keyed: how many memories took the query as a
+-- question key (``MemoryStore._traffic_keys``). Never in a backup unless
+-- asked: it contains what people asked.
+CREATE TABLE IF NOT EXISTS search_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    user_id TEXT,
+    agent_id TEXT,
+    run_id TEXT,
+    query TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    seeds INTEGER NOT NULL DEFAULT 0,
+    first_person INTEGER NOT NULL DEFAULT 0,
+    filtered INTEGER NOT NULL DEFAULT 0,
+    judged INTEGER NOT NULL DEFAULT 0,
+    best_judged REAL DEFAULT NULL,
+    results INTEGER NOT NULL DEFAULT 0,
+    latency_ms REAL NOT NULL DEFAULT 0,
+    keyed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_search_log_ns ON search_log(user_id, at);
+CREATE INDEX IF NOT EXISTS idx_search_log_at ON search_log(at);
 CREATE INDEX IF NOT EXISTS idx_memories_invalid ON memories(invalid_at);
 -- what a memory replaced, read when it is deleted for good (``replaced_by``)
 CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by)
@@ -410,15 +514,23 @@ _MEMORY_COLS = (
 _BACKUP_TABLE_KEYS: dict[str, tuple[str, ...]] = {
     "episodes": ("id",),
     "memories": ("id",),
+    "memory_questions": ("memory_id", "n"),
     "memory_events": ("id",),
     "topics": ("id",),
     "memory_topics": ("memory_id", "topic_id"),
     "entities": ("id",),
+    "entity_questions": ("entity_id", "n"),
     "entity_mentions": ("id",),
     "entity_proposals": ("id",),
     "relations": ("id",),
 }
 _BACKUP_ORDER = tuple(_BACKUP_TABLE_KEYS)
+#: The columns of a kept search as written (``log_search``). The search log
+#: is not in ``_BACKUP_TABLE_KEYS``: a backup carries it only when asked.
+_SEARCH_LOG_COLS = (
+    "at", "user_id", "agent_id", "run_id", "query", "mode", "seeds", "first_person",
+    "filtered", "judged", "best_judged", "results", "latency_ms",
+)
 #: The tables whose rows carry a namespace, but for the legacy tag index
 #: (``topics``), which ``adopt_unscoped`` moves apart.
 _NAMESPACED_TABLES = (
@@ -698,6 +810,12 @@ _EPISODE_COLS = (
 )
 
 
+def _save_key(episode: Episode) -> tuple:
+    """The save an episode came from: every turn of one save has its scope and
+    its time (``MemoryStore.add``)."""
+    return (episode.user_id, episode.agent_id, episode.run_id, episode.created_at)
+
+
 def _row_to_episode(row: sqlite3.Row) -> Episode:
     return Episode(
         id=row["id"],
@@ -711,6 +829,20 @@ def _row_to_episode(row: sqlite3.Row) -> Episode:
         created_at=row["created_at"],
         withheld_at=row["withheld_at"],
     )
+
+
+def _pack_half(vector: list[float]) -> bytes:
+    """A vector as float16 bytes (a question key's vector: a few per memory)."""
+    return np.asarray(vector, dtype=np.float16).tobytes()
+
+
+def _unpack_half(blob: bytes) -> np.ndarray:
+    return np.frombuffer(blob, dtype=np.float16).astype(np.float32)
+
+
+def _prefixed(columns: str, alias: str) -> str:
+    """``_MEMORY_COLS`` with each column under ``alias``."""
+    return ", ".join(f"{alias}.{column.strip()}" for column in columns.split(","))
 
 
 def _row_to_memory(row: sqlite3.Row) -> Memory:
@@ -763,6 +895,7 @@ class LocalBackend(MemoryBackend):
         self._db.executescript(_SCHEMA)
         if not indexed:
             self._db.execute("INSERT INTO episodes_fts(episodes_fts) VALUES ('rebuild')")
+        self._ensure_passages()
         self._ensure_entity_description_columns()
         self._ensure_exact_topic_scopes()
         self._ensure_one_active_topic_per_name()
@@ -1136,7 +1269,40 @@ class LocalBackend(MemoryBackend):
                     for e in episodes
                 ],
             )
+            self._insert_passages([(e, None, None) for e in episodes])
             self._commit()
+
+    def _insert_passages(
+        self, rows: list[tuple[Episode, bytes | None, str | None]]
+    ) -> None:
+        """Write the passages of these episodes (``intelligence.passages``),
+        each episode with its vector and model, which its only passage takes.
+        Under the lock, uncommitted."""
+        values = []
+        for episode, vector, model in rows:
+            parts = split_episode(episode)
+            single = len(parts) == 1
+            values.extend((p.id, p.episode_id, p.position, p.count, p.content,
+                           vector if single else None, model if single else None)
+                          for p in parts)
+        self._db.executemany(
+            "INSERT OR IGNORE INTO passages (id, episode_id, position, count, content, "
+            "embedding, embedding_model) VALUES (?,?,?,?,?,?,?)", values)
+
+    def _ensure_passages(self) -> None:
+        """Write the passages of every episode saved before passages were
+        kept, in the order saved, with no provider call: an episode's only
+        passage takes its vector, a longer one's parts wait for theirs
+        (``passages_to_embed``)."""
+        while True:
+            rows = self._db.execute(
+                f"SELECT {_EPISODE_COLS}, embedding, embedding_model FROM episodes e "
+                "WHERE NOT EXISTS (SELECT 1 FROM passages p WHERE p.episode_id = e.id) "
+                "ORDER BY e.rowid LIMIT 2000").fetchall()
+            if not rows:
+                return
+            self._insert_passages([(_row_to_episode(r), r["embedding"], r["embedding_model"])
+                                   for r in rows])
 
     def list_episodes(self, scope: Scope, limit: int = 100) -> list[Episode]:
         clause, params = _scope_clause(scope)
@@ -1170,6 +1336,10 @@ class LocalBackend(MemoryBackend):
         with self._lock:
             self._db.executemany(
                 "UPDATE episodes SET embedding = ?, embedding_model = ? WHERE id = ?", rows)
+            # an episode's only passage is its whole text, so it has its vector
+            self._db.executemany(
+                "UPDATE passages SET embedding = ?, embedding_model = ? "
+                "WHERE episode_id = ? AND count = 1", rows)
             self._commit()
 
     def episode_vectors_of(
@@ -1217,10 +1387,9 @@ class LocalBackend(MemoryBackend):
             out.update((r["id"], -float(r["rank_score"])) for r in rows)
         return out
 
-    def evidence_episodes(self, episode_ids: list[str]) -> list[Episode]:
+    def _episodes_with_seq(self, episode_ids: list[str]) -> list[tuple[int, Episode]]:
+        """(rowid, episode) of the episodes among these that are not withheld."""
         ids = list(dict.fromkeys(episode_ids))
-        if not ids:
-            return []
         episodes: list[tuple[int, Episode]] = []
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
@@ -1231,16 +1400,22 @@ class LocalBackend(MemoryBackend):
                     chunk,
                 ).fetchall()
             episodes.extend((r["seq"], _row_to_episode(r)) for r in rows)
+        return episodes
+
+    def _resting(self, episodes: list[Episode]) -> tuple[set[str], set[str], set[str]]:
+        """Of these episodes, (those a memory in use or kept as history rests
+        on, those a removed memory rests on, those any memory rests on). Only
+        the memories of an episode's own user count."""
         if not episodes:
-            return []
-        # the memories resting on an episode are of the episode's own user
-        users = sorted({e.user_id for _, e in episodes if e.user_id is not None})
+            return set(), set(), set()
+        users = sorted({e.user_id for e in episodes if e.user_id is not None})
         owner = " OR ".join(
             ([f"m.user_id IN ({','.join('?' * len(users))})"] if users else [])
-            + (["m.user_id IS NULL"] if any(e.user_id is None for _, e in episodes) else []))
-        wanted = [e.id for _, e in episodes]
+            + (["m.user_id IS NULL"] if any(e.user_id is None for e in episodes) else []))
+        wanted = [e.id for e in episodes]
         in_use: set[str] = set()
         removed: set[str] = set()
+        rested: set[str] = set()
         for start in range(0, len(wanted), 500):
             chunk = wanted[start:start + 500]
             with self._lock:
@@ -1252,15 +1427,264 @@ class LocalBackend(MemoryBackend):
                     (*users, *chunk),
                 ).fetchall()
             for r in rows:
+                rested.add(r["episode_id"])
                 # a memory kept as history rests on what was said while it
                 # held: its turns are shown as a memory's in use are
                 if r["invalid_at"] is None or r["history"]:
                     in_use.add(r["episode_id"])
                 elif r["superseded_by"] is None:
                     removed.add(r["episode_id"])
+        return in_use, removed, rested
+
+    def evidence_episodes(self, episode_ids: list[str]) -> list[Episode]:
+        episodes = self._episodes_with_seq(episode_ids)
+        if not episodes:
+            return []
+        in_use, removed, _ = self._resting([e for _, e in episodes])
         shown = [(e.created_at, seq, e) for seq, e in episodes
                  if e.id in in_use and e.id not in removed]
         return [e for *_, e in sorted(shown, key=lambda item: (item[0], item[1]))]
+
+    def turn_search_episodes(self, episode_ids: list[str]) -> list[Episode]:
+        episodes = self._episodes_with_seq(episode_ids)
+        if not episodes:
+            return []
+        in_use, removed, rested = self._resting([e for _, e in episodes])
+        loose = [e for _, e in episodes if e.id not in rested]
+        barred = self._barred_saves(loose)
+
+        def allowed(e: Episode) -> bool:
+            if e.id in removed:
+                return False
+            if e.id in rested:
+                return e.id in in_use
+            # a turn no memory rests on: one extraction may have refused
+            return _save_key(e) not in barred and not looks_secret(e.content)
+
+        shown = [(e.created_at, seq, e) for seq, e in episodes if allowed(e)]
+        return [e for *_, e in sorted(shown, key=lambda item: (item[0], item[1]))]
+
+    def _barred_saves(self, episodes: list[Episode]) -> set[tuple]:
+        """The saves (``_save_key``) of these episodes whose loose turns turn
+        search may not show: a save of which extraction kept nothing (no
+        memory in use or kept as history rests on any of its turns), and a
+        save a delete touched (a turn withheld, or under a removed memory)."""
+        barred: set[tuple] = set()
+        for key in {_save_key(e) for e in episodes}:
+            with self._lock:
+                rows = self._db.execute(
+                    f"SELECT {_EPISODE_COLS} FROM episodes WHERE user_id IS ? AND "
+                    "agent_id IS ? AND run_id IS ? AND created_at = ?", key).fetchall()
+            save = [_row_to_episode(r) for r in rows]
+            if any(e.withheld_at for e in save):
+                barred.add(key)
+                continue
+            in_use, removed, _ = self._resting(save)
+            if removed or not in_use:
+                barred.add(key)
+        return barred
+
+    def episode_keyword_search(
+        self, query: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        tokens = _WORD_RE.findall(query)
+        if not tokens or limit <= 0:
+            return []
+        match = " OR ".join(f'"{t}"' for t in tokens[:32])
+        clause, params = _scope_clause(scope, prefix="e.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT e.id, bm25(episodes_fts) AS rank_score FROM episodes_fts "
+                "JOIN episodes e ON e.rowid = episodes_fts.rowid "
+                f"WHERE episodes_fts MATCH ? AND {clause} AND e.withheld_at IS NULL "
+                "ORDER BY rank_score, e.rowid LIMIT ?",
+                (match, *params, limit),
+            ).fetchall()
+        # bm25() is lower-is-better (negative); flipped to higher-is-better
+        return [(r["id"], -float(r["rank_score"])) for r in rows]
+
+    def episode_vector_search(
+        self, vector: list[float], embedding_model: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        asked = np.asarray(vector, dtype=np.float32)
+        norm = float(np.linalg.norm(asked))
+        if not norm or limit <= 0:
+            return []
+        asked /= norm
+        clause, params = _scope_clause(scope)
+        best: list[tuple[float, int, str]] = []
+        with self._lock:
+            cursor = self._db.execute(
+                f"SELECT rowid AS seq, id, embedding FROM episodes WHERE {clause} "
+                "AND withheld_at IS NULL AND embedding IS NOT NULL AND embedding_model = ?",
+                (*params, embedding_model),
+            )
+            while rows := cursor.fetchmany(2000):
+                matrix = np.vstack([np.frombuffer(r["embedding"], dtype=np.float32)
+                                    for r in rows])
+                if matrix.shape[1] != asked.shape[0]:
+                    continue
+                norms = np.linalg.norm(matrix, axis=1)
+                norms[norms == 0] = 1.0
+                scores = (matrix @ asked) / norms
+                for r, score in zip(rows, scores):
+                    item = (float(score), -int(r["seq"]), r["id"])
+                    if len(best) < limit:
+                        heapq.heappush(best, item)
+                    elif item > best[0]:
+                        heapq.heapreplace(best, item)
+        return [(eid, round(score, 6)) for score, _, eid in sorted(best, reverse=True)]
+
+    def episode_neighbours(self, episode_id: str, before: int, after: int) -> list[Episode]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT rowid AS seq, user_id, agent_id, run_id, created_at FROM episodes "
+                "WHERE id = ?", (episode_id,)).fetchone()
+            if row is None:
+                return []
+            same = ("user_id IS ? AND agent_id IS ? AND run_id IS ? "
+                    "AND substr(created_at, 1, 10) = substr(?, 1, 10)")
+            key = (row["user_id"], row["agent_id"], row["run_id"], row["created_at"])
+            earlier = self._db.execute(
+                f"SELECT {_EPISODE_COLS} FROM episodes WHERE {same} AND "
+                "(created_at < ? OR (created_at = ? AND rowid < ?)) "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (*key, row["created_at"], row["created_at"], row["seq"], max(before, 0)),
+            ).fetchall()
+            later = self._db.execute(
+                f"SELECT {_EPISODE_COLS} FROM episodes WHERE {same} AND "
+                "(created_at > ? OR (created_at = ? AND rowid > ?)) "
+                "ORDER BY created_at, rowid LIMIT ?",
+                (*key, row["created_at"], row["created_at"], row["seq"], max(after, 0)),
+            ).fetchall()
+            this = self._db.execute(
+                f"SELECT {_EPISODE_COLS} FROM episodes WHERE id = ?", (episode_id,)).fetchone()
+        return [_row_to_episode(r) for r in [*reversed(earlier), this, *later]]
+
+    def passages_of(self, episode_ids: list[str]) -> dict[str, list[Passage]]:
+        ids = list(dict.fromkeys(episode_ids))
+        out: dict[str, list[Passage]] = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT id, episode_id, position, count, content FROM passages "
+                    f"WHERE episode_id IN ({','.join('?' * len(chunk))}) "
+                    "ORDER BY episode_id, position", chunk).fetchall()
+            for r in rows:
+                out.setdefault(r["episode_id"], []).append(Passage(
+                    id=r["id"], episode_id=r["episode_id"], position=r["position"],
+                    count=r["count"], content=r["content"]))
+        return out
+
+    def set_passage_vectors(self, vectors: dict[str, list[float]], embedding_model: str) -> None:
+        rows = [(np.asarray(vector, dtype=np.float32).tobytes(), embedding_model, passage_id)
+                for passage_id, vector in vectors.items() if vector]
+        if not rows:
+            return
+        with self._lock:
+            self._db.executemany(
+                "UPDATE passages SET embedding = ?, embedding_model = ? WHERE id = ?", rows)
+            self._commit()
+
+    def passage_vectors_of(
+        self, passage_ids: list[str], embedding_model: str
+    ) -> dict[str, np.ndarray]:
+        out: dict[str, np.ndarray] = {}
+        ids = list(dict.fromkeys(passage_ids))
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    f"SELECT id, embedding FROM passages WHERE id IN ({','.join('?' * len(chunk))}) "
+                    "AND embedding IS NOT NULL AND embedding_model = ?",
+                    (*chunk, embedding_model),
+                ).fetchall()
+            out.update((r["id"], np.frombuffer(r["embedding"], dtype=np.float32)) for r in rows)
+        return out
+
+    def passages_to_embed(self, embedding_model: str, *, limit: int = 1000) -> list[Passage]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, episode_id, position, count, content FROM passages "
+                "WHERE count > 1 AND embedding_model IS NOT ? ORDER BY rowid LIMIT ?",
+                (embedding_model, limit),
+            ).fetchall()
+        return [Passage(id=r["id"], episode_id=r["episode_id"], position=r["position"],
+                        count=r["count"], content=r["content"]) for r in rows]
+
+    def passage_keyword_scores(self, query: str, passage_ids: list[str]) -> dict[str, float]:
+        tokens = _WORD_RE.findall(query)
+        ids = list(dict.fromkeys(passage_ids))
+        if not tokens or not ids:
+            return {}
+        match = " OR ".join(f'"{t}"' for t in tokens[:32])
+        out: dict[str, float] = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT p.id, bm25(passages_fts) AS rank_score FROM passages_fts "
+                    "JOIN passages p ON p.rowid = passages_fts.rowid "
+                    f"WHERE passages_fts MATCH ? AND p.id IN ({','.join('?' * len(chunk))})",
+                    (match, *chunk),
+                ).fetchall()
+            # bm25() is lower-is-better (negative); flipped to higher-is-better
+            out.update((r["id"], -float(r["rank_score"])) for r in rows)
+        return out
+
+    def passage_keyword_search(
+        self, query: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        tokens = _WORD_RE.findall(query)
+        if not tokens or limit <= 0:
+            return []
+        match = " OR ".join(f'"{t}"' for t in tokens[:32])
+        clause, params = _scope_clause(scope, prefix="e.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT p.id, bm25(passages_fts) AS rank_score FROM passages_fts "
+                "JOIN passages p ON p.rowid = passages_fts.rowid "
+                "JOIN episodes e ON e.id = p.episode_id "
+                f"WHERE passages_fts MATCH ? AND {clause} AND e.withheld_at IS NULL "
+                "ORDER BY rank_score, p.rowid LIMIT ?",
+                (match, *params, limit),
+            ).fetchall()
+        return [(r["id"], -float(r["rank_score"])) for r in rows]
+
+    def passage_vector_search(
+        self, vector: list[float], embedding_model: str, scope: Scope, limit: int
+    ) -> list[tuple[str, float]]:
+        asked = np.asarray(vector, dtype=np.float32)
+        norm = float(np.linalg.norm(asked))
+        if not norm or limit <= 0:
+            return []
+        asked /= norm
+        clause, params = _scope_clause(scope, prefix="e.")
+        best: list[tuple[float, int, str]] = []
+        with self._lock:
+            cursor = self._db.execute(
+                "SELECT p.rowid AS seq, p.id, p.embedding FROM passages p "
+                f"JOIN episodes e ON e.id = p.episode_id WHERE {clause} "
+                "AND e.withheld_at IS NULL AND p.embedding IS NOT NULL "
+                "AND p.embedding_model = ?",
+                (*params, embedding_model),
+            )
+            while rows := cursor.fetchmany(2000):
+                matrix = np.vstack([np.frombuffer(r["embedding"], dtype=np.float32)
+                                    for r in rows])
+                if matrix.shape[1] != asked.shape[0]:
+                    continue
+                norms = np.linalg.norm(matrix, axis=1)
+                norms[norms == 0] = 1.0
+                scores = (matrix @ asked) / norms
+                for r, score in zip(rows, scores):
+                    item = (float(score), -int(r["seq"]), r["id"])
+                    if len(best) < limit:
+                        heapq.heappush(best, item)
+                    elif item > best[0]:
+                        heapq.heapreplace(best, item)
+        return [(pid, round(score, 6)) for score, _, pid in sorted(best, reverse=True)]
 
     def history_ids(self, memory_ids: list[str]) -> set[str]:
         ids = list(dict.fromkeys(memory_ids))
@@ -1576,6 +2000,7 @@ class LocalBackend(MemoryBackend):
                 self._db.execute("DELETE FROM relations WHERE memory_id = ?", (memory_id,))
                 self._db.execute(
                     "DELETE FROM memory_property_vectors WHERE memory_id = ?", (memory_id,))
+                self._db.execute("DELETE FROM memory_questions WHERE memory_id = ?", (memory_id,))
                 # what it replaced has nothing standing in for it any more
                 self._db.execute(
                     "UPDATE memories SET superseded_by = NULL WHERE superseded_by = ?",
@@ -3076,6 +3501,423 @@ class LocalBackend(MemoryBackend):
                 )
             self._commit()
 
+    # --- question keys (``intelligence.questions``) ---------------------------
+
+    def set_questions(
+        self, memory_id: str, questions: list[tuple[str, str]],
+        vectors: list[list[float] | None] | None = None, embedding_model: str | None = None,
+    ) -> None:
+        """Replace a memory's question keys with ``questions`` ((text, source)
+        each, in order) and their vectors where given (None for a question
+        without one), stored in float16."""
+        with self._lock:
+            self._db.execute("DELETE FROM memory_questions WHERE memory_id = ?", (memory_id,))
+            for n, (text, source) in enumerate(questions):
+                vector = vectors[n] if vectors and n < len(vectors) else None
+                self._db.execute(
+                    "INSERT INTO memory_questions (memory_id, n, text, source, embedding, "
+                    "embedding_model) VALUES (?, ?, ?, ?, ?, ?)",
+                    (memory_id, n, text, source,
+                     _pack_half(vector) if vector else None,
+                     embedding_model if vector else None))
+            self._commit()
+
+    def add_question(
+        self, memory_id: str, text: str, source: str, vector: list[float] | None = None,
+        embedding_model: str | None = None, *, limit: int,
+    ) -> bool:
+        """Add one question key after a memory's others, unless the memory
+        has it already (ignoring case) or has ``limit`` keys. Returns whether
+        it was added."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT n, text FROM memory_questions WHERE memory_id = ?",
+                (memory_id,)).fetchall()
+            if len(rows) >= limit or any(
+                    row["text"].casefold() == text.casefold() for row in rows):
+                return False
+            n = max((row["n"] for row in rows), default=-1) + 1
+            self._db.execute(
+                "INSERT INTO memory_questions (memory_id, n, text, source, embedding, "
+                "embedding_model) VALUES (?, ?, ?, ?, ?, ?)",
+                (memory_id, n, text, source, _pack_half(vector) if vector else None,
+                 embedding_model if vector else None))
+            self._commit()
+        return True
+
+    def set_question_vectors(
+        self, vectors: dict[tuple[str, int], list[float]], embedding_model: str,
+    ) -> None:
+        """The vectors of these question rows ((memory_id, n) each)."""
+        with self._lock:
+            for (memory_id, n), vector in vectors.items():
+                self._db.execute(
+                    "UPDATE memory_questions SET embedding = ?, embedding_model = ? "
+                    "WHERE memory_id = ? AND n = ?",
+                    (_pack_half(vector), embedding_model, memory_id, n))
+            self._commit()
+
+    def questions_of(self, memory_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Each memory's question keys, in order: ``n``, ``text``, ``source``
+        and ``embedding_model`` (None for a question without a vector)."""
+        out: dict[str, list[dict[str, Any]]] = {}
+        with self._lock:
+            for start in range(0, len(memory_ids), 500):
+                chunk = memory_ids[start:start + 500]
+                rows = self._db.execute(
+                    "SELECT memory_id, n, text, source, embedding_model FROM memory_questions "
+                    f"WHERE memory_id IN ({','.join('?' * len(chunk))}) ORDER BY memory_id, n",
+                    chunk).fetchall()
+                for row in rows:
+                    out.setdefault(row["memory_id"], []).append(
+                        {"n": row["n"], "text": row["text"], "source": row["source"],
+                         "embedding_model": row["embedding_model"]})
+        return out
+
+    def questions_without_vectors(
+        self, scope: Scope, embedding_model: str, limit: int = 100_000,
+    ) -> list[tuple[str, int, str]]:
+        """The question keys of valid memories in ``scope`` that have no
+        vector from ``embedding_model`` ((memory_id, n, text) each)."""
+        clause, params = _scope_clause(scope, prefix="m.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT q.memory_id, q.n, q.text FROM memory_questions q "
+                f"JOIN memories m ON m.id = q.memory_id WHERE {clause} "
+                "AND m.invalid_at IS NULL AND (q.embedding IS NULL OR q.embedding_model IS NOT ?) "
+                "ORDER BY q.memory_id, q.n LIMIT ?",
+                (*params, embedding_model, limit)).fetchall()
+        return [(row["memory_id"], row["n"], row["text"]) for row in rows]
+
+    def memories_without_questions(self, scope: Scope, limit: int = 100_000) -> list[Memory]:
+        """Valid memories in ``scope`` with no question key at all and not
+        marked as asked about (``questions_checked``), oldest first (a
+        backfill's work)."""
+        clause, params = _scope_clause(scope, prefix="m.")
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {_prefixed(_MEMORY_COLS, 'm')} FROM memories m WHERE {clause} "
+                "AND m.invalid_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_questions q "
+                "WHERE q.memory_id = m.id) "
+                "AND json_extract(m.metadata, '$.questions_checked') IS NULL "
+                "ORDER BY m.created_at, m.id LIMIT ?",
+                (*params, limit)).fetchall()
+        return [_row_to_memory(row) for row in rows]
+
+    # --- entity questions (``intelligence.entity_questions``) -----------------
+
+    def set_entity_questions(
+        self, entity_id: str, questions: list[tuple[str, str]],
+        vectors: list[list[float] | None] | None = None, embedding_model: str | None = None,
+    ) -> None:
+        """Replace an entity's questions with ``questions`` ((text, source)
+        each, in order) and their vectors where given, stored in float16."""
+        with self._lock:
+            self._db.execute("DELETE FROM entity_questions WHERE entity_id = ?", (entity_id,))
+            for n, (text, source) in enumerate(questions):
+                vector = vectors[n] if vectors and n < len(vectors) else None
+                self._db.execute(
+                    "INSERT INTO entity_questions (entity_id, n, text, source, embedding, "
+                    "embedding_model) VALUES (?, ?, ?, ?, ?, ?)",
+                    (entity_id, n, text, source, _pack_half(vector) if vector else None,
+                     embedding_model if vector else None))
+            self._commit()
+
+    def entity_questions_of(self, entity_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Each entity's questions, in order: ``n``, ``text``, ``source`` and
+        ``embedding_model`` (None for a question without a vector)."""
+        out: dict[str, list[dict[str, Any]]] = {}
+        with self._lock:
+            for start in range(0, len(entity_ids), 500):
+                chunk = entity_ids[start:start + 500]
+                rows = self._db.execute(
+                    "SELECT entity_id, n, text, source, embedding_model FROM entity_questions "
+                    f"WHERE entity_id IN ({','.join('?' * len(chunk))}) ORDER BY entity_id, n",
+                    chunk).fetchall()
+                for row in rows:
+                    out.setdefault(row["entity_id"], []).append(
+                        {"n": row["n"], "text": row["text"], "source": row["source"],
+                         "embedding_model": row["embedding_model"]})
+        return out
+
+    def entity_questions_without_vectors(
+        self, scope: Scope, embedding_model: str, limit: int = 100_000,
+    ) -> list[tuple[str, int, str]]:
+        """The questions of the entities in ``scope`` that are not merged into
+        another and have no vector from ``embedding_model`` ((entity_id, n,
+        text) each)."""
+        clause, params = _scope_clause(scope, prefix="e.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT q.entity_id, q.n, q.text FROM entity_questions q "
+                f"JOIN entities e ON e.id = q.entity_id WHERE e.merged_into IS NULL AND {clause} "
+                "AND (q.embedding IS NULL OR q.embedding_model IS NOT ?) "
+                "ORDER BY q.entity_id, q.n LIMIT ?",
+                (*params, embedding_model, limit)).fetchall()
+        return [(row["entity_id"], row["n"], row["text"]) for row in rows]
+
+    def set_entity_question_vectors(
+        self, vectors: dict[tuple[str, int], list[float]], embedding_model: str,
+    ) -> None:
+        """The vectors of these entity question rows ((entity_id, n) each)."""
+        with self._lock:
+            for (entity_id, n), vector in vectors.items():
+                self._db.execute(
+                    "UPDATE entity_questions SET embedding = ?, embedding_model = ? "
+                    "WHERE entity_id = ? AND n = ?",
+                    (_pack_half(vector), embedding_model, entity_id, n))
+            self._commit()
+
+    def entity_question_rows(
+        self, scope: Scope, embedding_model: str,
+    ) -> list[tuple[str, str, np.ndarray | None]]:
+        """(entity id, text, vector) of every question of the entities in
+        ``scope`` that are not merged into another; the vector is None where
+        it is missing or of another model."""
+        clause, params = _scope_clause(scope, prefix="e.")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT q.entity_id, q.text, q.embedding, q.embedding_model "
+                "FROM entity_questions q JOIN entities e ON e.id = q.entity_id "
+                f"WHERE e.merged_into IS NULL AND {clause} ORDER BY q.entity_id, q.n",
+                params).fetchall()
+        return [(row["entity_id"], row["text"],
+                 _unpack_half(row["embedding"])
+                 if row["embedding"] is not None and row["embedding_model"] == embedding_model
+                 else None) for row in rows]
+
+    def question_keyword_search(
+        self,
+        query: str,
+        scope: Scope,
+        limit: int = 20,
+        include_invalid: bool = False,
+        categories: list[str] | None = None,
+        entity_id: str | None = None,
+        history: bool = False,
+        among: Any = None,
+    ) -> list[tuple[Memory, float]]:
+        """BM25 over the question keys: a memory scores as its best question
+        does. The same scope and filters as ``keyword_search``, in SQL before
+        bm25() reads a row, so another account's questions are never scored."""
+        tokens = _WORD_RE.findall(query)
+        if not tokens:
+            return []
+        match = " OR ".join(f'"{t}"' for t in dict.fromkeys(t.lower() for t in tokens[:32]))
+        clause, params = _search_scope_clause(scope, "m")
+        cat_clause, cat_params = _category_clause(categories, "m.id")
+        entity_clause, entity_params = _entity_clause(entity_id, "m.id")
+        among_clause, among_params = _among_clause(among, "m.id")
+        if not include_invalid:
+            clause += (f" AND (m.invalid_at IS NULL OR ({_history_clause('m')}))" if history
+                       else " AND m.invalid_at IS NULL")
+        with self._lock:
+            # bm25() is read per question row (SQLite cannot aggregate it);
+            # a memory has at most QUESTIONS_LIMIT rows, so the best
+            # ``limit`` memories are among the best ``limit * 9`` rows
+            rows = self._db.execute(
+                "SELECT q.memory_id AS id, bm25(memory_questions_fts) AS rank_score "
+                "FROM memory_questions_fts CROSS JOIN memory_questions q "
+                "ON q.rowid = memory_questions_fts.rowid CROSS JOIN memories m "
+                f"ON m.id = q.memory_id WHERE memory_questions_fts MATCH ? AND {clause} "
+                f"AND {cat_clause} AND {entity_clause} AND {among_clause} "
+                "ORDER BY rank_score, q.memory_id LIMIT ?",
+                (match, *params, *cat_params, *entity_params, *among_params, limit * 9),
+            ).fetchall()
+            best: dict[str, float] = {}
+            for row in rows:
+                score = -float(row["rank_score"])  # bm25() is lower-is-better
+                if score > best.get(row["id"], -math.inf):
+                    best[row["id"]] = score
+            scores = dict(sorted(best.items(), key=lambda item: (-item[1], item[0]))[:limit])
+            found = self._memories_by_id(list(scores))
+        return [(found[mid], scores[mid]) for mid in scores if mid in found]
+
+    def question_vector_search(
+        self,
+        embedding: list[float],
+        embedding_model: str,
+        scope: Scope,
+        limit: int = 20,
+        include_invalid: bool = False,
+        categories: list[str] | None = None,
+        entity_id: str | None = None,
+        history: bool = False,
+        among: Any = None,
+    ) -> list[tuple[Memory, float]]:
+        """Cosine over the question keys' vectors, read exactly (there are a
+        few per memory and no index): a memory scores as its best question
+        does. ``embedding`` is compared cut to the stored length. The same
+        scope and filters as ``vector_search``."""
+        clause, params = _search_scope_clause(scope, "m")
+        cat_clause, cat_params = _category_clause(categories, "m.id")
+        entity_clause, entity_params = _entity_clause(entity_id, "m.id")
+        among_clause, among_params = _among_clause(among, "m.id")
+        if not include_invalid:
+            clause += (f" AND (m.invalid_at IS NULL OR ({_history_clause('m')}))" if history
+                       else " AND m.invalid_at IS NULL")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT q.memory_id, q.embedding FROM memory_questions q "
+                f"JOIN memories m ON m.id = q.memory_id WHERE {clause} AND {cat_clause} "
+                f"AND {entity_clause} AND {among_clause} AND q.embedding IS NOT NULL "
+                "AND q.embedding_model = ?",
+                (*params, *cat_params, *entity_params, *among_params, embedding_model),
+            ).fetchall()
+            if not rows or limit <= 0:
+                return []
+            mats = np.stack([_unpack_half(r["embedding"]) for r in rows])
+            query = np.asarray(embedding, dtype=np.float32)[:mats.shape[1]]
+            qnorm = float(np.linalg.norm(query))
+            if qnorm == 0 or mats.shape[1] != query.shape[0]:
+                return []
+            norms = np.linalg.norm(mats, axis=1)
+            norms[norms == 0] = 1e-9
+            sims = (mats @ query) / (norms * qnorm)
+            best: dict[str, float] = {}
+            for row, sim in zip(rows, sims):
+                mid = row["memory_id"]
+                if sim > best.get(mid, -2.0):
+                    best[mid] = float(sim)
+            order = sorted(best, key=lambda mid: (-best[mid], mid))[:limit]
+            found = self._memories_by_id(order)
+        return [(found[mid], best[mid]) for mid in order if mid in found]
+
+    # --- the search log (``retrieval.search_log``) -----------------------------
+
+    def log_search(self, row: dict[str, Any]) -> int:
+        """Keep one search (the columns of ``search_log`` but ``id`` and
+        ``keyed``); returns its id."""
+        cols = [c for c in _SEARCH_LOG_COLS if c in row]
+        with self._lock:
+            cur = self._db.execute(
+                f"INSERT INTO search_log ({', '.join(cols)}) "
+                f"VALUES ({', '.join('?' * len(cols))})",
+                [row[c] for c in cols])
+            self._commit()
+        return int(cur.lastrowid)
+
+    def search_log_rows(
+        self, *, user_id: str | None = None, since: str | None = None,
+        until: str | None = None, run_id: str | None = None,
+        owner_prefix: str | None = None, newest_first: bool = False,
+        limit: int = 1_000_000,
+    ) -> list[dict[str, Any]]:
+        """The kept searches, oldest first (``newest_first`` the other way):
+        of one namespace (``user_id``), one run, an account's namespaces
+        (``owner_prefix``, as ``_backup_owner_matches`` reads one), and
+        ``since`` <= at <= ``until`` (ISO 8601 times)."""
+        clauses, params = ["1=1"], []
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if since is not None:
+            clauses.append("at >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("at <= ?")
+            params.append(until)
+        if owner_prefix is not None:
+            if owner_prefix.endswith("::"):
+                clauses.append("substr(user_id, 1, ?) = ?")
+                params += [len(owner_prefix), owner_prefix]
+            else:
+                clauses.append("user_id = ?")
+                params.append(owner_prefix)
+        order = "DESC" if newest_first else "ASC"
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM search_log WHERE {' AND '.join(clauses)} "
+                f"ORDER BY at {order}, id {order} LIMIT ?", (*params, limit)).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_search_keyed(self, log_ids: dict[int, int]) -> None:
+        """Count, per kept search, the memories that took its query as a key."""
+        with self._lock:
+            for log_id, count in log_ids.items():
+                self._db.execute("UPDATE search_log SET keyed = keyed + ? WHERE id = ?",
+                                 (count, log_id))
+            self._commit()
+
+    def prune_search_log(
+        self, before: str, *, user_id: str | None = None, exact_user: bool = False,
+    ) -> int:
+        """Delete the kept searches older than ``before``: of one namespace
+        (``user_id``; with ``exact_user`` None is the searches without one),
+        or of every namespace. Returns how many."""
+        clause, params = "at < ?", [before]
+        if user_id is not None:
+            clause += " AND user_id = ?"
+            params.append(user_id)
+        elif exact_user:
+            clause += " AND user_id IS NULL"
+        with self._lock:
+            cur = self._db.execute(f"DELETE FROM search_log WHERE {clause}", params)
+            self._commit()
+        return cur.rowcount
+
+    def delete_search_log(self, *, user_id: str | None) -> int:
+        """Delete every kept search of a namespace (None: those without one)."""
+        with self._lock:
+            cur = self._db.execute(
+                "DELETE FROM search_log WHERE user_id IS ?", (user_id,))
+            self._commit()
+        return cur.rowcount
+
+    def restore_search_log(
+        self, rows: list[dict[str, Any]], *, owner_prefix: str | None = None,
+        check_only: bool = False,
+    ) -> int:
+        """Add kept searches from an export that asked for them
+        (``export_backup(..., search_log=True)``), each under a new id; a row
+        outside the account (``owner_prefix``) or with other columns is
+        refused before anything is written. ``check_only``: refuse or pass,
+        and write nothing."""
+        allowed = set(_SEARCH_LOG_COLS) | {"id", "keyed"}
+        if not isinstance(rows, list):
+            raise ValueError("backup search_log must be a list")
+        for row in rows:
+            if not isinstance(row, dict) or not set(row) <= allowed \
+                    or not {"at", "query", "mode"} <= set(row):
+                raise ValueError("search log row has the wrong columns")
+            if not self._backup_owner_matches(row.get("user_id"), owner_prefix):
+                raise ValueError("backup contains search_log outside this account")
+        if check_only:
+            return 0
+        added = 0
+        with self._lock:
+            for row in rows:
+                # a search restored twice is kept once
+                if self._db.execute(
+                        "SELECT 1 FROM search_log WHERE at = ? AND user_id IS ? "
+                        "AND run_id IS ? AND query = ?",
+                        (row["at"], row.get("user_id"), row.get("run_id"),
+                         row["query"])).fetchone():
+                    continue
+                cols = [c for c in row if c != "id"]
+                self._db.execute(
+                    f"INSERT INTO search_log ({', '.join(cols)}) "
+                    f"VALUES ({', '.join('?' * len(cols))})", [row[c] for c in cols])
+                added += 1
+            self._commit()
+        return added
+
+    def _memories_by_id(self, memory_ids: list[str]) -> dict[str, Memory]:
+        """The memories of these ids that exist. Caller holds the lock."""
+        found: dict[str, Memory] = {}
+        for start in range(0, len(memory_ids), 500):
+            chunk = memory_ids[start:start + 500]
+            if not chunk:
+                continue
+            rows = self._db.execute(
+                f"SELECT {_MEMORY_COLS} FROM memories WHERE id IN "
+                f"({','.join('?' * len(chunk))})", chunk).fetchall()
+            found.update((row["id"], _row_to_memory(row)) for row in rows)
+        return found
+
     def session_memories(
         self, memory: Memory, *, hours: float = 3.0, limit: int = 50
     ) -> list[Memory]:
@@ -3769,6 +4611,10 @@ class LocalBackend(MemoryBackend):
             ],
             "mentions": rows(
                 f"SELECT * FROM entity_mentions WHERE entity_id IN ({marks})", 1),
+            # the texts; the vectors are computed again after a restore
+            "questions": rows(
+                "SELECT entity_id, n, text, source FROM entity_questions "
+                f"WHERE entity_id IN ({marks})", 1),
             "relations": rows(
                 f"SELECT * FROM relations WHERE subject IN ({marks}) OR object IN ({marks})", 2),
             "proposals": rows(
@@ -3787,6 +4633,7 @@ class LocalBackend(MemoryBackend):
         marks = ",".join("?" * len(chain))
         for sql, times in (
             (f"DELETE FROM entity_mentions WHERE entity_id IN ({marks})", 1),
+            (f"DELETE FROM entity_questions WHERE entity_id IN ({marks})", 1),
             (f"DELETE FROM relations WHERE subject IN ({marks}) OR object IN ({marks})", 2),
             ("DELETE FROM entity_proposals "
              f"WHERE entity_a IN ({marks}) OR entity_b IN ({marks})", 2),
@@ -4021,6 +4868,10 @@ class LocalBackend(MemoryBackend):
                 return all(self._db.execute(
                     "SELECT 1 FROM entities WHERE id = ?", (other,)
                 ).fetchone() is not None for other in entity_ids)
+
+            for question in snapshot.get("questions", []):
+                if present(question["entity_id"]):
+                    self._insert_row_locked("entity_questions", question)
 
             for relation in snapshot.get("relations", []):
                 if not present(relation["subject"], relation["object"]):
@@ -4271,13 +5122,23 @@ class LocalBackend(MemoryBackend):
     #: decided stays (``_one_row_per_pair_locked``).
     _DECIDED = {"proposed": 0, "rejected": 1, "confirmed": 2}
 
+    @staticmethod
+    def _answered(row: sqlite3.Row) -> bool:
+        """Whether a pair's row carries an answer: it was compared, or has
+        P(different) or a belongs answer."""
+        return bool(row["compared_step"]) or row["different"] is not None or (
+            row["belongs"] is not None)
+
     def _one_row_per_pair_locked(self, keep_id: str, merge_id: str) -> list[dict[str, Any]]:
         """Before a merge points the merged entity's pairs at the kept one:
         where the kept one has a row for the same pair (both were compared
         with a third entity), one row stays. That is the more decided one (a
-        decision over an open pair), of two alike the later answer, the kept
-        entity's own on a tie; it carries its answer or decision, and the
-        other row goes. A confirmed row keeps the ends it was decided on and
+        decision over an open pair), then one with an answer over one never
+        compared, of two alike the later answer, the kept entity's own on a
+        tie; it carries its answer or decision, and the other row goes. A pair
+        raised after the other was answered is the later row but has no
+        answer: before, it won, and the answer went with the row it dropped
+        (a version's belongs answer, so its memories lost the merged names). A confirmed row keeps the ends it was decided on and
         is never dropped. Returns the rows dropped, as they were, for the
         merge record: an undo puts them back."""
         dropped: list[dict[str, Any]] = []
@@ -4302,8 +5163,8 @@ class LocalBackend(MemoryBackend):
             else:
                 rows = [row, *held]
                 best = max(rows, key=lambda r: (
-                    self._DECIDED.get(r["status"], 0), r["decided_at"] or r["created_at"],
-                    r["id"] != row["id"]))
+                    self._DECIDED.get(r["status"], 0), self._answered(r),
+                    r["decided_at"] or r["created_at"], r["id"] != row["id"]))
                 losers = [r for r in rows if r["id"] != best["id"]]
             for loser in losers:
                 dropped.append(dict(loser))
@@ -4319,8 +5180,9 @@ class LocalBackend(MemoryBackend):
         both created in that pass. Of each pair's rows the one a merge keeps
         stays (``_one_row_per_pair_locked``): confirmed rows all stay as they
         are, and beside one the rest go (the two are one, the pair is moot);
-        otherwise the more decided, of two alike the later answer. The rows
-        that go are kept under the marker, so each can be put back."""
+        otherwise the more decided, then one with an answer, of two alike the
+        later answer. The rows that go are kept under the marker, so each can
+        be put back."""
         if self._db.execute(
             "SELECT 1 FROM meta WHERE key = 'schema:one-row-per-pair:v1'"
         ).fetchone():
@@ -4340,8 +5202,8 @@ class LocalBackend(MemoryBackend):
                 losers = [r for r in rows if r["status"] != "confirmed"]
             else:
                 best = max(rows, key=lambda r: (
-                    self._DECIDED.get(r["status"], 0), r["decided_at"] or r["created_at"],
-                    r["id"]))
+                    self._DECIDED.get(r["status"], 0), self._answered(r),
+                    r["decided_at"] or r["created_at"], r["id"]))
                 losers = [r for r in rows if r["id"] != best["id"]]
             for loser in losers:
                 dropped.append(dict(loser))
@@ -4710,8 +5572,11 @@ class LocalBackend(MemoryBackend):
             table, f"{column} IN ({placeholders})", tuple(sorted(values))
         )
 
-    def export_backup(self, scope: Scope) -> dict[str, Any]:
-        """Export exact source records; FTS and ANN remain derived indexes."""
+    def export_backup(self, scope: Scope, *, search_log: bool = False) -> dict[str, Any]:
+        """Export exact source records; FTS and ANN remain derived indexes.
+        The search log (what people asked) is left out unless ``search_log``:
+        then the backup carries the scope's kept searches under
+        "search_log", beside the tables."""
         with self._lock:
             clause, params = _scope_clause(scope)
             tables: dict[str, list[dict[str, Any]]] = {
@@ -4723,6 +5588,20 @@ class LocalBackend(MemoryBackend):
             memory_ids = {row["id"] for row in tables["memories"]}
             topic_ids = {row["id"] for row in tables["topics"]}
             entity_ids = {row["id"] for row in tables["entities"]}
+            # the questions' texts; their vectors are derived, like the ANN
+            # index, and computed again after a restore
+            tables["memory_questions"] = [
+                {key: value for key, value in row.items()
+                 if key not in ("embedding", "embedding_model")}
+                for row in (self._select_backup_rows("memory_questions") if scope.is_empty()
+                            else self._backup_rows_for_ids(
+                                "memory_questions", "memory_id", memory_ids))]
+            tables["entity_questions"] = [
+                {key: value for key, value in row.items()
+                 if key not in ("embedding", "embedding_model")}
+                for row in (self._select_backup_rows("entity_questions") if scope.is_empty()
+                            else self._backup_rows_for_ids(
+                                "entity_questions", "entity_id", entity_ids))]
 
             if scope.is_empty():
                 for table in (
@@ -4757,10 +5636,19 @@ class LocalBackend(MemoryBackend):
                 ]
 
             ordered = {table: tables.get(table, []) for table in _BACKUP_ORDER}
-        return {
+            searches = None
+            if search_log:
+                log_clause, log_params = _scope_clause(scope)
+                searches = [dict(row) for row in self._db.execute(
+                    f"SELECT * FROM search_log WHERE {log_clause} ORDER BY at, id",
+                    log_params).fetchall()]
+        backup = {
             "format": "memry-backup", "version": 1, "created_at": utcnow(),
             "scope": scope.model_dump(), "tables": ordered,
         }
+        if searches is not None:
+            backup["search_log"] = searches
+        return backup
 
     @staticmethod
     def _backup_owner_matches(user_id: Any, owner_prefix: str | None) -> bool:
@@ -4778,6 +5666,11 @@ class LocalBackend(MemoryBackend):
         raw_tables = backup.get("tables")
         # Every table this schema needs must be present; anything extra is from
         # an older Memry and is ignored rather than refused.
+        if isinstance(raw_tables, dict):
+            # a backup from before the question keys or the entity questions
+            for added in ("memory_questions", "entity_questions"):
+                if added not in raw_tables:
+                    raw_tables = {**raw_tables, added: []}
         if not isinstance(raw_tables, dict) or not set(_BACKUP_ORDER) <= set(raw_tables):
             raise ValueError("backup table set is incomplete or unknown")
         tables: dict[str, list[dict[str, Any]]] = {}
@@ -4814,6 +5707,12 @@ class LocalBackend(MemoryBackend):
         for row in tables["memory_events"]:
             if row["memory_id"] not in memory_ids and owner_prefix is not None:
                 raise ValueError("memory history references a memory outside the backup")
+        for row in tables["memory_questions"]:
+            if row["memory_id"] not in memory_ids:
+                raise ValueError("question key references a memory outside the backup")
+        for row in tables["entity_questions"]:
+            if row["entity_id"] not in entity_ids:
+                raise ValueError("entity question references an entity outside the backup")
         for row in tables["memory_topics"]:
             if row["memory_id"] not in memory_ids or row["topic_id"] not in topic_ids:
                 raise ValueError("topic assignment references data outside the backup")

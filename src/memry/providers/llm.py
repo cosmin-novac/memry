@@ -22,6 +22,8 @@ from ..config import LLMConfig
 _ADAPTIVE_PREFIXES = (
     "claude-fable-5",
     "claude-mythos",
+    "claude-opus-5",
+    "claude-haiku-5",
     "claude-opus-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
@@ -33,6 +35,8 @@ _ADAPTIVE_PREFIXES = (
 _STRUCTURED_PREFIXES = (
     "claude-fable-5",
     "claude-mythos",
+    "claude-opus-5",
+    "claude-haiku-5",
     "claude-opus-4-8",
     "claude-sonnet-5",
     "claude-haiku-4-5",

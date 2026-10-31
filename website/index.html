@@ -310,9 +310,9 @@ footer a{color:var(--dim)}
       <div class="feat"><h3>MCP-native</h3>
         <p>Connect any MCP client over stdio or streamable HTTP. No client-specific memory integration to build or maintain.</p></div>
       <div class="feat"><h3>Memry searches by keywords and by meaning at once</h3>
-        <p>Memry ranks each result by how well it matches your words, how close it is in meaning, how recent it is and how important it is, so you find a memory whether you use its words in your question or only its meaning.</p></div>
-      <div class="feat"><h3>Forgetting built in</h3>
-        <p>Old trivia gradually matters less, so stale details stop crowding out what matters without being deleted from your history.</p></div>
+        <p>Memry collects candidates by your words and by their meaning, so you get a memory whether your question uses its words or only its meaning. The decision model then reads the best 20, and Memry puts the ones that answer the question first.</p></div>
+      <div class="feat"><h3>Memry never drops a memory for being old</h3>
+        <p>Memry keeps a memory until you delete it or Memry replaces it with a newer one. You still see a replaced memory in the history, with the day it stopped being true.</p></div>
       <div class="feat"><h3>Bring your own models.</h3>
         <p>Use Anthropic, OpenAI or Ollama for extraction, and choose between hosted or local embeddings. Memry doesn't lock your memory to one model provider.</p></div>
       <div class="feat"><h3>Memry sends the judgement calls to a model built for them</h3>
@@ -381,7 +381,7 @@ ctx = store.reconstruct_context(
     <div class="features two">
       <div class="feat"><h3>Everything lives in a single SQLite file.</h3>
         <p>Memories, entities, edit history, and the conversations they came from all stay together in one place.</p>
-        <p>Run it on your laptop or a VPS. There’s no Memry account to create, and the only data that leaves the machine is whatever you send to the model provider you configure. With the default hash embedder and no LLM key, nothing leaves the machine at all.</p>
+        <p>Run it on your laptop or a VPS. There’s no Memry account to create, and the only data that leaves the machine is whatever you send to the model provider you configure. With Ollama for the text model and the embeddings, and <code class="inlinecode">MEMRY_DECISION_PROVIDER=llm</code>, nothing leaves the machine at all.</p>
         <p>And if you want to get rid of it, you delete the file.</p></div>
       <div class="feat"><h3>Claude, ChatGPT, Cursor, Codex and Claude Code can all connect to the same Memry instance.</h3>
         <p>So if Claude Code learns something in the morning, ChatGPT already knows it that afternoon. And if you switch models or vendors later, your memory stays where it is. You don’t have to start over.</p></div>
@@ -389,7 +389,7 @@ ctx = store.reconstruct_context(
         <p>Your work, your projects, the people around you, and the things you care about all end up in there. That’s unusually personal data. It shouldn’t have to live inside whichever AI product you happen to be using today, under terms that may look different a year from now.</p>
         <p>Memry gives you somewhere independent to keep it.</p></div>
       <div class="feat"><h3>Memry periodically cleans up the store.</h3>
-        <p>If two entries clearly refer to the same person, they get merged. If a tag has drifted into two spellings, Memry flags it for review instead of guessing. Old trivia gradually matters less in ranking, so it stops getting in the way without disappearing.</p>
+        <p>If two entries clearly refer to the same person, they get merged. If one tag is written two ways, such as <i>food</i> and <i>foods</i>, Memry merges the two. If two tags are about one subject, the decision model compares them, and Memry merges them when the probability is high enough.</p>
         <p>Anything ambiguous waits for you under <b>Upkeep</b>, and each maintenance task can be turned off individually.</p></div>
     </div>
   </div>
@@ -409,7 +409,7 @@ ctx = store.reconstruct_context(
           <tr><td>Temporal invalidation (supersede, not delete)</td><td class="hl yes">yes</td><td class="no">platform only</td><td class="yes">yes</td><td class="no">-</td></tr>
           <tr><td>Provenance: fact → source episode</td><td class="hl yes">yes</td><td class="part">partial</td><td class="yes">yes</td><td class="no">-</td></tr>
           <tr><td>Hybrid retrieval (BM25 + vector + recency)</td><td class="hl yes">yes</td><td class="yes">yes</td><td class="yes">graph</td><td class="yes">yes</td></tr>
-          <tr><td>Memory decay / forgetting</td><td class="hl yes">yes</td><td class="no">platform only</td><td class="part">retention</td><td class="yes">yes</td></tr>
+          <tr><td>Memory decay / forgetting</td><td class="hl part">no, by design</td><td class="no">platform only</td><td class="part">retention</td><td class="yes">yes</td></tr>
           <tr><td>Runs without extra services</td><td class="hl yes">SQLite only</td><td class="part">needs vector DB</td><td class="no">BYOC</td><td class="yes">SQLite</td></tr>
           <tr><td>Built-in eval harness</td><td class="hl yes">yes</td><td class="no">-</td><td class="no">-</td><td class="no">-</td></tr>
           <tr><td>License</td><td class="hl">Apache-2.0</td><td>Apache-2.0</td><td>proprietary</td><td>open source</td></tr>

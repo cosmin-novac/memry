@@ -101,7 +101,7 @@ def test_provider_autodetect_anthropic(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     cfg = Config.load()
     assert cfg.llm.provider == "anthropic"
-    assert cfg.llm.resolved_model() == "claude-haiku-4-5"
+    assert cfg.llm.resolved_model() == "claude-haiku-5-5"
     assert cfg.embedding.provider == "hash"  # anthropic has no embeddings API
 
 
